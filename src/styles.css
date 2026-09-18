@@ -132,8 +132,8 @@ body.resizing{cursor:col-resize;-webkit-user-select:none;user-select:none}
 .tbl .r{text-align:right}
 .tbl .mono{font-family:var(--mono);font-size:12px;-webkit-user-select:text;user-select:text}
 .tbl tr.cur td{background:var(--gold-soft)}
-.tbl tr.pick{cursor:pointer}
-.tbl tr.pick:hover td{background:var(--gold-soft)}
+.tbl tr.rowpick{cursor:pointer}
+.tbl tr.rowpick:hover td{background:var(--gold-soft)}
 .tbl tr.future td{opacity:.6}
 .lbl{display:inline-flex;align-items:center;gap:6px;min-height:22px}
 .lbl .pencil{padding:2px;color:transparent}
