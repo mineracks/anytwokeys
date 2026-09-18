@@ -88,7 +88,7 @@ async function sync() {
     $('#send-have').textContent = `${sats(s.balance)} sats`;
   } catch (e) { $('#balance-sub').textContent = 'could not reach the server'; $('#conn').textContent = String(e); }
 }
-document.addEventListener('click', (e) => { const a = e.target.closest('[data-tx]'); if (a) { e.preventDefault(); const base = ($('#conn').textContent.includes('signet') ? 'https://signet.mineracks.com' : (store.settings.custom && store.settings.explorer) || (netName() === 'mainnet' ? 'https://mempool.mineracks.com' : 'https://signet.mineracks.com')); window.open(`${base}/tx/${a.dataset.tx}`); } });
+document.addEventListener('click', (e) => { const a = e.target.closest('[data-tx]'); if (a) { e.preventDefault(); const base = ($('#conn').textContent.includes('signet') ? 'https://signet.mineracks.com' : (store.settings.custom && store.settings.explorer) || (netName() === 'mainnet' ? 'https://mempool.mineracks.com' : 'https://signet.mineracks.com')); invoke('open_url', { url: `${base}/tx/${a.dataset.tx}` }).catch(fail); } });
 
 // ---------- receive ----------
 async function drawAddress() {

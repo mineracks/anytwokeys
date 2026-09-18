@@ -24,6 +24,13 @@ async fn card_generate(reader: String, admin_pin: String) -> R<String> {
 }
 
 #[tauri::command]
+fn open_url(url: String) -> R<()> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) { return Err("only web links can be opened".into()); }
+    open::that(&url).map_err(|e| format!("could not open the browser: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
 fn store_get() -> Store {
     wallet::load()
 }
@@ -357,7 +364,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| { watch::start(app.handle().clone()); Ok(()) })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(tauri::generate_handler![open_url, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
