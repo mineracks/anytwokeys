@@ -150,3 +150,46 @@ tr:hover .lbl .pencil,.coin:hover .lbl .pencil,.lbl .pencil:focus-visible{color:
 .tbl .lbl{max-width:100%}
 .tbl .lbl .text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px}
 #activity td:nth-child(2){width:200px}
+
+/* the signing ceremony: a ring that fills one arc per signature, and the vault's keys as they sign */
+.cer-top{display:flex;align-items:center;gap:26px}
+#cer-ring{flex:0 0 auto}
+#cer-ring .track{fill:none;stroke:var(--line);stroke-width:10}
+#cer-ring .arc{fill:none;stroke:var(--gold);stroke-width:10;transition:stroke-dashoffset .5s ease}
+#cer-ring .halo{fill:none;stroke:var(--gold);stroke-width:1.5;opacity:.45}
+#cer-ring .dot{fill:var(--line);transition:fill .4s}
+#cer-ring.ready .dot{fill:var(--signal)}
+.cer-head{display:flex;flex-direction:column;gap:6px;min-width:0}
+.cer-count{font-family:var(--display);font-size:22px;letter-spacing:-.01em}
+.cer-count b{font-weight:800;font-size:34px;letter-spacing:-.03em}
+.cer-line{font-size:15px}
+.cer-pays{font-size:13px;overflow-wrap:anywhere}
+.cer-keys{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:10px;border-top:1px solid var(--line);padding-top:16px}
+.ckey{display:flex;flex-direction:column;align-items:center;gap:3px;padding:12px 8px;border:1px solid transparent;border-radius:8px;text-align:center;min-width:0}
+.ckey svg{display:block;margin-bottom:6px;overflow:visible}
+.ckey .kbody{fill:none;stroke:var(--muted);stroke-width:2;stroke-dasharray:4 4}
+.ckey .kplug{fill:none;stroke:var(--muted);stroke-width:2}
+.ckey .kring{fill:none;stroke:var(--line);stroke-width:4}
+.ckey .kdot{fill:var(--line)}
+.ckey .khalo{fill:none;stroke:var(--gold);stroke-width:1.5;opacity:0}
+.ckey .kname{font-family:var(--display);font-weight:600;font-size:14px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ckey .kstate{font-family:var(--display);font-size:12px;color:var(--muted);display:inline-flex;align-items:center;gap:5px}
+.ckey.signed{background:var(--ground);border-color:var(--line)}
+.ckey.signed .kbody{fill:var(--ink);stroke:none}
+.ckey.signed .kring{stroke:var(--gold)}
+.ckey.signed .kdot{fill:var(--signal)}
+.ckey.signed .kstate{color:var(--signal);font-weight:600}
+.ckey.part .kbody{fill:var(--ink);stroke:none;opacity:.55}
+.ckey.part .kring{stroke:var(--gold)}
+.ckey.part .kstate{color:var(--gold);font-weight:600}
+.ckey.here{border-color:var(--gold)}
+.ckey.here .kbody{stroke:var(--ink);stroke-dasharray:none}
+.ckey.here .kring{stroke:var(--gold)}
+.ckey.here .khalo{opacity:.8;transform-origin:22px 40px;animation:pulse 2.4s ease-out infinite}
+.ckey.here .kstate{color:var(--gold);font-weight:600}
+.ckey.spare{opacity:.45}
+#qr-panel{display:flex;gap:22px;align-items:center;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:16px}
+.qr-box{background:#fff;border-radius:8px;padding:0;line-height:0;border:1px solid var(--line)}
+#qr-canvas{width:340px;height:340px;max-width:100%;image-rendering:pixelated;border-radius:8px}
+.qr-side{display:flex;flex-direction:column;gap:10px;flex:1 1 220px;min-width:0}
+@media (prefers-reduced-motion: reduce){.ckey.here .khalo{animation:none}#cer-ring .arc{transition:none}}

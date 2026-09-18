@@ -1,5 +1,6 @@
 mod cards;
 mod chain;
+mod export;
 mod hd;
 mod message;
 mod seal;
@@ -290,6 +291,71 @@ fn spend_export(name: String, what: String) -> R<String> {
         .ok_or("cancelled")?;
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path.display().to_string())
+}
+
+/// The spend in progress as the Sign screen draws it: who has signed, what it pays, what is left.
+#[tauri::command]
+fn spend_ceremony(name: String) -> R<wallet::Ceremony> {
+    let s = wallet::load();
+    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
+    wallet::ceremony(v, s.last_psbt.as_deref().ok_or("no spend in progress")?)
+}
+
+#[derive(Serialize)]
+struct QrOut { parts: Vec<String>, single: Option<String>, bytes: usize }
+
+/// UR crypto-psbt codes for the screen: a looping set of parts, and one still code when the PSBT is small enough.
+#[tauri::command]
+fn spend_qr() -> R<QrOut> {
+    use std::str::FromStr;
+    let s = wallet::load();
+    let raw = bitcoin::psbt::Psbt::from_str(s.last_psbt.as_deref().ok_or("no spend in progress")?.trim()).map_err(|e| format!("psbt: {e}"))?.serialize();
+    let single = if raw.len() <= 700 { export::ur_parts(&raw, usize::MAX, false)?.pop() } else { None };
+    Ok(QrOut { parts: export::ur_parts(&raw, 160, true)?, single, bytes: raw.len() })
+}
+
+fn sats_text(n: u64) -> String { let s = n.to_string(); let mut o = String::new(); for (i, c) in s.chars().enumerate() { if i > 0 && (s.len() - i) % 3 == 0 { o.push(','); } o.push(c); } o }
+
+/// A printable sheet: what the spend pays, who has signed, the PSBT as UR codes and as base64 text.
+#[tauri::command]
+fn spend_pdf(name: String) -> R<String> {
+    use std::str::FromStr;
+    let s = wallet::load();
+    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
+    let b64 = s.last_psbt.clone().ok_or("no spend in progress")?;
+    let c = wallet::ceremony(v, &b64)?;
+    let raw = bitcoin::psbt::Psbt::from_str(b64.trim()).map_err(|e| format!("psbt: {e}"))?.serialize();
+    let names = |f: &dyn Fn(&wallet::KeySig) -> bool| { let n: Vec<String> = c.keys.iter().filter(|k| f(k)).map(|k| if k.signed > 0 && k.signed < c.inputs { format!("{} ({} of {} inputs)", k.name, k.signed, c.inputs) } else { k.name.clone() }).collect(); if n.is_empty() { "nobody yet".to_string() } else { n.join(", ") } };
+    let left = c.need - c.have;
+    let sheet = export::Sheet {
+        title: if c.ready { "Fully signed transaction, not yet broadcast (PSBT, BIP 174)".into() } else { "Partially signed transaction (PSBT, BIP 174)".into() },
+        facts: vec![("Vault".into(), format!("{} \u{b7} {} of {} \u{b7} {}", v.name, v.threshold, v.keys.len(), v.network)),
+            ("Signatures".into(), format!("{} of {} on every input", c.have, c.need)), ("Signed by".into(), names(&|k| k.signed > 0)), ("Not yet".into(), names(&|k| k.signed == 0)),
+            ("Transaction".into(), c.txid.clone()), ("Inputs \u{b7} fee".into(), format!("{} \u{b7} {} sats", c.inputs, sats_text(c.fee)))],
+        pays: c.pays.iter().map(|p| (p.address.clone(), format!("{} sats{}", sats_text(p.sats), if p.ours { " \u{b7} back to this vault (change)" } else { "" }))).collect(),
+        note: if c.ready { "Every signature is on. Any wallet can finalise and broadcast it. Nothing here is secret, but it shows what the vault pays.".into() }
+              else { format!("Needs {left} more signature{}. Load it in Any Two Keys (Send \u{203a} Load a PSBT) or any PSBT wallet. It cannot spend as it is.", if left == 1 { "" } else { "s" }) },
+        parts: export::ur_parts(&raw, 320, false)?, base64: b64.trim().to_string() };
+    let bytes = export::pdf(&sheet)?;
+    let path = rfd::FileDialog::new().set_title("Save the PSBT as a PDF").set_file_name(format!("anytwokeys-{}.pdf", &c.txid[..12])).add_filter("PDF", &["pdf"]).save_file().ok_or("cancelled")?;
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
+}
+
+/// Bring a PSBT in: pasted text (base64, hex or UR parts), or a file the person picks when `text` is absent.
+#[tauri::command]
+fn spend_import(name: String, text: Option<String>) -> R<wallet::Ceremony> {
+    let raw = match text { Some(t) => t.into_bytes(), None => {
+        let path = rfd::FileDialog::new().set_title("Open a PSBT").add_filter("PSBT", &["psbt", "txt", "base64"]).pick_file().ok_or("cancelled")?;
+        std::fs::read(&path).map_err(|e| e.to_string())? } };
+    let psbt = export::parse(&raw)?;
+    let s = wallet::load();
+    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+    let current = if s.last_message.is_some() { None } else { s.last_psbt.clone() };
+    let merged = wallet::adopt(&v, psbt, current.as_deref())?;
+    let keep = merged.clone();
+    wallet::update(move |s| { s.last_psbt = Some(keep); s.last_message = None; })?;
+    wallet::ceremony(&v, &merged)
 }
 
 #[tauri::command]
@@ -780,7 +846,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| { watch::start(app.handle().clone()); Ok(()) })
-        .invoke_handler(tauri::generate_handler![open_url, vault_key_seen, notify_test, seal_status, seal_write, seal_read, seal_preview, seal_restore, label_set, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![open_url, vault_key_seen, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_preview, seal_restore, label_set, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])

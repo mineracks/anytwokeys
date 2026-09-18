@@ -30,6 +30,8 @@ dirs = "6"
 num-bigint = "0.4"
 num-traits = "0.2"
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+ur = "0.5"
+qrcode = { version = "0.14", default-features = false }
 
 # macOS 26+/27 dyld refuses proc-macro dylibs that Cargo's release profile strips with rustc's own
 # Mach-O writer ("mis-aligned LINKEDIT string pool"). Leave build scripts and proc macros unstripped.

@@ -104,12 +104,23 @@
           </details>
         </div>
         <div class="card"><div class="label">Review</div><div id="review" class="muted">Fill in the destination and amount, then build the transaction to see what it will cost.</div><button class="btn primary" id="build-btn">Build transaction</button></div>
+        <div class="card"><div class="label">Or carry on with one made elsewhere</div><div class="muted" style="font-size:14px">Load a PSBT that another copy of this app, or another wallet, built or part-signed for this vault. Every signature already on it is checked before it is accepted.</div><div class="row"><button class="btn" id="psbt-open">Open a PSBT file</button><button class="btn" id="psbt-paste-toggle">Paste one</button></div><div id="psbt-paste" hidden style="display:flex;flex-direction:column;gap:10px"><textarea id="psbt-text" class="mono" spellcheck="false" placeholder="cHNidP8B…  or  ur:crypto-psbt/…  (every part on its own line)" style="min-height:90px"></textarea><div class="row"><button class="btn primary" id="psbt-load">Load it</button></div></div></div>
       </div>
     </section>
 
     <section id="s-sign" class="screen">
       <div style="display:flex;flex-direction:column;gap:22px;max-width:780px">
-        <div class="steps" id="sign-steps"></div>
+        <div class="card" id="ceremony">
+          <div class="cer-top">
+            <svg id="cer-ring" viewBox="0 0 120 120" width="124" height="124" role="img" aria-label="Signatures collected"></svg>
+            <div class="cer-head">
+              <div class="cer-count"><b id="cer-have">0</b> of <span id="cer-need">2</span> <span id="cer-word">signatures</span></div>
+              <div id="sign-progress" class="cer-line"></div>
+              <div id="sign-summary" class="muted cer-pays"></div>
+            </div>
+          </div>
+          <div class="cer-keys" id="cer-keys"></div>
+        </div>
         <div class="card hot" style="flex-direction:row;gap:26px;align-items:center;padding:26px">
           <div style="flex:0 0 110px;display:flex;justify-content:center"><svg width="96" height="96" id="sign-ring"><use href="#ring"/></svg></div>
           <div style="display:flex;flex-direction:column;gap:10px;flex-grow:1">
@@ -120,11 +131,7 @@
             <div class="row"><button class="btn primary" id="sign-btn" disabled>Sign with this key</button><button class="btn" id="sign-cancel">Cancel this spend</button></div>
           </div>
         </div>
-        <div class="grid2">
-          <div class="card"><div class="label">Signing</div><div id="sign-summary" class="muted"></div></div>
-          <div class="card"><div class="label">Signatures</div><div id="sign-progress" class="muted"></div></div>
-        </div>
-        <div class="card" id="export-card" hidden><div class="label">Take it elsewhere</div><div class="muted" style="font-size:14px">Save the transaction to broadcast or finish signing in another wallet. Nothing is sent from here.</div><div class="row"><button class="btn" id="export-psbt">Save as PSBT</button><button class="btn" id="export-tx" hidden>Save signed transaction</button><button class="btn" id="copy-psbt">Copy PSBT</button></div><div class="muted" style="font-size:13px" id="export-note"></div></div>
+        <div class="card" id="export-card" hidden><div class="label">Take it elsewhere</div><div class="muted" style="font-size:14px">Save the transaction to broadcast or finish signing in another wallet. Nothing is sent from here.</div><div class="row"><button class="btn" id="export-psbt" title="The binary BIP 174 file every PSBT wallet opens">Save as PSBT</button><button class="btn" id="export-qr">Show as QR</button><button class="btn" id="export-pdf">Save as PDF</button><button class="btn" id="export-tx" hidden>Save signed transaction</button><button class="btn" id="copy-psbt">Copy PSBT</button></div><div class="muted" style="font-size:13px" id="export-note"></div><div id="qr-panel" hidden><div class="qr-box"><canvas id="qr-canvas" width="720" height="720"></canvas></div><div class="qr-side"><div class="label" id="qr-title">Scan with the other wallet</div><div class="muted" style="font-size:13px" id="qr-note"></div><div class="row"><button class="btn small" id="qr-mode" hidden>Show one still code</button><button class="btn small" id="qr-close">Hide</button></div></div></div></div>
         <div class="card hot" id="message-card" hidden><div class="label">Signed message</div><div class="muted" id="message-summary" style="font-size:14px"></div><div class="row"><button class="btn primary" id="message-finish">Produce the signature</button></div></div>
         <div class="card" id="broadcast-card" hidden><div class="label">Ready</div><div id="broadcast-text"></div><div class="row"><button class="btn primary" id="broadcast-btn">Send it</button></div></div>
       </div>

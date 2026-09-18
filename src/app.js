@@ -42,6 +42,7 @@ function show(name) {
   $('#title').textContent = { home: vault ? vault.name : 'Vault', send: 'Send', receive: 'Receive', keys: 'Keys', settings: 'Settings', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
   $('#title-edit').hidden = !(name === 'home' && vault); $('#title-input').hidden = true; $('#title').hidden = false;
   if (name !== 'restore') stopCam();
+  if (name !== 'sign') stopQr();
   if (name === 'home') sync();
   if (name === 'receive') { drawAddress(); renderAddresses(); }
   if (name === 'send') { loadFees(); if (vault && !vault._coins) sync().then(renderCoins); else renderCoins(); }
@@ -198,22 +199,51 @@ $('#build-btn').onclick = async () => {
 };
 
 // ---------- sign ----------
+const KEYGLYPH = '<svg viewBox="0 0 44 84" width="34" height="65" aria-hidden="true"><circle class="khalo" cx="22" cy="40" r="17"/><rect class="kplug" x="13" y="2" width="18" height="14" rx="2"/><rect class="kbody" x="5" y="14" width="34" height="66" rx="8"/><circle class="kring" cx="22" cy="40" r="9"/><circle class="kdot" cx="22" cy="40" r="2.5"/></svg>';
+// the ring: one arc per signature the vault needs, filled as they arrive; the centre turns green when it can be sent
+function drawRing(have, need, ready) {
+  const R = 44, C = 2 * Math.PI * R, gap = need > 1 ? 7 : 0, seg = C / need - gap;
+  let g = `<circle class="halo" cx="60" cy="60" r="56"/>`;
+  for (let i = 0; i < need; i++) {
+    const rot = -90 + i * 360 / need + (gap / 2) / C * 360;
+    g += `<circle class="track" cx="60" cy="60" r="${R}" stroke-dasharray="${seg} ${C - seg}" transform="rotate(${rot} 60 60)"/>`;
+    g += `<circle class="arc" cx="60" cy="60" r="${R}" stroke-dasharray="${seg} ${C - seg}" stroke-dashoffset="${i < have ? 0 : seg}" stroke-linecap="butt" transform="rotate(${rot} 60 60)" style="${i < have ? '' : 'opacity:0'}"/>`;
+  }
+  g += `<circle class="dot" cx="60" cy="60" r="11"/>`;
+  const el = $('#cer-ring'), sig = `${have}/${need}/${ready}`;
+  if (drawRing.sig === sig && el.firstChild) return;   // the 2 s card poll must not restart the drawing
+  const was = drawRing.need === need ? (drawRing.have || 0) : have; drawRing.sig = sig; drawRing.have = have; drawRing.need = need;
+  el.innerHTML = g; el.classList.toggle('ready', ready);
+  // arcs that are new since the last look sweep in
+  [...el.querySelectorAll('.arc')].forEach((a, i) => { if (i >= was && i < have) { const seg = a.getAttribute('stroke-dasharray').split(' ')[0]; a.style.opacity = 1; a.setAttribute('stroke-dashoffset', seg); requestAnimationFrame(() => requestAnimationFrame(() => a.setAttribute('stroke-dashoffset', 0))); } });
+  el.setAttribute('aria-label', `${have} of ${need} signatures collected`);
+}
 async function renderSign() {
   if (!vault) return;
-  let st; try { st = await invoke('spend_status', { name: vault.name }); } catch { $('#sign-title').textContent = 'No spend in progress'; $('#sign-text').textContent = 'Build one on the Send screen.'; $('#sign-btn').disabled = true; return; }
-  const have = Math.min(...st.have), need = st.need;
-  $('#sign-summary').textContent = built ? `${sats(built.fee)} sats fee · ${built.inputs} input${built.inputs === 1 ? '' : 's'}` : `${st.inputs} input${st.inputs === 1 ? '' : 's'}`;
-  $('#sign-progress').textContent = `${have} of ${need} signature${need === 1 ? '' : 's'} on every input` + (st.signers.length ? ' · signed so far: ' + st.signers.map(p => (vault.keys.find(k => k.pubkey === p) || {}).name || p.slice(0, 8)).join(', ') : '');
-  const steps = []; for (let i = 1; i <= need; i++) steps.push(`<b class="${i <= have ? 'done' : i === have + 1 ? 'now' : ''}">${i}</b><span class="${i <= have + 1 ? 'on' : ''}">${i <= have ? 'signed' : 'key ' + i}</span><hr>`);
-  steps.push(`<b class="${st.ready ? 'now' : ''}">✓</b><span class="${st.ready ? 'on' : ''}">confirm and send</span>`);
-  $('#sign-steps').innerHTML = steps.join('');
+  let st; try { st = await invoke('spend_ceremony', { name: vault.name }); } catch { $('#ceremony').hidden = true; $('#export-card').hidden = true; $('#broadcast-card').hidden = true; $('#message-card').hidden = true; $('#sign-title').textContent = 'No spend in progress'; $('#sign-text').textContent = 'Build one on the Send screen, or load a PSBT there.'; $('#pin-field').hidden = true; $('#sign-warn').hidden = true; $('#sign-btn').disabled = true; return; }
+  $('#ceremony').hidden = false;
+  const have = st.have, need = st.need, full = k => k.signed >= st.inputs;
+  const canSign = k => !st.ready && !full(k) && cards.some(c => c.pubkey === k.pubkey);
+  drawRing(have, need, st.ready);
+  $('#cer-have').textContent = have; $('#cer-need').textContent = need; $('#cer-word').textContent = need === 1 ? 'signature' : 'signatures';
+  const signed = st.keys.filter(full).map(k => k.name), open = st.keys.filter(k => !full(k)).map(k => k.name), left = need - have;
+  $('#sign-progress').textContent = st.ready ? `${signed.join(' and ')} signed. Nothing has been sent yet.`
+    : (signed.length ? `${signed.join(' and ')} ${signed.length === 1 ? 'has' : 'have'} signed. ` : '') + `${left === 1 ? 'One more key' : left + ' more keys'}${open.length > left ? ', any of ' : ': '}${open.join(', ')}.` + (st.inputs > 1 ? ` Each key signs all ${st.inputs} inputs, one touch each.` : '');
+  const out = st.pays.filter(p => !p.ours), back = st.pays.filter(p => p.ours).reduce((a, p) => a + p.sats, 0);
+  $('#sign-summary').textContent = (out.length ? 'Pays ' + out.map(p => `${sats(p.sats)} sats to ${p.address.slice(0, 12)}…${p.address.slice(-6)}`).join(', ') : 'Pays nothing outside this vault') + (back ? ` · ${sats(back)} back to this vault` : '') + ` · fee ${sats(st.fee)} sats`;
+  const tiles = st.keys.map(k => {
+    const cls = full(k) ? 'signed' : k.signed ? 'part' : canSign(k) ? 'here' : st.ready ? 'spare' : '';
+    const label = full(k) ? '✓ signed' : k.signed ? `${k.signed} of ${st.inputs} inputs` : canSign(k) ? 'plugged in · sign now' : st.ready ? 'not needed' : 'not yet';
+    return `<div class="ckey ${cls}">${KEYGLYPH}<span class="kname" title="${esc(k.name)}">${esc(k.name)}</span><span class="kstate">${label}</span></div>`;
+  }).join('');
+  if (renderSign.tiles !== tiles) { renderSign.tiles = tiles; $('#cer-keys').innerHTML = tiles; }   // unchanged tiles keep their pulse running
   const staged = (await invoke('store_get')).last_message;
   if (staged) { $('#sign-summary').innerHTML = `Message for <span class="mono">${staged.address.slice(0, 14)}…${staged.address.slice(-6)}</span>: “${staged.message.length > 60 ? staged.message.slice(0, 60) + '…' : staged.message}”`; $('#message-summary').textContent = `The proof for ${staged.address} is fully signed. Nothing is broadcast; the signature is text you can hand to whoever asked.`; }
   $('#message-card').hidden = !(st.ready && staged);
   $('#broadcast-card').hidden = !st.ready || !!staged;
   $('#export-card').hidden = !!staged; $('#export-tx').hidden = !st.ready;
   if (st.ready) { $('#sign-title').textContent = 'All signatures in'; $('#sign-text').textContent = staged ? 'Produce the signature below; nothing is broadcast.' : 'Nothing has been sent. Review the summary, then send it.'; $('#pin-field').hidden = true; $('#sign-warn').hidden = true; $('#sign-btn').disabled = true; $('#sign-ring').querySelector('use').classList.remove('pulse'); $('#broadcast-text').textContent = `Broadcast to ${netName()} through the Electrum server.`; return; }
-  const usable = cards.filter(c => c.pubkey && vault.keys.some(k => k.pubkey === c.pubkey) && !st.signers.includes(c.pubkey));
+  const usable = cards.filter(c => c.pubkey && st.keys.some(k => k.pubkey === c.pubkey && !full(k)));
   if (!usable.length) { $('#sign-title').textContent = 'Plug in a key'; $('#sign-text').textContent = cards.length ? 'The plugged-in key is not one of this vault\'s, or it has already signed.' : 'Any of the vault\'s keys that has not signed yet.'; $('#pin-field').hidden = true; $('#sign-warn').hidden = true; $('#sign-btn').disabled = true; return; }
   const c = usable[0]; const k = vault.keys.find(k => k.pubkey === c.pubkey);
   $('#sign-title').textContent = `${k.name} is plugged in`; $('#sign-text').textContent = `${cardLabel(c)}. Enter its PIN, press Sign, then touch the key when it blinks — once per input.`;
@@ -228,6 +258,36 @@ async function renderSign() {
 }
 $('#export-psbt').onclick = async () => { try { const p = await invoke('spend_export', { name: vault.name, what: 'psbt' }); $('#export-note').textContent = 'Saved ' + p; } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
 $('#export-tx').onclick = async () => { try { const p = await invoke('spend_export', { name: vault.name, what: 'tx' }); $('#export-note').textContent = 'Saved ' + p + ' — raw hex, broadcastable from any wallet or explorer.'; } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
+$('#export-pdf').onclick = async () => { try { $('#export-note').textContent = 'Saved ' + await invoke('spend_pdf', { name: vault.name }) + ' — the codes and the text on it are the same PSBT.'; } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
+// QR: UR crypto-psbt. A looping set of parts (plain ones, then fountain mixtures so a late camera still completes), or one still code when it fits.
+const qrShow = { timer: null, parts: [], single: null, still: false, i: 0 };
+function drawQr(text) {
+  const qr = qrcode(0, 'L'); qr.addData(text, 'Alphanumeric'); qr.make();
+  const n = qr.getModuleCount(), cv = $('#qr-canvas'), ctx = cv.getContext('2d'), m = Math.floor(cv.width / (n + 8)), off = Math.floor((cv.width - m * n) / 2);
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height); ctx.fillStyle = '#000';
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) ctx.fillRect(off + c * m, off + r * m, m, m);
+}
+function stopQr() { clearInterval(qrShow.timer); qrShow.timer = null; $('#qr-panel').hidden = true; }
+function playQr() {
+  clearInterval(qrShow.timer); qrShow.timer = null;
+  const still = qrShow.still && qrShow.single, plain = qrShow.parts.length / 2;
+  $('#qr-mode').hidden = !qrShow.single || qrShow.parts.length < 2; $('#qr-mode').textContent = still ? 'Show the animated code' : 'Show one still code';
+  if (still || qrShow.parts.length < 2) { drawQr(qrShow.single || qrShow.parts[0]); $('#qr-title').textContent = 'One code'; $('#qr-note').textContent = 'UR crypto-psbt, the format Sparrow, Keystone, Passport, Jade and SeedSigner scan. Dense: hold the camera steady, or use the animated code.'; return; }
+  const tick = () => { const i = qrShow.i++ % qrShow.parts.length; drawQr(qrShow.parts[i]); $('#qr-title').textContent = i < plain ? `Part ${i + 1} of ${plain}` : `Part ${plain} of ${plain} · repair`; };
+  $('#qr-note').textContent = 'An animated UR crypto-psbt code, as Sparrow, Keystone, Passport, Jade and SeedSigner scan. Point the other wallet\'s camera at it and wait; it can join at any moment.';
+  tick(); qrShow.timer = setInterval(tick, 260);
+}
+$('#export-qr').onclick = async () => { if (!$('#qr-panel').hidden) return stopQr(); try { const r = await invoke('spend_qr'); qrShow.parts = r.parts; qrShow.single = r.single; qrShow.still = !!r.single && r.parts.length < 2; qrShow.i = 0; $('#qr-panel').hidden = false; playQr(); } catch (e) { fail(e); } };
+$('#qr-mode').onclick = () => { qrShow.still = !qrShow.still; playQr(); };
+$('#qr-close').onclick = stopQr;
+// a PSBT made or part-signed elsewhere
+async function loadPsbt(text) {
+  try { const c = await invoke('spend_import', { name: vault.name, text }); built = null; $('#psbt-text').value = ''; $('#psbt-paste').hidden = true; toast(`PSBT loaded: ${c.have} of ${c.need} signatures on it, every one checked`, 5000); show('sign'); }
+  catch (e) { if (!/cancelled/.test(String(e))) fail(e); }
+}
+$('#psbt-open').onclick = () => loadPsbt(null);
+$('#psbt-paste-toggle').onclick = () => { $('#psbt-paste').hidden = !$('#psbt-paste').hidden; if (!$('#psbt-paste').hidden) $('#psbt-text').focus(); };
+$('#psbt-load').onclick = () => { const t = $('#psbt-text').value.trim(); if (!t) return toast('Paste the PSBT first'); loadPsbt(t); };
 $('#copy-psbt').onclick = async () => { try { const st = await invoke('store_get'); if (!st.last_psbt) return toast('No spend in progress'); await navigator.clipboard.writeText(st.last_psbt); toast('PSBT copied (base64)'); } catch (e) { fail(e); } };
 $('#sign-cancel').onclick = async () => { await invoke('spend_discard'); built = null; coinPick.clear(); $('#build-btn').textContent = 'Build transaction'; $('#build-btn').onclick = null; show('send'); location.reload(); };
 $('#broadcast-btn').onclick = async () => {

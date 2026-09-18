@@ -395,6 +395,74 @@ pub fn status(psbt_b64: &str, threshold: usize) -> Result<SigStatus, String> {
     Ok(SigStatus { inputs: psbt.inputs.len(), have, need: threshold, ready, signers })
 }
 
+/// One of the vault's keys, as the ceremony sees it: how many of the spend's inputs carry its signature.
+#[derive(Debug, Clone, Serialize)]
+pub struct KeySig { pub name: String, pub pubkey: String, pub signed: usize }
+#[derive(Debug, Clone, Serialize)]
+pub struct Pays { pub address: String, pub sats: u64, pub ours: bool }
+/// Everything the Sign screen, the QR and the PDF say about a spend in progress.
+#[derive(Debug, Clone, Serialize)]
+pub struct Ceremony { pub inputs: usize, pub need: usize, pub have: usize, pub ready: bool, pub keys: Vec<KeySig>, pub pays: Vec<Pays>, pub fee: u64, pub txid: String, pub bytes: usize }
+
+/// The key that signs input `inp` for vault key `base`: the key itself, or its child at the input's index.
+fn signer_at(v: &Vault, base: &str, index: u32) -> Result<bitcoin::PublicKey, String> {
+    let q = PublicKey::from_str(base).map_err(|e| e.to_string())?;
+    Ok(bitcoin::PublicKey::new(match cc_of(v) { Some(cc) => crate::hd::child_pubkey(&cc, &q, index), None => q }))
+}
+
+pub fn ceremony(v: &Vault, psbt_b64: &str) -> Result<Ceremony, String> {
+    let psbt = Psbt::from_str(psbt_b64.trim()).map_err(|e| format!("psbt: {e}"))?;
+    let mut keys: Vec<KeySig> = v.keys.iter().map(|k| KeySig { name: k.name.clone(), pubkey: k.pubkey.clone(), signed: 0 }).collect();
+    let mut total_in = 0u64;
+    for inp in &psbt.inputs {
+        let utxo = inp.witness_utxo.as_ref().ok_or("an input does not say what it spends")?;
+        total_in += utxo.value.to_sat();
+        let Some(index) = index_of_input(v, &utxo.script_pubkey)? else { continue };
+        for k in keys.iter_mut() { if inp.partial_sigs.contains_key(&signer_at(v, &k.pubkey, index)?) { k.signed += 1; } }
+    }
+    let have = psbt.inputs.iter().map(|i| i.partial_sigs.len()).min().unwrap_or(0).min(v.threshold);
+    let net = network_of(&v.network);
+    let pays = psbt.unsigned_tx.output.iter().map(|o| Ok(Pays {
+        address: Address::from_script(&o.script_pubkey, net).map(|a| a.to_string()).unwrap_or_else(|_| format!("script {}", o.script_pubkey.to_hex_string())),
+        sats: o.value.to_sat(), ours: index_of_input(v, &o.script_pubkey)?.is_some() })).collect::<Result<Vec<_>, String>>()?;
+    let out: u64 = pays.iter().map(|p| p.sats).sum();
+    Ok(Ceremony { inputs: psbt.inputs.len(), need: v.threshold, have, ready: psbt.inputs.iter().all(|i| i.partial_sigs.len() >= v.threshold), keys, pays,
+        fee: total_in.saturating_sub(out), txid: psbt.unsigned_tx.compute_txid().to_string(), bytes: psbt.serialize().len() })
+}
+
+/// Take in a PSBT made or part-signed elsewhere. Every input must spend this vault's coins, and every signature
+/// already on it must be by one of this vault's keys and must verify: a bad one is refused here, not at broadcast.
+/// If the same spend is already in progress the signatures are merged.
+pub fn adopt(v: &Vault, mut psbt: Psbt, current: Option<&str>) -> Result<String, String> {
+    if psbt.inputs.is_empty() { return Err("that PSBT spends nothing".into()); }
+    let secp = Secp256k1::verification_only();
+    let tx = psbt.unsigned_tx.clone();
+    let mut cache = SighashCache::new(&tx);
+    for (i, inp) in psbt.inputs.iter_mut().enumerate() {
+        if inp.final_script_witness.is_some() { return Err("that PSBT is already finalised; broadcast it from the wallet that finished it".into()); }
+        let utxo = inp.witness_utxo.clone().ok_or("an input does not say what it spends (no witness UTXO); this app only signs segwit coins")?;
+        let index = index_of_input(v, &utxo.script_pubkey)?.ok_or(format!("input {} does not spend this vault's coins", i + 1))?;
+        let single = v.keys.len() == 1;
+        if !single {
+            let ours = parse(&descriptor_at(v, index)?)?.at_derivation_index(0).map_err(|e| e.to_string())?.explicit_script().map_err(|e| e.to_string())?;
+            match &inp.witness_script { Some(ws) if ws != &ours => return Err(format!("input {} carries a script that is not this vault's", i + 1)), Some(_) => {}, None => inp.witness_script = Some(ours) }
+        }
+        let digest = if single { cache.p2wpkh_signature_hash(i, &utxo.script_pubkey, utxo.value, EcdsaSighashType::All).map_err(|e| e.to_string())?.to_byte_array() }
+            else { cache.p2wsh_signature_hash(i, inp.witness_script.as_ref().unwrap(), utxo.value, EcdsaSighashType::All).map_err(|e| e.to_string())?.to_byte_array() };
+        let allowed: Vec<bitcoin::PublicKey> = v.keys.iter().map(|k| signer_at(v, &k.pubkey, index)).collect::<Result<_, _>>()?;
+        for (pk, sig) in &inp.partial_sigs {
+            if !allowed.contains(pk) { return Err(format!("input {} is signed by a key that is not this vault's", i + 1)); }
+            if sig.sighash_type != EcdsaSighashType::All { return Err("a signature commits to only part of the transaction (not SIGHASH_ALL); refused".into()); }
+            secp.verify_ecdsa(&bitcoin::secp256k1::Message::from_digest(digest), &sig.signature, &pk.inner).map_err(|_| format!("a signature on input {} does not verify", i + 1))?;
+        }
+    }
+    if let Some(cur) = current {
+        let mut mine = Psbt::from_str(cur.trim()).map_err(|e| format!("psbt: {e}"))?;
+        if mine.unsigned_tx == psbt.unsigned_tx { mine.combine(psbt).map_err(|e| format!("could not merge: {e}"))?; return Ok(mine.to_string()); }
+    }
+    Ok(psbt.to_string())
+}
+
 pub fn finalize(psbt_b64: &str) -> Result<Transaction, String> {
     let mut psbt = Psbt::from_str(psbt_b64.trim()).map_err(|e| format!("psbt: {e}"))?;
     let secp = Secp256k1::verification_only();
@@ -410,6 +478,30 @@ mod tests {
         let descriptor = descriptor_for(2, &keys.iter().map(|k| k.to_string()).collect::<Vec<_>>()).unwrap();
         Vault { name: "t".into(), network: "signet".into(), threshold: 2, keys: keys.iter().enumerate().map(|(i, k)| KeyRef { name: format!("k{i}"), serial: 0, pubkey: k.to_string() }).collect(),
             descriptor, address: String::new(), created: 0, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), seal: Default::default() }
+    }
+    #[test]
+    fn a_part_signed_psbt_from_elsewhere_is_checked_before_it_is_taken_in() {
+        let raw = include_bytes!("../../test/fixtures/sample.psbt");   // the signet vault's spend with one card's signature
+        let v = vault(None);
+        let taken = adopt(&v, Psbt::deserialize(raw).unwrap(), None).unwrap();
+        let c = ceremony(&v, &taken).unwrap();
+        assert_eq!((c.have, c.need, c.ready, c.inputs), (1, 2, false, 1));
+        assert_eq!(c.keys.iter().filter(|k| k.signed == 1).count(), 1, "exactly one named key has signed");
+        assert!(c.fee > 0 && c.fee < 10_000 && !c.pays.is_empty());
+        // a flipped bit in the signature is refused at the door
+        let mut forged = Psbt::deserialize(raw).unwrap();
+        let (pk, mut sig) = forged.inputs[0].partial_sigs.iter().next().map(|(k, s)| (*k, *s)).unwrap();
+        let mut c64 = sig.signature.serialize_compact(); c64[40] ^= 1;
+        sig.signature = ecdsa::Signature::from_compact(&c64).unwrap();
+        forged.inputs[0].partial_sigs.insert(pk, sig);
+        assert!(adopt(&v, forged, None).unwrap_err().contains("does not verify"));
+        // another vault's coins are not ours to sign
+        assert!(adopt(&vault(Some(&"ab".repeat(32))), Psbt::deserialize(raw).unwrap(), None).unwrap_err().contains("does not spend this vault"));
+        // the same spend arriving twice merges rather than replaces
+        let mut bare = Psbt::deserialize(raw).unwrap(); bare.inputs[0].partial_sigs.clear();
+        let bare = adopt(&v, bare, None).unwrap();
+        assert_eq!(ceremony(&v, &bare).unwrap().have, 0);
+        assert_eq!(ceremony(&v, &adopt(&v, Psbt::deserialize(raw).unwrap(), Some(&bare)).unwrap()).unwrap().have, 1);
     }
     #[test]
     fn a_scan_that_cannot_reach_the_server_fails_instead_of_reporting_an_empty_vault() {
