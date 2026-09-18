@@ -59,7 +59,8 @@ async function boot() {
 async function pollCards() {
   try { cards = await invoke('cards_list'); cardsErr = ''; } catch (e) { cards = []; cardsErr = String(e); }
   if ($('#s-setup').classList.contains('on')) renderSetup();
-  if ($('#s-keys').classList.contains('on')) renderKeysNow();
+  if ($('#s-keys').classList.contains('on')) { const sig = cards.map(c => c.serial + ':' + c.pubkey).sort().join(','); if (sig !== pollCards.sig) { pollCards.sig = sig; renderKeys(); } else renderKeysNow(); }
+  if (vault) for (const c of cards) { const k = vault.keys.find(k => c.pubkey && k.pubkey === c.pubkey && !k.serial); if (k && c.serial) { invoke('vault_key_seen', { name: vault.name, pubkey: c.pubkey, serial: c.serial }).then(st => { store = st; vault = st.vaults.find(v => v.name === vault.name) || vault; if ($('#s-keys').classList.contains('on')) renderKeys(); }).catch(() => {}); } }
   if ($('#s-sign').classList.contains('on')) renderSign();
   setTimeout(pollCards, 2000);
 }
@@ -202,7 +203,7 @@ $('#broadcast-btn').onclick = async () => {
 // ---------- keys ----------
 function renderKeys() {
   if (!vault) return;
-  $('#keys-list').innerHTML = vault.keys.map(k => keyRow(k.name, k.serial ? `serial ${k.serial}` : 'serial unknown (restored)', k.pubkey, cards.some(c => c.pubkey === k.pubkey) ? 'here' : 'off')).join('');
+  $('#keys-list').innerHTML = vault.keys.map(k => keyRow(k.name, k.serial ? `serial ${k.serial}` : 'serial not yet seen (restored)', k.pubkey, cards.some(c => c.pubkey === k.pubkey) ? 'here' : 'off')).join('');
   invoke('vault_recovery', { name: vault.name }).then(l => { $('#keys-desc').textContent = l; vault._recovery = l; }); $('#keys-k').textContent = vault.threshold;
   renderKeysNow();
 }

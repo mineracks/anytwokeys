@@ -31,6 +31,17 @@ fn open_url(url: String) -> R<()> {
 }
 
 #[tauri::command]
+fn vault_key_seen(name: String, pubkey: String, serial: u32) -> R<Store> {
+    // a restored vault knows its keys only by public key; the first time that card is plugged in, remember its serial
+    let mut s = wallet::load();
+    let v = s.vaults.iter_mut().find(|v| v.name == name).ok_or("no such vault")?;
+    let mut changed = false;
+    for k in v.keys.iter_mut() { if k.pubkey == pubkey && k.serial == 0 && serial != 0 { k.serial = serial; changed = true; } }
+    if changed { wallet::save(&s)?; }
+    Ok(s)
+}
+
+#[tauri::command]
 fn store_get() -> Store {
     wallet::load()
 }
@@ -364,7 +375,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| { watch::start(app.handle().clone()); Ok(()) })
-        .invoke_handler(tauri::generate_handler![open_url, 
+        .invoke_handler(tauri::generate_handler![open_url, vault_key_seen, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
