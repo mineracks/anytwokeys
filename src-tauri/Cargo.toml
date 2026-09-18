@@ -26,9 +26,8 @@ electrum-client = { version = "0.23", default-features = false, features = ["use
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 dirs = "6"
 
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = "s"
-panic = "abort"
-strip = true
+# macOS 26+/27 dyld refuses proc-macro dylibs that Cargo's release profile strips with rustc's own
+# Mach-O writer ("mis-aligned LINKEDIT string pool"). Leave build scripts and proc macros unstripped.
+[profile.release.build-override]
+strip = "none"
+opt-level = 0
