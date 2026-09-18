@@ -500,6 +500,12 @@ mod watch {
             let seen = s.seen.entry(v.name.clone()).or_default();
             let now_txs: std::collections::HashMap<String, i32> = sc.history.iter().map(|(t, h, _)| (t.clone(), *h)).collect();
             let now_coins: std::collections::HashMap<String, u64> = sc.coins.iter().map(|c| (format!("{}:{}", c.txid, c.vout), c.value)).collect();
+            // a confirmed transaction does not vanish; a scan that lost one came from a server that answered badly
+            if let Some(gone) = seen.txs.iter().find(|(t, h)| **h > 0 && !now_txs.contains_key(*t)) {
+                log(&format!("{}: scan lost confirmed {}; ignoring this pass", v.name, &gone.0[..8]));
+                continue;
+            }
+            let before = out.len();
             if seen.primed {
                 for (txid, h) in &now_txs {
                     let gained: u64 = now_coins.iter().filter(|(k, _)| k.starts_with(txid.as_str()) && !seen.coins.contains_key(*k)).map(|(_, v)| v).sum();
@@ -508,7 +514,9 @@ mod watch {
                             let lost: u64 = seen.coins.iter().filter(|(k, _)| !now_coins.contains_key(*k)).map(|(_, v)| v).sum();
                             let net = gained as i64 - lost as i64;
                             let short = format!("{}…{}", &txid[..8], &txid[txid.len() - 6..]);
-                            if net >= 0 {
+                            if net == 0 {
+                                out.push(Event { vault: v.name.clone(), title: format!("{}: new transaction", v.name), body: format!("{short} · {}", if *h > 0 { "confirmed" } else { "in the mempool" }) });
+                            } else if net > 0 {
                                 out.push(Event { vault: v.name.clone(), title: format!("{}: {} sats arrived", v.name, fmt(net as u64)), body: format!("{short} · {}", if *h > 0 { "confirmed" } else { "waiting for a confirmation" }) });
                             } else {
                                 out.push(Event { vault: v.name.clone(), title: format!("{}: {} sats sent", v.name, fmt((-net) as u64)), body: format!("{short} · {}", if *h > 0 { "confirmed" } else { "in the mempool" }) });
@@ -526,7 +534,7 @@ mod watch {
             let (n, sm, nc, smc) = (sc.next, sc.scan_max, sc.next_change, sc.scan_max_change);
             let name = v.name.clone();
             let r = wallet::update(move |s| { s.seen.insert(name.clone(), seen_now); if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == name) { vm.next = n; vm.scan_max = sm; vm.next_change = nc; vm.scan_max_change = smc; } });
-            log(&format!("{}: {} coins, {} txs, primed_before={primed_before}, events={}, save={}", v.name, sc.coins.len(), sc.history.len(), out.len(), r.as_ref().map(|_| "ok").unwrap_or("FAILED")));
+            log(&format!("{}: {} coins, {} txs, primed_before={primed_before}, events={}, save={}", v.name, sc.coins.len(), sc.history.len(), out.len() - before, r.as_ref().map(|_| "ok").unwrap_or("FAILED")));
         }
         out
     }

@@ -221,7 +221,8 @@ pub fn scan(v: &Vault, servers: &Servers, gap: u32) -> Result<Scanned, String> {
         let mut i = 0u32;
         loop {
             let spk = script_of(&descriptor_at(v, base | i)?)?;
-            let h = chain::history(servers, &spk).unwrap_or_default();
+            // a failed query is a failed scan, never "no history": an empty answer resets the next address and the watcher's memory
+            let h = chain::history(servers, &spk)?;
             if !h.is_empty() {
                 last_used = Some(i);
                 for item in h { history.push((item.txid, item.height, base | i)); }
@@ -401,6 +402,13 @@ mod tests {
         let descriptor = descriptor_for(2, &keys.iter().map(|k| k.to_string()).collect::<Vec<_>>()).unwrap();
         Vault { name: "t".into(), network: "signet".into(), threshold: 2, keys: keys.iter().enumerate().map(|(i, k)| KeyRef { name: format!("k{i}"), serial: 0, pubkey: k.to_string() }).collect(),
             descriptor, address: String::new(), created: 0, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default() }
+    }
+    #[test]
+    fn a_scan_that_cannot_reach_the_server_fails_instead_of_reporting_an_empty_vault() {
+        // an empty Ok here once reset the next address and made the watcher announce every old transaction again
+        let dead = Servers { electrum: "tcp://127.0.0.1:1".into(), explorer: "http://127.0.0.1:1".into() };
+        assert!(scan(&vault(Some(&"ab".repeat(32))), &dead, 20).is_err());
+        assert!(scan(&vault(None), &dead, 20).is_err());
     }
     #[test]
     fn fixed_vault_keeps_the_known_address() {
