@@ -247,6 +247,18 @@ window.__TAURI__.event.listen('vault-changed', (ev) => {
   if ($('#s-receive').classList.contains('on')) drawAddress();
 });
 
+// sidebar width: drag the divider; remembered per machine
+(() => {
+  const min = 200, max = 440;
+  let w = 220; try { w = Math.min(max, Math.max(min, +localStorage.getItem('a2k-side') || 220)); } catch {}
+  document.documentElement.style.setProperty('--side', w + 'px');
+  const d = $('#divider'); let dragging = false, startX = 0, startW = w;
+  d.addEventListener('mousedown', (e) => { dragging = true; startX = e.clientX; startW = w; d.classList.add('dragging'); document.body.classList.add('resizing'); e.preventDefault(); });
+  window.addEventListener('mousemove', (e) => { if (!dragging) return; w = Math.min(max, Math.max(min, startW + e.clientX - startX)); document.documentElement.style.setProperty('--side', w + 'px'); });
+  window.addEventListener('mouseup', () => { if (!dragging) return; dragging = false; d.classList.remove('dragging'); document.body.classList.remove('resizing'); try { localStorage.setItem('a2k-side', String(w)); } catch {} });
+  d.addEventListener('dblclick', () => { w = 220; document.documentElement.style.setProperty('--side', '220px'); try { localStorage.setItem('a2k-side', '220'); } catch {} });
+})();
+
 boot(); };
 
 // ---------- setup (enrol) ----------
