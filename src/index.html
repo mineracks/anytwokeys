@@ -15,6 +15,8 @@
   <symbol id="i-receive" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v14"/><path d="m6 11 6 6 6-6"/><path d="M4 21h16"/></symbol>
   <symbol id="i-keys" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="m11 12 9-9"/><path d="m16 7 2 2"/><path d="m19 4 2 2"/></symbol>
   <symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></symbol>
+  <symbol id="i-camera" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></symbol>
+  <symbol id="i-paste" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></symbol>
   <symbol id="i-warn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></symbol>
 </defs></svg>
 
@@ -70,7 +72,7 @@
     <section id="s-send" class="screen">
       <div class="split">
         <div style="display:flex;flex-direction:column;gap:18px">
-          <div class="field"><div class="label">To</div><input id="send-to" class="mono" placeholder="bc1q… or tb1q…" spellcheck="false"></div>
+          <div class="field"><div class="label">To</div><div class="row" style="gap:8px;flex-wrap:nowrap"><input id="send-to" class="mono" placeholder="bc1q… or tb1q…" spellcheck="false" style="flex-grow:1"><button class="btn icon" id="paste-to" title="Paste address"><svg width="18" height="18"><use href="#i-paste"/></svg></button><button class="btn icon" id="scan-to" title="Scan a QR code"><svg width="18" height="18"><use href="#i-camera"/></svg></button></div></div>
           <div class="grid2">
             <div class="field"><div class="label">Amount, sats</div><input id="send-amount" inputmode="numeric" placeholder="5000"><label class="muted" style="display:flex;gap:8px;align-items:center;font-size:13px"><input type="checkbox" id="send-all" style="width:auto;min-height:0"> send everything</label></div>
             <div class="field"><div class="label">Vault holds</div><div id="send-have" style="padding:11px 0;font-variant-numeric:tabular-nums">—</div></div>
@@ -171,6 +173,13 @@
   <div>Use it only for amounts you would be willing to lose. For anything else, a 2-of-3 vault survives the loss of a key.</div>
   <label style="display:flex;gap:10px;align-items:center"><input type="checkbox" id="single-ack" style="width:auto;min-height:0"> I understand that losing this key loses the funds.</label>
   <div class="row" style="justify-content:flex-end"><button class="btn primary" id="single-instead">Make it 2 of 3 instead</button><button class="btn" id="single-go" disabled>Continue with one key</button></div>
+</div></div>
+
+<div class="modal" id="scan-modal"><div class="box" style="width:520px">
+  <h2>Scan a QR code</h2>
+  <div class="cam"><video id="cam2" autoplay playsinline muted></video><div class="frame"></div></div>
+  <div class="muted" style="font-size:13px" id="cam2-note">An address, or a bitcoin: link with an amount.</div>
+  <div class="row" style="justify-content:flex-end"><button class="btn" id="scan-close">Cancel</button></div>
 </div></div>
 
 <div class="toast" id="toast"></div>

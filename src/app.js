@@ -102,6 +102,34 @@ async function loadFees() {
   } catch (e) { $('#fee-note').textContent = 'Could not read fee rates: ' + e; }
 }
 function inVb(k, n) { if (n === 1) return 68; const sl = 1 + 34 * n + 2; return 41 + Math.ceil((1 + 1 + k * 73 + (sl < 76 ? 1 : 2) + sl) / 4); }
+// paste and scan into the To field
+$('#paste-to').onclick = async () => {
+  try { const t = (await navigator.clipboard.readText()).trim(); if (!t) return toast('Clipboard is empty'); fillDestination(t); }
+  catch { toast('Could not read the clipboard'); }
+};
+function fillDestination(text) {
+  let t = text.trim();
+  if (/^bitcoin:/i.test(t)) {
+    const u = t.slice(8); const [addr, q] = u.split('?');
+    t = addr;
+    if (q) { const amt = new URLSearchParams(q).get('amount'); if (amt) { $('#send-amount').value = String(Math.round(parseFloat(amt) * 1e8)); } }
+  }
+  $('#send-to').value = t;
+  toast('Destination filled');
+}
+let cam2Stream = null, cam2Timer = null;
+$('#scan-to').onclick = async () => {
+  $('#scan-modal').classList.add('on');
+  try {
+    cam2Stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+    $('#cam2').srcObject = cam2Stream;
+    const cv = document.createElement('canvas'); const ctx = cv.getContext('2d', { willReadFrequently: true });
+    cam2Timer = setInterval(() => { const v = $('#cam2'); if (!v.videoWidth) return; cv.width = v.videoWidth; cv.height = v.videoHeight; ctx.drawImage(v, 0, 0); const img = ctx.getImageData(0, 0, cv.width, cv.height); const code = jsQR(img.data, cv.width, cv.height); if (code && code.data && /^(bitcoin:|bc1|tb1|[13mn2])/i.test(code.data.trim())) { fillDestination(code.data); closeScan(); } }, 350);
+  } catch { $('#cam2-note').textContent = 'No camera available on this computer. Paste the address instead.'; }
+};
+function closeScan() { if (cam2Timer) clearInterval(cam2Timer); cam2Timer = null; if (cam2Stream) { cam2Stream.getTracks().forEach(t => t.stop()); cam2Stream = null; } $('#scan-modal').classList.remove('on'); }
+$('#scan-close').onclick = closeScan;
+
 $('#fee-pick').addEventListener('click', (e) => { const o = e.target.closest('.opt'); if (!o) return; feeLevel = o.dataset.fee; $$('#fee-pick .opt').forEach(x => x.classList.toggle('on', x === o)); });
 $('#send-all').onchange = () => { $('#send-amount').disabled = $('#send-all').checked; };
 $('#build-btn').onclick = async () => {
