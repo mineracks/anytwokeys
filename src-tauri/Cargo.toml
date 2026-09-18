@@ -25,6 +25,8 @@ miniscript = { version = "12", features = ["serde"] }
 electrum-client = { version = "0.23", default-features = false, features = ["use-rustls-ring", "proxy"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 dirs = "6"
+num-bigint = "0.4"
+num-traits = "0.2"
 
 # macOS 26+/27 dyld refuses proc-macro dylibs that Cargo's release profile strips with rustc's own
 # Mach-O writer ("mis-aligned LINKEDIT string pool"). Leave build scripts and proc macros unstripped.

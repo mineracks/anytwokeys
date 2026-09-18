@@ -1,5 +1,6 @@
 mod cards;
 mod chain;
+mod hd;
 mod wallet;
 
 use serde::{Deserialize, Serialize};

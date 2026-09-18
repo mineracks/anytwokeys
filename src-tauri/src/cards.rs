@@ -116,8 +116,13 @@ fn select(card: &Card) -> Result<(), CardError> {
     apdu(card, 0x00, 0xA4, 0x04, 0x00, AID_OPENPGP).map(|_| ())
 }
 
+/// Application related data — the card answers with the whole 6E object; return its contents.
 fn app_data(card: &Card) -> Result<Vec<u8>, CardError> {
-    apdu(card, 0x00, 0xCA, 0x00, 0x6E, &[])
+    let raw = apdu(card, 0x00, 0xCA, 0x00, 0x6E, &[])?;
+    match tlv(&raw) {
+        Some((0x6E, v, _)) => Ok(v.to_vec()),
+        _ => Ok(raw),      // some firmwares answer unwrapped
+    }
 }
 
 fn compress(point: &[u8]) -> Option<[u8; 33]> {

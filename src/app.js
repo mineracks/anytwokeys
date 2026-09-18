@@ -3,7 +3,7 @@ const { invoke } = window.__TAURI__.core;
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 const sats = (n) => Number(n).toLocaleString('en-AU');
-let store = null, vault = null, cards = [], fees = null, feeLevel = 'medium', built = null, camStream = null, camTimer = null;
+let store = null, vault = null, cards = [], cardsErr = '', fees = null, feeLevel = 'medium', built = null, camStream = null, camTimer = null;
 let setup = { k: 2, n: 3, keys: [] };
 
 function toast(t, ms = 3500) { const el = $('#toast'); el.textContent = t; el.classList.add('on'); clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove('on'), ms); }
@@ -43,7 +43,7 @@ async function boot() {
 
 // ---------- cards ----------
 async function pollCards() {
-  try { cards = await invoke('cards_list'); } catch { cards = []; }
+  try { cards = await invoke('cards_list'); cardsErr = ''; } catch (e) { cards = []; cardsErr = String(e); }
   if ($('#s-setup').classList.contains('on')) renderSetup();
   if ($('#s-keys').classList.contains('on')) renderKeysNow();
   if ($('#s-sign').classList.contains('on')) renderSign();
@@ -156,7 +156,7 @@ function renderKeys() {
   renderKeysNow();
 }
 function keyRow(name, sub, pub, state) { return `<div class="keyrow"><svg width="22" height="22"><use href="#ring"/></svg><div class="who"><div class="name">${name}</div><div class="muted" style="font-size:13px">${sub} · <span class="mono">${pub.slice(0, 12)}…</span></div></div><div class="state ${state}"><i></i>${{ ok: 'enrolled', off: 'not plugged in', here: 'plugged in' }[state]}</div></div>`; }
-function renderKeysNow() { $('#keys-now').innerHTML = cards.length ? cards.map(c => `${cardLabel(c)} · ${c.pubkey ? 'signing key present' : 'no signing key'} · touch ${c.touch}`).join('<br>') : 'No YubiKey plugged in.'; }
+function renderKeysNow() { $('#keys-now').innerHTML = cards.length ? cards.map(c => `${cardLabel(c)} · ${c.pubkey ? 'signing key present' : 'no signing key'} · touch ${c.touch}`).join('<br>') : (cardsErr && !/no YubiKey found/i.test(cardsErr) ? 'Card reader problem: ' + cardsErr : 'No YubiKey plugged in.'); }
 $('#copy-desc').onclick = () => navigator.clipboard.writeText(vault.descriptor).then(() => toast('Descriptor copied'));
 $('#forget-vault').onclick = async () => { if (!confirm(`Forget '${vault.name}' on this computer? The coins stay on the chain; the recovery line and two keys bring it back.`)) return; store = await invoke('vault_forget', { name: vault.name }); vault = null; boot(); };
 
