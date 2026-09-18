@@ -381,8 +381,9 @@ fn message_verify(address: String, message: String, signature: String) -> R<mess
 fn notify_test(app: tauri::AppHandle) -> R<String> {
     use tauri_plugin_notification::NotificationExt;
     app.notification().builder().title("Any Two Keys").body("Notifications reach you. Arrivals, spends and confirmations will look like this.").show().map_err(|e| format!("macOS refused the notification: {e}"))?;
-    watch::log("notify_test: shown");
-    Ok("Sent. If nothing appeared, open System Settings › Notifications › Any Two Keys and allow them.".into())
+    // show() hands the notification to macOS on a spawned task and drops the result: "sent" is all we can say.
+    watch::log("notify_test: sent");
+    Ok("Sent. If no banner appeared, look in Notification Centre (click the clock): a Focus such as Do Not Disturb delivers it there silently. To get banners during a Focus, add Any Two Keys under System Settings › Focus › Allowed Apps. If it is not in Notification Centre either, allow it under System Settings › Notifications › Any Two Keys.".into())
 }
 
 // ---------- labels (BIP 329) ----------
@@ -544,7 +545,7 @@ mod watch {
                 let events = pass();
                 for e in &events {
                     let r = app.notification().builder().title(&e.title).body(&e.body).show();
-                    log(&format!("notify '{}': {}", e.title, match &r { Ok(_) => "shown".to_string(), Err(e) => format!("FAILED {e}") }));
+                    log(&format!("notify '{}': {}", e.title, match &r { Ok(_) => "sent".to_string(), Err(e) => format!("FAILED {e}") }));
                     let _ = app.emit("vault-changed", &e.vault);
                 }
                 std::thread::sleep(std::time::Duration::from_secs(60));
