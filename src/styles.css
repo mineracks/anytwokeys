@@ -143,3 +143,10 @@ tr:hover .lbl .pencil,.coin:hover .lbl .pencil,.lbl .pencil:focus-visible{color:
 .lbl .text{font-size:13px;color:var(--ink)}
 .lbl .text:empty::before{content:"";}
 .coin{grid-template-columns:auto 1fr auto auto auto}
+.tbl{table-layout:fixed}
+.tbl th,.tbl td{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
+.tbl col.c-n{width:44px}.tbl col.c-lbl{width:190px}.tbl col.c-bal{width:120px}.tbl col.c-st{width:130px}
+.tbl td.mono{font-size:12px}
+.tbl .lbl{max-width:100%}
+.tbl .lbl .text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px}
+#activity td:nth-child(2){width:200px}

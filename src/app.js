@@ -279,7 +279,7 @@ async function renderAddresses() {
         const bal = coins.filter(c => c.index === r.index).reduce((a, c) => a + c.value, 0);
         const used = hist.some(x => x.index === r.index);
         const tr = document.createElement('tr'); tr.className = 'pick' + (r.current ? ' cur' : '') + (r.future ? ' future' : '');
-        tr.innerHTML = `<td class="muted">${r.position}</td><td class="mono">${r.address}</td><td>${lblHtml('addr:' + r.address)}</td><td class="r" style="font-variant-numeric:tabular-nums">${bal ? sats(bal) + ' sats' : '<span class="muted">—</span>'}</td><td class="r ${r.current ? 'ok' : 'muted'}">${r.current ? (chain === 'change' ? 'next change' : 'next deposit') : r.future ? 'unused · ahead' : used ? (bal ? 'in use' : 'spent') : 'unused'}</td>`;
+        tr.innerHTML = `<td class="muted">${r.position}</td><td class="mono" title="${r.address}">${r.address}</td><td>${lblHtml('addr:' + r.address)}</td><td class="r" style="font-variant-numeric:tabular-nums">${bal ? sats(bal) + ' sats' : '<span class="muted">—</span>'}</td><td class="r ${r.current ? 'ok' : 'muted'}">${r.current ? (chain === 'change' ? 'next change' : 'next deposit') : r.future ? 'unused · ahead' : used ? (bal ? 'in use' : 'spent') : 'unused'}</td>`;
         tr.addEventListener('click', (e) => { if (e.target.closest('.lbl')) return; drawAddress(r); window.scrollTo({ top: 0, behavior: 'smooth' }); });
         tb.appendChild(tr);
       }
