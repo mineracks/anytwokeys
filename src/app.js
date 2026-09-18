@@ -39,7 +39,10 @@ function show(name) {
   $('#welcome').hidden = true; $('#shell').hidden = false;
   $$('.screen').forEach(s => s.classList.toggle('on', s.id === 's-' + name));
   const navName = name === 'sign' ? (paintCrumbs.via || 'send') : name;   // Sign has no sidebar entry of its own: light the screen it came from
-  $$('.nav').forEach(n => n.classList.toggle('on', n.dataset.go === navName));
+  $$('.nav[data-go]').forEach(n => n.classList.toggle('on', n.dataset.go === navName));
+  // the vault you are in stays lit on every screen that is about it, matching the breadcrumb; not while making another, nor in app settings
+  const inVault = vault && !['setup', 'restore', 'settings'].includes(name);
+  $$('#vault-tabs .nav').forEach(n => n.classList.toggle('on', !!inVault && n.dataset.vault === vault.name));
   $('#title').textContent = { home: vault ? vault.name : 'Vault', send: 'Send', receive: 'Receive', keys: 'Keys', settings: 'Settings', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
   $('#title-edit').hidden = !(name === 'home' && vault); $('#title-input').hidden = true; $('#title').hidden = false;
   paintCrumbs(name); paintStaged(name);
@@ -92,8 +95,8 @@ function paintNet() { const p = $('#netpill'); p.classList.toggle('signet', netN
 function renderTabs() {
   const tabs = $('#vault-tabs'); tabs.innerHTML = '';
   for (const v of store.vaults) {
-    const d = document.createElement('div'); d.className = 'nav' + (vault && v.name === vault.name ? ' on' : ''); d.style.fontWeight = '600';
-    d.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${v.network === 'mainnet' ? 'var(--gold)' : 'var(--signal)'};display:inline-block;flex:0 0 8px"></span><span style="flex-grow:1">${v.name}</span><span class="muted" style="font-size:11px;font-weight:400">${v.keys.length === 1 ? '1 key' : v.threshold + ' of ' + v.keys.length}</span>`;
+    const d = document.createElement('div'); d.className = 'nav' + (vault && v.name === vault.name ? ' on' : ''); d.style.fontWeight = '600'; d.dataset.vault = v.name;
+    d.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${v.network === 'mainnet' ? 'var(--gold)' : 'var(--signal)'};display:inline-block;flex:0 0 8px"></span><span style="flex-grow:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v.name)}">${esc(v.name)}</span><span class="muted" style="font-size:11px;font-weight:400">${v.keys.length === 1 ? '1 key' : v.threshold + ' of ' + v.keys.length}</span>`;
     d.onclick = () => { vault = v; try { localStorage.setItem('a2k-vault', v.name); } catch {} paintNet(); show('home'); };
     tabs.appendChild(d);
   }

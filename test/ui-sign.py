@@ -50,6 +50,8 @@ with sync_playwright() as p:
     check("export card is offered after one signature", pg.locator("#export-card").is_visible() and pg.locator("#export-pdf").is_visible() and pg.locator("#export-qr").is_visible())
     pg.locator("#ceremony").screenshot(path=str(out / "ceremony-1.png"))
     # ---- context: where am I, and the way back ----
+    lit = lambda: [e.inner_text().split("\n")[0] for e in pg.locator(".side .nav.on, aside .nav.on, #vault-tabs .nav.on, .nav.on").all()]
+    check("sidebar lights the vault you are in AND the screen Sign came from", set(lit()) == {"family vault", "Send"}, str(lit()))
     check("breadcrumb reads vault > Send > Sign", pg.inner_text("#crumbs").replace("\n", " ").split() == "family vault › Send › Sign".split(), pg.inner_text("#crumbs"))
     box = lambda sel: pg.locator(sel).bounding_box()
     check("wide window: export sits beside the ceremony, not under it", box("#export-card")["x"] > box("#ceremony")["x"] + box("#ceremony")["width"] and abs(box("#export-card")["y"] - box("#ceremony")["y"]) < 4)
@@ -60,6 +62,10 @@ with sync_playwright() as p:
     pg.screenshot(path=str(out / "sign-wide.png"))
     pg.click("#crumbs [data-crumb=send]"); pg.wait_for_timeout(500)
     check("walking back to Send keeps the spend in view", pg.locator("#s-send.on").count() == 1 and pg.locator("#staged-bar").is_visible() and "1 of 2" in pg.inner_text("#staged-text") and "5,000 sats" in pg.inner_text("#staged-text"), pg.inner_text("#staged-text"))
+    check("the vault stays lit after walking back", "family vault" in lit() and "Send" in lit(), str(lit()))
+    pg.evaluate("show('settings')"); pg.wait_for_timeout(200)
+    check("app settings are not about a vault: no vault lit", lit() == ["Settings"], str(lit()))
+    pg.evaluate("show('send')"); pg.wait_for_timeout(400)
     check("Send's breadcrumb is vault > Send", pg.inner_text("#crumbs").split() == "family vault › Send".split(), pg.inner_text("#crumbs"))
     pg.screenshot(path=str(out / "send-staged.png"))
     pg.click("#staged-bar [data-go=sign]"); pg.wait_for_timeout(500)
