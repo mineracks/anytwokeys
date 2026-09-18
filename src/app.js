@@ -62,7 +62,7 @@ async function pollCards() {
   if ($('#s-sign').classList.contains('on')) renderSign();
   setTimeout(pollCards, 2000);
 }
-function cardLabel(c) { return `YubiKey 5 · serial ${c.serial} · firmware ${c.version}`; }
+function cardLabel(c) { return `YubiKey 5 · serial ${c.serial} · ${c.version}`; }
 
 // ---------- home ----------
 async function sync() {
@@ -211,6 +211,7 @@ function renderSetup() {
   paintNet();
   if (!setup.network) setup.network = store.settings.network;
   $('#n-show').textContent = setup.n;
+  $$('#preset-pick .opt').forEach(o => o.classList.toggle('on', +o.dataset.k === setup.k && +o.dataset.n === setup.n));
   $$('#setup-net-pick .opt').forEach(o => o.classList.toggle('on', o.dataset.net === setup.network));
   $('#n-less').disabled = setup.n <= Math.max(2, setup.keys.length) || setup.n <= 1; $('#n-more').disabled = setup.n >= 15;
   $('#n-less').closest('.field').hidden = setup.n === 1;
@@ -248,6 +249,7 @@ function renderSetup() {
     renderSetup();
   }; }
 }
+$('#preset-pick').addEventListener('click', (e) => { const o = e.target.closest('.opt'); if (!o) return; if (setup.keys.length > +o.dataset.n) return toast('More keys already enrolled than that shape holds'); setup.n = +o.dataset.n; setup.k = +o.dataset.k; renderSetup(); });
 $('#n-less').onclick = () => { if (setup.n > Math.max(2, setup.keys.length)) { setup.n--; if (setup.k > setup.n) setup.k = setup.n; renderSetup(); } };
 $('#n-more').onclick = () => { if (setup.n < 15) { setup.n++; renderSetup(); } };
 $('#setup-net-pick').addEventListener('click', (e) => { const o = e.target.closest('.opt'); if (o) { setup.network = o.dataset.net; renderSetup(); } });

@@ -165,8 +165,10 @@ pub fn list() -> Result<Vec<CardInfo>, CardError> {
         if aid.len() < 14 {
             return Err(CardError::Parse);
         }
-        let version = format!("{}.{}", aid[6], aid[7]);
-        let serial = u32::from_be_bytes([aid[10], aid[11], aid[12], aid[13]]);
+        // AID: D2760001 2401 | OpenPGP spec version (2) | manufacturer (2) | serial (4) | RFU (2).
+        // YubiKeys write the DECIMAL serial as hex digits (BCD): 27446043 → 0x27446043.
+        let version = format!("OpenPGP {}.{}", aid[6], aid[7]);
+        let serial = u32::from_str_radix(&hex::encode(&aid[10..14]), 10).unwrap_or(u32::from_be_bytes([aid[10], aid[11], aid[12], aid[13]]));
         // algorithm attributes for SIG live inside 6E → 73 → C1; only a secp256k1 key counts
         let disc = find(&ad, 0x73).unwrap_or(&[]);
         let is_k1 = find(disc, 0xC1).map(|a| a.len() >= 6 && a[0] == 0x13 && &a[1..6] == OID_SECP256K1).unwrap_or(false);
