@@ -45,6 +45,11 @@ fn vault_key_seen(name: String, pubkey: String, serial: u32) -> R<Store> {
 }
 
 #[tauri::command]
+fn key_form_seen(pubkey: String, form: u8) -> R<Store> {
+    wallet::update(move |s| { s.forms.insert(pubkey, form); })
+}
+
+#[tauri::command]
 fn store_get() -> Store {
     wallet::load()
 }
@@ -846,7 +851,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| { watch::start(app.handle().clone()); Ok(()) })
-        .invoke_handler(tauri::generate_handler![open_url, vault_key_seen, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_preview, seal_restore, label_set, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![open_url, vault_key_seen, key_form_seen, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_preview, seal_restore, label_set, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])

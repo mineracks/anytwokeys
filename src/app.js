@@ -38,9 +38,11 @@ function show(name) {
   const first = ['setup', 'restore'].includes(name) && !vault;
   $('#welcome').hidden = true; $('#shell').hidden = false;
   $$('.screen').forEach(s => s.classList.toggle('on', s.id === 's-' + name));
-  $$('.nav').forEach(n => n.classList.toggle('on', n.dataset.go === name));
+  const navName = name === 'sign' ? (paintCrumbs.via || 'send') : name;   // Sign has no sidebar entry of its own: light the screen it came from
+  $$('.nav').forEach(n => n.classList.toggle('on', n.dataset.go === navName));
   $('#title').textContent = { home: vault ? vault.name : 'Vault', send: 'Send', receive: 'Receive', keys: 'Keys', settings: 'Settings', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
   $('#title-edit').hidden = !(name === 'home' && vault); $('#title-input').hidden = true; $('#title').hidden = false;
+  paintCrumbs(name); paintStaged(name);
   if (name !== 'restore') stopCam();
   if (name !== 'sign') stopQr();
   if (name === 'home') sync();
@@ -55,6 +57,32 @@ function show(name) {
   void first;
 }
 document.addEventListener('click', (e) => { const go = e.target.closest('[data-go]'); if (go) { if (go.dataset.k) { setup = { k: +go.dataset.k, n: +go.dataset.n, keys: [], network: store.settings.network }; } show(go.dataset.go); } });
+// where you are, and the way back: Vaults › this vault › Send › Sign
+function paintCrumbs(name) {
+  const trail = [];
+  if (['setup', 'restore'].includes(name)) trail.push(['Vaults', store.vaults.length ? 'welcome' : null]);
+  else if (name !== 'settings' && vault) {
+    if (name !== 'home') trail.push([vault.name, 'home']);
+    if (name === 'sign') trail.push(paintCrumbs.via === 'messages' ? ['Messages', 'messages'] : ['Send', 'send']);
+  }
+  const here = { home: '', send: 'Send', receive: 'Receive', keys: 'Keys', settings: '', setup: 'New vault', restore: 'Restore', sign: 'Sign', messages: 'Messages' }[name] || '';
+  const el = $('#crumbs'); el.hidden = !trail.length;
+  const html = trail.map(([t, go]) => (go ? `<a tabindex="0" role="link" data-crumb="${go}">${esc(t)}</a>` : `<span>${esc(t)}</span>`) + '<span class="sep">›</span>').join('') + `<span class="here">${esc(here)}</span>`;
+  if (el._html !== html) { el._html = html; el.innerHTML = html; }   // a poll must not take focus off a crumb
+}
+document.addEventListener('click', (e) => { const c = e.target.closest('[data-crumb]'); if (!c) return; if (c.dataset.crumb === 'welcome') showWelcome(); else show(c.dataset.crumb); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.matches && e.target.matches('[data-crumb]')) e.target.click(); });
+// a spend that is waiting follows you around every screen of its vault until it is sent or discarded
+async function paintStaged(name) {
+  const bar = $('#staged-bar'); bar.hidden = true;
+  if (!vault || ['sign', 'setup', 'restore', 'settings'].includes(name)) return;
+  let st; try { st = await invoke('spend_ceremony', { name: vault.name }); } catch { return; }
+  if (!st.ours || !$('#s-' + name).classList.contains('on')) return;
+  const msg = (await invoke('store_get')).last_message;
+  $('#staged-text').textContent = msg ? `A message proof is waiting for signatures: ${st.have} of ${st.need}.` : `A spend is waiting for signatures: ${st.have} of ${st.need}${st.ready ? ', ready to send' : ''}. ${st.pays.filter(p => !p.ours).map(p => sats(p.sats) + ' sats').join(' + ') || 'nothing'} leaving this vault.`;
+  paintCrumbs.via = msg ? 'messages' : 'send';
+  bar.hidden = false;
+}
 function showWelcome() { $('#shell').hidden = true; $('#welcome').hidden = false; $('#welcome-back').hidden = !store.vaults.length; }
 $('#new-vault-nav').onclick = showWelcome;
 $('#welcome-back').onclick = () => { if (vault) show('home'); };
@@ -84,6 +112,7 @@ async function boot() {
 // ---------- cards ----------
 async function pollCards() {
   try { cards = await invoke('cards_list'); cardsErr = ''; } catch (e) { cards = []; cardsErr = String(e); }
+  for (const c of cards) if (c.pubkey && c.form && (store.forms || {})[c.pubkey] !== c.form) { try { store = await invoke('key_form_seen', { pubkey: c.pubkey, form: c.form }); renderSign.tiles = null; } catch {} }
   if ($('#s-setup').classList.contains('on')) renderSetup();
   if ($('#s-keys').classList.contains('on')) { const sig = cards.map(c => c.serial + ':' + c.pubkey).sort().join(','); if (sig !== pollCards.sig) { pollCards.sig = sig; if (!$('#keys-list input')) renderKeys(); } else renderKeysNow(); }
   if (vault) for (const c of cards) { const k = vault.keys.find(k => c.pubkey && k.pubkey === c.pubkey && !k.serial); if (k && c.serial) { invoke('vault_key_seen', { name: vault.name, pubkey: c.pubkey, serial: c.serial }).then(st => { store = st; vault = st.vaults.find(v => v.name === vault.name) || vault; if ($('#s-keys').classList.contains('on')) renderKeys(); }).catch(() => {}); } }
@@ -199,7 +228,10 @@ $('#build-btn').onclick = async () => {
 };
 
 // ---------- sign ----------
-const KEYGLYPH = '<svg viewBox="0 0 44 84" width="34" height="65" aria-hidden="true"><circle class="khalo" cx="22" cy="40" r="17"/><rect class="kplug" x="13" y="2" width="18" height="14" rx="2"/><rect class="kbody" x="5" y="14" width="34" height="66" rx="8"/><circle class="kring" cx="22" cy="40" r="9"/><circle class="kdot" cx="22" cy="40" r="2.5"/></svg>';
+const isNano = (pub) => [2, 4].includes((store.forms || {})[pub]);
+const keyGlyph = (pub) => isNano(pub)
+  ? '<svg viewBox="0 0 44 84" width="34" height="65" aria-hidden="true"><circle class="khalo" cx="22" cy="65" r="15"/><rect class="kplug" x="13" y="38" width="18" height="14" rx="2"/><rect class="kbody" x="7" y="50" width="30" height="30" rx="7"/><circle class="kring" cx="22" cy="65" r="7"/><circle class="kdot" cx="22" cy="65" r="2"/></svg>'
+  : '<svg viewBox="0 0 44 84" width="34" height="65" aria-hidden="true"><circle class="khalo" cx="22" cy="40" r="17"/><rect class="kplug" x="13" y="2" width="18" height="14" rx="2"/><rect class="kbody" x="5" y="14" width="34" height="66" rx="8"/><circle class="kring" cx="22" cy="40" r="9"/><circle class="kdot" cx="22" cy="40" r="2.5"/></svg>';
 // the ring: one arc per signature the vault needs, filled as they arrive; the centre turns green when it can be sent
 function drawRing(have, need, ready) {
   const R = 44, C = 2 * Math.PI * R, gap = need > 1 ? 7 : 0, seg = C / need - gap;
@@ -218,10 +250,18 @@ function drawRing(have, need, ready) {
   [...el.querySelectorAll('.arc')].forEach((a, i) => { if (i >= was && i < have) { const seg = a.getAttribute('stroke-dasharray').split(' ')[0]; a.style.opacity = 1; a.setAttribute('stroke-dashoffset', seg); requestAnimationFrame(() => requestAnimationFrame(() => a.setAttribute('stroke-dashoffset', 0))); } });
   el.setAttribute('aria-label', `${have} of ${need} signatures collected`);
 }
+const canSign0 = (st, k) => !st.ready && k.signed < st.inputs && cards.some(c => c.pubkey === k.pubkey);
 async function renderSign() {
   if (!vault) return;
-  let st; try { st = await invoke('spend_ceremony', { name: vault.name }); } catch { $('#ceremony').hidden = true; $('#export-card').hidden = true; $('#broadcast-card').hidden = true; $('#message-card').hidden = true; $('#sign-title').textContent = 'No spend in progress'; $('#sign-text').textContent = 'Build one on the Send screen, or load a PSBT there.'; $('#pin-field').hidden = true; $('#sign-warn').hidden = true; $('#sign-btn').disabled = true; return; }
-  $('#ceremony').hidden = false;
+  let st = null; try { st = await invoke('spend_ceremony', { name: vault.name }); } catch {}
+  if (!st || !st.ours) {
+    for (const id of ['#ceremony', '#export-card', '#broadcast-card', '#message-card']) $(id).hidden = true; stopQr();
+    $('#nospend').hidden = false; $('#nospend-title').textContent = st ? 'That spend belongs to another vault' : 'No spend in progress';
+    $('#nospend-text').textContent = st ? 'The transaction waiting for signatures spends a different vault\'s coins. Switch to that vault to carry on.' : 'Build one on the Send screen, or load a PSBT there.';
+    return;
+  }
+  $('#nospend').hidden = true;
+  $('#ceremony').hidden = false; $('#ceremony').classList.toggle('can-sign', st.keys.some(k => canSign0(st, k)));
   const have = st.have, need = st.need, full = k => k.signed >= st.inputs;
   const canSign = k => !st.ready && !full(k) && cards.some(c => c.pubkey === k.pubkey);
   drawRing(have, need, st.ready);
@@ -234,15 +274,16 @@ async function renderSign() {
   const tiles = st.keys.map(k => {
     const cls = full(k) ? 'signed' : k.signed ? 'part' : canSign(k) ? 'here' : st.ready ? 'spare' : '';
     const label = full(k) ? '✓ signed' : k.signed ? `${k.signed} of ${st.inputs} inputs` : canSign(k) ? 'plugged in · sign now' : st.ready ? 'not needed' : 'not yet';
-    return `<div class="ckey ${cls}">${KEYGLYPH}<span class="kname" title="${esc(k.name)}">${esc(k.name)}</span><span class="kstate">${label}</span></div>`;
+    return `<div class="ckey ${cls}${isNano(k.pubkey) ? ' nano' : ''}">${keyGlyph(k.pubkey)}<span class="kname" title="${esc(k.name)}">${esc(k.name)}</span><span class="kstate">${label}</span></div>`;
   }).join('');
   if (renderSign.tiles !== tiles) { renderSign.tiles = tiles; $('#cer-keys').innerHTML = tiles; }   // unchanged tiles keep their pulse running
   const staged = (await invoke('store_get')).last_message;
+  paintCrumbs.via = staged ? 'messages' : 'send'; paintCrumbs('sign');
   if (staged) { $('#sign-summary').innerHTML = `Message for <span class="mono">${staged.address.slice(0, 14)}…${staged.address.slice(-6)}</span>: “${staged.message.length > 60 ? staged.message.slice(0, 60) + '…' : staged.message}”`; $('#message-summary').textContent = `The proof for ${staged.address} is fully signed. Nothing is broadcast; the signature is text you can hand to whoever asked.`; }
   $('#message-card').hidden = !(st.ready && staged);
   $('#broadcast-card').hidden = !st.ready || !!staged;
   $('#export-card').hidden = !!staged; $('#export-tx').hidden = !st.ready;
-  if (st.ready) { $('#sign-title').textContent = 'All signatures in'; $('#sign-text').textContent = staged ? 'Produce the signature below; nothing is broadcast.' : 'Nothing has been sent. Review the summary, then send it.'; $('#pin-field').hidden = true; $('#sign-warn').hidden = true; $('#sign-btn').disabled = true; $('#sign-ring').querySelector('use').classList.remove('pulse'); $('#broadcast-text').textContent = `Broadcast to ${netName()} through the Electrum server.`; return; }
+  if (st.ready) { $('#sign-title').textContent = 'All signatures in'; $('#sign-text').textContent = staged ? 'Produce the signature below; nothing is broadcast.' : 'Nothing has been sent. Review the summary, then send it.'; $('#pin-field').hidden = true; $('#sign-warn').hidden = true; $('#sign-btn').disabled = true; $('#broadcast-text').textContent = `Broadcast to ${netName()} through the Electrum server.`; return; }
   const usable = cards.filter(c => c.pubkey && st.keys.some(k => k.pubkey === c.pubkey && !full(k)));
   if (!usable.length) { $('#sign-title').textContent = 'Plug in a key'; $('#sign-text').textContent = cards.length ? 'The plugged-in key is not one of this vault\'s, or it has already signed.' : 'Any of the vault\'s keys that has not signed yet.'; $('#pin-field').hidden = true; $('#sign-warn').hidden = true; $('#sign-btn').disabled = true; return; }
   const c = usable[0]; const k = vault.keys.find(k => k.pubkey === c.pubkey);
@@ -289,6 +330,7 @@ $('#psbt-open').onclick = () => loadPsbt(null);
 $('#psbt-paste-toggle').onclick = () => { $('#psbt-paste').hidden = !$('#psbt-paste').hidden; if (!$('#psbt-paste').hidden) $('#psbt-text').focus(); };
 $('#psbt-load').onclick = () => { const t = $('#psbt-text').value.trim(); if (!t) return toast('Paste the PSBT first'); loadPsbt(t); };
 $('#copy-psbt').onclick = async () => { try { const st = await invoke('store_get'); if (!st.last_psbt) return toast('No spend in progress'); await navigator.clipboard.writeText(st.last_psbt); toast('PSBT copied (base64)'); } catch (e) { fail(e); } };
+$('#staged-discard').onclick = async () => { if (!confirm('Discard the transaction that is waiting for signatures? Nothing has been sent; any signatures on it are lost.')) return; await invoke('spend_discard'); built = null; location.reload(); };
 $('#sign-cancel').onclick = async () => { await invoke('spend_discard'); built = null; coinPick.clear(); $('#build-btn').textContent = 'Build transaction'; $('#build-btn').onclick = null; show('send'); location.reload(); };
 $('#broadcast-btn').onclick = async () => {
   $('#broadcast-btn').disabled = true;

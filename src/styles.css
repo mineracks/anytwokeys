@@ -193,3 +193,21 @@ tr:hover .lbl .pencil,.coin:hover .lbl .pencil,.lbl .pencil:focus-visible{color:
 #qr-canvas{width:340px;height:340px;max-width:100%;image-rendering:pixelated;border-radius:8px}
 .qr-side{display:flex;flex-direction:column;gap:10px;flex:1 1 220px;min-width:0}
 @media (prefers-reduced-motion: reduce){.ckey.here .khalo{animation:none}#cer-ring .arc{transition:none}}
+
+/* breadcrumb, staged-spend bar, and the Sign screen's two columns */
+.topleft{display:flex;flex-direction:column;gap:3px;min-width:0}
+#crumbs{display:flex;align-items:center;gap:7px;font-family:var(--display);font-size:12.5px;color:var(--muted);min-width:0;flex-wrap:wrap}
+#crumbs a{color:var(--muted);text-decoration:none;cursor:pointer;border-bottom:1px solid transparent;max-width:28ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#crumbs a:hover,#crumbs a:focus-visible{color:var(--ink);border-bottom-color:var(--gold);outline:none}
+#crumbs .sep{opacity:.55}
+#crumbs .here{color:var(--ink);font-weight:600}
+#staged-bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 32px;background:var(--gold-soft);border-bottom:1px solid var(--line);font-size:14px}
+#staged-bar span{flex:1 1 260px;min-width:0}
+.signgrid{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:22px;align-items:start;max-width:1240px}
+.signmain,.signside{display:flex;flex-direction:column;gap:22px;min-width:0}
+@media (max-width:1240px){.signgrid{grid-template-columns:minmax(0,1fr);max-width:780px}}
+.cer-action{display:flex;flex-direction:column;gap:10px;border-top:1px solid var(--line);padding-top:16px}
+.cer-act-title{font-family:var(--display);font-weight:800;font-size:20px;letter-spacing:-.02em}
+#ceremony.can-sign{border-color:var(--gold)}
+.ckey.nano svg{margin-top:0}
+.ckey.nano.here .khalo{transform-origin:22px 65px}

@@ -67,6 +67,8 @@ pub struct Store {
     /// when `last_psbt` is a BIP 322 proof rather than a spend
     #[serde(default)] pub last_message: Option<StagedMessage>,
     #[serde(default)] pub seen: std::collections::HashMap<String, Seen>,
+    /// public key → YubiKey form factor, learnt when the card is plugged in, so a Nano is drawn as one
+    #[serde(default)] pub forms: std::collections::HashMap<String, u8>,
 }
 
 pub fn network_of(s: &str) -> Network {
@@ -402,7 +404,7 @@ pub struct KeySig { pub name: String, pub pubkey: String, pub signed: usize }
 pub struct Pays { pub address: String, pub sats: u64, pub ours: bool }
 /// Everything the Sign screen, the QR and the PDF say about a spend in progress.
 #[derive(Debug, Clone, Serialize)]
-pub struct Ceremony { pub inputs: usize, pub need: usize, pub have: usize, pub ready: bool, pub keys: Vec<KeySig>, pub pays: Vec<Pays>, pub fee: u64, pub txid: String, pub bytes: usize }
+pub struct Ceremony { pub ours: bool, pub inputs: usize, pub need: usize, pub have: usize, pub ready: bool, pub keys: Vec<KeySig>, pub pays: Vec<Pays>, pub fee: u64, pub txid: String, pub bytes: usize }
 
 /// The key that signs input `inp` for vault key `base`: the key itself, or its child at the input's index.
 fn signer_at(v: &Vault, base: &str, index: u32) -> Result<bitcoin::PublicKey, String> {
@@ -426,7 +428,8 @@ pub fn ceremony(v: &Vault, psbt_b64: &str) -> Result<Ceremony, String> {
         address: Address::from_script(&o.script_pubkey, net).map(|a| a.to_string()).unwrap_or_else(|_| format!("script {}", o.script_pubkey.to_hex_string())),
         sats: o.value.to_sat(), ours: index_of_input(v, &o.script_pubkey)?.is_some() })).collect::<Result<Vec<_>, String>>()?;
     let out: u64 = pays.iter().map(|p| p.sats).sum();
-    Ok(Ceremony { inputs: psbt.inputs.len(), need: v.threshold, have, ready: psbt.inputs.iter().all(|i| i.partial_sigs.len() >= v.threshold), keys, pays,
+    let ours = psbt.inputs.iter().all(|i| i.witness_utxo.as_ref().map(|u| index_of_input(v, &u.script_pubkey).ok().flatten().is_some()).unwrap_or(false));
+    Ok(Ceremony { ours, inputs: psbt.inputs.len(), need: v.threshold, have, ready: psbt.inputs.iter().all(|i| i.partial_sigs.len() >= v.threshold), keys, pays,
         fee: total_in.saturating_sub(out), txid: psbt.unsigned_tx.compute_txid().to_string(), bytes: psbt.serialize().len() })
 }
 

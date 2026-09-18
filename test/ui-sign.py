@@ -13,21 +13,22 @@ vault = dict(name="family vault", network="signet", threshold=2, keys=[dict(name
 MOCK = """
 window.__state = { cards: [], signed: [0, 0, 0], inputs: 2, psbt: true, imported: null };
 const V = %(vault)s, K = %(keys)s;
-const store = () => ({ vaults: [V], settings: { network: 'signet', custom: false, electrum: '', explorer: '', gap: 20 }, seen: {}, last_psbt: __state.psbt ? 'cHNidP8B' : null, last_message: null });
-const ceremony = () => { if (!__state.psbt) throw 'no spend in progress'; const full = __state.signed.filter(n => n >= __state.inputs).length; return { inputs: __state.inputs, need: 2, have: Math.min(full, 2), ready: full >= 2, fee: 190, txid: 'bcd3fb3d', bytes: 398,
+const store = () => ({ forms: __state.forms || {}, vaults: [V], settings: { network: 'signet', custom: false, electrum: '', explorer: '', gap: 20 }, seen: {}, last_psbt: __state.psbt ? 'cHNidP8B' : null, last_message: null });
+const ceremony = () => { if (!__state.psbt) throw 'no spend in progress'; const full = __state.signed.filter(n => n >= __state.inputs).length; return { ours: __state.ours !== false, inputs: __state.inputs, need: 2, have: Math.min(full, 2), ready: full >= 2, fee: 190, txid: 'bcd3fb3d', bytes: 398,
   keys: V.keys.map((k, i) => ({ name: k.name, pubkey: k.pubkey, signed: __state.signed[i] })), pays: [{ address: 'tb1qrecipient0000000000000000000000000000000000000000000dest', sats: 5000, ours: false }, { address: 'tb1qchange', sats: 4810, ours: true }] }; };
 const H = { store_get: store, cards_list: () => { if (!__state.cards.length) throw 'no YubiKey found'; return __state.cards; }, vault_sync: () => { throw 'offline'; }, fees_get: () => ({ slow: 1, medium: 2, fast: 3 }),
+  key_form_seen: (a) => { __state.forms = Object.assign({}, __state.forms, { [a.pubkey]: a.form }); return store(); }, spend_discard: () => { __state.psbt = false; },
   spend_ceremony: ceremony, spend_qr: () => ({ parts: %(parts)s, single: %(single)s, bytes: 398 }), spend_pdf: () => '/tmp/x.pdf',
   spend_import: (a) => { __state.imported = a; __state.psbt = true; __state.signed = [2, 0, 0]; return ceremony(); } };
 window.__TAURI__ = { core: { invoke: async (cmd, args) => { if (!H[cmd]) throw 'unmocked: ' + cmd; return H[cmd](args || {}); } }, event: { listen: async () => () => {} } };
 """
-card = lambda i: dict(reader=f"Yubico YubiKey {i}", serial=i + 1, version="OpenPGP 3.4", pubkey=K[i], touch="FIXED")
+card = lambda i: dict(reader=f"Yubico YubiKey {i}", serial=i + 1, version="OpenPGP 3.4", pubkey=K[i], touch="FIXED", form=4 if i == 0 else 3)
 fails = []
 def check(name, ok, detail=""):
     print(("ok   " if ok else "FAIL ") + name + (f" — {detail}" if detail and not ok else ""))
     if not ok: fails.append(name)
 with sync_playwright() as p:
-    b = p.webkit.launch(); pg = b.new_page(viewport=dict(width=1180, height=1000)); errs = []
+    b = p.webkit.launch(); pg = b.new_page(viewport=dict(width=1500, height=1000)); errs = []
     pg.on("pageerror", lambda e: errs.append(str(e)))
     pg.add_init_script(MOCK % dict(vault=json.dumps(vault), keys=json.dumps(K), parts=json.dumps(parts), single=json.dumps(single)))
     pg.goto((src / "index.html").as_uri()); pg.wait_for_timeout(600)
@@ -48,6 +49,25 @@ with sync_playwright() as p:
     check("sentence: who signed, who may finish", "keyring has signed. One more key, any of laptop, off-site" in pg.inner_text("#sign-progress"), pg.inner_text("#sign-progress"))
     check("export card is offered after one signature", pg.locator("#export-card").is_visible() and pg.locator("#export-pdf").is_visible() and pg.locator("#export-qr").is_visible())
     pg.locator("#ceremony").screenshot(path=str(out / "ceremony-1.png"))
+    # ---- context: where am I, and the way back ----
+    check("breadcrumb reads vault > Send > Sign", pg.inner_text("#crumbs").replace("\n", " ").split() == "family vault › Send › Sign".split(), pg.inner_text("#crumbs"))
+    box = lambda sel: pg.locator(sel).bounding_box()
+    check("wide window: export sits beside the ceremony, not under it", box("#export-card")["x"] > box("#ceremony")["x"] + box("#ceremony")["width"] and abs(box("#export-card")["y"] - box("#ceremony")["y"]) < 4)
+    check("the PIN and Sign button live inside the ceremony card", pg.locator("#ceremony #sign-btn").count() == 1 and pg.locator("#ceremony #pin").is_visible() and pg.locator("#sign-ring").count() == 0)
+    check("the card that can sign now carries the gold border", "can-sign" in pg.get_attribute("#ceremony", "class"))
+    pg.evaluate("__state.cards = %s" % json.dumps([card(0)])); pg.wait_for_timeout(2600)
+    check("a Nano is learnt from the card and drawn short", "nano" in tiles.nth(0).get_attribute("class") and pg.evaluate("__state.forms[%s]" % json.dumps(K[0])) == 4 and "nano" not in tiles.nth(1).get_attribute("class"))
+    pg.screenshot(path=str(out / "sign-wide.png"))
+    pg.click("#crumbs [data-crumb=send]"); pg.wait_for_timeout(500)
+    check("walking back to Send keeps the spend in view", pg.locator("#s-send.on").count() == 1 and pg.locator("#staged-bar").is_visible() and "1 of 2" in pg.inner_text("#staged-text") and "5,000 sats" in pg.inner_text("#staged-text"), pg.inner_text("#staged-text"))
+    check("Send's breadcrumb is vault > Send", pg.inner_text("#crumbs").split() == "family vault › Send".split(), pg.inner_text("#crumbs"))
+    pg.screenshot(path=str(out / "send-staged.png"))
+    pg.click("#staged-bar [data-go=sign]"); pg.wait_for_timeout(500)
+    check("Continue signing returns to the ceremony", pg.locator("#s-sign.on").count() == 1 and not pg.locator("#staged-bar").is_visible())
+    pg.set_viewport_size(dict(width=1100, height=1000)); pg.wait_for_timeout(200)
+    check("narrow window: one column", box("#export-card")["y"] > box("#ceremony")["y"] + box("#ceremony")["height"])
+    pg.set_viewport_size(dict(width=1500, height=1000))
+    pg.evaluate("__state.cards = %s" % json.dumps([card(2)])); pg.wait_for_timeout(2600)
     # ---- the QR panel: read the canvas back with a real decoder ----
     pg.click("#export-qr"); pg.wait_for_timeout(300)
     check("QR panel opens on the animated code", pg.locator("#qr-panel").is_visible() and pg.inner_text("#qr-title").lower().startswith("part "), pg.inner_text("#qr-title"))
@@ -70,7 +90,10 @@ with sync_playwright() as p:
     pg.locator("#ceremony").screenshot(path=str(out / "ceremony-2.png"))
     # ---- nothing in progress, then import by paste ----
     pg.evaluate("__state.psbt = false; show('sign')"); pg.wait_for_timeout(500)
-    check("no spend: the ceremony and export cards are hidden", not pg.locator("#ceremony").is_visible() and not pg.locator("#export-card").is_visible())
+    check("no spend: the ceremony and export cards are hidden, and the way to Send is offered", not pg.locator("#ceremony").is_visible() and not pg.locator("#export-card").is_visible() and pg.locator("#nospend [data-go=send]").is_visible())
+    pg.evaluate("__state.psbt = true; __state.ours = false; show('sign')"); pg.wait_for_timeout(500)
+    check("another vault's spend is named as such, not drawn as ours", "another vault" in pg.inner_text("#nospend-title").lower() and not pg.locator("#ceremony").is_visible())
+    pg.evaluate("__state.psbt = false; __state.ours = true")
     pg.evaluate("show('send')"); pg.click("#psbt-paste-toggle"); pg.fill("#psbt-text", "cHNidP8BAH0C"); pg.click("#psbt-load"); pg.wait_for_timeout(700)
     check("pasted PSBT goes to the backend and lands on the Sign screen", pg.evaluate("__state.imported && __state.imported.text") == "cHNidP8BAH0C" and pg.locator("#s-sign.on").count() == 1 and pg.inner_text("#cer-have") == "1")
     check("no page errors", not errs, "; ".join(errs))
