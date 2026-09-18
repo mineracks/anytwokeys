@@ -27,16 +27,21 @@
     <div class="muted" style="font-size:18px;max-width:44ch;text-align:center">A Bitcoin vault signed by your YubiKeys. Research software: test on signet first.</div>
   </div>
   <div class="grid3">
-    <div class="card" style="min-height:220px"><div class="row" style="gap:6px"><svg width="22" height="22"><use href="#ring"/></svg><svg width="22" height="22"><use href="#ring"/></svg><svg width="22" height="22"><use href="#ring"/></svg></div><div style="font-family:var(--display);font-weight:600;font-size:18px">New vault, 2 of 3</div><div class="muted" style="flex-grow:1">Three keys. Any two sign. Lose one and the other two still spend. This is the recommended setup.</div><button class="btn primary" data-go="setup" data-k="2" data-n="3">Start</button></div>
+    <div class="card" style="min-height:220px"><div class="row" style="gap:6px"><svg width="22" height="22"><use href="#ring"/></svg><svg width="22" height="22"><use href="#ring"/></svg><svg width="22" height="22"><use href="#ring"/></svg></div><div style="font-family:var(--display);font-weight:600;font-size:18px">New multisig vault</div><div class="muted" style="flex-grow:1">Any number of keys, any threshold you choose. 2 of 3 is the recommended shape: lose one key and the other two still spend.</div><button class="btn primary" data-go="setup" data-k="2" data-n="3">Start</button></div>
     <div class="card" style="min-height:220px"><div class="row"><svg width="22" height="22"><use href="#ring"/></svg></div><div style="font-family:var(--display);font-weight:600;font-size:18px">Single key</div><div class="warn" style="flex-grow:1">One key. If it is lost, damaged or wiped, the funds are gone. No backup is possible. For small amounts only.</div><button class="btn" id="single-btn">Continue anyway</button></div>
     <div class="card" style="min-height:220px"><div class="row"></div><div style="font-family:var(--display);font-weight:600;font-size:18px">Restore from a recovery sheet</div><div class="muted" style="flex-grow:1">Scan the code on your printed sheet or paste the descriptor line. Then plug in any two of its keys.</div><button class="btn" data-go="restore">Restore</button></div>
   </div>
   <div class="muted" style="font-size:13px">Free software · not affiliated with Yubico · YubiKey 5 series, firmware 5.2.3 or later · <span id="welcome-net"></span></div>
+  <button class="btn" id="welcome-back" hidden>Back to my vaults</button>
 </div>
 
 <div id="shell" hidden>
 <div class="side">
   <div class="brand"><svg width="26" height="26"><use href="#ring"/></svg>Any Two Keys</div>
+  <div class="label" style="padding:4px 12px 2px">Vaults</div>
+  <div id="vault-tabs" style="display:flex;flex-direction:column;gap:2px;margin-bottom:8px"></div>
+  <div class="nav" id="new-vault-nav" style="font-weight:400;color:var(--muted)"><span style="width:18px;text-align:center;font-weight:800">+</span>New vault…</div>
+  <div style="border-top:1px solid var(--line);margin:8px 0"></div>
   <div class="nav" data-go="home"><svg><use href="#i-home"/></svg>Home</div>
   <div class="nav" data-go="send"><svg><use href="#i-send"/></svg>Send</div>
   <div class="nav" data-go="receive"><svg><use href="#i-receive"/></svg>Receive</div>
@@ -122,9 +127,10 @@
         </div>
         <div class="card"><div class="label">Vault</div>
           <div class="field"><div class="label">Name</div><input id="setup-name" value="vault"></div>
-          <div class="field"><div class="label">Keys needed to spend</div><div class="pick" id="k-pick"></div></div>
+          <div class="field"><div class="label">Number of keys</div><div class="row" style="gap:8px"><button class="btn icon" id="n-less">−</button><div id="n-show" style="font-family:var(--display);font-weight:800;font-size:22px;min-width:2ch;text-align:center">3</div><button class="btn icon" id="n-more">+</button><span class="muted" style="font-size:13px">2 to 15</span></div></div>
+          <div class="field"><div class="label">Keys needed to spend</div><div class="pick" id="k-pick" style="flex-wrap:wrap"></div></div>
           <div class="muted" style="font-size:13px" id="k-note"></div>
-          <div class="muted" style="font-size:13px">Network: <b id="setup-net"></b>. Change it in Settings before enrolling.</div>
+          <div class="field"><div class="label">Network</div><div class="pick" id="setup-net-pick"><div class="opt" data-net="signet">signet</div><div class="opt" data-net="mainnet">mainnet</div></div></div>
           <div style="border-top:1px solid var(--line);padding-top:14px" class="muted">When every key is enrolled the app shows the recovery line. Keep it. It is the only place a lost key's public key survives.</div>
           <button class="btn primary" id="setup-finish" disabled>Create vault</button>
         </div>

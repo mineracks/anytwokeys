@@ -4,7 +4,7 @@ const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 const sats = (n) => Number(n).toLocaleString('en-AU');
 let store = null, vault = null, cards = [], cardsErr = '', fees = null, feeLevel = 'medium', built = null, camStream = null, camTimer = null;
-let setup = { k: 2, n: 3, keys: [] };
+let setup = { k: 2, n: 3, keys: [], network: null };
 
 function toast(t, ms = 3500) { const el = $('#toast'); el.textContent = t; el.classList.add('on'); clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove('on'), ms); }
 function fail(e) { toast(String(e && e.message || e), 6000); console.error(e); }
@@ -27,17 +27,30 @@ function show(name) {
   if (name === 'sign') renderSign();
   void first;
 }
-document.addEventListener('click', (e) => { const go = e.target.closest('[data-go]'); if (go) { if (go.dataset.k) { setup = { k: +go.dataset.k, n: +go.dataset.n, keys: [] }; } show(go.dataset.go); } });
+document.addEventListener('click', (e) => { const go = e.target.closest('[data-go]'); if (go) { if (go.dataset.k) { setup = { k: +go.dataset.k, n: +go.dataset.n, keys: [], network: store.settings.network }; } show(go.dataset.go); } });
+function showWelcome() { $('#shell').hidden = true; $('#welcome').hidden = false; $('#welcome-back').hidden = !store.vaults.length; }
+$('#new-vault-nav').onclick = showWelcome;
+$('#welcome-back').onclick = () => { if (vault) show('home'); };
 
-function netName() { return store.settings.network; }
-function paintNet() { const p = $('#netpill'); p.classList.toggle('signet', netName() === 'signet'); p.querySelector('span').textContent = netName(); $('#welcome-net').textContent = netName(); $('#setup-net').textContent = netName(); }
+function netName() { return vault ? vault.network : store.settings.network; }
+function paintNet() { const p = $('#netpill'); p.classList.toggle('signet', netName() === 'signet'); p.querySelector('span').textContent = netName(); $('#welcome-net').textContent = store.settings.network; renderTabs(); }
+function renderTabs() {
+  const tabs = $('#vault-tabs'); tabs.innerHTML = '';
+  for (const v of store.vaults) {
+    const d = document.createElement('div'); d.className = 'nav' + (vault && v.name === vault.name ? ' on' : ''); d.style.fontWeight = '600';
+    d.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${v.network === 'mainnet' ? 'var(--gold)' : 'var(--signal)'};display:inline-block;flex:0 0 8px"></span><span style="flex-grow:1">${v.name}</span><span class="muted" style="font-size:11px;font-weight:400">${v.keys.length === 1 ? '1 key' : v.threshold + ' of ' + v.keys.length}</span>`;
+    d.onclick = () => { vault = v; try { localStorage.setItem('a2k-vault', v.name); } catch {} paintNet(); show('home'); };
+    tabs.appendChild(d);
+  }
+}
 
 async function boot() {
   store = await invoke('store_get');
   paintNet();
-  const mine = store.vaults.filter(v => v.network === netName());
-  vault = mine[0] || null;
-  if (vault) show('home'); else { $('#shell').hidden = true; $('#welcome').hidden = false; }
+  let want = null; try { want = localStorage.getItem('a2k-vault'); } catch {}
+  vault = store.vaults.find(v => v.name === want) || store.vaults[0] || null;
+  paintNet();
+  if (vault) show('home'); else showWelcome();
   pollCards();
 }
 
@@ -95,7 +108,7 @@ async function loadFees() {
   if (!vault) return;
   if (!vault._coins) await sync();
   try {
-    fees = await invoke('fees_get');
+    fees = await invoke('fees_get', { network: vault.network });
     const vb = vault.keys.length === 1 ? 141 : (11 + inVb(vault.threshold, vault.keys.length) + 31 + 43);
     for (const lvl of ['slow', 'medium', 'fast']) { const r = fees[lvl]; $(`[data-fee="${lvl}"] small`).textContent = `${r} sat/vB · ≈${sats(Math.ceil(r * vb))} sats`; }
     $('#fee-note').textContent = `Rates from the explorer just now. A ${vault.keys.length === 1 ? 'single-key' : vault.threshold + '-of-' + vault.keys.length} spend is about ${vb} vB per input set.`;
@@ -196,6 +209,11 @@ $('#forget-vault').onclick = async () => { if (!confirm(`Forget '${vault.name}' 
 // ---------- setup (enrol) ----------
 function renderSetup() {
   paintNet();
+  if (!setup.network) setup.network = store.settings.network;
+  $('#n-show').textContent = setup.n;
+  $$('#setup-net-pick .opt').forEach(o => o.classList.toggle('on', o.dataset.net === setup.network));
+  $('#n-less').disabled = setup.n <= Math.max(2, setup.keys.length) || setup.n <= 1; $('#n-more').disabled = setup.n >= 15;
+  $('#n-less').closest('.field').hidden = setup.n === 1;
   const kp = $('#k-pick'); kp.innerHTML = '';
   for (let k = 1; k <= setup.n; k++) { const o = document.createElement('div'); o.className = 'opt' + (k === setup.k ? ' on' : ''); o.textContent = `${k} of ${setup.n}`; o.onclick = () => { setup.k = k; renderSetup(); }; kp.appendChild(o); }
   $('#k-note').textContent = setup.k === 1 ? 'Any one key spends: convenient, but one stolen key with its PIN spends everything.' : setup.k === setup.n ? 'Every key must sign: losing any one key loses the funds.' : `${setup.k} of ${setup.n} is the balance: one key can be lost without loss, and one stolen key with its PIN spends nothing.`;
@@ -230,16 +248,19 @@ function renderSetup() {
     renderSetup();
   }; }
 }
+$('#n-less').onclick = () => { if (setup.n > Math.max(2, setup.keys.length)) { setup.n--; if (setup.k > setup.n) setup.k = setup.n; renderSetup(); } };
+$('#n-more').onclick = () => { if (setup.n < 15) { setup.n++; renderSetup(); } };
+$('#setup-net-pick').addEventListener('click', (e) => { const o = e.target.closest('.opt'); if (o) { setup.network = o.dataset.net; renderSetup(); } });
 $('#setup-finish').onclick = async () => {
-  try { vault = await invoke('vault_create', { name: $('#setup-name').value.trim() || 'vault', threshold: setup.k, keys: setup.keys }); store = await invoke('store_get'); toast('Vault created'); show('keys'); }
+  try { vault = await invoke('vault_create', { name: $('#setup-name').value.trim() || 'vault', threshold: setup.k, keys: setup.keys, rotating: true, network: setup.network }); store = await invoke('store_get'); try { localStorage.setItem('a2k-vault', vault.name); } catch {} toast('Vault created'); paintNet(); show('keys'); }
   catch (e) { fail(e); }
 };
 
 // single key
 $('#single-btn').onclick = () => { $('#single-ack').checked = false; $('#single-go').disabled = true; $('#single-modal').classList.add('on'); };
 $('#single-ack').onchange = () => { $('#single-go').disabled = !$('#single-ack').checked; };
-$('#single-instead').onclick = () => { $('#single-modal').classList.remove('on'); setup = { k: 2, n: 3, keys: [] }; show('setup'); };
-$('#single-go').onclick = () => { $('#single-modal').classList.remove('on'); setup = { k: 1, n: 1, keys: [] }; show('setup'); };
+$('#single-instead').onclick = () => { $('#single-modal').classList.remove('on'); setup = { k: 2, n: 3, keys: [], network: store.settings.network }; show('setup'); };
+$('#single-go').onclick = () => { $('#single-modal').classList.remove('on'); setup = { k: 1, n: 1, keys: [], network: store.settings.network }; show('setup'); };
 
 // ---------- restore ----------
 $$('.tabs div').forEach(t => t.onclick = () => { $$('.tabs div').forEach(x => x.classList.toggle('on', x === t)); $('#tab-scan').hidden = t.dataset.tab !== 'scan'; $('#tab-paste').hidden = t.dataset.tab !== 'paste'; if (t.dataset.tab === 'scan') startCam(); else stopCam(); });
@@ -263,7 +284,7 @@ async function readDescriptor(text) {
       <div class="field"><div class="label">Vault name</div><input id="restore-name" value="vault"></div>
       <button class="btn primary" id="restore-go">Restore this vault</button>`;
     $('#restore-go').onclick = async () => {
-      try { vault = await invoke('vault_restore', { name: $('#restore-name').value.trim() || 'vault', text: parsed.descriptor, names: $$('[data-kname]').map(i => i.value.trim()) }); store = await invoke('store_get'); stopCam(); toast('Vault restored'); show('home'); }
+      try { vault = await invoke('vault_restore', { name: $('#restore-name').value.trim() || 'vault', text: parsed.descriptor, names: $$('[data-kname]').map(i => i.value.trim()) }); store = await invoke('store_get'); try { localStorage.setItem('a2k-vault', vault.name); } catch {} stopCam(); toast('Vault restored'); paintNet(); show('home'); }
       catch (e) { fail(e); }
     };
   } catch (e) { $('#restore-card').innerHTML = `<div class="warn">${e}</div>`; }
@@ -271,14 +292,14 @@ async function readDescriptor(text) {
 
 // ---------- settings ----------
 function renderSettings() {
-  $$('#net-pick .opt').forEach(o => o.classList.toggle('on', o.dataset.net === netName()));
-  const def = netName() === 'mainnet' ? ['ssl://electrum.mineracks.com:50002', 'https://mempool.mineracks.com'] : ['tcp://100.94.4.10:50001', 'https://signet.mineracks.com'];
+  $$('#net-pick .opt').forEach(o => o.classList.toggle('on', o.dataset.net === store.settings.network));
+  const def = store.settings.network === 'mainnet' ? ['ssl://electrum.mineracks.com:50002', 'https://mempool.mineracks.com'] : ['tcp://100.94.4.10:50001', 'https://signet.mineracks.com'];
   $('#def-electrum').textContent = def[0]; $('#def-explorer').textContent = def[1];
   $('#own-servers').classList.toggle('on', !store.settings.custom);
   $('#c-electrum').value = store.settings.electrum || ''; $('#c-explorer').value = store.settings.explorer || '';
   $('#custom-card').style.opacity = store.settings.custom ? 1 : .6;
 }
-$('#net-pick').addEventListener('click', async (e) => { const o = e.target.closest('.opt'); if (!o) return; store = await invoke('settings_set', { network: o.dataset.net, custom: store.settings.custom, electrum: store.settings.electrum, explorer: store.settings.explorer }); toast('Network: ' + o.dataset.net); boot(); });
+$('#net-pick').addEventListener('click', async (e) => { const o = e.target.closest('.opt'); if (!o) return; store = await invoke('settings_set', { network: o.dataset.net, custom: store.settings.custom, electrum: store.settings.electrum, explorer: store.settings.explorer }); toast('New vaults will use ' + o.dataset.net); renderSettings(); $('#welcome-net').textContent = store.settings.network; });
 $('#own-servers').onclick = async () => { store = await invoke('settings_set', { network: netName(), custom: !store.settings.custom, electrum: $('#c-electrum').value, explorer: $('#c-explorer').value }); renderSettings(); };
 $('#save-settings').onclick = async () => { try { store = await invoke('settings_set', { network: netName(), custom: true, electrum: $('#c-electrum').value, explorer: $('#c-explorer').value }); renderSettings(); toast('Using your servers'); } catch (e) { fail(e); } };
 $('#test-servers').onclick = async () => { $('#test-out').textContent = 'testing…'; try { $('#test-out').textContent = await invoke('servers_test', { electrum: $('#c-electrum').value, explorer: $('#c-explorer').value }); } catch (e) { $('#test-out').textContent = String(e); } };

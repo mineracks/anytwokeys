@@ -67,13 +67,18 @@ pub fn save(s: &Store) -> Result<(), String> {
     std::fs::rename(&tmp, &p).map_err(|e| e.to_string())
 }
 
-pub fn servers(s: &Store) -> Servers {
-    if s.settings.custom && !s.settings.electrum.is_empty() {
-        Servers { electrum: s.settings.electrum.clone(), explorer: if s.settings.explorer.is_empty() { chain::defaults(network_of(&s.settings.network)).explorer } else { s.settings.explorer.clone() } }
+/// The servers for a network: the user's own when they set some for the network Settings is
+/// on, otherwise ours for that chain. An Electrum server serves one chain, so the custom pair
+/// only applies to the network it was entered under.
+pub fn servers_for(s: &Store, network: &str) -> Servers {
+    if s.settings.custom && !s.settings.electrum.is_empty() && s.settings.network == network {
+        Servers { electrum: s.settings.electrum.clone(), explorer: if s.settings.explorer.is_empty() { chain::defaults(network_of(network)).explorer } else { s.settings.explorer.clone() } }
     } else {
-        chain::defaults(network_of(&s.settings.network))
+        chain::defaults(network_of(network))
     }
 }
+
+pub fn servers(s: &Store) -> Servers { servers_for(s, &s.settings.network) }
 
 /// The descriptor for k of the given compressed pubkeys (hex). One key → wpkh; more → wsh(sortedmulti).
 pub fn descriptor_for(threshold: usize, pubkeys: &[String]) -> Result<String, String> {

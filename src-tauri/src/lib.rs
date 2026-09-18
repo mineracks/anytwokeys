@@ -39,9 +39,11 @@ fn fresh_chain_code() -> String {
 }
 
 #[tauri::command]
-fn vault_create(name: String, threshold: usize, keys: Vec<NewKey>, rotating: Option<bool>) -> R<Vault> {
+fn vault_create(name: String, threshold: usize, keys: Vec<NewKey>, rotating: Option<bool>, network: Option<String>) -> R<Vault> {
     let mut s = wallet::load();
+    if let Some(n) = network { if n != "mainnet" && n != "signet" { return Err("network must be mainnet or signet".into()); } s.settings.network = n; }
     if s.vaults.iter().any(|v| v.name == name) { return Err(format!("a vault called '{name}' already exists")); }
+    if threshold < 1 || threshold > keys.len() || keys.len() > 15 { return Err("threshold must be between 1 and the number of keys, and at most 15 keys".into()); }
     let pubs: Vec<String> = keys.iter().map(|k| k.pubkey.to_lowercase()).collect();
     let descriptor = wallet::descriptor_for(threshold, &pubs)?;
     let network = wallet::network_of(&s.settings.network);
@@ -121,7 +123,7 @@ async fn vault_sync(name: String) -> R<Snapshot> {
     block(move || {
         let mut s = wallet::load();
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
-        let servers = wallet::servers(&s);
+        let servers = wallet::servers_for(&s, &v.network);
         let sc = wallet::scan(&v, &servers)?;
         let balance = sc.coins.iter().map(|c| c.value).sum();
         let height = chain::height(&servers).unwrap_or(0);
@@ -137,8 +139,8 @@ async fn vault_sync(name: String) -> R<Snapshot> {
 }
 
 #[tauri::command]
-async fn fees_get() -> R<chain::Fees> {
-    block(|| { let s = wallet::load(); chain::fees(&wallet::servers(&s)) }).await
+async fn fees_get(network: Option<String>) -> R<chain::Fees> {
+    block(move || { let s = wallet::load(); let n = network.unwrap_or_else(|| s.settings.network.clone()); chain::fees(&wallet::servers_for(&s, &n)) }).await
 }
 
 #[tauri::command]
@@ -156,7 +158,7 @@ async fn spend_build(name: String, to: String, amount: u64, rate: f64, send_all:
     block(move || {
         let mut s = wallet::load();
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
-        let servers = wallet::servers(&s);
+        let servers = wallet::servers_for(&s, &v.network);
         let sc = wallet::scan(&v, &servers)?;
         let change_index = if v.chain_code.is_some() { sc.next } else { 0 };
         let b = wallet::build(&v, &sc.coins, change_index, &to, amount, rate, send_all)?;
@@ -216,7 +218,7 @@ async fn spend_broadcast(name: String) -> R<Sent> {
         let _v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
         let psbt = s.last_psbt.clone().ok_or("no spend in progress")?;
         let tx = wallet::finalize(&psbt)?;
-        let servers = wallet::servers(&s);
+        let servers = wallet::servers_for(&s, &_v.network);
         let txid = chain::broadcast(&servers, &tx)?;
         s.last_psbt = None;
         wallet::save(&s)?;
