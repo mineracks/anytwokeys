@@ -113,3 +113,22 @@ body.resizing{cursor:col-resize;-webkit-user-select:none;user-select:none}
 .keyrow:hover .pencil,.keyrow .pencil:focus-visible{color:var(--muted)}
 .keyrow .pencil:hover{color:var(--gold)}
 .key-input{font-family:var(--display);font-weight:600;font-size:14px;border:0;border-bottom:2px solid var(--gold);background:transparent;color:var(--ink);padding:0 2px;min-width:100px;max-width:240px;outline:none}
+.adv summary{cursor:pointer;font-family:var(--display);font-size:13px;font-weight:600;color:var(--muted);list-style:none;display:flex;align-items:center;gap:8px}
+.adv summary::before{content:"";width:6px;height:6px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);transition:transform .15s}
+.adv[open] summary::before{transform:rotate(45deg)}
+.adv summary:hover{color:var(--ink)}
+.coins{display:flex;flex-direction:column;gap:6px;max-height:220px;overflow:auto}
+.coin{display:grid;grid-template-columns:auto 1fr auto auto;gap:12px;align-items:center;padding:8px 12px;border:1px solid var(--line);border-radius:6px;background:var(--ground);font-size:13px;cursor:pointer}
+.coin input{width:auto;min-height:0;margin:0}
+.coin:has(input:checked){border-color:var(--gold);background:var(--gold-soft)}
+.coin .mono{font-family:var(--mono);font-size:12px}
+.btn.small{padding:6px 12px;font-size:12px}
+.out{display:flex;flex-direction:column;gap:10px;font-size:13px;padding:14px;border:1px solid var(--line);border-radius:6px;background:var(--ground)}
+.out .kv{display:grid;grid-template-columns:110px 1fr auto;gap:10px;align-items:center}
+.out .kv .mono{font-family:var(--mono);font-size:12px;word-break:break-all;-webkit-user-select:text;user-select:text}
+.tbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px}
+.tbl th{text-align:left;font-family:var(--display);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--line)}
+.tbl td{padding:7px 8px;border-bottom:1px solid var(--line)}
+.tbl .r{text-align:right}
+.tbl .mono{font-family:var(--mono);font-size:12px;-webkit-user-select:text;user-select:text}
+.tbl tr.cur td{background:var(--gold-soft)}

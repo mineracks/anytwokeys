@@ -15,12 +15,13 @@ function show(name) {
   $('#welcome').hidden = true; $('#shell').hidden = false;
   $$('.screen').forEach(s => s.classList.toggle('on', s.id === 's-' + name));
   $$('.nav').forEach(n => n.classList.toggle('on', n.dataset.go === name));
-  $('#title').textContent = { home: vault ? vault.name : 'Vault', send: 'Send', receive: 'Receive', keys: 'Keys', settings: 'Settings', setup: 'New vault · enrol keys', restore: 'Restore from a recovery sheet', sign: 'Sign' }[name] || '';
+  $('#title').textContent = { home: vault ? vault.name : 'Vault', send: 'Send', receive: 'Receive', keys: 'Keys', settings: 'Settings', setup: 'New vault · enrol keys', restore: 'Restore from a recovery sheet', sign: 'Sign', messages: 'Messages' }[name] || '';
   $('#title-edit').hidden = !(name === 'home' && vault); $('#title-input').hidden = true; $('#title').hidden = false;
   if (name !== 'restore') stopCam();
   if (name === 'home') sync();
-  if (name === 'receive') drawAddress();
-  if (name === 'send') loadFees();
+  if (name === 'receive') { drawAddress(); renderAddresses(); }
+  if (name === 'send') { loadFees(); if (vault && !vault._coins) sync().then(renderCoins); else renderCoins(); }
+  if (name === 'messages') renderMessages();
   if (name === 'keys') renderKeys();
   if (name === 'setup') renderSetup();
   if (name === 'restore') startCam();
@@ -62,6 +63,7 @@ async function pollCards() {
   if ($('#s-keys').classList.contains('on')) { const sig = cards.map(c => c.serial + ':' + c.pubkey).sort().join(','); if (sig !== pollCards.sig) { pollCards.sig = sig; if (!$('#keys-list input')) renderKeys(); } else renderKeysNow(); }
   if (vault) for (const c of cards) { const k = vault.keys.find(k => c.pubkey && k.pubkey === c.pubkey && !k.serial); if (k && c.serial) { invoke('vault_key_seen', { name: vault.name, pubkey: c.pubkey, serial: c.serial }).then(st => { store = st; vault = st.vaults.find(v => v.name === vault.name) || vault; if ($('#s-keys').classList.contains('on')) renderKeys(); }).catch(() => {}); } }
   if ($('#s-sign').classList.contains('on')) renderSign();
+  if ($('#s-messages').classList.contains('on')) { const c = cards.find(c => c.pubkey); const was = renderMessages.had; renderMessages.had = !!c; if (was !== !!c) renderMessages(); }
   setTimeout(pollCards, 2000);
 }
 function cardLabel(c) { return `YubiKey 5 · serial ${c.serial} · ${c.version}`; }
@@ -74,7 +76,9 @@ async function sync() {
   $('#balance-sub').textContent = 'syncing…';
   try {
     const s = await invoke('vault_sync', { name: vault.name });
-    vault._coins = s.coins; vault._receive = s.receive; vault._receiveIndex = s.receive_index; vault._rotating = s.rotating;
+    vault._coins = s.coins; vault._receive = s.receive; vault._receiveIndex = s.receive_index; vault._rotating = s.rotating; vault._height = s.height; vault._history = s.history;
+    if ($('#s-send').classList.contains('on')) renderCoins();
+    if ($('#s-receive').classList.contains('on')) renderAddresses();
     $('#balance').innerHTML = `${sats(s.balance)} <small>sats</small>`;
     const unconf = s.coins.filter(c => c.height === 0).reduce((a, c) => a + c.value, 0);
     $('#balance-sub').textContent = `${s.coins.length} coin${s.coins.length === 1 ? '' : 's'}` + (unconf ? ` · ${sats(unconf)} unconfirmed` : ' · all confirmed');
@@ -153,10 +157,11 @@ $('#build-btn').onclick = async () => {
   if (!all && !amount) return toast('Enter an amount in sats');
   const rate = fees ? fees[feeLevel] : 1;
   try {
-    built = await invoke('spend_build', { name: vault.name, to, amount, rate, sendAll: all });
+    built = await invoke('spend_build', { name: vault.name, to, amount, rate, sendAll: all, coins: [...coinPick] });
     $('#review').innerHTML = `<div style="display:flex;flex-direction:column;gap:8px;font-size:14px">
       <div class="row" style="justify-content:space-between"><span class="muted">To</span><span class="mono">${to.slice(0, 10)}…${to.slice(-6)}</span></div>
       <div class="row" style="justify-content:space-between"><span class="muted">Amount</span><span>${all ? 'everything' : sats(amount) + ' sats'}</span></div>
+      <div class="row" style="justify-content:space-between"><span class="muted">Coins</span><span>${built.inputs}${coinPick.size ? ' chosen by you' : ' picked by the app'}</span></div>
       <div class="row" style="justify-content:space-between"><span class="muted">Fee</span><span>${sats(built.fee)} sats · ${built.vsize} vB</span></div>
       <div class="row" style="justify-content:space-between"><span class="muted">Change back to vault</span><span>${sats(built.change)} sats</span></div>
       <div class="muted" style="border-top:1px solid var(--line);padding-top:10px;font-size:13px">Next: sign with ${vault.keys.length === 1 ? 'the key' : 'any ' + vault.threshold + ' of your ' + vault.keys.length + ' keys'}. Nothing is sent until you confirm after the last signature.</div></div>`;
@@ -174,9 +179,12 @@ async function renderSign() {
   const steps = []; for (let i = 1; i <= need; i++) steps.push(`<b class="${i <= have ? 'done' : i === have + 1 ? 'now' : ''}">${i}</b><span class="${i <= have + 1 ? 'on' : ''}">${i <= have ? 'signed' : 'key ' + i}</span><hr>`);
   steps.push(`<b class="${st.ready ? 'now' : ''}">✓</b><span class="${st.ready ? 'on' : ''}">confirm and send</span>`);
   $('#sign-steps').innerHTML = steps.join('');
-  $('#broadcast-card').hidden = !st.ready;
-  $('#export-card').hidden = false; $('#export-tx').hidden = !st.ready;
-  if (st.ready) { $('#sign-title').textContent = 'All signatures in'; $('#sign-text').textContent = 'Nothing has been sent. Review the summary, then send it.'; $('#pin-field').hidden = true; $('#sign-warn').hidden = true; $('#sign-btn').disabled = true; $('#sign-ring').querySelector('use').classList.remove('pulse'); $('#broadcast-text').textContent = `Broadcast to ${netName()} through the Electrum server.`; return; }
+  const staged = (await invoke('store_get')).last_message;
+  if (staged) { $('#sign-summary').innerHTML = `Message for <span class="mono">${staged.address.slice(0, 14)}…${staged.address.slice(-6)}</span>: “${staged.message.length > 60 ? staged.message.slice(0, 60) + '…' : staged.message}”`; $('#message-summary').textContent = `The proof for ${staged.address} is fully signed. Nothing is broadcast; the signature is text you can hand to whoever asked.`; }
+  $('#message-card').hidden = !(st.ready && staged);
+  $('#broadcast-card').hidden = !st.ready || !!staged;
+  $('#export-card').hidden = !!staged; $('#export-tx').hidden = !st.ready;
+  if (st.ready) { $('#sign-title').textContent = 'All signatures in'; $('#sign-text').textContent = staged ? 'Produce the signature below; nothing is broadcast.' : 'Nothing has been sent. Review the summary, then send it.'; $('#pin-field').hidden = true; $('#sign-warn').hidden = true; $('#sign-btn').disabled = true; $('#sign-ring').querySelector('use').classList.remove('pulse'); $('#broadcast-text').textContent = `Broadcast to ${netName()} through the Electrum server.`; return; }
   const usable = cards.filter(c => c.pubkey && vault.keys.some(k => k.pubkey === c.pubkey) && !st.signers.includes(c.pubkey));
   if (!usable.length) { $('#sign-title').textContent = 'Plug in a key'; $('#sign-text').textContent = cards.length ? 'The plugged-in key is not one of this vault\'s, or it has already signed.' : 'Any of the vault\'s keys that has not signed yet.'; $('#pin-field').hidden = true; $('#sign-warn').hidden = true; $('#sign-btn').disabled = true; return; }
   const c = usable[0]; const k = vault.keys.find(k => k.pubkey === c.pubkey);
@@ -193,11 +201,97 @@ async function renderSign() {
 $('#export-psbt').onclick = async () => { try { const p = await invoke('spend_export', { name: vault.name, what: 'psbt' }); $('#export-note').textContent = 'Saved ' + p; } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
 $('#export-tx').onclick = async () => { try { const p = await invoke('spend_export', { name: vault.name, what: 'tx' }); $('#export-note').textContent = 'Saved ' + p + ' — raw hex, broadcastable from any wallet or explorer.'; } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
 $('#copy-psbt').onclick = async () => { try { const st = await invoke('store_get'); if (!st.last_psbt) return toast('No spend in progress'); await navigator.clipboard.writeText(st.last_psbt); toast('PSBT copied (base64)'); } catch (e) { fail(e); } };
-$('#sign-cancel').onclick = async () => { await invoke('spend_discard'); built = null; $('#build-btn').textContent = 'Build transaction'; $('#build-btn').onclick = null; show('send'); location.reload(); };
+$('#sign-cancel').onclick = async () => { await invoke('spend_discard'); built = null; coinPick.clear(); $('#build-btn').textContent = 'Build transaction'; $('#build-btn').onclick = null; show('send'); location.reload(); };
 $('#broadcast-btn').onclick = async () => {
   $('#broadcast-btn').disabled = true;
-  try { const r = await invoke('spend_broadcast', { name: vault.name }); built = null; toast('Sent. ' + r.txid.slice(0, 16) + '…', 8000); $('#broadcast-text').innerHTML = `Broadcast. <a href="#" data-tx="${r.txid}">${r.txid}</a>`; setTimeout(() => show('home'), 2500); }
+  try { const r = await invoke('spend_broadcast', { name: vault.name }); built = null; coinPick.clear(); toast('Sent. ' + r.txid.slice(0, 16) + '…', 8000); $('#broadcast-text').innerHTML = `Broadcast. <a href="#" data-tx="${r.txid}">${r.txid}</a>`; setTimeout(() => show('home'), 2500); }
   catch (e) { fail(e); $('#broadcast-btn').disabled = false; }
+};
+
+$('#message-finish').onclick = async () => {
+  $('#message-finish').disabled = true;
+  try { const r = await invoke('message_finish', { name: vault.name }); built = null; lastMessageOut = r; show('messages'); toast('Message signed'); }
+  catch (e) { fail(e); }
+  $('#message-finish').disabled = false;
+};
+
+// ---------- coin control ----------
+const coinPick = new Set();
+function renderCoins() {
+  const list = $('#coin-list'); if (!list) return;
+  const coins = (vault && vault._coins) || [];
+  const live = new Set(coins.map(c => c.txid + ':' + c.vout)); for (const op of [...coinPick]) if (!live.has(op)) coinPick.delete(op);
+  if (!coins.length) { list.innerHTML = '<div class="muted" style="font-size:13px">the vault holds no coins</div>'; $('#coin-sum').textContent = ''; return; }
+  const h = vault._height || 0;
+  list.innerHTML = coins.slice().sort((a, b) => b.value - a.value).map(c => { const op = c.txid + ':' + c.vout; const conf = c.height ? h - c.height + 1 : 0;
+    return `<label class="coin"><input type="checkbox" data-op="${op}" ${coinPick.has(op) ? 'checked' : ''}><span class="mono">${c.txid.slice(0, 10)}…${c.txid.slice(-4)}:${c.vout}${vault._rotating ? ' <span class="muted">· address #' + c.index + '</span>' : ''}</span><span style="font-variant-numeric:tabular-nums">${sats(c.value)} sats</span><span class="muted">${conf ? conf + ' conf' : 'unconfirmed'}</span></label>`; }).join('');
+  coinSum();
+}
+function coinSum() { const n = coinPick.size; const tot = ((vault && vault._coins) || []).filter(c => coinPick.has(c.txid + ':' + c.vout)).reduce((a, c) => a + c.value, 0); $('#coin-sum').textContent = n ? `${n} coin${n === 1 ? '' : 's'} ticked · ${sats(tot)} sats` : 'none ticked: the app picks'; }
+$('#coin-list').addEventListener('change', (e) => { const i = e.target.closest('[data-op]'); if (!i) return; if (i.checked) coinPick.add(i.dataset.op); else coinPick.delete(i.dataset.op); coinSum(); });
+$('#coins-all').onclick = () => { ((vault && vault._coins) || []).forEach(c => coinPick.add(c.txid + ':' + c.vout)); renderCoins(); };
+$('#coins-none').onclick = () => { coinPick.clear(); renderCoins(); };
+$('#consolidate').onclick = () => {
+  if (!coinPick.size) ((vault && vault._coins) || []).forEach(c => coinPick.add(c.txid + ':' + c.vout));
+  renderCoins();
+  if (coinPick.size < 2) return toast('Tick at least two coins to consolidate');
+  $('#send-to').value = vault._receive || vault.address; $('#send-all').checked = true; $('#send-amount').disabled = true;
+  toast('The ticked coins will be joined into one at the vault\'s own address. Build to see the fee.', 6000);
+};
+
+// ---------- addresses ----------
+async function renderAddresses() {
+  const card = $('#addr-card'); if (!vault || !vault._rotating) { card.hidden = true; return; }
+  try {
+    const rows = await invoke('vault_addresses', { name: vault.name });
+    const coins = vault._coins || [], hist = vault._history || [];
+    const tb = $('#addr-table tbody'); tb.innerHTML = '';
+    for (const r of rows.slice().reverse()) {
+      const bal = coins.filter(c => c.index === r.index).reduce((a, c) => a + c.value, 0);
+      const used = hist.some(x => x.index === r.index);
+      const tr = document.createElement('tr'); if (r.current) tr.className = 'cur';
+      tr.innerHTML = `<td class="muted">${r.index}</td><td class="mono">${r.address}</td><td class="r" style="font-variant-numeric:tabular-nums">${bal ? sats(bal) + ' sats' : '<span class="muted">—</span>'}</td><td class="r ${r.current ? 'ok' : 'muted'}">${r.current ? 'next deposit' : used ? (bal ? 'in use' : 'spent') : 'unused'}</td>`;
+      tb.appendChild(tr);
+    }
+    $('#addr-note').textContent = 'Deposits and change share one sequence. Each address is used once; the highlighted one is where the next deposit or change goes.';
+    card.hidden = false;
+  } catch (e) { card.hidden = true; }
+}
+
+// ---------- messages ----------
+let lastMessageOut = null;
+function outRow(label, val, mono = true) { return `<div class="kv"><span class="muted">${label}</span><span class="${mono ? 'mono' : ''}">${val}</span><button class="btn small" data-copy="${encodeURIComponent(val)}">Copy</button></div>`; }
+document.addEventListener('click', (e) => { const b = e.target.closest('[data-copy]'); if (b) navigator.clipboard.writeText(decodeURIComponent(b.dataset.copy)).then(() => toast('Copied')); });
+async function renderMessages() {
+  if (!vault) return;
+  const c = cards.find(c => c.pubkey);
+  $('#msg-key-sign').disabled = !c; $('#msg-key-who').textContent = c ? `${cardLabel(c)}${vault.keys.some(k => k.pubkey === c.pubkey) ? ' · ' + vault.keys.find(k => k.pubkey === c.pubkey).name : ''}` : 'plug in a key';
+  $('#msg-key-warn').hidden = !c;
+  $('#msg-vault-note').textContent = `Proves the vault controls one of its addresses (BIP 322). It takes ${vault.threshold} of the vault's ${vault.keys.length} keys, one after another on the Sign screen, and nothing is broadcast. Verifiable here and by tools that understand BIP 322 script proofs.`;
+  try { const rows = await invoke('vault_addresses', { name: vault.name }); const sel = $('#msg-vault-addr'); sel.innerHTML = rows.slice().reverse().map(r => `<option value="${r.index}">${vault._rotating ? '#' + r.index + ' · ' : ''}${r.address}${r.current && vault._rotating ? ' (next)' : ''}</option>`).join(''); } catch (e) { fail(e); }
+  if (lastMessageOut) { const r = lastMessageOut; $('#msg-vault-out').hidden = false; $('#msg-vault-out').innerHTML = outRow('Address', r.address) + outRow('Message', r.message.replace(/</g, '&lt;'), false) + outRow('Signature', r.signature); }
+}
+$('#msg-key-sign').onclick = async () => {
+  const c = cards.find(c => c.pubkey); const text = $('#msg-key-text').value; const pin = $('#msg-key-pin').value;
+  if (!c) return toast('Plug in a key'); if (!text.trim()) return toast('Write the message first'); if (!pin) return toast('Enter the card PIN');
+  $('#msg-key-sign').disabled = true; $('#msg-key-who').textContent = 'TOUCH THE KEY NOW · it is blinking';
+  try {
+    const r = await invoke('message_sign_key', { reader: c.reader, pin, message: text }); $('#msg-key-pin').value = '';
+    $('#msg-key-out').hidden = false;
+    $('#msg-key-out').innerHTML = outRow('Key', r.pubkey) + outRow('Legacy address', r.p2pkh) + outRow('Segwit address', r.p2wpkh) + outRow('Signature', r.legacy) + outRow('Segwit form', r.segwit) + `<div class="muted">Verify against the legacy address with the first signature in any wallet (Sparrow, Electrum, Bitcoin Core). Some wallets verify the segwit address with the second form.</div>`;
+    toast('Signed');
+  } catch (e) { fail(e); }
+  renderMessages();
+};
+$('#msg-vault-stage').onclick = async () => {
+  const text = $('#msg-vault-text').value; const index = +$('#msg-vault-addr').value;
+  if (!text.trim()) return toast('Write the message first');
+  try { await invoke('message_stage', { name: vault.name, index, message: text }); built = null; lastMessageOut = null; $('#msg-vault-out').hidden = true; show('sign'); } catch (e) { fail(e); }
+};
+$('#ver-btn').onclick = async () => {
+  const out = $('#ver-out');
+  try { const r = await invoke('message_verify', { address: $('#ver-addr').value, message: $('#ver-text').value, signature: $('#ver-sig').value }); out.innerHTML = r.ok ? `<span class="ok">✓ valid</span> · ${r.detail}` : `<span class="warn">✗ not valid</span> · ${r.detail}`; }
+  catch (e) { out.innerHTML = `<span class="warn">${String(e)}</span>`; }
 };
 
 // ---------- keys ----------

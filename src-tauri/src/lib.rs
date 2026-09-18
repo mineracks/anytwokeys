@@ -1,6 +1,7 @@
 mod cards;
 mod chain;
 mod hd;
+mod message;
 mod wallet;
 
 use serde::{Deserialize, Serialize};
@@ -189,16 +190,18 @@ async fn servers_test(electrum: String, explorer: String) -> R<String> {
 }
 
 #[tauri::command]
-async fn spend_build(name: String, to: String, amount: u64, rate: f64, send_all: bool) -> R<wallet::Built> {
+async fn spend_build(name: String, to: String, amount: u64, rate: f64, send_all: bool, coins: Option<Vec<String>>) -> R<wallet::Built> {
     block(move || {
         let mut s = wallet::load();
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
         let servers = wallet::servers_for(&s, &v.network);
         let sc = wallet::scan(&v, &servers)?;
         let change_index = if v.chain_code.is_some() { sc.next } else { 0 };
-        let b = wallet::build(&v, &sc.coins, change_index, &to, amount, rate, send_all)?;
+        let pick = coins.filter(|c| !c.is_empty());
+        let b = wallet::build(&v, &sc.coins, change_index, &to, amount, rate, send_all, pick.as_deref())?;
         if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == v.name) { vm.next = sc.next; vm.scan_max = sc.scan_max.max(sc.next); }
         s.last_psbt = Some(b.psbt.clone());
+        s.last_message = None;
         wallet::save(&s)?;
         Ok(b)
     }).await
@@ -251,6 +254,7 @@ async fn spend_broadcast(name: String) -> R<Sent> {
     block(move || {
         let mut s = wallet::load();
         let _v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+        if s.last_message.is_some() { return Err("this is a signed message, not a spend; finish it on the Messages screen".into()); }
         let psbt = s.last_psbt.clone().ok_or("no spend in progress")?;
         let tx = wallet::finalize(&psbt)?;
         let servers = wallet::servers_for(&s, &_v.network);
@@ -291,7 +295,78 @@ fn spend_export(name: String, what: String) -> R<String> {
 fn spend_discard() -> R<()> {
     let mut s = wallet::load();
     s.last_psbt = None;
+    s.last_message = None;
     wallet::save(&s)
+}
+
+// ---------- signed messages ----------
+#[derive(Serialize)]
+struct AddrRow { index: u32, address: String, current: bool }
+
+/// The vault's addresses so far: index 0 for a fixed vault; 0..=next for a rotating one.
+#[tauri::command]
+fn vault_addresses(name: String) -> R<Vec<AddrRow>> {
+    let s = wallet::load();
+    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
+    let last = if v.chain_code.is_some() { v.next } else { 0 };
+    (0..=last).map(|i| Ok(AddrRow { index: i, address: wallet::address_at(v, i)?, current: i == last })).collect()
+}
+
+/// Sign a message with the plugged-in card's own key: one PIN, one touch. Nothing to do with a vault.
+#[tauri::command]
+async fn message_sign_key(reader: String, pin: String, message: String) -> R<message::KeySig> {
+    block(move || {
+        let s = wallet::load();
+        let card = cards::list().map_err(|e| e.to_string())?.into_iter().find(|c| c.reader == reader).ok_or("that card is no longer plugged in")?;
+        let pub_hex = card.pubkey.ok_or("this card has no signing key")?;
+        let digest = message::legacy_digest(&message);
+        let (r, sg) = cards::sign_digest(&reader, &pin, &digest).map_err(|e| e.to_string())?;
+        message::key_signature(&pub_hex, wallet::network_of(&s.settings.network), &message, &r, &sg)
+    }).await
+}
+
+/// Stage a BIP 322 proof for one of the vault's addresses. It then goes through the Sign screen like a spend.
+#[tauri::command]
+fn message_stage(name: String, index: u32, message: String) -> R<wallet::StagedMessage> {
+    let mut s = wallet::load();
+    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+    if message.trim().is_empty() { return Err("write the message first".into()); }
+    let d = wallet::parse(&wallet::descriptor_at(&v, index)?)?.at_derivation_index(0).map_err(|e| e.to_string())?;
+    let spk = d.script_pubkey();
+    let ws = if v.keys.len() > 1 { Some(d.explicit_script().map_err(|e| e.to_string())?) } else { None };
+    let psbt = message::to_sign_psbt(&spk, ws, &message)?;
+    let staged = wallet::StagedMessage { vault: v.name.clone(), address: wallet::address_at(&v, index)?, message, index };
+    if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == v.name) { vm.scan_max = vm.scan_max.max(index); }
+    s.last_psbt = Some(psbt.to_string());
+    s.last_message = Some(staged.clone());
+    wallet::save(&s)?;
+    Ok(staged)
+}
+
+#[derive(Serialize)]
+struct MessageDone { address: String, message: String, signature: String }
+
+/// Every signature is in: turn the finished proof into the base64 BIP 322 signature and clear it.
+#[tauri::command]
+fn message_finish(name: String) -> R<MessageDone> {
+    let mut s = wallet::load();
+    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+    let st = s.last_message.clone().ok_or("no message is staged")?;
+    let psbt = s.last_psbt.clone().ok_or("no message is staged")?;
+    let tx = wallet::finalize(&psbt)?;
+    let signature = message::encode_witness(&tx)?;
+    let check = message::verify(&st.address, &st.message, &signature, wallet::network_of(&v.network))?;
+    if !check.ok { return Err(format!("the finished proof does not verify: {}", check.detail)); }
+    s.last_psbt = None;
+    s.last_message = None;
+    wallet::save(&s)?;
+    Ok(MessageDone { address: st.address, message: st.message, signature })
+}
+
+#[tauri::command]
+fn message_verify(address: String, message: String, signature: String) -> R<message::Verified> {
+    let s = wallet::load();
+    message::verify(&address, &message, &signature, wallet::network_of(&s.settings.network))
 }
 
 fn now() -> u64 {
@@ -375,7 +450,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| { watch::start(app.handle().clone()); Ok(()) })
-        .invoke_handler(tauri::generate_handler![open_url, vault_key_seen, 
+        .invoke_handler(tauri::generate_handler![open_url, vault_key_seen, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])

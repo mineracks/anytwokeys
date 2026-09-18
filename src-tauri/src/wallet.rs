@@ -37,6 +37,9 @@ pub struct Settings {
     pub explorer: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StagedMessage { pub vault: String, pub address: String, pub message: String, pub index: u32 }
+
 /// What the watcher last saw for a vault: txid → height, and the coins it held.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Seen { pub txs: std::collections::HashMap<String, i32>, pub coins: std::collections::HashMap<String, u64>, pub primed: bool }
@@ -46,6 +49,8 @@ pub struct Store {
     pub vaults: Vec<Vault>,
     pub settings: Settings,
     pub last_psbt: Option<String>,
+    /// when `last_psbt` is a BIP 322 proof rather than a spend
+    #[serde(default)] pub last_message: Option<StagedMessage>,
     #[serde(default)] pub seen: std::collections::HashMap<String, Seen>,
 }
 
@@ -231,7 +236,8 @@ pub struct Built {
 }
 
 /// Spend `amount` sats to `to` from the vault's coins at `rate` sat/vB; change to a fresh address.
-pub fn build(vault: &Vault, coins: &[CoinAt], change_index: u32, to: &str, amount: u64, rate: f64, send_all: bool) -> Result<Built, String> {
+/// `pick`: `None` lets the builder choose (largest first); `Some(outpoints)` spends exactly those coins.
+pub fn build(vault: &Vault, coins: &[CoinAt], change_index: u32, to: &str, amount: u64, rate: f64, send_all: bool, pick: Option<&[String]>) -> Result<Built, String> {
     let network = network_of(&vault.network);
     let to_addr = Address::from_str(to).map_err(|e| format!("address: {e}"))?.require_network(network).map_err(|_| "that address is for another network".to_string())?;
     let n = vault.keys.len();
@@ -242,6 +248,11 @@ pub fn build(vault: &Vault, coins: &[CoinAt], change_index: u32, to: &str, amoun
     let change_vb = 9 + change_spk.len() as u64;
     let mut coins: Vec<&CoinAt> = coins.iter().collect();
     coins.sort_by(|a, b| b.value.cmp(&a.value));
+    if let Some(p) = pick {
+        for op in p { if !coins.iter().any(|c| format!("{}:{}", c.txid, c.vout) == *op) { return Err(format!("coin {op} is not in the vault any more; sync and choose again")); } }
+        coins.retain(|c| p.iter().any(|op| format!("{}:{}", c.txid, c.vout) == *op));
+        if coins.is_empty() { return Err("choose at least one coin".into()); }
+    }
     let total: u64 = coins.iter().map(|c| c.value).sum();
     if coins.is_empty() { return Err("the vault holds no coins".into()); }
     let mut chosen: Vec<&CoinAt> = Vec::new();
@@ -252,7 +263,8 @@ pub fn build(vault: &Vault, coins: &[CoinAt], change_index: u32, to: &str, amoun
         have += c.value;
         let vsize = 11 + in_vb * chosen.len() as u64 + out_vb + change_vb;
         let fee = (rate * vsize as f64).ceil() as u64;
-        if send_all || have >= want + fee { break; }
+        // chosen coins are all spent, as asked; otherwise stop as soon as the amount and fee are covered
+        if pick.is_none() && (send_all || have >= want + fee) { break; }
     }
     let (vsize, fee, send, change) = if send_all {
         let vsize = 11 + in_vb * chosen.len() as u64 + out_vb;
