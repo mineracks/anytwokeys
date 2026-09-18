@@ -31,6 +31,14 @@ pub struct Vault {
     #[serde(default)] pub scan_max_change: u32,
     /// BIP 329 style labels: "addr:<address>", "tx:<txid>", "out:<txid:vout>"
     #[serde(default)] pub labels: std::collections::HashMap<String, String>,
+    #[serde(default)] pub seal: Seal,
+}
+
+/// The recovery record split across the cards (seal.rs). Shares are made once so cards sealed on different days agree.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Seal {
+    #[serde(default)] pub shares: Vec<String>,   // hex, share i belongs to keys[i] (x = i + 1)
+    #[serde(default)] pub sealed: Vec<String>,   // public keys of the cards seen carrying their share
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -401,7 +409,7 @@ mod tests {
         let keys = ["03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2", "032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe", "038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47"];
         let descriptor = descriptor_for(2, &keys.iter().map(|k| k.to_string()).collect::<Vec<_>>()).unwrap();
         Vault { name: "t".into(), network: "signet".into(), threshold: 2, keys: keys.iter().enumerate().map(|(i, k)| KeyRef { name: format!("k{i}"), serial: 0, pubkey: k.to_string() }).collect(),
-            descriptor, address: String::new(), created: 0, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default() }
+            descriptor, address: String::new(), created: 0, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), seal: Default::default() }
     }
     #[test]
     fn a_scan_that_cannot_reach_the_server_fails_instead_of_reporting_an_empty_vault() {

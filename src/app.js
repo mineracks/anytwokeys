@@ -39,7 +39,7 @@ function show(name) {
   $('#welcome').hidden = true; $('#shell').hidden = false;
   $$('.screen').forEach(s => s.classList.toggle('on', s.id === 's-' + name));
   $$('.nav').forEach(n => n.classList.toggle('on', n.dataset.go === name));
-  $('#title').textContent = { home: vault ? vault.name : 'Vault', send: 'Send', receive: 'Receive', keys: 'Keys', settings: 'Settings', setup: 'New vault · enrol keys', restore: 'Restore from a recovery sheet', sign: 'Sign', messages: 'Messages' }[name] || '';
+  $('#title').textContent = { home: vault ? vault.name : 'Vault', send: 'Send', receive: 'Receive', keys: 'Keys', settings: 'Settings', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
   $('#title-edit').hidden = !(name === 'home' && vault); $('#title-input').hidden = true; $('#title').hidden = false;
   if (name !== 'restore') stopCam();
   if (name === 'home') sync();
@@ -48,7 +48,7 @@ function show(name) {
   if (name === 'messages') renderMessages();
   if (name === 'keys') renderKeys();
   if (name === 'setup') renderSetup();
-  if (name === 'restore') startCam();
+  if (name === 'restore') restoreTab(restoreTab.now || 'keys');
   if (name === 'settings') renderSettings();
   if (name === 'sign') renderSign();
   void first;
@@ -86,6 +86,7 @@ async function pollCards() {
   if ($('#s-setup').classList.contains('on')) renderSetup();
   if ($('#s-keys').classList.contains('on')) { const sig = cards.map(c => c.serial + ':' + c.pubkey).sort().join(','); if (sig !== pollCards.sig) { pollCards.sig = sig; if (!$('#keys-list input')) renderKeys(); } else renderKeysNow(); }
   if (vault) for (const c of cards) { const k = vault.keys.find(k => c.pubkey && k.pubkey === c.pubkey && !k.serial); if (k && c.serial) { invoke('vault_key_seen', { name: vault.name, pubkey: c.pubkey, serial: c.serial }).then(st => { store = st; vault = st.vaults.find(v => v.name === vault.name) || vault; if ($('#s-keys').classList.contains('on')) renderKeys(); }).catch(() => {}); } }
+  if ($('#s-restore').classList.contains('on') && restoreTab.now === 'keys') readSeals();
   if ($('#s-sign').classList.contains('on')) renderSign();
   if ($('#s-messages').classList.contains('on')) { const c = cards.find(c => c.pubkey); const was = renderMessages.had; renderMessages.had = !!c; if (was !== !!c) renderMessages(); }
   setTimeout(pollCards, 2000);
@@ -340,8 +341,8 @@ $('#bsms-open').onclick = async () => { try { const r = await invoke('bsms_impor
 function renderKeys() {
   if (!vault) return;
   $('#keys-list').innerHTML = vault.keys.map(k => keyRow(k.name, k.serial ? `serial ${k.serial}` : 'serial not yet seen (restored)', k.pubkey, cards.some(c => c.pubkey === k.pubkey) ? 'here' : 'off', vault.keys.indexOf(k))).join('');
-  invoke('vault_recovery', { name: vault.name }).then(l => { $('#keys-desc').textContent = l; vault._recovery = l; }); $('#keys-k').textContent = vault.threshold;
-  renderKeysNow();
+  invoke('vault_recovery', { name: vault.name }).then(l => { $('#keys-desc').textContent = l; vault._recovery = l; }); $('#keys-k').textContent = vault.threshold; $$('.keys-k2').forEach(e => e.textContent = vault.threshold);
+  renderKeysNow(); renderSeal();
 }
 function keyRow(name, sub, pub, state, idx) { const pen = idx === undefined ? '' : `<button class="pencil" data-edit-idx="${idx}" title="Rename this key"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>`; return `<div class="keyrow"><svg width="22" height="22"><use href="#ring"/></svg><div class="who"><div class="name"><span class="name-text">${name}</span>${pen}</div><div class="muted" style="font-size:13px">${sub} · <span class="mono">${pub.slice(0, 12)}…</span></div></div><div class="state ${state}"><i></i>${{ ok: 'enrolled', off: 'not plugged in', here: 'plugged in' }[state]}</div></div>`; }
 function renderKeysNow() { $('#keys-now').innerHTML = cards.length ? cards.map(c => `${cardLabel(c)} · ${c.pubkey ? 'signing key present' : 'no signing key'} · touch ${c.touch}`).join('<br>') : (cardsErr && !/no YubiKey found/i.test(cardsErr) ? 'Card reader problem: ' + cardsErr : 'No YubiKey plugged in.'); }
@@ -459,8 +460,69 @@ $('#single-ack').onchange = () => { $('#single-go').disabled = !$('#single-ack')
 $('#single-instead').onclick = () => { $('#single-modal').classList.remove('on'); setup = { k: 2, n: 3, keys: [], network: store.settings.network }; show('setup'); };
 $('#single-go').onclick = () => { $('#single-modal').classList.remove('on'); setup = { k: 1, n: 1, keys: [], network: store.settings.network }; show('setup'); };
 
+// ---------- the seal: recovery shares on the keys ----------
+async function renderSeal(force) {
+  if (!vault) return;
+  const typing = $$('#seal-list input').some(i => i.value || i === document.activeElement);
+  if (typing && !force) return;   // a poll must not wipe a half-typed PIN
+  const name = vault.name;
+  let st; try { st = await invoke('seal_status', { name }); } catch (e) { $('#seal-note').textContent = String(e); $('#seal-list').innerHTML = ''; return; }
+  if (!vault || vault.name !== name) return;
+  const n = st.keys.length, k = st.threshold;
+  $('#seal-note').textContent = st.sealed === n
+    ? `All ${n} keys carry their share. Any ${k} of them rebuild this vault on a new computer, with no sheet and no file. One key alone gives nothing away.`
+    : st.sealed ? `${st.sealed} of ${n} keys sealed. Recovery from the keys alone only works with sealed keys, so finish the rest: you cannot choose which keys you will be left with.`
+    : `Each key can carry a share of this vault's recovery record. Any ${k} sealed keys then rebuild the vault on a new computer with nothing else. One key alone gives nothing away. Sealing takes the key's admin PIN once; it writes to the card's certificate object and never touches the signing key.`;
+  if (st.earlier) $('#seal-note').textContent += ` These keys carry shares from an earlier sealing this computer does not know: plug in ${k} of them together and it is adopted.`;
+  $('#seal-list').innerHTML = st.keys.map((key, i) => {
+    const card = cards.find(c => c.pubkey === key.pubkey);
+    const form = (label, replace) => `<input type="password" autocomplete="off" placeholder="admin PIN" data-seal-pin="${i}" style="max-width:150px;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--paper,#fff);font:inherit"><button class="btn" data-seal-go="${i}" data-replace="${replace ? 1 : ''}" style="min-height:36px;padding:6px 14px;font-size:13px">${label}</button>`;
+    const right = key.state === 'sealed' ? `<div class="state ok"><i></i>sealed${key.here ? '' : ' · not plugged in'}</div>`
+      : key.state === 'foreign' ? `<div class="state"><i></i>certificate object in use by something else · left alone</div>`
+      : !key.here ? `<div class="state"><i></i>not sealed · plug it in</div>`
+      : key.state === 'other' ? form('Replace its share', true) : form('Seal this key', false);
+    return `<div class="keyrow"><svg width="22" height="22"><use href="#ring"/></svg><div class="who"><div class="name">${esc(key.name)}</div><div class="muted" style="font-size:13px">${key.state === 'other' ? 'carries a share from a different sealing of this vault' : 'share ' + (i + 1) + ' of ' + n}</div></div>${right}</div>`;
+  }).join('');
+  $$('[data-seal-go]').forEach(b => b.onclick = async () => {
+    const i = +b.dataset.sealGo, key = st.keys[i], card = cards.find(c => c.pubkey === key.pubkey), pin = $(`[data-seal-pin="${i}"]`).value;
+    if (!card) return toast('That key is no longer plugged in');
+    if (!pin) return toast('Enter the admin PIN of this key');
+    b.disabled = true; b.textContent = 'writing…';
+    try { const r = await invoke('seal_write', { name: vault.name, reader: card.reader, adminPin: pin, replace: !!b.dataset.replace }); toast(`${key.name}: ${r}`, 5000); store = await invoke('store_get'); vault = store.vaults.find(v => v.name === vault.name) || vault; }
+    catch (e) { fail(e); }
+    renderSeal(true);
+  });
+}
+
+// restore, from the keys: shares are remembered across card swaps, so one port is enough
+let sealFound = [];
+async function readSeals() {
+  const sig = cards.map(c => c.serial + ':' + c.pubkey).sort().join(',');
+  if (sig === readSeals.sig) return; readSeals.sig = sig;
+  let r; try { r = await invoke('seal_read'); } catch (e) { $('#seal-read-list').innerHTML = `<div class="warn">${esc(e)}</div>`; readSeals.sig = null; return; }
+  for (const f of r.found) if (!sealFound.some(o => o.entry.id === f.entry.id && o.entry.x === f.entry.x)) sealFound.push(f);
+  const seen = [...new Set(sealFound.map(f => f.serial))];
+  $('#seal-read-list').innerHTML = (seen.length ? seen.map(sn => `<div class="keyrow"><svg width="22" height="22"><use href="#ring"/></svg><div class="who"><div class="name">YubiKey ${sn}</div><div class="muted" style="font-size:13px">${sealFound.filter(f => f.serial === sn).length} share(s) read${cards.some(c => c.serial === sn) ? '' : ' · unplugged, remembered'}</div></div><div class="state ok"><i></i>read</div></div>`).join('') : '')
+    + (r.cards && !r.found.length ? `<div class="muted" style="font-size:13px">${r.foreign.length ? 'This key\'s certificate object holds something that is not a seal.' : 'The key plugged in now is not sealed. A vault sealed by this app writes a share to each key from the Keys screen.'}</div>` : '')
+    + (!r.cards && !seen.length ? '<div class="muted" style="font-size:13px">No YubiKey plugged in.</div>' : '');
+  if (!sealFound.length) return;
+  const cands = await invoke('seal_preview', { found: sealFound });
+  $('#restore-card').innerHTML = cands.map((c, ci) => c.record ? `<div style="display:flex;flex-direction:column;gap:10px${ci ? ';border-top:1px solid var(--line);padding-top:14px' : ''}">
+      <div class="ok">Rebuilt from ${c.need} keys: ${esc(c.record.name)} · ${c.record.threshold} of ${c.record.pubkeys.length} · ${c.record.network}${c.record.chain_code ? ' · rotating addresses' : ' · one fixed address'}</div>
+      <div class="muted" style="font-size:13px">Keys: ${c.record.key_names.map(esc).join(' · ')}. First address: <span class="mono">${c.address}</span></div>
+      <div class="mono muted" style="background:var(--ground);padding:12px;border-radius:6px;border:1px solid var(--line);-webkit-user-select:text;user-select:text">${esc(c.line)}</div>
+      ${c.known_as ? `<div class="muted" style="font-size:13px">Already on this computer as “${esc(c.known_as)}”.</div>` : `<div class="field"><div class="label">Vault name</div><input data-seal-name="${c.id}" value="${esc(c.record.name)}"></div><button class="btn primary" data-seal-restore="${c.id}">Restore this vault</button>`}</div>`
+    : `<div class="muted"${ci ? ' style="border-top:1px solid var(--line);padding-top:14px"' : ''}>A vault with ${c.have} of the ${c.need} keys it needs. Unplug this key and plug in another of the same vault; what was read is remembered.</div>`).join('') || '<div class="muted">Nothing read yet.</div>';
+  $$('[data-seal-restore]').forEach(b => b.onclick = async () => {
+    const id = b.dataset.sealRestore;
+    try { vault = await invoke('seal_restore', { id, name: $(`[data-seal-name="${id}"]`).value, found: sealFound }); store = await invoke('store_get'); try { localStorage.setItem('a2k-vault', vault.name); } catch {} sealFound = []; readSeals.sig = null; toast('Vault restored from its keys'); paintNet(); renderTabs(); show('home'); }
+    catch (e) { fail(e); }
+  });
+}
+
 // ---------- restore ----------
-$$('.tabs div').forEach(t => t.onclick = () => { $$('.tabs div').forEach(x => x.classList.toggle('on', x === t)); $('#tab-scan').hidden = t.dataset.tab !== 'scan'; $('#tab-paste').hidden = t.dataset.tab !== 'paste'; if (t.dataset.tab === 'scan') startCam(); else stopCam(); });
+function restoreTab(name) { restoreTab.now = name; $$('.tabs div').forEach(x => x.classList.toggle('on', x.dataset.tab === name)); for (const t of ['keys', 'scan', 'paste']) $('#tab-' + t).hidden = t !== name; $('#sheet-note').hidden = name === 'keys'; if (name === 'scan') startCam(); else stopCam(); if (name === 'keys') { readSeals.sig = null; readSeals(); } }
+$$('.tabs div').forEach(t => t.onclick = () => restoreTab(t.dataset.tab));
 async function startCam() {
   if (camStream) return;
   try { camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }); $('#cam').srcObject = camStream; const cv = document.createElement('canvas'); const ctx = cv.getContext('2d', { willReadFrequently: true });

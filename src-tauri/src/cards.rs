@@ -25,6 +25,10 @@ pub enum CardError {
     NoTouch,
     #[error("malformed answer from the card")]
     Parse,
+    #[error("the card's contents changed since they were read; nothing was written")]
+    Changed,
+    #[error("the card did not read back what was written")]
+    Unverified,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -230,6 +234,45 @@ pub fn sign_digest(reader: &str, pin: &str, digest: &[u8; 32]) -> Result<([u8; 3
     Ok((r, s))
 }
 
+/// What one plugged-in card holds for the seal: readable with no PIN.
+#[derive(Debug, Clone, Serialize)]
+pub struct Sealed { pub reader: String, pub serial: u32, pub pubkey: Option<String>, pub container: Vec<u8>, pub room: usize }
+
+fn serial_of(ad: &[u8]) -> u32 {
+    find(ad, 0x4F).filter(|a| a.len() >= 14).map(|a| u32::from_str_radix(&hex::encode(&a[10..14]), 10).unwrap_or(0)).unwrap_or(0)
+}
+
+/// The cardholder-certificate object (7F21) of every plugged-in card, and how many bytes it can hold.
+pub fn read_sealed() -> Result<Vec<Sealed>, CardError> {
+    let ctx = Context::establish(Scope::User)?;
+    let mut out = Vec::new();
+    for reader in readers(&ctx)? {
+        let card = connect(&ctx, &reader)?;   // a key that is plugged in but unreadable is an error, not an absent key
+        let ad = app_data(&card)?;
+        // extended capabilities (C0): bytes 4..6 = the longest certificate the card will store
+        let room = find(&ad, 0x73).and_then(|d| find(d, 0xC0)).filter(|c| c.len() >= 6).map(|c| ((c[4] as usize) << 8) | c[5] as usize).unwrap_or(0);
+        let container = apdu(&card, 0x00, 0xCA, 0x7F, 0x21, &[])?;
+        out.push(Sealed { serial: serial_of(&ad), pubkey: read_sig_pubkey(&card).map(hex::encode), reader, container, room });
+    }
+    Ok(out)
+}
+
+/// Replace the certificate object. `expect` is what the caller read before deciding: if the card holds anything
+/// else by now, nothing is written. Needs the ADMIN PIN. The write is read back and compared before returning.
+pub fn write_sealed(reader: &str, admin_pin: &str, expect: &[u8], data: &[u8]) -> Result<(), CardError> {
+    let ctx = Context::establish(Scope::User)?;
+    let card = connect(&ctx, reader)?;
+    if apdu(&card, 0x00, 0xCA, 0x7F, 0x21, &[])? != expect { return Err(CardError::Changed); }
+    apdu(&card, 0x00, 0x20, 0x00, 0x83, admin_pin.as_bytes())?;
+    // command chaining: every block but the last carries CLA bit 0x10
+    let blocks: Vec<&[u8]> = data.chunks(255).collect();
+    for (i, b) in blocks.iter().enumerate() {
+        apdu(&card, if i + 1 < blocks.len() { 0x10 } else { 0x00 }, 0xDA, 0x7F, 0x21, b)?;
+    }
+    if apdu(&card, 0x00, 0xCA, 0x7F, 0x21, &[])? != data { return Err(CardError::Unverified); }
+    Ok(())
+}
+
 fn is_low_s(s: &[u8; 32]) -> bool {
     // s <= n/2  ⇔  s < n - s  (compare against half order)
     const HALF: [u8; 32] = [
@@ -247,4 +290,14 @@ fn neg_mod_n(s: &[u8; 32]) -> [u8; 32] {
         if d < 0 { out[i] = (d + 256) as u8; borrow = 1 } else { out[i] = d as u8; borrow = 0 }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    /// Needs a key plugged in: `cargo test hardware_read -- --ignored --nocapture`. Reads only.
+    #[test]
+    #[ignore]
+    fn hardware_read_sealed() {
+        for c in super::read_sealed().unwrap() { println!("serial {} pubkey {:?} container {} bytes, room {}", c.serial, c.pubkey, c.container.len(), c.room); assert!(c.room >= 255); }
+    }
 }
