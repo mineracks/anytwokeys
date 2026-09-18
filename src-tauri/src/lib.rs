@@ -96,6 +96,23 @@ fn vault_recovery(name: String) -> R<String> {
     Ok(wallet::recovery_line(v))
 }
 
+/// Rename a vault and/or its keys. Labels only: nothing on the chain or the cards changes.
+#[tauri::command]
+fn vault_rename(name: String, new_name: String, key_names: Vec<String>) -> R<Store> {
+    let mut s = wallet::load();
+    let new_name = new_name.trim().to_string();
+    if new_name.is_empty() { return Err("a vault needs a name".into()); }
+    if new_name != name && s.vaults.iter().any(|v| v.name == new_name) { return Err(format!("a vault called '{new_name}' already exists")); }
+    let v = s.vaults.iter_mut().find(|v| v.name == name).ok_or("no such vault")?;
+    for (i, k) in v.keys.iter_mut().enumerate() {
+        if let Some(n) = key_names.get(i) { let n = n.trim(); if !n.is_empty() { k.name = n.to_string(); } }
+    }
+    v.name = new_name.clone();
+    if new_name != name { if let Some(seen) = s.seen.remove(&name) { s.seen.insert(new_name, seen); } }
+    wallet::save(&s)?;
+    Ok(s)
+}
+
 #[tauri::command]
 fn vault_forget(name: String) -> R<Store> {
     let mut s = wallet::load();
@@ -341,7 +358,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .setup(|app| { watch::start(app.handle().clone()); Ok(()) })
         .invoke_handler(tauri::generate_handler![
-            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_forget,
+            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
         .run(tauri::generate_context!())

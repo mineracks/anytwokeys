@@ -207,6 +207,21 @@ function renderKeys() {
 }
 function keyRow(name, sub, pub, state) { return `<div class="keyrow"><svg width="22" height="22"><use href="#ring"/></svg><div class="who"><div class="name">${name}</div><div class="muted" style="font-size:13px">${sub} · <span class="mono">${pub.slice(0, 12)}…</span></div></div><div class="state ${state}"><i></i>${{ ok: 'enrolled', off: 'not plugged in', here: 'plugged in' }[state]}</div></div>`; }
 function renderKeysNow() { $('#keys-now').innerHTML = cards.length ? cards.map(c => `${cardLabel(c)} · ${c.pubkey ? 'signing key present' : 'no signing key'} · touch ${c.touch}`).join('<br>') : (cardsErr && !/no YubiKey found/i.test(cardsErr) ? 'Card reader problem: ' + cardsErr : 'No YubiKey plugged in.'); }
+$('#edit-names').onclick = () => {
+  $('#edit-vault-name').value = vault.name;
+  $('#edit-key-names').innerHTML = vault.keys.map((k, i) => `<div class="row"><span class="mono muted" style="width:140px;font-size:12px">${k.serial ? 'serial ' + k.serial : k.pubkey.slice(0, 12) + '…'}</span><input data-edit-key="${i}" value="${k.name.replace(/"/g, '&quot;')}" style="max-width:260px;padding:8px 12px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink)"></div>`).join('');
+  $('#edit-panel').hidden = false; $('#edit-names').hidden = true;
+};
+$('#cancel-names').onclick = () => { $('#edit-panel').hidden = true; $('#edit-names').hidden = false; };
+$('#save-names').onclick = async () => {
+  const old = vault.name;
+  try {
+    store = await invoke('vault_rename', { name: old, newName: $('#edit-vault-name').value, keyNames: $$('[data-edit-key]').map(i => i.value) });
+    vault = store.vaults.find(v => v.name === ($('#edit-vault-name').value.trim() || old)) || store.vaults[0];
+    try { localStorage.setItem('a2k-vault', vault.name); } catch {}
+    $('#edit-panel').hidden = true; $('#edit-names').hidden = false; paintNet(); renderKeys(); $('#title').textContent = vault.name; toast('Names saved');
+  } catch (e) { fail(e); }
+};
 $('#copy-desc').onclick = () => navigator.clipboard.writeText(vault._recovery || vault.descriptor).then(() => toast('Recovery line copied'));
 $('#forget-vault').onclick = async () => { if (!confirm(`Forget '${vault.name}' on this computer? The coins stay on the chain; the recovery line and two keys bring it back.`)) return; store = await invoke('vault_forget', { name: vault.name }); vault = null; // the background watcher saw a deposit, a spend or a confirmation: refresh what is on screen
 window.__TAURI__.event.listen('vault-changed', (ev) => {
