@@ -62,7 +62,7 @@
         <div class="card"><div class="label">Vault</div><div style="font-family:var(--display);font-weight:600;font-size:18px" id="vault-kind"></div><div class="muted" id="vault-keys"></div></div>
         <div class="card"><div class="label">Actions</div><div class="row"><button class="btn primary" data-go="send" style="min-width:120px">Send</button><button class="btn" data-go="receive" style="min-width:120px">Receive</button></div></div>
       </div>
-      <div class="card"><div class="label">Activity</div><table><thead><tr><th>Transaction</th><th class="r">Status</th></tr></thead><tbody id="activity"><tr><td class="muted" colspan="2">nothing yet</td></tr></tbody></table></div>
+      <div class="card"><div class="label">Activity</div><table><thead><tr><th>Transaction</th><th>Label</th><th class="r">Status</th></tr></thead><tbody id="activity"><tr><td class="muted" colspan="3">nothing yet</td></tr></tbody></table></div>
       <div class="muted" style="font-size:13px" id="conn"></div>
     </section>
 
@@ -75,8 +75,13 @@
           <div class="muted" style="font-size:13px">Deposits show on Home after one confirmation, usually within 10 to 30 minutes.</div>
         </div>
       </div>
-          <div class="card" id="addr-card" hidden style="margin-top:22px"><div class="row" style="justify-content:space-between;align-items:center"><div class="label">Addresses</div><span class="muted" style="font-size:13px" id="addr-note"></span></div>
-        <table class="tbl" id="addr-table"><thead><tr><th>#</th><th>Address</th><th class="r">Balance</th><th class="r">Status</th></tr></thead><tbody></tbody></table>
+      <div class="card" id="addr-card" hidden style="margin-top:22px">
+        <div class="row" style="justify-content:space-between;align-items:center"><div class="label">Addresses</div><span class="muted" style="font-size:13px" id="addr-table-note">Click an address to show it on the left. Hover a row for the pencil to label it.</span></div>
+        <div class="label" style="margin-top:14px;color:var(--gold)">Receive</div>
+        <table class="tbl" id="addr-recv"><thead><tr><th>#</th><th>Address</th><th>Label</th><th class="r">Balance</th><th class="r">Status</th></tr></thead><tbody></tbody></table>
+        <div class="label" style="margin-top:18px;color:var(--gold)">Change</div>
+        <table class="tbl" id="addr-chg"><thead><tr><th>#</th><th>Address</th><th>Label</th><th class="r">Balance</th><th class="r">Status</th></tr></thead><tbody></tbody></table>
+        <div class="row" style="margin-top:12px;gap:10px;align-items:center"><button class="btn small" id="addr-more">Show 10 more on each chain</button><span class="muted" style="font-size:13px" id="addr-gap"></span></div>
       </div>
 </section>
 
@@ -133,7 +138,7 @@
           <div class="row"><button class="btn primary" id="save-names">Save</button><button class="btn" id="cancel-names">Cancel</button></div>
         </div></div>
       <div class="card"><div class="label">Plugged in now</div><div id="keys-now" class="muted">looking…</div></div>
-      <div class="card"><div class="label">Recovery</div><div class="mono" id="keys-desc" style="-webkit-user-select:text;user-select:text"></div><div class="muted" style="font-size:13px">Any <span id="keys-k"></span> of the keys plus this line rebuilds the vault in another copy of this app; the part before <span class="mono">cc=</span> is a standard descriptor Bitcoin Core imports for the first address. Keep it away from the PINs.</div><div class="row"><button class="btn" id="copy-desc">Copy descriptor</button><button class="btn" id="forget-vault" style="border-color:var(--no);color:var(--no)">Forget this vault on this computer</button></div></div>
+      <div class="card"><div class="label">Recovery</div><div class="mono" id="keys-desc" style="-webkit-user-select:text;user-select:text"></div><div class="muted" style="font-size:13px">Any <span id="keys-k"></span> of the keys plus this line rebuilds the vault in another copy of this app; the part before <span class="mono">cc=</span> is a standard descriptor Bitcoin Core imports for the first address. Keep it away from the PINs.</div><div class="row"><button class="btn" id="copy-desc">Copy descriptor</button><button class="btn" id="bsms-export" title="Bitcoin Secure Multisig Setup descriptor record (BIP 129)">Save as BSMS</button><button class="btn" id="forget-vault" style="border-color:var(--no);color:var(--no)">Forget this vault on this computer</button></div></div>
     </section>
 
     <section id="s-setup" class="screen">
@@ -161,7 +166,7 @@
         <div style="display:flex;flex-direction:column;gap:14px">
           <div class="tabs"><div class="on" data-tab="scan">Scan the sheet</div><div data-tab="paste">Paste the line</div></div>
           <div id="tab-scan"><div class="cam"><video id="cam" autoplay playsinline muted></video><div class="frame"></div></div><div class="muted" style="font-size:13px;margin-top:8px" id="cam-note">Hold the sheet's code in the frame.</div></div>
-          <div id="tab-paste" hidden><div class="field"><textarea id="desc-in" class="mono" placeholder="wsh(sortedmulti(2,02…,03…,03…))#checksum cc=…" spellcheck="false"></textarea></div><button class="btn" id="desc-read">Read it</button></div>
+          <div id="tab-paste" hidden><div class="field"><textarea id="desc-in" class="mono" placeholder="wsh(sortedmulti(2,02…,03…,03…))#checksum cc=…" spellcheck="false"></textarea></div><button class="btn" id="desc-read">Read it</button><button class="btn" id="bsms-open" title="Open a BSMS descriptor record (BIP 129)">Open a BSMS file</button></div>
           <div class="muted" style="font-size:13px">The code on a recovery sheet carries the descriptor alone. Nothing on it can spend.</div>
         </div>
         <div class="card" id="restore-card"><div class="muted">Nothing read yet.</div></div>
@@ -215,6 +220,13 @@
             <div class="field"><div class="label">Block explorer</div><input id="c-explorer" class="mono" placeholder="http://umbrel.local:3006" spellcheck="false"></div>
             <div class="row"><button class="btn" id="test-servers">Test connection</button><button class="btn primary" id="save-settings">Save</button></div>
             <div class="muted" style="font-size:13px" id="test-out"></div></div>
+          <div class="card"><div class="label">Addresses</div>
+            <div class="field"><div class="label">Gap limit</div><div class="row" style="gap:10px;align-items:center"><input id="gap-in" inputmode="numeric" style="max-width:110px"><button class="btn" id="gap-save">Save</button></div></div>
+            <div class="muted" style="font-size:13px">How many unused addresses past the last used one a scan looks at, on the receive chain and the change chain each. 20 is the usual. Raise it if you hand out many addresses before any is paid; every scan costs one server query per address.</div></div>
+          <div class="card"><div class="label">Notifications</div><div class="row" style="align-items:center;gap:12px"><button class="btn" id="notify-test">Send a test notification</button><span class="muted" style="font-size:13px" id="notify-out"></span></div>
+            <div class="muted" style="font-size:13px">Arrivals, spends and confirmations are checked every minute in the background. The log is at <span class="mono" id="watch-log-path"></span>.</div></div>
+          <div class="card"><div class="label">Labels</div><div class="row" style="gap:10px"><button class="btn" id="labels-export">Export labels</button><button class="btn" id="labels-import">Import labels</button></div>
+            <div class="muted" style="font-size:13px" id="labels-out">BIP 329 format, the same file Sparrow reads and writes: address, transaction and coin labels for the current vault.</div></div>
           <div class="card"><div class="label">About</div><div class="muted" style="font-size:13px">v0.1 research build. Source and checksums at anytwokeys.com. Not affiliated with Yubico.</div></div>
         </div>
       </div>

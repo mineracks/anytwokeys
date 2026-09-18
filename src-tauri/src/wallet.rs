@@ -27,6 +27,10 @@ pub struct Vault {
     #[serde(default)] pub chain_code: Option<String>,   // hex; present = rotating addresses (hd.rs)
     #[serde(default)] pub next: u32,                     // first unused index, from the last scan
     #[serde(default)] pub scan_max: u32,                 // highest index the last scan looked at
+    #[serde(default)] pub next_change: u32,              // first unused change position (change chain = CHANGE | pos)
+    #[serde(default)] pub scan_max_change: u32,
+    /// BIP 329 style labels: "addr:<address>", "tx:<txid>", "out:<txid:vout>"
+    #[serde(default)] pub labels: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -35,7 +39,10 @@ pub struct Settings {
     pub custom: bool,
     pub electrum: String,
     pub explorer: String,
+    /// how many unused addresses past the last used one a scan looks at, per chain
+    #[serde(default = "default_gap")] pub gap: u32,
 }
+pub fn default_gap() -> u32 { GAP }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StagedMessage { pub vault: String, pub address: String, pub message: String, pub index: u32 }
@@ -68,6 +75,18 @@ pub fn load() -> Store {
     let mut s: Store = std::fs::read_to_string(store_path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
     if s.settings.network.is_empty() { s.settings.network = "signet".into(); }
     s
+}
+
+static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Load, change, save, under one lock: for the short write after a long scan, so two threads that both
+/// scanned cannot erase each other's marks. Never hold it across network calls.
+pub fn update<F: FnOnce(&mut Store)>(f: F) -> Result<Store, String> {
+    let _g = STORE_LOCK.lock().map_err(|_| "store lock poisoned".to_string())?;
+    let mut s = load();
+    f(&mut s);
+    save(&s)?;
+    Ok(s)
 }
 
 pub fn save(s: &Store) -> Result<(), String> {
@@ -133,6 +152,10 @@ pub fn keys_of(desc: &str) -> Result<(usize, Vec<String>), String> {
 }
 
 pub const GAP: u32 = 20;
+/// Change addresses live on their own chain: index = CHANGE | position. Receive addresses are plain positions.
+pub const CHANGE: u32 = 0x8000_0000;
+pub fn is_change(index: u32) -> bool { index & CHANGE != 0 }
+pub fn position(index: u32) -> u32 { index & !CHANGE }
 
 pub fn cc_of(v: &Vault) -> Option<[u8; 32]> {
     let h = v.chain_code.as_ref()?;
@@ -183,38 +206,48 @@ pub fn split_recovery(text: &str) -> (String, Option<String>) {
 pub struct CoinAt { pub txid: String, pub vout: u32, pub value: u64, pub height: u32, pub index: u32 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct Scanned { pub coins: Vec<CoinAt>, pub history: Vec<(String, i32, u32)>, pub next: u32, pub scan_max: u32 }
+pub struct Scanned { pub coins: Vec<CoinAt>, pub history: Vec<(String, i32, u32)>, pub next: u32, pub scan_max: u32, pub next_change: u32, pub scan_max_change: u32 }
 
-/// Every index up to GAP past the last one with history. A fixed vault has index 0 only.
-pub fn scan(v: &Vault, servers: &Servers) -> Result<Scanned, String> {
+/// Every index up to `gap` past the last one with history, on the receive chain and, for a rotating
+/// vault, the change chain too. A fixed vault has index 0 only.
+pub fn scan(v: &Vault, servers: &Servers, gap: u32) -> Result<Scanned, String> {
+    let gap = gap.max(1);
+    let rotating = cc_of(v).is_some();
     let mut coins = Vec::new();
     let mut history = Vec::new();
-    let rotating = cc_of(v).is_some();
-    let mut last_used: Option<u32> = None;
-    let mut next: Option<u32> = None;
-    let mut i = 0u32;
-    loop {
-        let spk = script_of(&descriptor_at(v, i)?)?;
-        let h = chain::history(servers, &spk).unwrap_or_default();
-        if !h.is_empty() {
-            last_used = Some(i);
-            for item in h { history.push((item.txid, item.height, i)); }
-            for c in chain::coins(servers, &spk)? { coins.push(CoinAt { txid: c.txid, vout: c.vout, value: c.value, height: c.height, index: i }); }
-        } else if next.is_none() {
-            next = Some(i);
+    let mut chain = |base: u32| -> Result<(u32, u32), String> {
+        let mut last_used: Option<u32> = None;
+        let mut next: Option<u32> = None;
+        let mut i = 0u32;
+        loop {
+            let spk = script_of(&descriptor_at(v, base | i)?)?;
+            let h = chain::history(servers, &spk).unwrap_or_default();
+            if !h.is_empty() {
+                last_used = Some(i);
+                for item in h { history.push((item.txid, item.height, base | i)); }
+                for c in chain::coins(servers, &spk)? { coins.push(CoinAt { txid: c.txid, vout: c.vout, value: c.value, height: c.height, index: base | i }); }
+            } else if next.is_none() {
+                next = Some(i);
+            }
+            if !rotating { break; }
+            if i >= last_used.map(|u| u + gap).unwrap_or(gap - 1) { break; }
+            i += 1;
         }
-        if !rotating { break; }
-        if i >= last_used.map(|u| u + GAP).unwrap_or(GAP - 1) { break; }
-        i += 1;
-    }
-    Ok(Scanned { coins, history, next: next.unwrap_or(i + 1), scan_max: i })
+        Ok((next.unwrap_or(i + 1), i))
+    };
+    let (next, scan_max) = chain(0)?;
+    let (next_change, scan_max_change) = if rotating { chain(CHANGE)? } else { (0, 0) };
+    Ok(Scanned { coins, history, next, scan_max, next_change, scan_max_change })
 }
 
 /// Which index a PSBT input pays to, by matching its script against the vault's.
-pub fn index_of_input(v: &Vault, spk: &ScriptBuf, upto: u32) -> Result<Option<u32>, String> {
-    let max = if cc_of(v).is_some() { upto + GAP } else { 0 };
-    for i in 0..=max {
+pub fn index_of_input(v: &Vault, spk: &ScriptBuf) -> Result<Option<u32>, String> {
+    if cc_of(v).is_none() { return Ok(if &script_of(&descriptor_at(v, 0)?)? == spk { Some(0) } else { None }); }
+    for i in 0..=v.scan_max.max(v.next) + GAP {
         if &script_of(&descriptor_at(v, i)?)? == spk { return Ok(Some(i)); }
+    }
+    for i in 0..=v.scan_max_change.max(v.next_change) + GAP {
+        if &script_of(&descriptor_at(v, CHANGE | i)?)? == spk { return Ok(Some(CHANGE | i)); }
     }
     Ok(None)
 }
@@ -310,7 +343,7 @@ pub fn sighashes_for(v: &Vault, psbt_b64: &str, pubkey_hex: &str) -> Result<Vec<
     let mut out = Vec::new();
     for (i, inp) in psbt.inputs.iter().enumerate() {
         let Some(utxo) = &inp.witness_utxo else { continue };
-        let Some(index) = index_of_input(v, &utxo.script_pubkey, v.scan_max)? else { continue };
+        let Some(index) = index_of_input(v, &utxo.script_pubkey)? else { continue };
         let (child, tweak) = match cc {
             Some(cc) => (crate::hd::child_pubkey(&cc, &q, index), Some(crate::hd::child_scalar(&cc, &q, index))),
             None => (q, None),
@@ -367,7 +400,7 @@ mod tests {
         let keys = ["03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2", "032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe", "038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47"];
         let descriptor = descriptor_for(2, &keys.iter().map(|k| k.to_string()).collect::<Vec<_>>()).unwrap();
         Vault { name: "t".into(), network: "signet".into(), threshold: 2, keys: keys.iter().enumerate().map(|(i, k)| KeyRef { name: format!("k{i}"), serial: 0, pubkey: k.to_string() }).collect(),
-            descriptor, address: String::new(), created: 0, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0 }
+            descriptor, address: String::new(), created: 0, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default() }
     }
     #[test]
     fn fixed_vault_keeps_the_known_address() {
@@ -383,7 +416,7 @@ mod tests {
         assert_ne!(a0, a1);
         assert_ne!(a0, "tb1q2n7mza35dzyea6du9dh4amzqxjg6ysgtc45kfklfd7revryppuxqfegkkp");
         let spk = script_of(&descriptor_at(&v, 5).unwrap()).unwrap();
-        assert_eq!(index_of_input(&v, &spk, 0).unwrap(), Some(5));
+        assert_eq!(index_of_input(&v, &spk).unwrap(), Some(5));
         let (d, cc) = split_recovery(&recovery_line(&v));
         assert_eq!(d, v.descriptor);
         assert_eq!(cc.as_deref(), Some("ab".repeat(32).as_str()));

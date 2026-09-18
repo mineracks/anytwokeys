@@ -6,6 +6,30 @@ const sats = (n) => Number(n).toLocaleString('en-AU');
 let store = null, vault = null, cards = [], cardsErr = '', fees = null, feeLevel = 'medium', built = null, camStream = null, camTimer = null;
 let setup = { k: 2, n: 3, keys: [], network: null };
 
+const CHANGE = 0x80000000;
+const fmtIndex = (i) => i >= CHANGE ? 'change #' + (i - CHANGE) : '#' + i;
+const PEN = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
+const labelOf = (key) => (vault && vault.labels && vault.labels[key]) || '';
+const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+// an inline label: text plus a hover pencil; click → field; Enter/blur saves through label_set
+function lblHtml(key) { return `<span class="lbl" data-lkey="${esc(key)}"><span class="text">${esc(labelOf(key))}</span><button class="pencil" title="Label">${PEN}</button></span>`; }
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('.lbl .pencil'); if (!b) return; e.preventDefault(); e.stopPropagation();
+  const box = b.closest('.lbl'), key = box.dataset.lkey, cur = labelOf(key);
+  const inp = document.createElement('input'); inp.className = 'lbl-input'; inp.value = cur; inp.maxLength = 80; inp.placeholder = 'label';
+  box.replaceChildren(inp); inp.focus(); inp.select();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return; done = true;
+    const v = inp.value.trim();
+    if (save && v !== cur) { try { store = await invoke('label_set', { name: vault.name, key, label: v }); vault = store.vaults.find(x => x.name === vault.name) || vault; } catch (err) { fail(err); } }
+    box.innerHTML = `<span class="text">${esc(labelOf(key))}</span><button class="pencil" title="Label">${PEN}</button>`;
+  };
+  inp.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); finish(true); } if (ev.key === 'Escape') finish(false); });
+  inp.addEventListener('blur', () => finish(true));
+  inp.addEventListener('click', (ev) => ev.stopPropagation());
+});
+
 function toast(t, ms = 3500) { const el = $('#toast'); el.textContent = t; el.classList.add('on'); clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove('on'), ms); }
 function fail(e) { toast(String(e && e.message || e), 6000); console.error(e); }
 
@@ -76,7 +100,7 @@ async function sync() {
   $('#balance-sub').textContent = 'syncing…';
   try {
     const s = await invoke('vault_sync', { name: vault.name });
-    vault._coins = s.coins; vault._receive = s.receive; vault._receiveIndex = s.receive_index; vault._rotating = s.rotating; vault._height = s.height; vault._history = s.history;
+    vault._coins = s.coins; vault._receive = s.receive; vault._receiveIndex = s.receive_index; vault._rotating = s.rotating; vault._height = s.height; vault._history = s.history; vault._nextChange = s.next_change; vault._gap = s.gap;
     if ($('#s-send').classList.contains('on')) renderCoins();
     if ($('#s-receive').classList.contains('on')) renderAddresses();
     $('#balance').innerHTML = `${sats(s.balance)} <small>sats</small>`;
@@ -84,10 +108,10 @@ async function sync() {
     $('#balance-sub').textContent = `${s.coins.length} coin${s.coins.length === 1 ? '' : 's'}` + (unconf ? ` · ${sats(unconf)} unconfirmed` : ' · all confirmed');
     $('#conn').textContent = `Connected to ${s.servers.electrum.replace(/^\w+:\/\//, '')} · block ${sats(s.height)}`;
     const tb = $('#activity'); tb.innerHTML = '';
-    if (!s.history.length) tb.innerHTML = '<tr><td class="muted" colspan="2">nothing yet</td></tr>';
+    if (!s.history.length) tb.innerHTML = '<tr><td class="muted" colspan="3">nothing yet</td></tr>';
     for (const h of s.history.slice().reverse()) {
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td><a href="#" data-tx="${h.txid}" class="mono">${h.txid.slice(0, 16)}…${h.txid.slice(-6)}</a>${s.rotating ? ' <span class="muted">· address #' + h.index + '</span>' : ''}</td><td class="r ${h.height > 0 ? 'ok' : 'muted'}">${h.height > 0 ? 'confirmed · ' + sats(h.height) : 'unconfirmed'}</td>`;
+      tr.innerHTML = `<td><a href="#" data-tx="${h.txid}" class="mono">${h.txid.slice(0, 16)}…${h.txid.slice(-6)}</a>${s.rotating ? ' <span class="muted">· ' + fmtIndex(h.index) + '</span>' : ''}</td><td>${lblHtml('tx:' + h.txid)}</td><td class="r ${h.height > 0 ? 'ok' : 'muted'}">${h.height > 0 ? 'confirmed · ' + sats(h.height) : 'unconfirmed'}</td>`;
       tb.appendChild(tr);
     }
     $('#send-have').textContent = `${sats(s.balance)} sats`;
@@ -96,18 +120,21 @@ async function sync() {
 document.addEventListener('click', (e) => { const a = e.target.closest('[data-tx]'); if (a) { e.preventDefault(); const base = ($('#conn').textContent.includes('signet') ? 'https://signet.mineracks.com' : (store.settings.custom && store.settings.explorer) || (netName() === 'mainnet' ? 'https://mempool.mineracks.com' : 'https://signet.mineracks.com')); invoke('open_url', { url: `${base}/tx/${a.dataset.tx}` }).catch(fail); } });
 
 // ---------- receive ----------
-async function drawAddress() {
+async function drawAddress(chosen) {
   if (!vault) return;
   if (vault._receive === undefined) await sync();
-  const addr = vault._receive || vault.address;
+  const addr = chosen ? chosen.address : (vault._receive || vault.address);
   $('#addr-text').textContent = addr;
-  $('#addr-note').innerHTML = vault._rotating
+  $('#addr-note').innerHTML = chosen && !chosen.current
+    ? `<b style="font-family:var(--display);font-weight:600">${chosen.chain === 'change' ? 'Change' : 'Receive'} address ${fmtIndex(chosen.index).replace('change ', '')}${chosen.future ? ', ahead of the next unused one' : ''}.</b> ${chosen.future ? 'Fine to hand out now; the scan will find it as long as it is within the gap limit of the last one used.' : 'Already used. Paying it again works, but links the payments together on the chain.'} <a href="#" id="addr-back">Back to the next unused</a>`
+    : vault._rotating
     ? `<b style="font-family:var(--display);font-weight:600">Fresh address, #${vault._receiveIndex}.</b> Every deposit gets its own. Any two cards can still spend all of them: the app derives each address from the card keys and the vault's chain code, and the recovery line carries both.`
     : `<b style="font-family:var(--display);font-weight:600">This vault has one address.</b> It was made before rotating addresses existed, so every deposit lands here and anyone who knows it sees its whole history.`;
   const qr = qrcode(0, 'M'); qr.addData('bitcoin:' + addr); qr.make();
   $('#addr-qr').innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
+  const back = $('#addr-back'); if (back) back.onclick = (e) => { e.preventDefault(); drawAddress(); };
 }
-$('#copy-addr').onclick = () => { navigator.clipboard.writeText(vault._receive || vault.address).then(() => toast('Address copied')); };
+$('#copy-addr').onclick = () => { navigator.clipboard.writeText($('#addr-text').textContent).then(() => toast('Address copied')); };
 
 // ---------- send ----------
 async function loadFees() {
@@ -224,7 +251,7 @@ function renderCoins() {
   if (!coins.length) { list.innerHTML = '<div class="muted" style="font-size:13px">the vault holds no coins</div>'; $('#coin-sum').textContent = ''; return; }
   const h = vault._height || 0;
   list.innerHTML = coins.slice().sort((a, b) => b.value - a.value).map(c => { const op = c.txid + ':' + c.vout; const conf = c.height ? h - c.height + 1 : 0;
-    return `<label class="coin"><input type="checkbox" data-op="${op}" ${coinPick.has(op) ? 'checked' : ''}><span class="mono">${c.txid.slice(0, 10)}…${c.txid.slice(-4)}:${c.vout}${vault._rotating ? ' <span class="muted">· address #' + c.index + '</span>' : ''}</span><span style="font-variant-numeric:tabular-nums">${sats(c.value)} sats</span><span class="muted">${conf ? conf + ' conf' : 'unconfirmed'}</span></label>`; }).join('');
+    return `<label class="coin"><input type="checkbox" data-op="${op}" ${coinPick.has(op) ? 'checked' : ''}><span class="mono">${c.txid.slice(0, 10)}…${c.txid.slice(-4)}:${c.vout}${vault._rotating ? ' <span class="muted">· ' + fmtIndex(c.index) + '</span>' : ''}</span>${lblHtml('out:' + op)}<span style="font-variant-numeric:tabular-nums">${sats(c.value)} sats</span><span class="muted">${conf ? conf + ' conf' : 'unconfirmed'}</span></label>`; }).join('');
   coinSum();
 }
 function coinSum() { const n = coinPick.size; const tot = ((vault && vault._coins) || []).filter(c => coinPick.has(c.txid + ':' + c.vout)).reduce((a, c) => a + c.value, 0); $('#coin-sum').textContent = n ? `${n} coin${n === 1 ? '' : 's'} ticked · ${sats(tot)} sats` : 'none ticked: the app picks'; }
@@ -240,23 +267,28 @@ $('#consolidate').onclick = () => {
 };
 
 // ---------- addresses ----------
+let addrAhead = 0;
 async function renderAddresses() {
   const card = $('#addr-card'); if (!vault || !vault._rotating) { card.hidden = true; return; }
   try {
-    const rows = await invoke('vault_addresses', { name: vault.name });
+    const rows = await invoke('vault_addresses', { name: vault.name, ahead: addrAhead });
     const coins = vault._coins || [], hist = vault._history || [];
-    const tb = $('#addr-table tbody'); tb.innerHTML = '';
-    for (const r of rows.slice().reverse()) {
-      const bal = coins.filter(c => c.index === r.index).reduce((a, c) => a + c.value, 0);
-      const used = hist.some(x => x.index === r.index);
-      const tr = document.createElement('tr'); if (r.current) tr.className = 'cur';
-      tr.innerHTML = `<td class="muted">${r.index}</td><td class="mono">${r.address}</td><td class="r" style="font-variant-numeric:tabular-nums">${bal ? sats(bal) + ' sats' : '<span class="muted">—</span>'}</td><td class="r ${r.current ? 'ok' : 'muted'}">${r.current ? 'next deposit' : used ? (bal ? 'in use' : 'spent') : 'unused'}</td>`;
-      tb.appendChild(tr);
+    for (const [chain, sel] of [['receive', '#addr-recv tbody'], ['change', '#addr-chg tbody']]) {
+      const tb = $(sel); tb.innerHTML = '';
+      for (const r of rows.filter(r => r.chain === chain).slice().reverse()) {
+        const bal = coins.filter(c => c.index === r.index).reduce((a, c) => a + c.value, 0);
+        const used = hist.some(x => x.index === r.index);
+        const tr = document.createElement('tr'); tr.className = 'pick' + (r.current ? ' cur' : '') + (r.future ? ' future' : '');
+        tr.innerHTML = `<td class="muted">${r.position}</td><td class="mono">${r.address}</td><td>${lblHtml('addr:' + r.address)}</td><td class="r" style="font-variant-numeric:tabular-nums">${bal ? sats(bal) + ' sats' : '<span class="muted">—</span>'}</td><td class="r ${r.current ? 'ok' : 'muted'}">${r.current ? (chain === 'change' ? 'next change' : 'next deposit') : r.future ? 'unused · ahead' : used ? (bal ? 'in use' : 'spent') : 'unused'}</td>`;
+        tr.addEventListener('click', (e) => { if (e.target.closest('.lbl')) return; drawAddress(r); window.scrollTo({ top: 0, behavior: 'smooth' }); });
+        tb.appendChild(tr);
+      }
     }
-    $('#addr-note').textContent = 'Deposits and change share one sequence. Each address is used once; the highlighted one is where the next deposit or change goes.';
+    $('#addr-gap').textContent = `Gap limit ${vault._gap || 20}: showing ${addrAhead} ahead of the next unused on each chain.`;
     card.hidden = false;
   } catch (e) { card.hidden = true; }
 }
+$('#addr-more').onclick = () => { addrAhead = Math.min(addrAhead + 10, 200); renderAddresses(); };
 
 // ---------- messages ----------
 let lastMessageOut = null;
@@ -268,7 +300,7 @@ async function renderMessages() {
   $('#msg-key-sign').disabled = !c; $('#msg-key-who').textContent = c ? `${cardLabel(c)}${vault.keys.some(k => k.pubkey === c.pubkey) ? ' · ' + vault.keys.find(k => k.pubkey === c.pubkey).name : ''}` : 'plug in a key';
   $('#msg-key-warn').hidden = !c;
   $('#msg-vault-note').textContent = `Proves the vault controls one of its addresses (BIP 322). It takes ${vault.threshold} of the vault's ${vault.keys.length} keys, one after another on the Sign screen, and nothing is broadcast. Verifiable here and by tools that understand BIP 322 script proofs.`;
-  try { const rows = await invoke('vault_addresses', { name: vault.name }); const sel = $('#msg-vault-addr'); sel.innerHTML = rows.slice().reverse().map(r => `<option value="${r.index}">${vault._rotating ? '#' + r.index + ' · ' : ''}${r.address}${r.current && vault._rotating ? ' (next)' : ''}</option>`).join(''); } catch (e) { fail(e); }
+  try { const rows = await invoke('vault_addresses', { name: vault.name, ahead: 0 }); const sel = $('#msg-vault-addr'); sel.innerHTML = rows.filter(r => !r.future).slice().reverse().map(r => `<option value="${r.index}">${vault._rotating ? fmtIndex(r.index) + ' · ' : ''}${r.address}${r.current && vault._rotating ? ' (next)' : ''}</option>`).join(''); } catch (e) { fail(e); }
   if (lastMessageOut) { const r = lastMessageOut; $('#msg-vault-out').hidden = false; $('#msg-vault-out').innerHTML = outRow('Address', r.address) + outRow('Message', r.message.replace(/</g, '&lt;'), false) + outRow('Signature', r.signature); }
 }
 $('#msg-key-sign').onclick = async () => {
@@ -293,6 +325,16 @@ $('#ver-btn').onclick = async () => {
   try { const r = await invoke('message_verify', { address: $('#ver-addr').value, message: $('#ver-text').value, signature: $('#ver-sig').value }); out.innerHTML = r.ok ? `<span class="ok">✓ valid</span> · ${r.detail}` : `<span class="warn">✗ not valid</span> · ${r.detail}`; }
   catch (e) { out.innerHTML = `<span class="warn">${String(e)}</span>`; }
 };
+
+$('#gap-save').onclick = async () => {
+  const gap = +($('#gap-in').value.replace(/[^0-9]/g, '') || 0);
+  try { store = await invoke('settings_set', { network: netName(), custom: store.settings.custom, electrum: store.settings.electrum, explorer: store.settings.explorer, gap }); renderSettings(); toast(`Gap limit ${gap}`); if (vault) vault._coins = undefined; } catch (e) { fail(e); }
+};
+$('#notify-test').onclick = async () => { try { $('#notify-out').textContent = await invoke('notify_test'); } catch (e) { $('#notify-out').textContent = String(e); } };
+$('#labels-export').onclick = async () => { try { $('#labels-out').textContent = 'Saved ' + await invoke('labels_export', { name: vault.name }); } catch (e) { if (!/cancelled/.test(String(e))) $('#labels-out').textContent = String(e); } };
+$('#labels-import').onclick = async () => { try { const n = await invoke('labels_import', { name: vault.name }); store = await invoke('store_get'); vault = store.vaults.find(x => x.name === vault.name) || vault; $('#labels-out').textContent = `${n} label${n === 1 ? '' : 's'} imported into ${vault.name}.`; } catch (e) { if (!/cancelled/.test(String(e))) $('#labels-out').textContent = String(e); } };
+$('#bsms-export').onclick = async () => { try { toast('Saved ' + await invoke('bsms_export', { name: vault.name }), 6000); } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
+$('#bsms-open').onclick = async () => { try { const r = await invoke('bsms_import'); $('#desc-in').value = r.descriptor; readDescriptor(r.descriptor); if (r.first_address) toast('BSMS read. First address in the file: ' + r.first_address.slice(0, 12) + '…', 6000); } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
 
 // ---------- keys ----------
 function renderKeys() {
@@ -453,6 +495,8 @@ function renderSettings() {
   $('#own-servers').classList.toggle('on', !store.settings.custom);
   $('#c-electrum').value = store.settings.electrum || ''; $('#c-explorer').value = store.settings.explorer || '';
   $('#custom-card').style.opacity = store.settings.custom ? 1 : .6;
+  $('#gap-in').value = store.settings.gap || 20;
+  invoke('store_get').then(() => {}); $('#watch-log-path').textContent = '~/Library/Application Support/Any Two Keys/watch.log';
 }
 $('#net-pick').addEventListener('click', async (e) => { const o = e.target.closest('.opt'); if (!o) return; store = await invoke('settings_set', { network: o.dataset.net, custom: store.settings.custom, electrum: store.settings.electrum, explorer: store.settings.explorer }); toast('New vaults will use ' + o.dataset.net); renderSettings(); $('#welcome-net').textContent = store.settings.network; });
 $('#own-servers').onclick = async () => { store = await invoke('settings_set', { network: netName(), custom: !store.settings.custom, electrum: $('#c-electrum').value, explorer: $('#c-explorer').value }); renderSettings(); };

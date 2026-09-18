@@ -132,3 +132,14 @@ body.resizing{cursor:col-resize;-webkit-user-select:none;user-select:none}
 .tbl .r{text-align:right}
 .tbl .mono{font-family:var(--mono);font-size:12px;-webkit-user-select:text;user-select:text}
 .tbl tr.cur td{background:var(--gold-soft)}
+.tbl tr.pick{cursor:pointer}
+.tbl tr.pick:hover td{background:var(--gold-soft)}
+.tbl tr.future td{opacity:.6}
+.lbl{display:inline-flex;align-items:center;gap:6px;min-height:22px}
+.lbl .pencil{padding:2px;color:transparent}
+tr:hover .lbl .pencil,.coin:hover .lbl .pencil,.lbl .pencil:focus-visible{color:var(--muted)}
+.lbl .pencil:hover{color:var(--gold)}
+.lbl-input{font-family:var(--serif);font-size:13px;border:0;border-bottom:2px solid var(--gold);background:transparent;color:var(--ink);padding:0 2px;min-width:90px;max-width:220px;outline:none}
+.lbl .text{font-size:13px;color:var(--ink)}
+.lbl .text:empty::before{content:"";}
+.coin{grid-template-columns:auto 1fr auto auto auto}

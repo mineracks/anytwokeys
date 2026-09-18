@@ -69,7 +69,7 @@ fn vault_create(name: String, threshold: usize, keys: Vec<NewKey>, rotating: Opt
     let mut v = Vault { name, network: s.settings.network.clone(), threshold,
         keys: keys.into_iter().map(|k| wallet::KeyRef { name: k.name, serial: k.serial, pubkey: k.pubkey.to_lowercase() }).collect(),
         descriptor, address: String::new(), created: now(),
-        chain_code: if rotating.unwrap_or(true) { Some(fresh_chain_code()) } else { None }, next: 0, scan_max: 0 };
+        chain_code: if rotating.unwrap_or(true) { Some(fresh_chain_code()) } else { None }, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default() };
     v.address = wallet::address_at(&v, 0)?;
     let _ = network;
     s.vaults.push(v.clone());
@@ -87,7 +87,7 @@ fn descriptor_parse(text: String) -> R<Parsed> {
     let (threshold, keys) = wallet::keys_of(&desc_text)?;
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
     let tmp = Vault { name: String::new(), network: s.settings.network.clone(), threshold, keys: keys.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.clone() }).collect(),
-        descriptor: descriptor.clone(), address: String::new(), created: 0, chain_code: cc.clone(), next: 0, scan_max: 0 };
+        descriptor: descriptor.clone(), address: String::new(), created: 0, chain_code: cc.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default() };
     let address = wallet::address_at(&tmp, 0)?;
     Ok(Parsed { threshold, keys, descriptor: wallet::recovery_line(&tmp), address, rotating: cc.is_some() })
 }
@@ -101,7 +101,7 @@ fn vault_restore(name: String, text: String, names: Vec<String>) -> R<Vault> {
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
     let mut v = Vault { name, network: s.settings.network.clone(), threshold,
         keys: keys.iter().enumerate().map(|(i, k)| wallet::KeyRef { name: names.get(i).cloned().unwrap_or_else(|| format!("key {}", i + 1)), serial: 0, pubkey: k.clone() }).collect(),
-        descriptor, address: String::new(), created: now(), chain_code: cc, next: 0, scan_max: 0 };
+        descriptor, address: String::new(), created: now(), chain_code: cc, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default() };
     v.address = wallet::address_at(&v, 0)?;
     s.vaults.push(v.clone());
     wallet::save(&s)?;
@@ -141,10 +141,12 @@ fn vault_forget(name: String) -> R<Store> {
 }
 
 #[tauri::command]
-fn settings_set(network: String, custom: bool, electrum: String, explorer: String) -> R<Store> {
+fn settings_set(network: String, custom: bool, electrum: String, explorer: String, gap: Option<u32>) -> R<Store> {
     let mut s = wallet::load();
     if network != "mainnet" && network != "signet" { return Err("network must be mainnet or signet".into()); }
-    s.settings = wallet::Settings { network, custom, electrum: electrum.trim().to_string(), explorer: explorer.trim().to_string() };
+    let gap = gap.unwrap_or(s.settings.gap);
+    if !(1..=500).contains(&gap) { return Err("the gap limit must be between 1 and 500".into()); }
+    s.settings = wallet::Settings { network, custom, electrum: electrum.trim().to_string(), explorer: explorer.trim().to_string(), gap };
     wallet::save(&s)?;
     Ok(s)
 }
@@ -152,25 +154,25 @@ fn settings_set(network: String, custom: bool, electrum: String, explorer: Strin
 #[derive(Serialize)]
 struct HistoryRow { txid: String, height: i32, index: u32 }
 #[derive(Serialize)]
-struct Snapshot { coins: Vec<wallet::CoinAt>, balance: u64, height: u32, history: Vec<HistoryRow>, servers: chain::Servers, receive: String, receive_index: u32, rotating: bool }
+struct Snapshot { coins: Vec<wallet::CoinAt>, balance: u64, height: u32, history: Vec<HistoryRow>, servers: chain::Servers, receive: String, receive_index: u32, rotating: bool, next_change: u32, gap: u32 }
 
 #[tauri::command]
 async fn vault_sync(name: String) -> R<Snapshot> {
     block(move || {
-        let mut s = wallet::load();
+        let s = wallet::load();
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
         let servers = wallet::servers_for(&s, &v.network);
-        let sc = wallet::scan(&v, &servers)?;
+        let sc = wallet::scan(&v, &servers, s.settings.gap)?;
         let balance = sc.coins.iter().map(|c| c.value).sum();
         let height = chain::height(&servers).unwrap_or(0);
-        if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == v.name) { vm.next = sc.next; vm.scan_max = sc.scan_max; }
-        wallet::save(&s)?;
+        let (n, sm, nc, smc) = (sc.next, sc.scan_max, sc.next_change, sc.scan_max_change);
+        wallet::update(|s| if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == v.name) { vm.next = n; vm.scan_max = sm; vm.next_change = nc; vm.scan_max_change = smc; })?;
         let receive_index = if v.chain_code.is_some() { sc.next } else { 0 };
         let receive = wallet::address_at(&v, receive_index)?;
         let mut history: Vec<HistoryRow> = sc.history.into_iter().map(|(txid, height, index)| HistoryRow { txid, height, index }).collect();
         history.sort_by_key(|h| if h.height <= 0 { i32::MAX } else { h.height });
         history.dedup_by(|a, b| a.txid == b.txid);
-        Ok(Snapshot { coins: sc.coins, balance, height, history, servers, receive, receive_index, rotating: v.chain_code.is_some() })
+        Ok(Snapshot { coins: sc.coins, balance, height, history, servers, receive, receive_index, rotating: v.chain_code.is_some(), next_change: sc.next_change, gap: s.settings.gap })
     }).await
 }
 
@@ -192,17 +194,15 @@ async fn servers_test(electrum: String, explorer: String) -> R<String> {
 #[tauri::command]
 async fn spend_build(name: String, to: String, amount: u64, rate: f64, send_all: bool, coins: Option<Vec<String>>) -> R<wallet::Built> {
     block(move || {
-        let mut s = wallet::load();
+        let s = wallet::load();
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
         let servers = wallet::servers_for(&s, &v.network);
-        let sc = wallet::scan(&v, &servers)?;
-        let change_index = if v.chain_code.is_some() { sc.next } else { 0 };
+        let sc = wallet::scan(&v, &servers, s.settings.gap)?;
+        let change_index = if v.chain_code.is_some() { wallet::CHANGE | sc.next_change } else { 0 };
         let pick = coins.filter(|c| !c.is_empty());
         let b = wallet::build(&v, &sc.coins, change_index, &to, amount, rate, send_all, pick.as_deref())?;
-        if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == v.name) { vm.next = sc.next; vm.scan_max = sc.scan_max.max(sc.next); }
-        s.last_psbt = Some(b.psbt.clone());
-        s.last_message = None;
-        wallet::save(&s)?;
+        let (n, sm, nc, smc, psbt) = (sc.next, sc.scan_max.max(sc.next), sc.next_change, sc.scan_max_change.max(sc.next_change), b.psbt.clone());
+        wallet::update(|s| { if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == v.name) { vm.next = n; vm.scan_max = sm; vm.next_change = nc; vm.scan_max_change = smc; } s.last_psbt = Some(psbt); s.last_message = None; })?;
         Ok(b)
     }).await
 }
@@ -301,15 +301,23 @@ fn spend_discard() -> R<()> {
 
 // ---------- signed messages ----------
 #[derive(Serialize)]
-struct AddrRow { index: u32, address: String, current: bool }
+struct AddrRow { index: u32, position: u32, chain: &'static str, address: String, current: bool, future: bool }
 
-/// The vault's addresses so far: index 0 for a fixed vault; 0..=next for a rotating one.
+/// The vault's addresses: index 0 for a fixed vault; for a rotating one, each chain from 0 to its next
+/// unused position plus `ahead` more, so the ones beyond can be seen and handed out early.
 #[tauri::command]
-fn vault_addresses(name: String) -> R<Vec<AddrRow>> {
+fn vault_addresses(name: String, ahead: Option<u32>) -> R<Vec<AddrRow>> {
     let s = wallet::load();
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
-    let last = if v.chain_code.is_some() { v.next } else { 0 };
-    (0..=last).map(|i| Ok(AddrRow { index: i, address: wallet::address_at(v, i)?, current: i == last })).collect()
+    if v.chain_code.is_none() { return Ok(vec![AddrRow { index: 0, position: 0, chain: "receive", address: wallet::address_at(v, 0)?, current: true, future: false }]); }
+    let ahead = ahead.unwrap_or(0).min(200);
+    let mut out = Vec::new();
+    for (base, chain, next) in [(0u32, "receive", v.next), (wallet::CHANGE, "change", v.next_change)] {
+        for p in 0..=next + ahead {
+            out.push(AddrRow { index: base | p, position: p, chain, address: wallet::address_at(v, base | p)?, current: p == next, future: p > next });
+        }
+    }
+    Ok(out)
 }
 
 /// Sign a message with the plugged-in card's own key: one PIN, one touch. Nothing to do with a vault.
@@ -336,7 +344,7 @@ fn message_stage(name: String, index: u32, message: String) -> R<wallet::StagedM
     let ws = if v.keys.len() > 1 { Some(d.explicit_script().map_err(|e| e.to_string())?) } else { None };
     let psbt = message::to_sign_psbt(&spk, ws, &message)?;
     let staged = wallet::StagedMessage { vault: v.name.clone(), address: wallet::address_at(&v, index)?, message, index };
-    if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == v.name) { vm.scan_max = vm.scan_max.max(index); }
+    if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == v.name) { if wallet::is_change(index) { vm.scan_max_change = vm.scan_max_change.max(wallet::position(index)); } else { vm.scan_max = vm.scan_max.max(index); } }
     s.last_psbt = Some(psbt.to_string());
     s.last_message = Some(staged.clone());
     wallet::save(&s)?;
@@ -369,6 +377,88 @@ fn message_verify(address: String, message: String, signature: String) -> R<mess
     message::verify(&address, &message, &signature, wallet::network_of(&s.settings.network))
 }
 
+#[tauri::command]
+fn notify_test(app: tauri::AppHandle) -> R<String> {
+    use tauri_plugin_notification::NotificationExt;
+    app.notification().builder().title("Any Two Keys").body("Notifications reach you. Arrivals, spends and confirmations will look like this.").show().map_err(|e| format!("macOS refused the notification: {e}"))?;
+    watch::log("notify_test: shown");
+    Ok("Sent. If nothing appeared, open System Settings › Notifications › Any Two Keys and allow them.".into())
+}
+
+// ---------- labels (BIP 329) ----------
+#[tauri::command]
+fn label_set(name: String, key: String, label: String) -> R<Store> {
+    if !(key.starts_with("addr:") || key.starts_with("tx:") || key.starts_with("out:")) { return Err("label key must be addr:, tx: or out:".into()); }
+    wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == name) {
+        let label = label.trim().to_string();
+        if label.is_empty() { v.labels.remove(&key); } else { v.labels.insert(key, label); }
+    })
+}
+
+#[tauri::command]
+fn labels_export(name: String) -> R<String> {
+    let s = wallet::load();
+    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
+    let mut lines: Vec<String> = Vec::new();
+    let mut keys: Vec<&String> = v.labels.keys().collect(); keys.sort();
+    for k in keys {
+        let (t, r) = k.split_once(':').unwrap_or(("", ""));
+        let t = match t { "addr" => "addr", "tx" => "tx", "out" => "output", _ => continue };
+        lines.push(serde_json::json!({ "type": t, "ref": r, "label": v.labels[k] }).to_string());
+    }
+    if lines.is_empty() { return Err("this vault has no labels yet".into()); }
+    let path = rfd::FileDialog::new().set_title("Save labels (BIP 329)").set_file_name(format!("{}-labels.jsonl", v.name.replace(' ', "-"))).add_filter("BIP 329 labels", &["jsonl", "json"]).save_file().ok_or("cancelled")?;
+    std::fs::write(&path, lines.join("\n") + "\n").map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
+}
+
+#[tauri::command]
+fn labels_import(name: String) -> R<usize> {
+    let path = rfd::FileDialog::new().set_title("Open a labels file (BIP 329)").add_filter("BIP 329 labels", &["jsonl", "json", "txt"]).pick_file().ok_or("cancelled")?;
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut got: Vec<(String, String)> = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let j: serde_json::Value = match serde_json::from_str(line) { Ok(j) => j, Err(_) => continue };
+        let (t, r, lab) = (j["type"].as_str().unwrap_or(""), j["ref"].as_str().unwrap_or(""), j["label"].as_str().unwrap_or(""));
+        let key = match t { "addr" => format!("addr:{r}"), "tx" => format!("tx:{r}"), "output" => format!("out:{r}"), _ => continue };
+        if !r.is_empty() && !lab.trim().is_empty() { got.push((key, lab.trim().to_string())); }
+    }
+    let n = got.len();
+    if n == 0 { return Err("no addr, tx or output labels in that file".into()); }
+    wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == name) { for (k, l) in got { v.labels.insert(k, l); } })?;
+    Ok(n)
+}
+
+// ---------- BSMS (BIP 129) ----------
+#[tauri::command]
+fn bsms_export(name: String) -> R<String> {
+    let s = wallet::load();
+    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
+    let first = wallet::address_at(v, 0)?;
+    let text = format!("BSMS 1.0\n{}\nNo path restrictions\n{first}\n", v.descriptor);
+    let path = rfd::FileDialog::new().set_title("Save the vault as a BSMS descriptor record").set_file_name(format!("{}.bsms", v.name.replace(' ', "-"))).add_filter("BSMS", &["bsms", "txt"]).save_file().ok_or("cancelled")?;
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
+}
+
+#[derive(Serialize)]
+struct BsmsIn { descriptor: String, first_address: String }
+
+/// Read a BSMS 1.0 descriptor record. Only fixed public keys can come back: the cards hold no xpubs.
+#[tauri::command]
+fn bsms_import() -> R<BsmsIn> {
+    let path = rfd::FileDialog::new().set_title("Open a BSMS descriptor record").add_filter("BSMS", &["bsms", "txt"]).pick_file().ok_or("cancelled")?;
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if lines.len() < 2 || !lines[0].starts_with("BSMS") { return Err("not a BSMS descriptor record (first line should be 'BSMS 1.0')".into()); }
+    let desc = lines[1].replace("/**", "");
+    if desc.contains("pub") && (desc.contains("xpub") || desc.contains("tpub") || desc.contains('[')) { return Err("this record uses extended keys with derivation paths; YubiKeys hold single keys, so only fixed-key records can be restored here".into()); }
+    let (threshold, keys) = wallet::keys_of(&desc)?;
+    let descriptor = wallet::descriptor_for(threshold, &keys)?;
+    let first_address = lines.get(3).unwrap_or(&"").to_string();
+    Ok(BsmsIn { descriptor, first_address })
+}
+
 fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -383,13 +473,29 @@ mod watch {
     pub struct Event { pub vault: String, pub title: String, pub body: String }
 
     /// One pass over every vault: what changed since last time, as notifications.
+    pub fn log(line: &str) {
+        use std::io::Write;
+        let p = wallet::store_path().with_file_name("watch.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+            let _ = writeln!(f, "{} {line}", chrono_now());
+            if f.metadata().map(|m| m.len() > 2_000_000).unwrap_or(false) { let _ = std::fs::write(&p, ""); }
+        }
+    }
+    fn chrono_now() -> String {
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let (h, m, sec) = (((t + 10 * 3600) / 3600) % 24, (t / 60) % 60, t % 60); // Brisbane, UTC+10, no DST
+        format!("{h:02}:{m:02}:{sec:02}")
+    }
+
     pub fn pass() -> Vec<Event> {
-        let mut s = wallet::load();
+        let s0 = wallet::load();
         let mut out = Vec::new();
-        let vaults = s.vaults.clone();
+        let vaults = s0.vaults.clone();
         for v in &vaults {
-            let servers = wallet::servers_for(&s, &v.network);
-            let Ok(sc) = wallet::scan(v, &servers) else { continue };
+            let servers = wallet::servers_for(&s0, &v.network);
+            let sc = match wallet::scan(v, &servers, s0.settings.gap) { Ok(sc) => sc, Err(e) => { log(&format!("{}: scan failed: {e}", v.name)); continue } };
+            // re-read after the slow part, so a sync that saved meanwhile is not erased
+            let mut s = wallet::load();
             let seen = s.seen.entry(v.name.clone()).or_default();
             let now_txs: std::collections::HashMap<String, i32> = sc.history.iter().map(|(t, h, _)| (t.clone(), *h)).collect();
             let now_coins: std::collections::HashMap<String, u64> = sc.coins.iter().map(|c| (format!("{}:{}", c.txid, c.vout), c.value)).collect();
@@ -414,12 +520,13 @@ mod watch {
                     }
                 }
             }
-            seen.txs = now_txs;
-            seen.coins = now_coins;
-            seen.primed = true;
-            if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == v.name) { vm.next = sc.next; vm.scan_max = sc.scan_max; }
+            let primed_before = seen.primed;
+            let seen_now = wallet::Seen { txs: now_txs, coins: now_coins, primed: true };
+            let (n, sm, nc, smc) = (sc.next, sc.scan_max, sc.next_change, sc.scan_max_change);
+            let name = v.name.clone();
+            let r = wallet::update(move |s| { s.seen.insert(name.clone(), seen_now); if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == name) { vm.next = n; vm.scan_max = sm; vm.next_change = nc; vm.scan_max_change = smc; } });
+            log(&format!("{}: {} coins, {} txs, primed_before={primed_before}, events={}, save={}", v.name, sc.coins.len(), sc.history.len(), out.len(), r.as_ref().map(|_| "ok").unwrap_or("FAILED")));
         }
-        let _ = wallet::save(&s);
         out
     }
 
@@ -436,7 +543,8 @@ mod watch {
             loop {
                 let events = pass();
                 for e in &events {
-                    let _ = app.notification().builder().title(&e.title).body(&e.body).show();
+                    let r = app.notification().builder().title(&e.title).body(&e.body).show();
+                    log(&format!("notify '{}': {}", e.title, match &r { Ok(_) => "shown".to_string(), Err(e) => format!("FAILED {e}") }));
                     let _ = app.emit("vault-changed", &e.vault);
                 }
                 std::thread::sleep(std::time::Duration::from_secs(60));
@@ -450,7 +558,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| { watch::start(app.handle().clone()); Ok(()) })
-        .invoke_handler(tauri::generate_handler![open_url, vault_key_seen, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![open_url, vault_key_seen, notify_test, label_set, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
