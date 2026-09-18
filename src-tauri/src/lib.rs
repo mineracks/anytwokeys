@@ -226,6 +226,32 @@ async fn spend_broadcast(name: String) -> R<Sent> {
     }).await
 }
 
+/// Save the spend in progress to a file the person chooses: the PSBT (binary, BIP 174) or, once
+/// every input is fully signed, the raw transaction as hex. Nothing is broadcast.
+#[tauri::command]
+fn spend_export(name: String, what: String) -> R<String> {
+    use bitcoin::consensus::Encodable;
+    use std::str::FromStr;
+    let s = wallet::load();
+    let _v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
+    let psbt_b64 = s.last_psbt.clone().ok_or("no spend in progress")?;
+    let (bytes, ext, stem) = if what == "tx" {
+        let tx = wallet::finalize(&psbt_b64)?;
+        let mut raw = Vec::new();
+        tx.consensus_encode(&mut raw).map_err(|e| e.to_string())?;
+        (hex::encode(raw).into_bytes(), "hex", format!("anytwokeys-{}", &tx.compute_txid().to_string()[..12]))
+    } else {
+        let psbt = bitcoin::psbt::Psbt::from_str(psbt_b64.trim()).map_err(|e| format!("psbt: {e}"))?;
+        let txid = psbt.unsigned_tx.compute_txid().to_string();
+        (psbt.serialize(), "psbt", format!("anytwokeys-{}", &txid[..12]))
+    };
+    let path = rfd::FileDialog::new().set_title(if ext == "psbt" { "Save the PSBT" } else { "Save the signed transaction" })
+        .set_file_name(format!("{stem}.{ext}")).add_filter(if ext == "psbt" { "PSBT" } else { "Transaction hex" }, &[ext]).save_file()
+        .ok_or("cancelled")?;
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
+}
+
 #[tauri::command]
 fn spend_discard() -> R<()> {
     let mut s = wallet::load();
@@ -242,7 +268,7 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_forget,
-            settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_discard
+            settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
         .run(tauri::generate_context!())
         .expect("error while running Any Two Keys");

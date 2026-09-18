@@ -173,6 +173,7 @@ async function renderSign() {
   steps.push(`<b class="${st.ready ? 'now' : ''}">✓</b><span class="${st.ready ? 'on' : ''}">confirm and send</span>`);
   $('#sign-steps').innerHTML = steps.join('');
   $('#broadcast-card').hidden = !st.ready;
+  $('#export-card').hidden = false; $('#export-tx').hidden = !st.ready;
   if (st.ready) { $('#sign-title').textContent = 'All signatures in'; $('#sign-text').textContent = 'Nothing has been sent. Review the summary, then send it.'; $('#pin-field').hidden = true; $('#sign-warn').hidden = true; $('#sign-btn').disabled = true; $('#sign-ring').querySelector('use').classList.remove('pulse'); $('#broadcast-text').textContent = `Broadcast to ${netName()} through the Electrum server.`; return; }
   const usable = cards.filter(c => c.pubkey && vault.keys.some(k => k.pubkey === c.pubkey) && !st.signers.includes(c.pubkey));
   if (!usable.length) { $('#sign-title').textContent = 'Plug in a key'; $('#sign-text').textContent = cards.length ? 'The plugged-in key is not one of this vault\'s, or it has already signed.' : 'Any of the vault\'s keys that has not signed yet.'; $('#pin-field').hidden = true; $('#sign-warn').hidden = true; $('#sign-btn').disabled = true; return; }
@@ -187,6 +188,9 @@ async function renderSign() {
     renderSign();
   };
 }
+$('#export-psbt').onclick = async () => { try { const p = await invoke('spend_export', { name: vault.name, what: 'psbt' }); $('#export-note').textContent = 'Saved ' + p; } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
+$('#export-tx').onclick = async () => { try { const p = await invoke('spend_export', { name: vault.name, what: 'tx' }); $('#export-note').textContent = 'Saved ' + p + ' — raw hex, broadcastable from any wallet or explorer.'; } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
+$('#copy-psbt').onclick = async () => { try { const st = await invoke('store_get'); if (!st.last_psbt) return toast('No spend in progress'); await navigator.clipboard.writeText(st.last_psbt); toast('PSBT copied (base64)'); } catch (e) { fail(e); } };
 $('#sign-cancel').onclick = async () => { await invoke('spend_discard'); built = null; $('#build-btn').textContent = 'Build transaction'; $('#build-btn').onclick = null; show('send'); location.reload(); };
 $('#broadcast-btn').onclick = async () => {
   $('#broadcast-btn').disabled = true;

@@ -108,6 +108,7 @@
           <div class="card"><div class="label">Signing</div><div id="sign-summary" class="muted"></div></div>
           <div class="card"><div class="label">Signatures</div><div id="sign-progress" class="muted"></div></div>
         </div>
+        <div class="card" id="export-card" hidden><div class="label">Take it elsewhere</div><div class="muted" style="font-size:14px">Save the transaction to broadcast or finish signing in another wallet. Nothing is sent from here.</div><div class="row"><button class="btn" id="export-psbt">Save as PSBT</button><button class="btn" id="export-tx" hidden>Save signed transaction</button><button class="btn" id="copy-psbt">Copy PSBT</button></div><div class="muted" style="font-size:13px" id="export-note"></div></div>
         <div class="card" id="broadcast-card" hidden><div class="label">Ready</div><div id="broadcast-text"></div><div class="row"><button class="btn primary" id="broadcast-btn">Send it</button></div></div>
       </div>
     </section>
