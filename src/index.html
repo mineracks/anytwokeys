@@ -61,7 +61,7 @@
         <div class="card" style="align-items:center"><div class="qrbox" id="addr-qr"></div><button class="btn primary" id="copy-addr" style="width:240px">Copy address</button></div>
         <div style="display:flex;flex-direction:column;gap:18px">
           <div class="field"><div class="label">Your vault address</div><div class="mono" id="addr-text" style="padding:11px 14px;border:1px solid var(--line);border-radius:6px;background:var(--panel);-webkit-user-select:text;user-select:text"></div></div>
-          <div class="card" style="flex-direction:row;gap:12px;align-items:flex-start"><svg width="18" height="18" style="color:var(--gold);flex:0 0 18px;margin-top:2px"><use href="#i-warn"/></svg><div style="font-size:14px"><b style="font-family:var(--display);font-weight:600">This vault has one address.</b> Card keys cannot derive new ones, so every deposit lands here. Anyone who knows the address can see its whole history. Fine for a vault; not a wallet for daily spending.</div></div>
+          <div class="card" style="flex-direction:row;gap:12px;align-items:flex-start"><svg width="18" height="18" style="color:var(--gold);flex:0 0 18px;margin-top:2px"><use href="#i-warn"/></svg><div style="font-size:14px" id="addr-note"></div></div>
           <div class="muted" style="font-size:13px">Deposits show on Home after one confirmation, usually within 10 to 30 minutes.</div>
         </div>
       </div>
@@ -108,7 +108,7 @@
     <section id="s-keys" class="screen">
       <div class="card"><div class="label">This vault's keys</div><div id="keys-list" style="display:flex;flex-direction:column;gap:10px"></div></div>
       <div class="card"><div class="label">Plugged in now</div><div id="keys-now" class="muted">looking…</div></div>
-      <div class="card"><div class="label">Recovery</div><div class="mono" id="keys-desc" style="-webkit-user-select:text;user-select:text"></div><div class="muted" style="font-size:13px">Any <span id="keys-k"></span> of the keys plus this line rebuilds the vault in Bitcoin Core or another copy of this app. Keep it away from the PINs.</div><div class="row"><button class="btn" id="copy-desc">Copy descriptor</button><button class="btn" id="forget-vault" style="border-color:var(--no);color:var(--no)">Forget this vault on this computer</button></div></div>
+      <div class="card"><div class="label">Recovery</div><div class="mono" id="keys-desc" style="-webkit-user-select:text;user-select:text"></div><div class="muted" style="font-size:13px">Any <span id="keys-k"></span> of the keys plus this line rebuilds the vault in another copy of this app; the part before <span class="mono">cc=</span> is a standard descriptor Bitcoin Core imports for the first address. Keep it away from the PINs.</div><div class="row"><button class="btn" id="copy-desc">Copy descriptor</button><button class="btn" id="forget-vault" style="border-color:var(--no);color:var(--no)">Forget this vault on this computer</button></div></div>
     </section>
 
     <section id="s-setup" class="screen">
@@ -134,7 +134,7 @@
         <div style="display:flex;flex-direction:column;gap:14px">
           <div class="tabs"><div class="on" data-tab="scan">Scan the sheet</div><div data-tab="paste">Paste the line</div></div>
           <div id="tab-scan"><div class="cam"><video id="cam" autoplay playsinline muted></video><div class="frame"></div></div><div class="muted" style="font-size:13px;margin-top:8px" id="cam-note">Hold the sheet's code in the frame.</div></div>
-          <div id="tab-paste" hidden><div class="field"><textarea id="desc-in" class="mono" placeholder="wsh(sortedmulti(2,02…,03…,03…))#checksum" spellcheck="false"></textarea></div><button class="btn" id="desc-read">Read it</button></div>
+          <div id="tab-paste" hidden><div class="field"><textarea id="desc-in" class="mono" placeholder="wsh(sortedmulti(2,02…,03…,03…))#checksum cc=…" spellcheck="false"></textarea></div><button class="btn" id="desc-read">Read it</button></div>
           <div class="muted" style="font-size:13px">The code on a recovery sheet carries the descriptor alone. Nothing on it can spend.</div>
         </div>
         <div class="card" id="restore-card"><div class="muted">Nothing read yet.</div></div>

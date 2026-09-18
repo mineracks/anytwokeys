@@ -59,7 +59,7 @@ async function sync() {
   $('#balance-sub').textContent = 'syncing…';
   try {
     const s = await invoke('vault_sync', { name: vault.name });
-    vault._coins = s.coins;
+    vault._coins = s.coins; vault._receive = s.receive; vault._receiveIndex = s.receive_index; vault._rotating = s.rotating;
     $('#balance').innerHTML = `${sats(s.balance)} <small>sats</small>`;
     const unconf = s.coins.filter(c => c.height === 0).reduce((a, c) => a + c.value, 0);
     $('#balance-sub').textContent = `${s.coins.length} coin${s.coins.length === 1 ? '' : 's'}` + (unconf ? ` · ${sats(unconf)} unconfirmed` : ' · all confirmed');
@@ -68,7 +68,7 @@ async function sync() {
     if (!s.history.length) tb.innerHTML = '<tr><td class="muted" colspan="2">nothing yet</td></tr>';
     for (const h of s.history.slice().reverse()) {
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td><a href="#" data-tx="${h.txid}" class="mono">${h.txid.slice(0, 16)}…${h.txid.slice(-6)}</a></td><td class="r ${h.height > 0 ? 'ok' : 'muted'}">${h.height > 0 ? 'confirmed · ' + sats(h.height) : 'unconfirmed'}</td>`;
+      tr.innerHTML = `<td><a href="#" data-tx="${h.txid}" class="mono">${h.txid.slice(0, 16)}…${h.txid.slice(-6)}</a>${s.rotating ? ' <span class="muted">· address #' + h.index + '</span>' : ''}</td><td class="r ${h.height > 0 ? 'ok' : 'muted'}">${h.height > 0 ? 'confirmed · ' + sats(h.height) : 'unconfirmed'}</td>`;
       tb.appendChild(tr);
     }
     $('#send-have').textContent = `${sats(s.balance)} sats`;
@@ -77,13 +77,18 @@ async function sync() {
 document.addEventListener('click', (e) => { const a = e.target.closest('[data-tx]'); if (a) { e.preventDefault(); const base = ($('#conn').textContent.includes('signet') ? 'https://signet.mineracks.com' : (store.settings.custom && store.settings.explorer) || (netName() === 'mainnet' ? 'https://mempool.mineracks.com' : 'https://signet.mineracks.com')); window.open(`${base}/tx/${a.dataset.tx}`); } });
 
 // ---------- receive ----------
-function drawAddress() {
+async function drawAddress() {
   if (!vault) return;
-  $('#addr-text').textContent = vault.address;
-  const qr = qrcode(0, 'M'); qr.addData('bitcoin:' + vault.address); qr.make();
+  if (vault._receive === undefined) await sync();
+  const addr = vault._receive || vault.address;
+  $('#addr-text').textContent = addr;
+  $('#addr-note').innerHTML = vault._rotating
+    ? `<b style="font-family:var(--display);font-weight:600">Fresh address, #${vault._receiveIndex}.</b> Every deposit gets its own. Any two cards can still spend all of them: the app derives each address from the card keys and the vault's chain code, and the recovery line carries both.`
+    : `<b style="font-family:var(--display);font-weight:600">This vault has one address.</b> It was made before rotating addresses existed, so every deposit lands here and anyone who knows it sees its whole history.`;
+  const qr = qrcode(0, 'M'); qr.addData('bitcoin:' + addr); qr.make();
   $('#addr-qr').innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
 }
-$('#copy-addr').onclick = () => { navigator.clipboard.writeText(vault.address).then(() => toast('Address copied')); };
+$('#copy-addr').onclick = () => { navigator.clipboard.writeText(vault._receive || vault.address).then(() => toast('Address copied')); };
 
 // ---------- send ----------
 async function loadFees() {
@@ -152,12 +157,12 @@ $('#broadcast-btn').onclick = async () => {
 function renderKeys() {
   if (!vault) return;
   $('#keys-list').innerHTML = vault.keys.map(k => keyRow(k.name, k.serial ? `serial ${k.serial}` : 'serial unknown (restored)', k.pubkey, cards.some(c => c.pubkey === k.pubkey) ? 'here' : 'off')).join('');
-  $('#keys-desc').textContent = vault.descriptor; $('#keys-k').textContent = vault.threshold;
+  invoke('vault_recovery', { name: vault.name }).then(l => { $('#keys-desc').textContent = l; vault._recovery = l; }); $('#keys-k').textContent = vault.threshold;
   renderKeysNow();
 }
 function keyRow(name, sub, pub, state) { return `<div class="keyrow"><svg width="22" height="22"><use href="#ring"/></svg><div class="who"><div class="name">${name}</div><div class="muted" style="font-size:13px">${sub} · <span class="mono">${pub.slice(0, 12)}…</span></div></div><div class="state ${state}"><i></i>${{ ok: 'enrolled', off: 'not plugged in', here: 'plugged in' }[state]}</div></div>`; }
 function renderKeysNow() { $('#keys-now').innerHTML = cards.length ? cards.map(c => `${cardLabel(c)} · ${c.pubkey ? 'signing key present' : 'no signing key'} · touch ${c.touch}`).join('<br>') : (cardsErr && !/no YubiKey found/i.test(cardsErr) ? 'Card reader problem: ' + cardsErr : 'No YubiKey plugged in.'); }
-$('#copy-desc').onclick = () => navigator.clipboard.writeText(vault.descriptor).then(() => toast('Descriptor copied'));
+$('#copy-desc').onclick = () => navigator.clipboard.writeText(vault._recovery || vault.descriptor).then(() => toast('Recovery line copied'));
 $('#forget-vault').onclick = async () => { if (!confirm(`Forget '${vault.name}' on this computer? The coins stay on the chain; the recovery line and two keys bring it back.`)) return; store = await invoke('vault_forget', { name: vault.name }); vault = null; boot(); };
 
 // ---------- setup (enrol) ----------
@@ -174,19 +179,28 @@ function renderSetup() {
   const fresh = cards.find(c => !setup.keys.some(k => k.serial === c.serial));
   if (!fresh) { box.innerHTML = `<div class="muted">Plug in key ${setup.keys.length + 1} of ${setup.n}.</div>`; return; }
   const nameGuess = ['laptop', 'keyring', 'off-site'][setup.keys.length] || `key ${setup.keys.length + 1}`;
+  const has = !!fresh.pubkey;
   box.innerHTML = `<div style="font-family:var(--display);font-weight:600;font-size:15px">Key ${setup.keys.length + 1}: ${cardLabel(fresh)}</div>
-    <div class="muted" style="font-size:13px">${fresh.pubkey ? 'This card already holds a signing key (touch ' + fresh.touch + '). Enrolling generates a NEW one and replaces it.' : 'OpenPGP signature slot is empty.'}</div>
-    <div class="grid2"><div class="field"><div class="label">Name this key</div><input id="enrol-name" value="${nameGuess}"></div><div class="field"><div class="label">Admin PIN</div><input id="enrol-admin" type="password" autocomplete="off"></div></div>
-    <div class="muted" style="font-size:13px">Factory admin PIN is 12345678. Change it first with YubiKey Manager if you have not. Touch policy will be set to FIXED, which cannot be undone without wiping the key.</div>
-    <button class="btn primary" id="enrol-btn">Generate key on card</button>`;
-  $('#enrol-btn').onclick = async () => {
+    <div class="muted" style="font-size:13px">${has ? 'This card already holds a signing key (touch ' + fresh.touch + '). Use it: the same card key can belong to any number of vaults.' : 'OpenPGP signature slot is empty: a key will be generated on the card.'}</div>
+    <div class="grid2"><div class="field"><div class="label">Name this key</div><input id="enrol-name" value="${nameGuess}"></div>${has ? '' : '<div class="field"><div class="label">Admin PIN</div><input id="enrol-admin" type="password" autocomplete="off"></div>'}</div>
+    ${has ? '' : '<div class="muted" style="font-size:13px">Factory admin PIN is 12345678. Change it first with YubiKey Manager if you have not. Touch policy will be set to FIXED, which cannot be undone without wiping the key.</div>'}
+    <div class="row">${has ? '<button class="btn primary" id="use-btn">Use this card\'s key</button><button class="btn" id="replace-btn" style="border-color:var(--no);color:var(--no)">Replace it with a new key…</button>' : '<button class="btn primary" id="enrol-btn">Generate key on card</button>'}</div>`;
+  if (has) {
+    $('#use-btn').onclick = () => { setup.keys.push({ name: $('#enrol-name').value.trim() || nameGuess, serial: fresh.serial, pubkey: fresh.pubkey }); toast('enrolled with its existing key'); renderSetup(); };
+    $('#replace-btn').onclick = () => {
+      if (!confirm('Generate a NEW key on this card?\n\nThe key it holds now will be destroyed. Any vault that key belongs to loses that cosigner for good. Only do this for a card that has never held funds.')) return;
+      box.innerHTML += '<div class="field" style="margin-top:12px"><div class="label">Admin PIN</div><input id="enrol-admin" type="password" autocomplete="off" style="max-width:260px"></div><button class="btn" id="enrol-btn" style="border-color:var(--no);color:var(--no);margin-top:10px">Generate a new key, destroying the old one</button>';
+      wireGenerate();
+    };
+  } else wireGenerate();
+  function wireGenerate() { $('#enrol-btn').onclick = async () => {
     const name = $('#enrol-name').value.trim() || nameGuess, admin = $('#enrol-admin').value;
     if (!admin) return toast('Enter the admin PIN');
     $('#enrol-btn').disabled = true;
     try { const pub = await invoke('card_generate', { reader: fresh.reader, adminPin: admin }); setup.keys.push({ name, serial: fresh.serial, pubkey: pub }); toast(`${name} enrolled`); }
     catch (e) { fail(e); }
     renderSetup();
-  };
+  }; }
 }
 $('#setup-finish').onclick = async () => {
   try { vault = await invoke('vault_create', { name: $('#setup-name').value.trim() || 'vault', threshold: setup.k, keys: setup.keys }); store = await invoke('store_get'); toast('Vault created'); show('keys'); }
@@ -214,10 +228,10 @@ async function readDescriptor(text) {
   try {
     parsed = await invoke('descriptor_parse', { text });
     const names = ['laptop', 'keyring', 'off-site'];
-    $('#restore-card').innerHTML = `<div class="ok">Read: ${parsed.threshold} of ${parsed.keys.length} over fixed keys, checksum ok</div>
+    $('#restore-card').innerHTML = `<div class="ok">Read: ${parsed.threshold} of ${parsed.keys.length} over card keys, checksum ok${parsed.rotating ? ', with a chain code (rotating addresses)' : ' (one fixed address)'}</div>
       <div class="mono muted" style="background:var(--ground);padding:12px;border-radius:6px;border:1px solid var(--line)">${parsed.descriptor}</div>
       <div style="display:flex;flex-direction:column;gap:8px">${parsed.keys.map((k, i) => `<div class="row" style="justify-content:space-between"><span class="mono">${k.slice(0, 16)}…</span><input data-kname="${i}" value="${names[i] || 'key ' + (i + 1)}" style="max-width:160px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink)"><span class="${cards.some(c => c.pubkey === k) ? 'ok' : 'muted'}" style="font-size:13px">${cards.some(c => c.pubkey === k) ? 'plugged in' : 'not seen yet'}</span></div>`).join('')}</div>
-      <div class="muted" style="font-size:13px">Address on ${netName()}: <span class="mono">${parsed.address}</span>. The vault can be watched now; spending needs ${parsed.threshold} of these keys.</div>
+      <div class="muted" style="font-size:13px">First address on ${netName()}: <span class="mono">${parsed.address}</span>. The vault can be watched now; spending needs ${parsed.threshold} of these keys.</div>
       <div class="field"><div class="label">Vault name</div><input id="restore-name" value="vault"></div>
       <button class="btn primary" id="restore-go">Restore this vault</button>`;
     $('#restore-go').onclick = async () => {
