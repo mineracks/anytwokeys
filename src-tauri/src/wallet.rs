@@ -37,11 +37,16 @@ pub struct Settings {
     pub explorer: String,
 }
 
+/// What the watcher last saw for a vault: txid → height, and the coins it held.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Seen { pub txs: std::collections::HashMap<String, i32>, pub coins: std::collections::HashMap<String, u64>, pub primed: bool }
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Store {
     pub vaults: Vec<Vault>,
     pub settings: Settings,
     pub last_psbt: Option<String>,
+    #[serde(default)] pub seen: std::collections::HashMap<String, Seen>,
 }
 
 pub fn network_of(s: &str) -> Network {

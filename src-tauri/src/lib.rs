@@ -263,9 +263,83 @@ fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+
+// ------------------------------------------------------------------ watcher --
+mod watch {
+    use crate::{chain, wallet};
+    use tauri::{AppHandle, Emitter};
+    use tauri_plugin_notification::NotificationExt;
+
+    pub struct Event { pub vault: String, pub title: String, pub body: String }
+
+    /// One pass over every vault: what changed since last time, as notifications.
+    pub fn pass() -> Vec<Event> {
+        let mut s = wallet::load();
+        let mut out = Vec::new();
+        let vaults = s.vaults.clone();
+        for v in &vaults {
+            let servers = wallet::servers_for(&s, &v.network);
+            let Ok(sc) = wallet::scan(v, &servers) else { continue };
+            let seen = s.seen.entry(v.name.clone()).or_default();
+            let now_txs: std::collections::HashMap<String, i32> = sc.history.iter().map(|(t, h, _)| (t.clone(), *h)).collect();
+            let now_coins: std::collections::HashMap<String, u64> = sc.coins.iter().map(|c| (format!("{}:{}", c.txid, c.vout), c.value)).collect();
+            if seen.primed {
+                for (txid, h) in &now_txs {
+                    let gained: u64 = now_coins.iter().filter(|(k, _)| k.starts_with(txid.as_str()) && !seen.coins.contains_key(*k)).map(|(_, v)| v).sum();
+                    match seen.txs.get(txid) {
+                        None => {
+                            let lost: u64 = seen.coins.iter().filter(|(k, _)| !now_coins.contains_key(*k)).map(|(_, v)| v).sum();
+                            let net = gained as i64 - lost as i64;
+                            let short = format!("{}…{}", &txid[..8], &txid[txid.len() - 6..]);
+                            if net >= 0 {
+                                out.push(Event { vault: v.name.clone(), title: format!("{}: {} sats arrived", v.name, fmt(net as u64)), body: format!("{short} · {}", if *h > 0 { "confirmed" } else { "waiting for a confirmation" }) });
+                            } else {
+                                out.push(Event { vault: v.name.clone(), title: format!("{}: {} sats sent", v.name, fmt((-net) as u64)), body: format!("{short} · {}", if *h > 0 { "confirmed" } else { "in the mempool" }) });
+                            }
+                        }
+                        Some(prev) if *prev <= 0 && *h > 0 => {
+                            out.push(Event { vault: v.name.clone(), title: format!("{}: confirmed", v.name), body: format!("{}…{} is in block {}", &txid[..8], &txid[txid.len() - 6..], fmt(*h as u64)) });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            seen.txs = now_txs;
+            seen.coins = now_coins;
+            seen.primed = true;
+            if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == v.name) { vm.next = sc.next; vm.scan_max = sc.scan_max; }
+        }
+        let _ = wallet::save(&s);
+        out
+    }
+
+    fn fmt(n: u64) -> String {
+        let s = n.to_string();
+        let mut out = String::new();
+        for (i, ch) in s.chars().enumerate() { if i > 0 && (s.len() - i) % 3 == 0 { out.push(','); } out.push(ch); }
+        out
+    }
+
+    pub fn start(app: AppHandle) {
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(8));
+            loop {
+                let events = pass();
+                for e in &events {
+                    let _ = app.notification().builder().title(&e.title).body(&e.body).show();
+                    let _ = app.emit("vault-changed", &e.vault);
+                }
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+        });
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .setup(|app| { watch::start(app.handle().clone()); Ok(()) })
         .invoke_handler(tauri::generate_handler![
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
