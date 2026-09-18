@@ -59,7 +59,7 @@ async function boot() {
 async function pollCards() {
   try { cards = await invoke('cards_list'); cardsErr = ''; } catch (e) { cards = []; cardsErr = String(e); }
   if ($('#s-setup').classList.contains('on')) renderSetup();
-  if ($('#s-keys').classList.contains('on')) { const sig = cards.map(c => c.serial + ':' + c.pubkey).sort().join(','); if (sig !== pollCards.sig) { pollCards.sig = sig; renderKeys(); } else renderKeysNow(); }
+  if ($('#s-keys').classList.contains('on')) { const sig = cards.map(c => c.serial + ':' + c.pubkey).sort().join(','); if (sig !== pollCards.sig) { pollCards.sig = sig; if (!$('#keys-list input')) renderKeys(); } else renderKeysNow(); }
   if (vault) for (const c of cards) { const k = vault.keys.find(k => c.pubkey && k.pubkey === c.pubkey && !k.serial); if (k && c.serial) { invoke('vault_key_seen', { name: vault.name, pubkey: c.pubkey, serial: c.serial }).then(st => { store = st; vault = st.vaults.find(v => v.name === vault.name) || vault; if ($('#s-keys').classList.contains('on')) renderKeys(); }).catch(() => {}); } }
   if ($('#s-sign').classList.contains('on')) renderSign();
   setTimeout(pollCards, 2000);
@@ -203,12 +203,34 @@ $('#broadcast-btn').onclick = async () => {
 // ---------- keys ----------
 function renderKeys() {
   if (!vault) return;
-  $('#keys-list').innerHTML = vault.keys.map(k => keyRow(k.name, k.serial ? `serial ${k.serial}` : 'serial not yet seen (restored)', k.pubkey, cards.some(c => c.pubkey === k.pubkey) ? 'here' : 'off')).join('');
+  $('#keys-list').innerHTML = vault.keys.map(k => keyRow(k.name, k.serial ? `serial ${k.serial}` : 'serial not yet seen (restored)', k.pubkey, cards.some(c => c.pubkey === k.pubkey) ? 'here' : 'off', vault.keys.indexOf(k))).join('');
   invoke('vault_recovery', { name: vault.name }).then(l => { $('#keys-desc').textContent = l; vault._recovery = l; }); $('#keys-k').textContent = vault.threshold;
   renderKeysNow();
 }
-function keyRow(name, sub, pub, state) { return `<div class="keyrow"><svg width="22" height="22"><use href="#ring"/></svg><div class="who"><div class="name">${name}</div><div class="muted" style="font-size:13px">${sub} · <span class="mono">${pub.slice(0, 12)}…</span></div></div><div class="state ${state}"><i></i>${{ ok: 'enrolled', off: 'not plugged in', here: 'plugged in' }[state]}</div></div>`; }
+function keyRow(name, sub, pub, state, idx) { const pen = idx === undefined ? '' : `<button class="pencil" data-edit-idx="${idx}" title="Rename this key"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>`; return `<div class="keyrow"><svg width="22" height="22"><use href="#ring"/></svg><div class="who"><div class="name"><span class="name-text">${name}</span>${pen}</div><div class="muted" style="font-size:13px">${sub} · <span class="mono">${pub.slice(0, 12)}…</span></div></div><div class="state ${state}"><i></i>${{ ok: 'enrolled', off: 'not plugged in', here: 'plugged in' }[state]}</div></div>`; }
 function renderKeysNow() { $('#keys-now').innerHTML = cards.length ? cards.map(c => `${cardLabel(c)} · ${c.pubkey ? 'signing key present' : 'no signing key'} · touch ${c.touch}`).join('<br>') : (cardsErr && !/no YubiKey found/i.test(cardsErr) ? 'Card reader problem: ' + cardsErr : 'No YubiKey plugged in.'); }
+// rename a key in place from the pencil on its row
+$('#keys-list').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-edit-idx]'); if (!b || $('#keys-list input')) return;
+  const idx = +b.dataset.editIdx, nameEl = b.parentElement, cur = vault.keys[idx].name;
+  const inp = document.createElement('input'); inp.className = 'key-input'; inp.value = cur; inp.maxLength = 40;
+  nameEl.replaceChildren(inp); inp.focus(); inp.select();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return; done = true;
+    const v = inp.value.trim();
+    if (!save || !v || v === cur) { renderKeys(); return; }
+    try {
+      const names = vault.keys.map((k, i) => i === idx ? v : k.name);
+      store = await invoke('vault_rename', { name: vault.name, newName: vault.name, keyNames: names });
+      vault = store.vaults.find(x => x.name === vault.name) || vault; toast('Key renamed');
+    } catch (err) { fail(err); }
+    renderKeys();
+  };
+  inp.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); finish(true); } if (ev.key === 'Escape') finish(false); });
+  inp.addEventListener('blur', () => finish(true));
+});
+
 // rename in place from the title
 $('#title-edit').onclick = () => {
   const inp = $('#title-input'); inp.value = vault.name; $('#title').hidden = true; $('#title-edit').hidden = true; inp.hidden = false; inp.focus(); inp.select();

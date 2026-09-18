@@ -108,3 +108,8 @@ body.resizing{cursor:col-resize;-webkit-user-select:none;user-select:none}
 #vault-tabs .nav span:nth-child(2){white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 #vault-tabs .nav span:last-child{white-space:nowrap;flex:0 0 auto}
 .nav{min-width:0}
+.keyrow .name{display:flex;align-items:center;gap:6px;min-height:24px}
+.keyrow .pencil{padding:3px;color:transparent}
+.keyrow:hover .pencil,.keyrow .pencil:focus-visible{color:var(--muted)}
+.keyrow .pencil:hover{color:var(--gold)}
+.key-input{font-family:var(--display);font-weight:600;font-size:14px;border:0;border-bottom:2px solid var(--gold);background:transparent;color:var(--ink);padding:0 2px;min-width:100px;max-width:240px;outline:none}
