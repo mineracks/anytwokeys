@@ -16,6 +16,7 @@ function show(name) {
   $$('.screen').forEach(s => s.classList.toggle('on', s.id === 's-' + name));
   $$('.nav').forEach(n => n.classList.toggle('on', n.dataset.go === name));
   $('#title').textContent = { home: vault ? vault.name : 'Vault', send: 'Send', receive: 'Receive', keys: 'Keys', settings: 'Settings', setup: 'New vault · enrol keys', restore: 'Restore from a recovery sheet', sign: 'Sign' }[name] || '';
+  $('#title-edit').hidden = !(name === 'home' && vault); $('#title-input').hidden = true; $('#title').hidden = false;
   if (name !== 'restore') stopCam();
   if (name === 'home') sync();
   if (name === 'receive') drawAddress();
@@ -207,6 +208,22 @@ function renderKeys() {
 }
 function keyRow(name, sub, pub, state) { return `<div class="keyrow"><svg width="22" height="22"><use href="#ring"/></svg><div class="who"><div class="name">${name}</div><div class="muted" style="font-size:13px">${sub} · <span class="mono">${pub.slice(0, 12)}…</span></div></div><div class="state ${state}"><i></i>${{ ok: 'enrolled', off: 'not plugged in', here: 'plugged in' }[state]}</div></div>`; }
 function renderKeysNow() { $('#keys-now').innerHTML = cards.length ? cards.map(c => `${cardLabel(c)} · ${c.pubkey ? 'signing key present' : 'no signing key'} · touch ${c.touch}`).join('<br>') : (cardsErr && !/no YubiKey found/i.test(cardsErr) ? 'Card reader problem: ' + cardsErr : 'No YubiKey plugged in.'); }
+// rename in place from the title
+$('#title-edit').onclick = () => {
+  const inp = $('#title-input'); inp.value = vault.name; $('#title').hidden = true; $('#title-edit').hidden = true; inp.hidden = false; inp.focus(); inp.select();
+};
+async function commitTitle() {
+  const inp = $('#title-input'); const newName = inp.value.trim();
+  inp.hidden = true; $('#title').hidden = false; $('#title-edit').hidden = false;
+  if (!newName || newName === vault.name) return;
+  try {
+    store = await invoke('vault_rename', { name: vault.name, newName, keyNames: vault.keys.map(k => k.name) });
+    vault = store.vaults.find(v => v.name === newName); try { localStorage.setItem('a2k-vault', vault.name); } catch {}
+    $('#title').textContent = vault.name; paintNet(); toast('Renamed');
+  } catch (e) { fail(e); }
+}
+$('#title-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); commitTitle(); } if (e.key === 'Escape') { $('#title-input').value = vault.name; commitTitle(); } });
+$('#title-input').addEventListener('blur', () => { if (!$('#title-input').hidden) commitTitle(); });
 $('#edit-names').onclick = () => {
   $('#edit-vault-name').value = vault.name;
   $('#edit-key-names').innerHTML = vault.keys.map((k, i) => `<div class="row"><span class="mono muted" style="width:140px;font-size:12px">${k.serial ? 'serial ' + k.serial : k.pubkey.slice(0, 12) + '…'}</span><input data-edit-key="${i}" value="${k.name.replace(/"/g, '&quot;')}" style="max-width:260px;padding:8px 12px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink)"></div>`).join('');

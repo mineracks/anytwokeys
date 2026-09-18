@@ -97,3 +97,7 @@ a{color:var(--gold)}
 #shell:not([hidden]){display:contents}
 [hidden]{display:none !important}
 .btn.icon{padding:0;width:44px;flex:0 0 44px}
+.pencil{border:0;background:transparent;color:var(--line);padding:6px;border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;min-height:0}
+.top:hover .pencil,.pencil:focus-visible{color:var(--muted)}
+.pencil:hover{color:var(--gold);background:var(--gold-soft)}
+#title-input{font-family:var(--display);font-weight:800;font-size:22px;letter-spacing:-.02em;border:0;border-bottom:2px solid var(--gold);background:transparent;color:var(--ink);padding:0 2px;min-width:120px;max-width:60vw;outline:none}
