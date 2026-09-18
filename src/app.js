@@ -240,26 +240,7 @@ $('#save-names').onclick = async () => {
   } catch (e) { fail(e); }
 };
 $('#copy-desc').onclick = () => navigator.clipboard.writeText(vault._recovery || vault.descriptor).then(() => toast('Recovery line copied'));
-$('#forget-vault').onclick = async () => { if (!confirm(`Forget '${vault.name}' on this computer? The coins stay on the chain; the recovery line and two keys bring it back.`)) return; store = await invoke('vault_forget', { name: vault.name }); vault = null; // the background watcher saw a deposit, a spend or a confirmation: refresh what is on screen
-window.__TAURI__.event.listen('vault-changed', (ev) => {
-  if (!vault || ev.payload !== vault.name) { return; }
-  if ($('#s-home').classList.contains('on')) sync();
-  if ($('#s-receive').classList.contains('on')) drawAddress();
-});
-
-// sidebar width: drag the divider; remembered per machine
-(() => {
-  const min = 200, max = 440;
-  let w = 220; try { w = Math.min(max, Math.max(min, +localStorage.getItem('a2k-side') || 220)); } catch {}
-  document.documentElement.style.setProperty('--side', w + 'px');
-  const d = $('#divider'); let dragging = false, startX = 0, startW = w;
-  d.addEventListener('mousedown', (e) => { dragging = true; startX = e.clientX; startW = w; d.classList.add('dragging'); document.body.classList.add('resizing'); e.preventDefault(); });
-  window.addEventListener('mousemove', (e) => { if (!dragging) return; w = Math.min(max, Math.max(min, startW + e.clientX - startX)); document.documentElement.style.setProperty('--side', w + 'px'); });
-  window.addEventListener('mouseup', () => { if (!dragging) return; dragging = false; d.classList.remove('dragging'); document.body.classList.remove('resizing'); try { localStorage.setItem('a2k-side', String(w)); } catch {} });
-  d.addEventListener('dblclick', () => { w = 220; document.documentElement.style.setProperty('--side', '220px'); try { localStorage.setItem('a2k-side', '220'); } catch {} });
-})();
-
-boot(); };
+$('#forget-vault').onclick = async () => { if (!confirm(`Forget '${vault.name}' on this computer? The coins stay on the chain; the recovery line and two keys bring it back.`)) return; store = await invoke('vault_forget', { name: vault.name }); vault = null; boot(); };
 
 // ---------- setup (enrol) ----------
 function renderSetup() {
@@ -360,5 +341,24 @@ $('#net-pick').addEventListener('click', async (e) => { const o = e.target.close
 $('#own-servers').onclick = async () => { store = await invoke('settings_set', { network: netName(), custom: !store.settings.custom, electrum: $('#c-electrum').value, explorer: $('#c-explorer').value }); renderSettings(); };
 $('#save-settings').onclick = async () => { try { store = await invoke('settings_set', { network: netName(), custom: true, electrum: $('#c-electrum').value, explorer: $('#c-explorer').value }); renderSettings(); toast('Using your servers'); } catch (e) { fail(e); } };
 $('#test-servers').onclick = async () => { $('#test-out').textContent = 'testing…'; try { $('#test-out').textContent = await invoke('servers_test', { electrum: $('#c-electrum').value, explorer: $('#c-explorer').value }); } catch (e) { $('#test-out').textContent = String(e); } };
+
+// the background watcher saw a deposit, a spend or a confirmation: refresh what is on screen
+window.__TAURI__.event.listen('vault-changed', (ev) => {
+  if (!vault || ev.payload !== vault.name) { return; }
+  if ($('#s-home').classList.contains('on')) sync();
+  if ($('#s-receive').classList.contains('on')) drawAddress();
+});
+
+// sidebar width: drag the divider; remembered per machine
+(() => {
+  const min = 200, max = 440;
+  let w = 220; try { w = Math.min(max, Math.max(min, +localStorage.getItem('a2k-side') || 220)); } catch {}
+  document.documentElement.style.setProperty('--side', w + 'px');
+  const d = $('#divider'); let dragging = false, startX = 0, startW = w;
+  d.addEventListener('mousedown', (e) => { dragging = true; startX = e.clientX; startW = w; d.classList.add('dragging'); document.body.classList.add('resizing'); e.preventDefault(); });
+  window.addEventListener('mousemove', (e) => { if (!dragging) return; w = Math.min(max, Math.max(min, startW + e.clientX - startX)); document.documentElement.style.setProperty('--side', w + 'px'); });
+  window.addEventListener('mouseup', () => { if (!dragging) return; dragging = false; d.classList.remove('dragging'); document.body.classList.remove('resizing'); try { localStorage.setItem('a2k-side', String(w)); } catch {} });
+  d.addEventListener('dblclick', () => { w = 220; document.documentElement.style.setProperty('--side', '220px'); try { localStorage.setItem('a2k-side', '220'); } catch {} });
+})();
 
 boot();
