@@ -39,6 +39,14 @@ hkdf = "0.12"
 sha2 = "0.10"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 
+# the store key's slot on this Mac: a Keychain item, behind a Touch ID / password prompt (lockbox.rs)
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSError"] }
+objc2-local-authentication = { version = "0.3", features = ["LAContext", "block2"] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread"] }
 

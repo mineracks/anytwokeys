@@ -271,6 +271,13 @@
           <div class="card"><div class="label">Addresses</div>
             <div class="field"><div class="label">Gap limit</div><div class="row" style="gap:10px;align-items:center"><input id="gap-in" inputmode="numeric" style="max-width:110px"><button class="btn" id="gap-save">Save</button></div></div>
             <div class="muted" style="font-size:13px">How many unused addresses past the last used one a scan looks at, on the receive chain and the change chain each. 20 is the usual. Raise it if you hand out many addresses before any is paid; every scan costs one server query per address.</div></div>
+          <div class="card" id="lock-card"><div class="label">Lock</div>
+            <div class="muted" style="font-size:13px" id="lock-state"></div>
+            <div class="row" style="justify-content:space-between;flex-wrap:nowrap;gap:16px"><div style="font-family:var(--display);font-weight:600;font-size:14px;min-width:0">Ask for Touch ID when the app opens<small class="muted" style="display:block;font-weight:400;font-family:var(--serif);font-size:13px">Off: the app opens without asking. Its files stay encrypted either way.</small></div><div class="toggle on" id="lock-touch" role="switch" tabindex="0" aria-label="Ask for Touch ID when the app opens"><i></i></div></div>
+            <div class="field"><label class="cap" for="lock-idle">Lock again</label><select id="lock-idle" style="max-width:420px"><option value="0">only when the app quits</option><option value="5">after 5 minutes without a click or a key press</option><option value="15">after 15 minutes</option><option value="60">after an hour</option></select></div>
+            <div class="field"><div class="cap">Keys that can open this app</div><div id="lock-slots"></div></div>
+            <div class="row"><button class="btn" id="lock-now" type="button">Lock now</button></div>
+          </div>
           <div class="card"><div class="label">Notifications</div><div class="row" style="align-items:center;gap:12px"><button class="btn" id="notify-test">Send a test notification</button><span class="muted" style="font-size:13px" id="notify-out"></span></div>
             <div class="muted" style="font-size:13px">Arrivals, spends and confirmations are checked every minute in the background. The log is at <span class="mono" id="watch-log-path"></span>.</div></div>
           <div class="card"><div class="label">About</div><div class="muted" style="font-size:13px">v0.1 research build. Source and checksums at anytwokeys.com. Not affiliated with Yubico.</div></div>
@@ -297,6 +304,17 @@
   <div class="row" style="justify-content:flex-end"><button class="btn" id="scan-close">Cancel</button></div>
 </div></div>
 
+<div id="lock" hidden>
+  <div class="lock-card" role="dialog" aria-modal="true" aria-labelledby="lock-h">
+    <svg width="54" height="54" aria-hidden="true"><use href="#ring"/></svg>
+    <h2 id="lock-h">Any Two Keys is locked</h2>
+    <p class="muted" id="lock-say">Everything it keeps on this computer is encrypted. Open it with this Mac, or with one of your keys and its PIN.</p>
+    <button type="button" class="btn primary" id="lock-mac">Open with Touch ID</button>
+    <div class="lock-err" id="lock-err" hidden></div>
+    <div class="lock-or"><span>or with one of your keys</span></div>
+    <div id="lock-keys"></div>
+  </div>
+</div>
 <div class="toast" id="toast"></div>
 <div id="notices" aria-live="polite"></div>
 <script src="vendor/jsQR.js"></script>

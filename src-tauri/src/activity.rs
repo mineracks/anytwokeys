@@ -23,8 +23,15 @@ pub struct Row { pub txid: String, pub time: Option<u32>, pub net: Option<i64>, 
 pub struct Activity { pub ccy: String, pub rows: Vec<Row>, pub now: Option<Quote>, pub note: Option<String> }
 
 fn cache_path() -> std::path::PathBuf { wallet::store_path().with_file_name("cache.json") }
-fn load_cache() -> Cache { std::fs::read(cache_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default() }
-fn save_cache(c: &Cache) { if let Ok(b) = serde_json::to_vec(c) { let _ = std::fs::write(cache_path(), b); } }
+// a cache that cannot be read is an empty cache: everything in it can be asked for again
+fn load_cache() -> Cache {
+    let bytes = if crate::lockbox::sealed_mode() { crate::lockbox::read_sealed(&cache_path().with_extension("enc"), "cache").ok().flatten() } else { std::fs::read(cache_path()).ok() };
+    bytes.and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+fn save_cache(c: &Cache) {
+    let Ok(b) = serde_json::to_vec(c) else { return };
+    if crate::lockbox::sealed_mode() { let _ = crate::lockbox::write_sealed(&cache_path().with_extension("enc"), "cache", &b); } else { let _ = std::fs::write(cache_path(), b); }
+}
 
 /// (day, hour) in UTC for a Unix time.
 fn day_hour(t: u32) -> (String, u32) { (crate::export::ymd(t as u64), (t % 86_400) / 3_600) }
@@ -230,7 +237,7 @@ mod live {
     #[test]
     #[ignore]
     fn live_detail() {
-        let s = crate::wallet::load();
+        let s = crate::wallet::load().unwrap();
         for v in s.vaults.iter() {
             let servers = crate::wallet::servers_for(&s, &v.network);
             let sc = crate::wallet::scan(v, &servers, s.settings.gap).unwrap();
@@ -246,7 +253,7 @@ mod live {
     #[test]
     #[ignore]
     fn live_activity() {
-        let s = crate::wallet::load();
+        let s = crate::wallet::load().unwrap();
         for v in s.vaults.iter().filter(|v| v.network == "mainnet") {
             let servers = crate::wallet::servers_for(&s, &v.network);
             let sc = crate::wallet::scan(v, &servers, s.settings.gap).unwrap();

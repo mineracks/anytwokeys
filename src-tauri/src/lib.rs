@@ -5,6 +5,7 @@ mod chain;
 mod export;
 mod hd;
 mod labels;
+mod lockbox;
 mod message;
 mod seal;
 mod wallet;
@@ -39,7 +40,7 @@ fn open_url(url: String) -> R<()> {
 #[tauri::command]
 fn vault_key_seen(name: String, pubkey: String, serial: u32) -> R<Store> {
     // a restored vault knows its keys only by public key; the first time that card is plugged in, remember its serial
-    let mut s = wallet::load();
+    let mut s = wallet::load()?;
     let v = s.vaults.iter_mut().find(|v| v.name == name).ok_or("no such vault")?;
     let mut changed = false;
     for k in v.keys.iter_mut() { if k.pubkey == pubkey && k.serial == 0 && serial != 0 { k.serial = serial; changed = true; } }
@@ -57,7 +58,7 @@ fn key_form_seen(pubkey: String, form: u8, nfc: bool) -> R<Store> {
 #[tauri::command]
 async fn vault_activity(name: String, history: Vec<(String, i32)>, ccy: String) -> R<activity::Activity> {
     block(move || {
-        let s = wallet::load();
+        let s = wallet::load()?;
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
         let servers = wallet::servers_for(&s, &v.network);
         // our price service goes with our servers; someone running their own names their own, or has none
@@ -95,7 +96,7 @@ fn contact_used(address: String, network: String) -> R<Store> {
 /// A fresh address of one of this person's OWN vaults: the way to pay yourself without ever reusing an address.
 #[tauri::command]
 fn vault_receive_address(name: String) -> R<String> {
-    let s = wallet::load();
+    let s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
     wallet::address_at(v, if v.chain_code.is_some() { v.next } else { 0 })
 }
@@ -108,7 +109,7 @@ struct NodeStatus { electrum: String, height: u32, ms: u128, ours: bool }
 #[tauri::command]
 async fn node_status(network: String) -> R<NodeStatus> {
     block(move || {
-        let s = wallet::load();
+        let s = wallet::load()?;
         let servers = wallet::servers_for(&s, &network);
         let ours = servers.electrum == chain::defaults(wallet::network_of(&network)).electrum;
         let t = std::time::Instant::now();
@@ -125,14 +126,14 @@ fn device_locale() -> activity::Device { activity::device() }
 #[tauri::command]
 async fn tx_detail(name: String, txid: String, height: i32) -> R<activity::Detail> {
     block(move || {
-        let s = wallet::load();
+        let s = wallet::load()?;
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
         activity::detail(&v, &wallet::servers_for(&s, &v.network), &txid, height)
     }).await
 }
 
 #[tauri::command]
-fn store_get() -> Store {
+fn store_get() -> Result<Store, String> {
     wallet::load()
 }
 
@@ -148,7 +149,7 @@ fn fresh_chain_code() -> String {
 
 #[tauri::command]
 fn vault_create(name: String, threshold: usize, keys: Vec<NewKey>, rotating: Option<bool>, network: Option<String>) -> R<Vault> {
-    let mut s = wallet::load();
+    let mut s = wallet::load()?;
     if let Some(n) = network { if n != "mainnet" && n != "signet" { return Err("network must be mainnet or signet".into()); } s.settings.network = n; }
     if s.vaults.iter().any(|v| v.name == name) { return Err(format!("a vault called '{name}' already exists")); }
     if threshold < 1 || threshold > keys.len() || keys.len() > 15 { return Err("threshold must be between 1 and the number of keys, and at most 15 keys".into()); }
@@ -171,7 +172,7 @@ struct Parsed { threshold: usize, keys: Vec<String>, descriptor: String, address
 
 #[tauri::command]
 fn descriptor_parse(text: String) -> R<Parsed> {
-    let s = wallet::load();
+    let s = wallet::load()?;
     let (desc_text, cc) = wallet::split_recovery(&text);
     let (threshold, keys) = wallet::keys_of(&desc_text)?;
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
@@ -183,7 +184,7 @@ fn descriptor_parse(text: String) -> R<Parsed> {
 
 #[tauri::command]
 fn vault_restore(name: String, text: String, names: Vec<String>) -> R<Vault> {
-    let mut s = wallet::load();
+    let mut s = wallet::load()?;
     if s.vaults.iter().any(|v| v.name == name) { return Err(format!("a vault called '{name}' already exists")); }
     let (desc_text, cc) = wallet::split_recovery(&text);
     let (threshold, keys) = wallet::keys_of(&desc_text)?;
@@ -199,7 +200,7 @@ fn vault_restore(name: String, text: String, names: Vec<String>) -> R<Vault> {
 
 #[tauri::command]
 fn vault_recovery(name: String) -> R<String> {
-    let s = wallet::load();
+    let s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
     Ok(wallet::recovery_line(v))
 }
@@ -207,7 +208,7 @@ fn vault_recovery(name: String) -> R<String> {
 /// Rename a vault and/or its keys. Labels only: nothing on the chain or the cards changes.
 #[tauri::command]
 fn vault_rename(name: String, new_name: String, key_names: Vec<String>) -> R<Store> {
-    let mut s = wallet::load();
+    let mut s = wallet::load()?;
     let new_name = new_name.trim().to_string();
     if new_name.is_empty() { return Err("a vault needs a name".into()); }
     if new_name != name && s.vaults.iter().any(|v| v.name == new_name) { return Err(format!("a vault called '{new_name}' already exists")); }
@@ -223,7 +224,7 @@ fn vault_rename(name: String, new_name: String, key_names: Vec<String>) -> R<Sto
 
 #[tauri::command]
 fn vault_forget(name: String) -> R<Store> {
-    let mut s = wallet::load();
+    let mut s = wallet::load()?;
     s.vaults.retain(|v| v.name != name);
     wallet::save(&s)?;
     Ok(s)
@@ -231,7 +232,7 @@ fn vault_forget(name: String) -> R<Store> {
 
 #[tauri::command]
 fn settings_set(network: String, custom: bool, electrum: String, explorer: String, gap: Option<u32>, fiat: Option<String>, prices: Option<String>, vss: Option<String>) -> R<Store> {
-    let mut s = wallet::load();
+    let mut s = wallet::load()?;
     if network != "mainnet" && network != "signet" { return Err("network must be mainnet or signet".into()); }
     let gap = gap.unwrap_or(s.settings.gap);
     if !(1..=500).contains(&gap) { return Err("the gap limit must be between 1 and 500".into()); }
@@ -254,7 +255,7 @@ struct Snapshot { coins: Vec<wallet::CoinAt>, balance: u64, height: u32, history
 #[tauri::command]
 async fn vault_sync(name: String) -> R<Snapshot> {
     block(move || {
-        let s = wallet::load();
+        let s = wallet::load()?;
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
         let servers = wallet::servers_for(&s, &v.network);
         let sc = wallet::scan(&v, &servers, s.settings.gap)?;
@@ -273,7 +274,7 @@ async fn vault_sync(name: String) -> R<Snapshot> {
 
 #[tauri::command]
 async fn fees_get(network: Option<String>) -> R<chain::Fees> {
-    block(move || { let s = wallet::load(); let n = network.unwrap_or_else(|| s.settings.network.clone()); chain::fees(&wallet::servers_for(&s, &n)) }).await
+    block(move || { let s = wallet::load()?; let n = network.unwrap_or_else(|| s.settings.network.clone()); chain::fees(&wallet::servers_for(&s, &n)) }).await
 }
 
 #[tauri::command]
@@ -289,7 +290,7 @@ async fn servers_test(electrum: String, explorer: String) -> R<String> {
 #[tauri::command]
 async fn spend_build(name: String, to: String, amount: u64, rate: f64, send_all: bool, coins: Option<Vec<String>>) -> R<wallet::Built> {
     block(move || {
-        let s = wallet::load();
+        let s = wallet::load()?;
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
         let servers = wallet::servers_for(&s, &v.network);
         let sc = wallet::scan(&v, &servers, s.settings.gap)?;
@@ -309,7 +310,7 @@ struct Signed { psbt: String, signed_inputs: Vec<usize>, status: wallet::SigStat
 #[tauri::command]
 async fn spend_sign(name: String, reader: String, pin: String) -> R<Signed> {
     block(move || {
-        let mut s = wallet::load();
+        let mut s = wallet::load()?;
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
         let mut psbt = s.last_psbt.clone().ok_or("nothing to sign — build a spend first")?;
         let card = cards::list().map_err(|e| e.to_string())?.into_iter().find(|c| c.reader == reader).ok_or("that card is no longer plugged in")?;
@@ -335,7 +336,7 @@ async fn spend_sign(name: String, reader: String, pin: String) -> R<Signed> {
 
 #[tauri::command]
 fn spend_status(name: String) -> R<wallet::SigStatus> {
-    let s = wallet::load();
+    let s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
     let psbt = s.last_psbt.clone().ok_or("no spend in progress")?;
     wallet::status(&psbt, v.threshold)
@@ -347,7 +348,7 @@ struct Sent { txid: String, link: String }
 #[tauri::command]
 async fn spend_broadcast(name: String) -> R<Sent> {
     block(move || {
-        let mut s = wallet::load();
+        let mut s = wallet::load()?;
         let _v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
         if s.last_message.is_some() { return Err("this is a signed message, not a spend; finish it on the Messages screen".into()); }
         let psbt = s.last_psbt.clone().ok_or("no spend in progress")?;
@@ -366,7 +367,7 @@ async fn spend_broadcast(name: String) -> R<Sent> {
 fn spend_export(name: String, what: String) -> R<String> {
     use bitcoin::consensus::Encodable;
     use std::str::FromStr;
-    let s = wallet::load();
+    let s = wallet::load()?;
     let _v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
     let psbt_b64 = s.last_psbt.clone().ok_or("no spend in progress")?;
     let (bytes, ext, stem) = if what == "tx" {
@@ -389,7 +390,7 @@ fn spend_export(name: String, what: String) -> R<String> {
 /// The spend in progress as the Sign screen draws it: who has signed, what it pays, what is left.
 #[tauri::command]
 fn spend_ceremony(name: String) -> R<wallet::Ceremony> {
-    let s = wallet::load();
+    let s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
     wallet::ceremony(v, s.last_psbt.as_deref().ok_or("no spend in progress")?)
 }
@@ -401,7 +402,7 @@ struct QrOut { parts: Vec<String>, single: Option<String>, bytes: usize }
 #[tauri::command]
 fn spend_qr() -> R<QrOut> {
     use std::str::FromStr;
-    let s = wallet::load();
+    let s = wallet::load()?;
     let raw = bitcoin::psbt::Psbt::from_str(s.last_psbt.as_deref().ok_or("no spend in progress")?.trim()).map_err(|e| format!("psbt: {e}"))?.serialize();
     let single = if raw.len() <= 700 { export::ur_parts(&raw, usize::MAX, false)?.pop() } else { None };
     Ok(QrOut { parts: export::ur_parts(&raw, 160, true)?, single, bytes: raw.len() })
@@ -413,7 +414,7 @@ fn sats_text(n: u64) -> String { let s = n.to_string(); let mut o = String::new(
 #[tauri::command]
 fn spend_pdf(name: String) -> R<String> {
     use std::str::FromStr;
-    let s = wallet::load();
+    let s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
     let b64 = s.last_psbt.clone().ok_or("no spend in progress")?;
     let c = wallet::ceremony(v, &b64)?;
@@ -439,7 +440,7 @@ fn spend_pdf(name: String) -> R<String> {
 /// The vault's recovery sheet: its descriptor (and chain code) as a code the Restore screen scans, its keys, and the line as text.
 #[tauri::command]
 fn vault_pdf(name: String) -> R<String> {
-    let s = wallet::load();
+    let s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
     let sheet = export::recovery_sheet(v)?;
     let bytes = export::pdf(&sheet)?;
@@ -456,7 +457,7 @@ fn spend_import(name: String, text: Option<String>) -> R<wallet::Ceremony> {
         let path = rfd::FileDialog::new().set_title("Open a PSBT").add_filter("PSBT", &["psbt", "txt", "base64"]).pick_file().ok_or("cancelled")?;
         std::fs::read(&path).map_err(|e| e.to_string())? } };
     let psbt = export::parse(&raw)?;
-    let s = wallet::load();
+    let s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
     let current = if s.last_message.is_some() { None } else { s.last_psbt.clone() };
     let merged = wallet::adopt(&v, psbt, current.as_deref())?;
@@ -467,7 +468,7 @@ fn spend_import(name: String, text: Option<String>) -> R<wallet::Ceremony> {
 
 #[tauri::command]
 fn spend_discard() -> R<()> {
-    let mut s = wallet::load();
+    let mut s = wallet::load()?;
     s.last_psbt = None;
     s.last_message = None;
     wallet::save(&s)
@@ -481,7 +482,7 @@ struct AddrRow { index: u32, position: u32, chain: &'static str, address: String
 /// unused position plus `ahead` more, so the ones beyond can be seen and handed out early.
 #[tauri::command]
 fn vault_addresses(name: String, ahead: Option<u32>) -> R<Vec<AddrRow>> {
-    let s = wallet::load();
+    let s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
     if v.chain_code.is_none() { return Ok(vec![AddrRow { index: 0, position: 0, chain: "receive", address: wallet::address_at(v, 0)?, current: true, future: false }]); }
     let ahead = ahead.unwrap_or(0).min(200);
@@ -498,7 +499,7 @@ fn vault_addresses(name: String, ahead: Option<u32>) -> R<Vec<AddrRow>> {
 #[tauri::command]
 async fn message_sign_key(reader: String, pin: String, message: String) -> R<message::KeySig> {
     block(move || {
-        let s = wallet::load();
+        let s = wallet::load()?;
         let card = cards::list().map_err(|e| e.to_string())?.into_iter().find(|c| c.reader == reader).ok_or("that card is no longer plugged in")?;
         let pub_hex = card.pubkey.ok_or("this card has no signing key")?;
         let digest = message::legacy_digest(&message);
@@ -510,7 +511,7 @@ async fn message_sign_key(reader: String, pin: String, message: String) -> R<mes
 /// Stage a BIP 322 proof for one of the vault's addresses. It then goes through the Sign screen like a spend.
 #[tauri::command]
 fn message_stage(name: String, index: u32, message: String) -> R<wallet::StagedMessage> {
-    let mut s = wallet::load();
+    let mut s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
     if message.trim().is_empty() { return Err("write the message first".into()); }
     let d = wallet::parse(&wallet::descriptor_at(&v, index)?)?.at_derivation_index(0).map_err(|e| e.to_string())?;
@@ -531,7 +532,7 @@ struct MessageDone { address: String, message: String, signature: String }
 /// Every signature is in: turn the finished proof into the base64 BIP 322 signature and clear it.
 #[tauri::command]
 fn message_finish(name: String) -> R<MessageDone> {
-    let mut s = wallet::load();
+    let mut s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
     let st = s.last_message.clone().ok_or("no message is staged")?;
     let psbt = s.last_psbt.clone().ok_or("no message is staged")?;
@@ -547,7 +548,7 @@ fn message_finish(name: String) -> R<MessageDone> {
 
 #[tauri::command]
 fn message_verify(address: String, message: String, signature: String) -> R<message::Verified> {
-    let s = wallet::load();
+    let s = wallet::load()?;
     message::verify(&address, &message, &signature, wallet::network_of(&s.settings.network))
 }
 
@@ -635,7 +636,7 @@ struct SealStatus { id: String, threshold: usize, keys: Vec<SealKey>, sealed: us
 #[tauri::command]
 async fn seal_status(name: String) -> R<SealStatus> {
     block(move || {
-        let s = wallet::load();
+        let s = wallet::load()?;
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
         let cards = seal_cards()?;
         let shares = seal_shares(&v, &cards)?;
@@ -675,7 +676,7 @@ async fn seal_status(name: String) -> R<SealStatus> {
 #[tauri::command]
 async fn seal_write(name: String, reader: String, admin_pin: String, pin: String, replace: bool) -> R<String> {
     block(move || {
-        let s = wallet::load();
+        let s = wallet::load()?;
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
         let cards = seal_cards()?;
         let card = cards.iter().find(|c| c.reader == reader).ok_or("that key is no longer plugged in")?;
@@ -691,6 +692,7 @@ async fn seal_write(name: String, reader: String, admin_pin: String, pin: String
             if !e.locked && e.share != shares[i] && !replace { return Err("This key already carries a different share of this vault. Reseal every card to replace it.".into()); }
         }
         let key = cards::seal_key(&reader, &pin, true).map_err(|e| e.to_string())?.ok_or("the key would not keep a secret for the seal")?;
+        if let Some(pk) = &card.pubkey { learn_card(pk, card.serial, &key); }   // a sealed key can open this app too
         use bitcoin::secp256k1::rand::RngCore;
         let mut nonce = [0u8; 8];
         bitcoin::secp256k1::rand::rngs::OsRng.fill_bytes(&mut nonce);
@@ -755,7 +757,7 @@ fn seal_check(rec: &seal::Record, found: &[Found]) -> R<()> {
 /// What the shares collected so far (possibly over several card swaps) can rebuild.
 #[tauri::command]
 fn seal_preview(found: Vec<Found>) -> R<Vec<Candidate>> {
-    let s = wallet::load();
+    let s = wallet::load()?;
     let mut ids: Vec<String> = found.iter().map(|f| f.entry.id.clone()).collect();
     ids.sort(); ids.dedup();
     Ok(ids.into_iter().map(|id| {
@@ -772,6 +774,100 @@ fn seal_preview(found: Vec<Found>) -> R<Vec<Candidate>> {
     }).collect())
 }
 
+// ------------------------------------------------------------------- lock --
+// What this computer keeps is sealed (lockbox.rs). These are the ways in, and the settings for them.
+
+#[derive(serde::Serialize)]
+struct LockCard { pubkey: String, name: String, added: u64 }
+#[derive(serde::Serialize)]
+struct LockStatus { sealed: bool, unlocked: bool, finished: bool, touch: bool, idle_minutes: u32, cards: Vec<LockCard>, moved: Option<lockbox::Migration> }
+
+fn lock_state(moved: Option<lockbox::Migration>) -> R<LockStatus> {
+    let s = lockbox::slots()?;
+    Ok(LockStatus { sealed: lockbox::sealed_mode(), unlocked: lockbox::unlocked(), finished: s.as_ref().map(|s| s.migrated).unwrap_or(false), touch: s.as_ref().map(|s| s.touch).unwrap_or(true),
+        idle_minutes: s.as_ref().map(|s| s.idle_minutes).unwrap_or(0), cards: s.map(|s| s.cards.into_iter().map(|c| LockCard { pubkey: c.pubkey, name: c.name, added: c.added }).collect()).unwrap_or_default(), moved })
+}
+
+#[tauri::command]
+fn lock_status() -> R<LockStatus> { lock_state(None) }
+
+/// The first run of a build that seals its files: make the key, put it in the Keychain, seal everything, prove each
+/// sealed copy before its readable one goes. Also finishes a move that was interrupted.
+#[tauri::command]
+async fn lock_start() -> R<LockStatus> {
+    block(|| { let m = lockbox::migrate()?; attach::clear_opened(); lock_state(Some(m)) }).await
+}
+
+#[tauri::command]
+async fn lock_open_mac() -> R<LockStatus> {
+    block(|| { lockbox::unlock_mac("open your vaults")?; let m = lockbox::migrate()?; attach::clear_opened(); lock_state(Some(m)) }).await
+}
+
+/// The plugged-in key and its PIN. A wrong PIN costs one of the key's tries, as it would when signing.
+#[tauri::command]
+async fn lock_open_card(reader: String, pin: String) -> R<LockStatus> {
+    block(move || {
+        let card = cards::list().map_err(|e| e.to_string())?.into_iter().find(|c| c.reader == reader).ok_or("that key is no longer plugged in")?;
+        let pubkey = card.pubkey.clone().ok_or("that key has no signing key on it")?;
+        let slots = lockbox::slots()?.ok_or("this computer has nothing sealed yet")?;
+        // the PIN is only spent on a key that can actually open this app
+        if !slots.cards.iter().any(|c| c.pubkey == pubkey) { return Err("that key has not been added as a way to open this app".into()); }
+        let secret = cards::seal_key(&reader, &pin, false).map_err(|e| e.to_string())?.ok_or("that key no longer holds the secret it was added with")?;
+        lockbox::unlock_card(&pubkey, &secret)?;
+        let m = lockbox::migrate()?; attach::clear_opened();
+        lock_state(Some(m))
+    }).await
+}
+
+#[tauri::command]
+fn lock_now() -> R<LockStatus> { lockbox::lock(); lock_state(None) }
+
+/// Let the plugged-in key open this app. Its secret is made if the key has none yet (the same one a seal will use).
+#[tauri::command]
+async fn lock_add_card(reader: String, pin: String) -> R<LockStatus> {
+    block(move || {
+        lockbox::key()?;
+        let card = cards::list().map_err(|e| e.to_string())?.into_iter().find(|c| c.reader == reader).ok_or("that key is no longer plugged in")?;
+        let pubkey = card.pubkey.clone().ok_or("that key has no signing key on it yet")?;
+        let secret = cards::seal_key(&reader, &pin, true).map_err(|e| e.to_string())?.ok_or("the key would not keep a secret")?;
+        lockbox::add_card(&pubkey, &card_name(&pubkey, card.serial), &secret, now())?;
+        lock_state(None)
+    }).await
+}
+
+#[tauri::command]
+fn lock_remove_card(pubkey: String) -> R<LockStatus> {
+    lockbox::key()?;
+    let mut s = lockbox::slots()?.ok_or("nothing is sealed yet")?;
+    s.cards.retain(|c| c.pubkey != pubkey);
+    lockbox::save_slots(&s)?;
+    lock_state(None)
+}
+
+/// Touch ID on or off, and the idle lock. Turning the prompt OFF is itself something only the person at the Mac may do.
+#[tauri::command]
+async fn lock_settings(touch: Option<bool>, idle_minutes: Option<u32>) -> R<LockStatus> {
+    block(move || {
+        lockbox::key()?;
+        let mut s = lockbox::slots()?.ok_or("nothing is sealed yet")?;
+        if let Some(t) = touch { if s.touch && !t { lockbox::mac::presence("stop asking for Touch ID when Any Two Keys opens")?; } s.touch = t; }
+        if let Some(m) = idle_minutes { s.idle_minutes = m.min(24 * 60); }
+        lockbox::save_slots(&s)?;
+        lock_state(None)
+    }).await
+}
+
+/// What a key is called here: its name in any vault that has it, else its serial.
+fn card_name(pubkey: &str, serial: u32) -> String {
+    wallet::load().ok().and_then(|s| s.vaults.iter().flat_map(|v| v.keys.iter()).find(|k| k.pubkey == pubkey).map(|k| k.name.clone())).unwrap_or_else(|| format!("key {serial}"))
+}
+/// A key's secret has just been read for another reason (sealing, restoring): let that key open this app too.
+fn learn_card(pubkey: &str, serial: u32, secret: &[u8; 32]) {
+    if !lockbox::sealed_mode() || !lockbox::unlocked() { return; }
+    if lockbox::slots().ok().flatten().map(|s| s.cards.iter().any(|c| c.pubkey == pubkey && lockbox::unwrap_from_card(&s.id, c, secret).is_ok())).unwrap_or(true) { return; }
+    let _ = lockbox::add_card(pubkey, &card_name(pubkey, serial), secret, now());
+}
+
 /// Open the locked shares on one key with its PIN. A wrong PIN costs one of the key's tries, as it would when signing.
 #[tauri::command]
 async fn seal_unlock(reader: String, pin: String) -> R<Vec<Found>> {
@@ -780,6 +876,7 @@ async fn seal_unlock(reader: String, pin: String) -> R<Vec<Found>> {
         let card = cards.iter().find(|c| c.reader == reader).ok_or("that key is no longer plugged in")?;
         let entries = seal::parse_container(&card.container)?;
         let key = cards::seal_key(&reader, &pin, false).map_err(|e| e.to_string())?.ok_or("this key holds no secret for a seal: its shares were not locked by this app")?;
+        if let Some(pk) = &card.pubkey { learn_card(pk, card.serial, &key); }
         entries.into_iter().filter(|e| e.locked).map(|e| {
             let plain = seal::unlock_share(&key, &e.id, e.k, e.x, &hex::decode(&e.share).map_err(|e| e.to_string())?)?;
             Ok(Found { pubkey: card.pubkey.clone().unwrap_or_default(), serial: card.serial, entry: seal::Entry { share: hex::encode(plain), locked: false, ..e } })
@@ -790,7 +887,7 @@ async fn seal_unlock(reader: String, pin: String) -> R<Vec<Found>> {
 /// A vault this computer already has (restored from paper, say) learns its shares from its own keys, once they are open.
 #[tauri::command]
 fn seal_adopt(name: String, found: Vec<Found>) -> R<Store> {
-    let s = wallet::load();
+    let s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
     let id = seal_id(&v);
     let mine: Vec<Found> = found.into_iter().filter(|f| f.entry.id == id && !f.entry.locked).collect();
@@ -829,7 +926,7 @@ async fn label_set(name: String, key: String, label: String) -> R<Store> {
         if label.is_empty() { v.labels.remove(&key); } else { v.labels.insert(key, label); }
     })?;
     let _ = labels_sync(name).await;   // best effort; the status line on Home reports a host that could not be reached
-    Ok(wallet::load())
+    Ok(wallet::load()?)
 }
 
 /// The long note on a transaction, an address or a coin. It rides in the same synced record as the label.
@@ -844,7 +941,7 @@ async fn note_set(name: String, key: String, note: String) -> R<Store> {
         if note.trim().is_empty() { v.notes.remove(&key); } else { v.notes.insert(key, note); }
     })?;
     let _ = labels_sync(name).await;
-    Ok(wallet::load())
+    Ok(wallet::load()?)
 }
 
 // ---------- attachments: files kept with a record (attach.rs) ----------
@@ -869,7 +966,7 @@ async fn attach_into(name: String, key: String, items: Vec<(String, Vec<u8>)>, k
         })?;
         let _ = labels_sync(name).await;   // the RECORD travels now; the bytes stay on this computer until attachments sync is built
     }
-    Ok(Attached { store: wallet::load(), added, notes, errors })
+    Ok(Attached { store: wallet::load()?, added, notes, errors })
 }
 
 fn read_capped(path: &std::path::Path) -> Result<(String, Vec<u8>), String> {
@@ -919,7 +1016,7 @@ async fn attach_remove(name: String, key: String, sha256: String) -> R<Store> {
     let in_use: std::collections::HashSet<String> = st.vaults.iter().flat_map(|v| v.files.values().flatten()).flat_map(|e| ["sha256", "thumb"].into_iter().filter_map(|f| e.get(f).and_then(|x| x.as_str()).map(String::from)).collect::<Vec<_>>()).collect();
     attach::sweep(&gone, &in_use);
     let _ = labels_sync(name).await;
-    Ok(wallet::load())
+    Ok(wallet::load()?)
 }
 
 #[tauri::command]
@@ -941,7 +1038,7 @@ struct LabelsStatus { backed_up: bool, host: String, count: usize, synced: u64, 
 /// Pull, merge and push this vault's labels with the label host (labels.rs). Cheap when nothing changed.
 #[tauri::command]
 async fn labels_sync(name: String) -> R<LabelsStatus> {
-    let s = wallet::load();
+    let s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
     let host = s.settings.vss.clone();
     let count = v.labels.len();
@@ -973,7 +1070,7 @@ async fn labels_sync(name: String) -> R<LabelsStatus> {
 
 #[tauri::command]
 fn labels_export(name: String) -> R<String> {
-    let s = wallet::load();
+    let s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
     let mut lines: Vec<String> = Vec::new();
     let mut keys: Vec<&String> = v.labels.keys().collect(); keys.sort();
@@ -1010,7 +1107,7 @@ async fn labels_import(name: String) -> R<usize> {
 // ---------- BSMS (BIP 129) ----------
 #[tauri::command]
 fn bsms_export(name: String) -> R<String> {
-    let s = wallet::load();
+    let s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
     let first = wallet::address_at(v, 0)?;
     let text = format!("BSMS 1.0\n{}\nNo path restrictions\n{first}\n", v.descriptor);
@@ -1068,20 +1165,22 @@ mod watch {
     }
 
     pub fn pass() -> Vec<Event> {
-        let s0 = wallet::load();
+        // a store that cannot be read (damaged, or locked) means no pass at all: nothing is compared, nothing is saved
+        let s0 = match wallet::load() { Ok(s) => s, Err(e) => { if e != crate::lockbox::LOCKED { log(&format!("pass skipped: {e}")); } return Vec::new() } };
         let mut out = Vec::new();
         let vaults = s0.vaults.clone();
-        for v in &vaults {
+        for (n, v) in vaults.iter().enumerate() {
+            let tag = format!("vault {}", n + 1);   // the log is readable by anyone who can read the disk: no names, amounts or ids in it
             let servers = wallet::servers_for(&s0, &v.network);
-            let sc = match wallet::scan(v, &servers, s0.settings.gap) { Ok(sc) => sc, Err(e) => { log(&format!("{}: scan failed: {e}", v.name)); continue } };
+            let sc = match wallet::scan(v, &servers, s0.settings.gap) { Ok(sc) => sc, Err(e) => { log(&format!("{tag}: scan failed: {e}")); continue } };
             // re-read after the slow part, so a sync that saved meanwhile is not erased
-            let mut s = wallet::load();
+            let mut s = match wallet::load() { Ok(s) => s, Err(e) => { log(&format!("pass stopped: {e}")); return out } };
             let seen = s.seen.entry(v.name.clone()).or_default();
             let now_txs: std::collections::HashMap<String, i32> = sc.history.iter().map(|(t, h, _)| (t.clone(), *h)).collect();
             let now_coins: std::collections::HashMap<String, u64> = sc.coins.iter().map(|c| (format!("{}:{}", c.txid, c.vout), c.value)).collect();
             // a confirmed transaction does not vanish; a scan that lost one came from a server that answered badly
             if let Some(gone) = seen.txs.iter().find(|(t, h)| **h > 0 && !now_txs.contains_key(*t)) {
-                log(&format!("{}: scan lost confirmed {}; ignoring this pass", v.name, &gone.0[..8]));
+                let _ = gone; log(&format!("{tag}: scan lost a confirmed transaction; ignoring this pass"));
                 continue;
             }
             let before = out.len();
@@ -1113,7 +1212,7 @@ mod watch {
             let (n, sm, nc, smc) = (sc.next, sc.scan_max, sc.next_change, sc.scan_max_change);
             let name = v.name.clone();
             let r = wallet::update(move |s| { s.seen.insert(name.clone(), seen_now); if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == name) { vm.next = n; vm.scan_max = sm; vm.next_change = nc; vm.scan_max_change = smc; } });
-            log(&format!("{}: {} coins, {} txs, primed_before={primed_before}, events={}, save={}", v.name, sc.coins.len(), sc.history.len(), out.len() - before, r.as_ref().map(|_| "ok").unwrap_or("FAILED")));
+            log(&format!("{tag}: {} coins, {} txs, primed_before={primed_before}, events={}, save={}", sc.coins.len(), sc.history.len(), out.len() - before, r.as_ref().map(|_| "ok").unwrap_or("FAILED")));
         }
         out
     }
@@ -1132,7 +1231,7 @@ mod watch {
                 let events = pass();
                 for e in &events {
                     let r = app.notification().builder().title(&e.title).body(&e.body).show();
-                    log(&format!("notify '{}': {}", e.title, match &r { Ok(_) => "sent".to_string(), Err(e) => format!("FAILED {e}") }));
+                    log(&format!("notify ({}): {}", e.kind, match &r { Ok(_) => "sent".to_string(), Err(e) => format!("FAILED {e}") }));
                     let _ = app.emit("vault-changed", &e.vault);
                     let _ = app.emit("vault-event", e);   // the window shows its own notice too: a Focus can silence the system one
                 }
@@ -1146,11 +1245,12 @@ mod watch {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
-        .setup(|app| { watch::start(app.handle().clone()); Ok(()) })
-        .invoke_handler(tauri::generate_handler![open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .setup(|app| { attach::clear_opened(); watch::start(app.handle().clone()); Ok(()) })
+        .invoke_handler(tauri::generate_handler![lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Any Two Keys");
+        .build(tauri::generate_context!())
+        .expect("error while running Any Two Keys")
+        .run(|_, event| { if let tauri::RunEvent::Exit = event { lockbox::lock(); } });   // readable copies handed to a viewer go when the app does
 }

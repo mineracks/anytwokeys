@@ -1,6 +1,7 @@
 //! Files kept with a transaction (or an address, or a coin): a receipt, an invoice, a photo.
-//! Bytes live on this computer under `attachments/<sha256 of what is stored>`; the record that names them rides in the
-//! same synced record as the label (labels.rs). Photos are re-saved without their metadata unless the person says not
+//! Bytes live on this computer under `attachments/`, sealed under the store key (lockbox.rs) and named by a KEYED hash
+//! of their content, so neither what they say nor which known file they are can be read off the disk; the record
+//! that names them (by plain sha256) rides in the same synced record as the label (labels.rs). Photos are re-saved without their metadata unless the person says not
 //! to: a receipt photographed at home carries the home's coordinates. See roadmap TRANSACTION-DETAIL.md.
 use bitcoin::hashes::{sha256, Hash};
 use serde::Serialize;
@@ -9,11 +10,17 @@ use std::path::{Path, PathBuf};
 pub const MAX_FILE: u64 = 25 * 1024 * 1024;
 const THUMB_EDGE: u32 = 360;
 
-pub fn dir() -> PathBuf { crate::wallet::store_path().with_file_name("attachments") }
+pub fn dir() -> PathBuf { crate::lockbox::dir().join("attachments") }
 fn blob(hash: &str) -> Result<PathBuf, String> {
     // the path is built from the HASH and nothing else: a name never reaches the file system
     if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) { return Err("that is not an attachment id".into()); }
-    Ok(dir().join(hash.to_lowercase()))
+    let hash = hash.to_lowercase();
+    Ok(dir().join(if crate::lockbox::sealed_mode() { crate::lockbox::blob_name(&hash)? } else { hash }))
+}
+fn read_blob(hash: &str) -> Result<Vec<u8>, String> {
+    let p = blob(hash)?;
+    if crate::lockbox::sealed_mode() { crate::lockbox::read_sealed(&p, "att")?.ok_or_else(|| "that file is not on this computer".to_string()) }
+    else { std::fs::read(&p).map_err(|_| "that file is not on this computer".to_string()) }
 }
 
 fn put(bytes: &[u8]) -> Result<String, String> {
@@ -21,12 +28,26 @@ fn put(bytes: &[u8]) -> Result<String, String> {
     let path = blob(&hash)?;
     if !path.exists() {
         std::fs::create_dir_all(dir()).map_err(|e| e.to_string())?;
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+        if crate::lockbox::sealed_mode() { crate::lockbox::write_sealed(&path, "att", bytes)?; }
+        else {
+            let tmp = path.with_extension("tmp");
+            std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+            std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+        }
     }
     Ok(hash)
 }
+
+/// Readable copies exist only while something outside this app is looking at them: a picture handed to the viewer,
+/// a HEIC on its way through the system's converter. They live in one private folder that is emptied when the app
+/// locks, quits and starts.
+fn scratch() -> Result<PathBuf, String> {
+    let d = dir().join("opened");
+    std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+    #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; let _ = std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)); }
+    Ok(d)
+}
+pub fn clear_opened() { let _ = std::fs::remove_dir_all(dir().join("opened")); }
 
 /// What a file is, by its first bytes — never by the name it arrived with.
 pub fn sniff(b: &[u8]) -> &'static str {
@@ -81,7 +102,7 @@ fn thumb_of(img: &image::DynamicImage) -> Result<Vec<u8>, String> {
 /// HEIC is what an iPhone makes and no pure-Rust decoder reads: on a Mac the system converts it; elsewhere it is kept as it is.
 fn heic_to_jpeg(bytes: &[u8]) -> Option<Vec<u8>> {
     if !cfg!(target_os = "macos") { return None; }
-    let tmp = std::env::temp_dir().join(format!("a2k-{}.heic", hex::encode(&sha256::Hash::hash(bytes)[..8])));
+    let tmp = scratch().ok()?.join(format!("convert-{}.heic", hex::encode(&sha256::Hash::hash(bytes)[..8])));
     let out = tmp.with_extension("jpg");
     std::fs::write(&tmp, bytes).ok()?;
     let ok = std::process::Command::new("/usr/bin/sips").args(["-s", "format", "jpeg"]).arg(&tmp).arg("--out").arg(&out).output().map(|o| o.status.success()).unwrap_or(false);
@@ -119,9 +140,8 @@ pub fn have(hash: &str) -> bool { blob(hash).map(|p| p.exists()).unwrap_or(false
 
 /// A thumbnail's bytes, for the window to draw. Only small things come back this way.
 pub fn small(hash: &str) -> Result<Vec<u8>, String> {
-    let p = blob(hash)?;
-    if std::fs::metadata(&p).map_err(|_| "not on this computer".to_string())?.len() > 400_000 { return Err("too large to preview".into()); }
-    std::fs::read(&p).map_err(|e| e.to_string())
+    if std::fs::metadata(blob(hash)?).map_err(|_| "not on this computer".to_string())?.len() > 400_000 { return Err("too large to preview".into()); }
+    read_blob(hash)
 }
 
 /// Delete bytes nothing refers to any more. `in_use`: every hash any record of any vault still names.
@@ -132,14 +152,13 @@ pub fn sweep(gone: &[String], in_use: &std::collections::HashSet<String>) {
 /// Hand a file to the system's own viewer — only the kinds that are looked at, never run — under a name built from its
 /// TYPE. Anything else is shown in its folder. Returns what was done.
 pub fn open(hash: &str, name: &str, mime: &str) -> Result<&'static str, String> {
-    let src = blob(hash)?;
-    if !src.exists() { return Err("that file is not on this computer".into()); }
-    let folder = dir().join("opened").join(&hash[..16]);
+    let bytes = read_blob(hash)?;
+    let folder = scratch()?.join(&hash[..16]);
     std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
-    let sniffed = sniff(&std::fs::read(&src).map_err(|e| e.to_string())?);   // what it IS, not what its record says
+    let sniffed = sniff(&bytes);   // what it IS, not what its record says
     let stem = Path::new(&safe_name(name)).file_stem().and_then(|s| s.to_str()).unwrap_or("file").to_string();
     let (shown, view) = match ext_for(sniffed) { Some(ext) if sniffed == mime || mime.starts_with("image/") => (folder.join(format!("{stem}.{ext}")), true), _ => (folder.join(format!("{stem}.bin")), false) };
-    std::fs::copy(&src, &shown).map_err(|e| e.to_string())?;
+    std::fs::write(&shown, &bytes).map_err(|e| e.to_string())?;
     if view { ::open::that(&shown).map_err(|e| e.to_string())?; Ok("opened") }
     else { reveal(&shown)?; Ok("shown in its folder: this kind of file is not opened from here") }
 }

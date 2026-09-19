@@ -412,3 +412,21 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .toggle:focus-visible{outline:3px solid var(--gold-soft);outline-offset:2px}
 .txnav{display:flex;align-items:center;gap:12px;max-width:1240px;margin-bottom:-6px}
 .txnav span{font-family:var(--display);font-size:12.5px;flex-grow:1;text-align:center}
+
+/* locked: nothing of the app shows through */
+#lock{position:fixed;inset:0;z-index:200;background:var(--ground);display:flex;align-items:center;justify-content:center;padding:24px;overflow:auto}
+.lock-card{width:min(440px,100%);display:flex;flex-direction:column;align-items:center;gap:14px;text-align:center}
+.lock-card h2{margin:6px 0 0;font-family:var(--display);font-weight:800;font-size:24px;letter-spacing:-.02em}
+.lock-card p{margin:0;max-width:38ch} .lock-card .btn.primary{min-width:240px}
+.lock-err{color:var(--no);font-size:14px;max-width:40ch}
+.lock-or{display:flex;align-items:center;gap:12px;width:100%;margin-top:10px;font-family:var(--display);font-size:12.5px;color:var(--muted)} .lock-or::before,.lock-or::after{content:"";flex:1;height:1px;background:var(--line)}
+#lock-keys{width:100%;display:flex;flex-direction:column;gap:10px;text-align:left}
+.lock-key{display:grid;grid-template-columns:minmax(0,1fr) 120px auto;gap:10px;align-items:center;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+.lock-key b{font-family:var(--display);font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap} .lock-key small{display:block;color:var(--muted);font-size:12.5px;font-weight:400;font-family:var(--serif)}
+.lock-key input{padding:9px 12px;border:1px solid var(--line);border-radius:6px;background:var(--ground);color:var(--ink);font-size:15px;min-height:40px;width:100%} .lock-key input:focus{outline:3px solid var(--gold-soft);border-color:var(--gold)}
+.lock-key.off{grid-template-columns:1fr;opacity:.7}
+.lock-none{font-size:14px;color:var(--muted);text-align:center}
+#lock-slots{display:flex;flex-direction:column;gap:8px}
+.slot{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 12px;border:1px solid var(--line);border-radius:8px;flex-wrap:wrap} .slot b{font-family:var(--display);font-weight:600;font-size:14px} .slot small{color:var(--muted);font-size:12.5px;margin-left:8px}
+.slot.add{border-style:dashed} .slot.add input{padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);width:120px;min-height:38px}
+.slot .asknote{flex-basis:100%}

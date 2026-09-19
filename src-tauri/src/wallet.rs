@@ -104,17 +104,35 @@ pub fn network_of(s: &str) -> Network {
     if s == "mainnet" { Network::Bitcoin } else { Network::Signet }
 }
 
-pub fn store_path() -> std::path::PathBuf {
-    let dir = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join("Any Two Keys");
-    std::fs::create_dir_all(&dir).ok();
-    dir.join("store.json")
-}
+pub fn store_path() -> std::path::PathBuf { crate::lockbox::dir().join("store.json") }
 
-pub fn load() -> Store {
-    let mut s: Store = std::fs::read_to_string(store_path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+/// A store that is not there yet is an empty one. A store that is there and cannot be read is an ERROR, never an
+/// empty one: the next save would write that emptiness over every vault, label and contact on this computer.
+/// Once this computer seals what it keeps (lockbox.rs) the store is `store.enc`, and reading it needs the app unlocked.
+pub fn load() -> Result<Store, String> {
+    let p = store_path();
+    let bytes = if crate::lockbox::sealed_mode() {
+        let key = crate::lockbox::key()?;   // locked is locked, whatever is or is not on disk
+        match std::fs::read(p.with_extension("enc")) {
+            Ok(blob) => Some(crate::lockbox::open_with(&key, "store", &blob).map_err(|e| format!("the app's own file was left alone ({}): {e}", p.with_extension("enc").display()))?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("the app's own file could not be read ({}): {e}", p.with_extension("enc").display())),
+        }
+    } else { None };
+    // no sealed store: the readable one, if there is one — before the move to sealed files, or part-way through it.
+    // Once that move is finished a readable store.json is never read again: anyone who can write a file could
+    // otherwise hand this app a store of their own, with their own addresses in it.
+    let finished = crate::lockbox::slots()?.map(|s| s.migrated).unwrap_or(false);
+    let bytes = match bytes { Some(b) => Some(b), None if finished => None, None => match std::fs::read(&p) {
+        Ok(b) => Some(b),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("the app's own file could not be read ({}): {e}", p.display())),
+    } };
+    let mut s: Store = match bytes { None => Store::default(), Some(b) => parse_store(&b).map_err(|e| format!("the app's own file is damaged and was left alone: {e}"))? };
     if s.settings.network.is_empty() { s.settings.network = "signet".into(); }
-    s
+    Ok(s)
 }
+pub fn parse_store(bytes: &[u8]) -> Result<Store, String> { serde_json::from_slice(bytes).map_err(|e| e.to_string()) }
 
 static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -122,7 +140,7 @@ static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// scanned cannot erase each other's marks. Never hold it across network calls.
 pub fn update<F: FnOnce(&mut Store)>(f: F) -> Result<Store, String> {
     let _g = STORE_LOCK.lock().map_err(|_| "store lock poisoned".to_string())?;
-    let mut s = load();
+    let mut s = load()?;
     f(&mut s);
     save(&s)?;
     Ok(s)
@@ -130,8 +148,14 @@ pub fn update<F: FnOnce(&mut Store)>(f: F) -> Result<Store, String> {
 
 pub fn save(s: &Store) -> Result<(), String> {
     let p = store_path();
+    let text = serde_json::to_string_pretty(s).map_err(|e| e.to_string())?;
+    if crate::lockbox::sealed_mode() {
+        let finished = crate::lockbox::slots()?.map(|s| s.migrated).unwrap_or(false);
+        if !finished && p.exists() { return Err("this computer is part-way through sealing its files; open the app again to finish before anything is saved".into()); }
+        return crate::lockbox::write_sealed(&p.with_extension("enc"), "store", text.as_bytes());
+    }
     let tmp = p.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(s).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &p).map_err(|e| e.to_string())
 }
 

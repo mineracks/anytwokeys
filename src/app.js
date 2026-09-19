@@ -125,7 +125,68 @@ function renderTabs() {
   }
 }
 
+// ---------- locked: everything this app keeps on the computer is encrypted, and something you hold opens it ----------
+let lockInfo = null;
+const OTP = /^[cbdefghijklnrtuv]{32,}$/;   // a brushed key typing a Yubico one-time code, not a PIN
+const lockSaid = (text) => { $('#lock-err').textContent = text || ''; $('#lock-err').hidden = !text; };
+function lockScreen() {
+  return new Promise((done) => {
+    $('#lock').hidden = false;
+    let busy = false, sig = null, stop = false;
+    const opened = (ls) => { stop = true; lockInfo = ls; $('#lock').hidden = true; $('#lock-keys').innerHTML = ''; done(ls); };
+    const withMac = async () => { if (busy) return; busy = true; lockSaid(''); $('#lock-mac').disabled = true;
+      try { opened(await invoke('lock_open_mac')); } catch (e) { lockSaid(String(e)); } finally { busy = false; $('#lock-mac').disabled = false; } };
+    $('#lock-mac').textContent = lockInfo.touch ? 'Open with Touch ID' : 'Open'; $('#lock-mac').onclick = withMac;
+    const keys = async () => { if (stop) return;
+      let seen = []; try { seen = await invoke('cards_list'); } catch {}
+      const now = seen.map(c => c.reader + c.pubkey).join('|');
+      if (now !== sig && !(busy && $('#lock-keys form button:disabled'))) { sig = now;   // never redrawn under a PIN that is on its way to a key
+        const rows = seen.filter(c => c.pubkey).map((c, i) => { const slot = lockInfo.cards.find(k => k.pubkey === c.pubkey);
+          return slot ? `<form class="lock-key" data-reader="${esc(c.reader)}"><b>${esc(slot.name)}<small>plugged in</small></b><input type="password" autocomplete="off" placeholder="Key PIN" aria-label="PIN of ${esc(slot.name)}" id="lock-pin-${i}"><button class="btn" type="submit">Open</button></form>`
+            : `<div class="lock-key off"><b>Key ${esc(String(c.serial || ''))}<small>plugged in, but it has not been added as a way to open this app</small></b></div>`; });
+        $('#lock-keys').innerHTML = rows.join('') || `<div class="lock-none">${lockInfo.cards.length ? 'Plug in ' + lockInfo.cards.map(k => esc(k.name)).join(', or ') + '.' : 'No key has been added yet. Once the app is open, add one in App settings › Lock.'}</div>`;
+        $$('#lock-keys form').forEach(f => { f.onsubmit = async (ev) => { ev.preventDefault(); if (busy) return; const inp = f.querySelector('input'), pin = inp.value;
+          if (OTP.test(pin)) { inp.value = ''; return lockSaid('That was the key typing a one-time code, not a PIN. Nothing was sent to the key and no PIN try was used.'); }
+          if (pin.length < 6) return lockSaid('A key PIN has at least 6 characters.');
+          busy = true; lockSaid(''); f.querySelector('button').disabled = true;
+          try { opened(await invoke('lock_open_card', { reader: f.dataset.reader, pin })); } catch (e) { inp.value = ''; lockSaid(String(e)); } finally { busy = false; if (f.isConnected) f.querySelector('button').disabled = false; } }; });
+      }
+      setTimeout(keys, 2000); };
+    keys(); withMac();   // the system prompt comes up by itself; the keys are there if it is cancelled or cannot answer
+  });
+}
+async function lockNow() { try { await invoke('lock_now'); } catch {} location.reload(); }   // a reload forgets everything the window knew
+function idleLock() {
+  clearTimeout(idleLock.t); const m = lockInfo && lockInfo.sealed ? lockInfo.idle_minutes : 0; if (!m) return;
+  idleLock.t = setTimeout(() => { if (renderSign.signing) return idleLock(); lockNow(); }, m * 60000);
+}
+for (const ev of ['pointerdown', 'keydown', 'wheel']) document.addEventListener(ev, () => idleLock(), { passive: true, capture: true });
+function renderLock() {
+  const card = $('#lock-card'); if (!lockInfo || !lockInfo.sealed) { card.hidden = true; return; } card.hidden = false;
+  $('#lock-state').textContent = 'Vaults, labels, notes, contacts and attachments are encrypted on this computer. The key is in this Mac\'s Keychain' + (lockInfo.cards.length ? `, and ${lockInfo.cards.length === 1 ? 'one of your keys' : lockInfo.cards.length + ' of your keys'} can open the app without it.` : '. No key of yours can open the app yet: add one, so a lost Keychain is not a lost address book.');
+  $('#lock-state').classList.toggle('warn', !lockInfo.cards.length);
+  $('#lock-touch').classList.toggle('on', lockInfo.touch); $('#lock-touch').setAttribute('aria-checked', lockInfo.touch ? 'true' : 'false'); $('#lock-idle').value = String(lockInfo.idle_minutes);
+  const plugged = (cards || []).filter(c => c.pubkey && !lockInfo.cards.some(k => k.pubkey === c.pubkey));
+  const nameOf = (c) => { for (const v of store.vaults) { const k = v.keys.find(k => k.pubkey === c.pubkey); if (k) return k.name; } return 'key ' + (c.serial || ''); };
+  $('#lock-slots').innerHTML = lockInfo.cards.map(k => `<div class="slot"><span><b>${esc(k.name)}</b><small>added ${new Date(k.added * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}</small></span><button class="btn small" type="button" data-slot-x="${esc(k.pubkey)}">Remove</button></div>`).join('')
+    + plugged.map((c, i) => `<form class="slot add" data-reader="${esc(c.reader)}"><span><b>${esc(nameOf(c))}</b><small>plugged in</small></span><span class="row" style="gap:8px"><input type="password" autocomplete="off" placeholder="Key PIN" id="lock-add-pin-${i}" aria-label="PIN of ${esc(nameOf(c))}"><button class="btn small" type="submit">Let it open the app</button></span></form>`).join('')
+    + (!lockInfo.cards.length && !plugged.length ? '<div class="muted" style="font-size:13px">Plug in a key to add it.</div>' : '');
+  $$('#lock-slots [data-slot-x]').forEach(b => askTwice(b, 'This key will no longer open the app on this computer. It still signs and still restores its vaults.', 'Remove it', async () => { try { lockInfo = await invoke('lock_remove_card', { pubkey: b.dataset.slotX }); renderLock(); } catch (e) { fail(e); } }));
+  $$('#lock-slots form').forEach(f => { f.onsubmit = async (ev) => { ev.preventDefault(); const inp = f.querySelector('input'), pin = inp.value;
+    if (OTP.test(pin)) { inp.value = ''; return toast('That was the key typing a one-time code, not a PIN. Nothing was sent to the key.', 8000); }
+    if (pin.length < 6) return toast('A key PIN has at least 6 characters');
+    f.querySelector('button').disabled = true;
+    try { lockInfo = await invoke('lock_add_card', { reader: f.dataset.reader, pin }); toast('That key can now open this app'); renderLock.sig = null; renderLock(); } catch (e) { inp.value = ''; fail(e); if (f.isConnected) f.querySelector('button').disabled = false; } }; });
+}
+const lockSet = async (args) => { try { lockInfo = await invoke('lock_settings', args); idleLock(); } catch (e) { fail(e); } renderLock(); };
+$('#lock-touch').onclick = () => lockSet({ touch: !lockInfo.touch }); $('#lock-touch').onkeydown = (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); lockSet({ touch: !lockInfo.touch }); } };
+$('#lock-idle').onchange = () => lockSet({ idleMinutes: +$('#lock-idle').value });
+$('#lock-now').onclick = lockNow;
+
 async function boot() {
+  try { lockInfo = await invoke('lock_status'); } catch { lockInfo = null; }
+  if (lockInfo && lockInfo.sealed && !lockInfo.unlocked) await lockScreen();
+  else if (lockInfo && !lockInfo.finished) { try { lockInfo = await invoke('lock_start'); } catch (e) { boot.sealFailed = String(e); } }
   store = await invoke('store_get');
   try { osLocale = await invoke('device_locale'); } catch {}   // without it the language list and the clock still answer
   paintNet();
@@ -133,7 +194,10 @@ async function boot() {
   vault = store.vaults.find(v => v.name === want) || store.vaults[0] || null;
   paintNet();
   if (vault) show('home'); else showWelcome();
-  pollCards();
+  pollCards(); idleLock();
+  const moved = lockInfo && lockInfo.moved;
+  if (boot.sealFailed) notice({ kind: 'warn', title: 'This app\'s files are not encrypted yet', body: boot.sealFailed });
+  else if (moved && (moved.store || moved.attachments)) notice({ kind: 'confirmed', title: 'This app\'s files are now encrypted', body: `Vaults, labels, notes and contacts${moved.attachments ? `, and ${moved.attachments} attachment${moved.attachments === 1 ? '' : 's'}` : ''}. Add one of your keys in App settings › Lock, so the app can be opened without this Mac's Keychain.` }, 30000);
 }
 
 // ---------- fiat: which currency, worked out from the device unless the person chose ----------
@@ -173,6 +237,7 @@ async function pollCards() {
   try { cards = await invoke('cards_list'); cardsErr = ''; } catch (e) { cards = []; cardsErr = String(e); }
   for (const c of cards) if (c.pubkey && c.form && packedForm(c.pubkey) !== ((c.form & 0x0F) | 0x40 | (c.nfc ? 0x80 : 0))) { try { store = await invoke('key_form_seen', { pubkey: c.pubkey, form: c.form, nfc: !!c.nfc }); renderSign.tiles = null; if ($('#s-keys').classList.contains('on') && !keysBusy()) renderKeys(); } catch {} }
   if ($('#s-setup').classList.contains('on')) renderSetup();
+  if ($('#s-settings').classList.contains('on')) { const sig = cards.map(c => c.reader + c.pubkey).join('|'); if (sig !== renderLock.sig) { renderLock.sig = sig; renderLock(); } }
   if ($('#s-keys').classList.contains('on')) { const sig = cards.map(c => c.serial + ':' + c.pubkey).sort().join(','); if (sig !== pollCards.sig) { if (!keysBusy()) { pollCards.sig = sig; renderKeys(); } } else renderKeysNow(); }
   if (vault) for (const c of cards) { const k = vault.keys.find(k => c.pubkey && k.pubkey === c.pubkey && !k.serial); if (k && c.serial) { invoke('vault_key_seen', { name: vault.name, pubkey: c.pubkey, serial: c.serial }).then(st => { store = st; vault = st.vaults.find(v => v.name === vault.name) || vault; if ($('#s-keys').classList.contains('on')) renderKeys(); }).catch(() => {}); } }
   if ($('#s-restore').classList.contains('on') && restoreTab.now === 'keys') readSeals();
@@ -1094,6 +1159,7 @@ async function readDescriptor(text) {
 
 // ---------- settings ----------
 function renderSettings() {
+  renderLock();
   $$('#net-pick .opt').forEach(o => o.classList.toggle('on', o.dataset.net === store.settings.network));
   const def = store.settings.network === 'mainnet' ? ['ssl://electrum.mineracks.com:50002', 'https://mempool.mineracks.com'] : ['tcp://100.94.4.10:50001', 'https://signet.mineracks.com'];
   $('#def-electrum').textContent = def[0]; $('#def-explorer').textContent = def[1];
@@ -1133,14 +1199,14 @@ setInterval(() => { if (!document.hidden) checkNode(); }, 30000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) checkNode(); });
 
 // money moved: say so in the window too. Cards stack, stay ten seconds, and a click opens that vault's Home.
-function notice(ev) {
+function notice(ev, stay) {
   const el = document.createElement('div'); el.className = 'notice-card ' + (ev.kind || ''); el.setAttribute('role', 'status');
   el.innerHTML = `<div><div class="nt">${esc(ev.title)}</div><div class="nb">${esc(ev.body)}</div></div><button type="button" class="nx" aria-label="Dismiss">×</button>`;
   const close = () => el.remove();
   el.querySelector('.nx').onclick = (e) => { e.stopPropagation(); close(); };
   el.onclick = () => { const v = store.vaults.find(v => v.name === ev.vault); if (v) { vault = v; try { localStorage.setItem('a2k-vault', v.name); } catch {} paintNet(); renderTabs(); show('home'); } close(); };
   $('#notices').appendChild(el); while ($('#notices').children.length > 4) $('#notices').firstChild.remove();
-  setTimeout(close, 10000);
+  setTimeout(close, stay || 10000);
 }
 window.__TAURI__.event.listen('vault-event', (ev) => notice(ev.payload));
 // the background watcher saw a deposit, a spend or a confirmation: refresh what is on screen
