@@ -30,6 +30,17 @@ document.addEventListener('click', (e) => {
   inp.addEventListener('click', (ev) => ev.stopPropagation());
 });
 
+// window.confirm() is inert in the Tauri webview: it shows nothing and answers "no", so a button guarded by it does nothing at all.
+// A destructive button asks in the page instead: the first press arms it and says what it will do; a second press within 8 s does it.
+function askTwice(btn, question, yesLabel, act) {
+  const disarm = () => { clearTimeout(btn._t); if (btn.dataset.armed) { delete btn.dataset.armed; btn.textContent = btn._label; btn.classList.remove('armed'); } };
+  btn.onclick = async () => {
+    if (btn.dataset.armed) { disarm(); try { await act(); } catch (e) { fail(e); } return; }
+    btn._label = btn.textContent; btn.dataset.armed = '1'; btn.textContent = yesLabel; btn.classList.add('armed');
+    toast(question + ' Press again to confirm.', 8000); btn._t = setTimeout(disarm, 8000);
+  };
+  btn.addEventListener('blur', () => setTimeout(disarm, 150));
+}
 function toast(t, ms = 3500) { const el = $('#toast'); el.textContent = t; el.classList.add('on'); clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove('on'), ms); }
 function fail(e) { toast(String(e && e.message || e), 6000); console.error(e); }
 
@@ -359,10 +370,12 @@ function guideArt(step, form) {
   }
   const arrow = seated ? '' : `<path class="g-arrow g-nudge" d="M${nano ? 128 : 134} ${usbA ? 66 : 66}h16m-6 -6l6 6l-6 6"/>`;
   const [tx, ty] = touchAt;
-  // a finger as a rounded capsule with a nail, coming in from the upper left, its pad resting on the touch point
-  const finger = step !== 'touch' ? '' : `<circle class="g-pulse" cx="${tx}" cy="${ty}" r="15"/><g transform="translate(${tx} ${ty}) rotate(-42)"><rect class="g-finger" x="-14" y="-118" width="28" height="126" rx="14"/><path class="g-nail" d="M-8 -14 v-10 a8 8 0 0 1 16 0 v10"/></g>`;
+  // the fingertip hovers just above the touch point and three ticks point at it: the contact itself stays in view
+  const finger = step !== 'touch' ? '' : `<circle class="g-pulse" cx="${tx}" cy="${ty}" r="${nano ? 9 : 15}"/><g transform="translate(${tx} ${ty - (nano ? 9 : 17)}) rotate(-38)"><rect class="g-finger" x="-13" y="-120" width="26" height="120" rx="13"/><path class="g-nail" d="M-7 -20 v-9 a7 7 0 0 1 14 0 v9"/></g><path class="g-tick" d="M${tx + (nano ? 13 : 20)} ${ty - 12}l5 -6M${tx + (nano ? 17 : 25)} ${ty - 2}l8 -2M${tx - (nano ? 13 : 20)} ${ty + 8}l-6 5"/>`;
+  // at the touch step the picture moves in on the key, so where to touch is the biggest thing in it
+  const box = step !== 'touch' ? '0 0 250 132' : nano ? `${tx - 58} ${ty - 40} 125 66` : `${tx - 92} ${ty - 58} 170 90`;
   // the laptop is drawn over the plug, so a seated key's plug disappears into the port
-  return `<svg viewBox="0 0 250 132" role="img">${seated ? key + lap : lap + key}${arrow}${finger}</svg>`;
+  return `<svg viewBox="${box}" role="img">${seated ? key + lap : lap + key}${arrow}${finger}</svg>`;
 }
 let guideOn = true; try { guideOn = localStorage.getItem('a2k-guide') !== 'off'; } catch {}
 function paintGuide(step, form) {
@@ -395,8 +408,9 @@ async function renderSign() {
   const out = st.pays.filter(p => !p.ours), back = st.pays.filter(p => p.ours).reduce((a, p) => a + p.sats, 0);
   $('#sign-summary').textContent = (out.length ? 'Pays ' + out.map(p => `${sats(p.sats)} sats to ${p.address.slice(0, 12)}…${p.address.slice(-6)}`).join(', ') : 'Pays nothing outside this vault') + (back ? ` · ${sats(back)} back to this vault` : '') + ` · fee ${sats(st.fee)} sats`;
   const tiles = st.keys.map(k => {
-    const cls = full(k) ? 'signed' : k.signed ? 'part' : canSign(k) ? 'here' : st.ready ? 'spare' : '';
-    const label = full(k) ? '✓ signed' : k.signed ? `${k.signed} of ${st.inputs} inputs` : canSign(k) ? 'plugged in · sign now' : st.ready ? 'not needed' : 'not yet';
+    const waiting = renderSign.signing === k.pubkey;
+    const cls = full(k) ? 'signed' : waiting ? 'touch' : k.signed ? 'part' : canSign(k) ? 'here' : st.ready ? 'spare' : '';
+    const label = full(k) ? '✓ signed' : waiting ? 'waiting for touch' : k.signed ? `${k.signed} of ${st.inputs} inputs` : canSign(k) ? 'plugged in · enter PIN' : st.ready ? 'not needed' : 'not yet';
     return `<div class="ckey ${cls}${isNano(k.pubkey) ? ' nano' : ''}">${keyGlyph(k.pubkey)}<span class="kname" title="${esc(k.name)}">${esc(k.name)}</span><span class="kstate">${label}</span></div>`;
   }).join('');
   if (renderSign.tiles !== tiles) { renderSign.tiles = tiles; $('#cer-keys').innerHTML = tiles; }   // unchanged tiles keep their pulse running
@@ -406,41 +420,48 @@ async function renderSign() {
   $('#message-card').hidden = !(st.ready && staged);
   $('#broadcast-card').hidden = !st.ready || !!staged;
   $('#export-card').hidden = !!staged; $('#export-tx').hidden = !st.ready;
-  if (st.ready) { $('#gsteps').hidden = true; $('#guide').hidden = true; $('#guide-toggle').textContent = ''; $('#sign-title').textContent = 'All signatures in'; $('#sign-text').textContent = staged ? 'Produce the signature below; nothing is broadcast.' : 'Nothing has been sent. Review the summary, then send it.'; $('#pin-field').hidden = true; $('#sign-warn').hidden = true; $('#sign-btn').disabled = true; $('#broadcast-text').textContent = `Broadcast to ${netName()} through the Electrum server.`; return; }
+  if (st.ready) { $('#sign-waiting').hidden = true; $('#act-row').hidden = false; $('#gsteps').hidden = true; $('#guide').hidden = true; $('#guide-toggle').textContent = ''; $('#sign-title').textContent = 'All signatures in'; $('#sign-text').textContent = staged ? 'Produce the signature below; nothing is broadcast.' : 'Nothing has been sent. Review the summary, then send it.'; $('#pin-field').hidden = true; $('#sign-warn').hidden = true; $('#sign-btn').disabled = true; $('#broadcast-text').textContent = `Broadcast to ${netName()} through the Electrum server.`; return; }
   // while a key is signing, the 2 s poll redraws the ring and tiles above but must not touch this part:
   // it used to flip "TOUCH THE KEY NOW" back to "plugged in" and re-arm the Sign button mid-signature
   if (renderSign.signing) return;
   const usable = cards.filter(c => c.pubkey && st.keys.some(k => k.pubkey === c.pubkey && !full(k)));
-  $('#gsteps').hidden = false;
+  const q = (n) => `‘${n}’`, list = (ks) => ks.map(k => q(k.name)).join(ks.length === 2 ? ' or ' : ', ');
+  $('#gsteps').hidden = false; $('#act-row').hidden = false; $('#sign-waiting').hidden = true; $('#sign-cancel').hidden = false;
   if (!usable.length) {
-    const open = st.keys.filter(k => !full(k)), next = open[0];
-    $('#sign-title').textContent = open.length === 1 ? `Plug in ${open[0].name}` : 'Plug in a key';
-    $('#sign-text').textContent = cards.length ? 'The key that is plugged in is not one of this vault\'s, or it has already signed. Swap it for ' + open.map(k => k.name).join(' or ') + '.' : (open.length > 1 ? 'Any of ' + open.map(k => k.name).join(', ') + '.' : 'It is the last signature this spend needs.');
+    const open = st.keys.filter(k => !full(k)), done = st.keys.filter(full), next = open[0];
+    const inNow = cards.map(c => st.keys.find(k => k.pubkey === c.pubkey)), signedIn = inNow.filter(k => k && full(k)), stranger = cards.length && inNow.some(k => !k);
+    // three different situations, three different sentences: a success must not read like a fault
+    if (signedIn.length) { $('#sign-title').textContent = `${q(signedIn[0].name)} signed. Plug in another key`; $('#sign-text').textContent = `${have} of ${need} signatures are on. Use ${list(open)} next; ${q(signedIn[0].name)} can come out or stay in.`; }
+    else if (stranger) { $('#sign-title').textContent = 'That key is not one of this vault’s'; $('#sign-text').textContent = `Swap it for ${list(open)}.`; }
+    else { $('#sign-title').textContent = open.length === 1 ? `Plug in ${q(open[0].name)}` : 'Plug in a key'; $('#sign-text').textContent = done.length ? `${have} of ${need} signatures are on. Use ${list(open)} next.` : `Any of ${list(open)}.`; }
     $('#pin-field').hidden = true; $('#sign-warn').hidden = true; $('#sign-btn').disabled = true;
     renderSign.focusedFor = null; paintGuide('plug', next ? (packedForm(next.pubkey) || 3) : 3); return;
   }
-  const c = usable[0]; const k = vault.keys.find(k => k.pubkey === c.pubkey), nano = [2, 4].includes(c.form & 0x0F);
-  $('#sign-title').textContent = `${k.name} is plugged in`; $('#sign-text').textContent = `${modelName(c.form, c.nfc)} · serial ${c.serial}. Enter its PIN and press Sign. Then the key blinks: touch it then, not before${st.inputs > 1 ? ', once for each of the ' + st.inputs + ' inputs' : ''}.`;
+  const c = usable[0]; const k = vault.keys.find(k => k.pubkey === c.pubkey), nano = [2, 4].includes(c.form & 0x0F), where = nano ? 'gold strip' : 'gold contact';
+  $('#sign-title').textContent = `Enter the PIN for ${q(k.name)}`; $('#sign-text').textContent = `${modelName(c.form, c.nfc)} · serial ${c.serial}. Press Enter, then touch the key when its light flashes.`;
   $('#pin-field').hidden = false; $('#sign-warn').hidden = false; $('#sign-btn').disabled = false;
   paintGuide('pin', c.form || 3);
   // hands stay on the keyboard: the PIN field takes focus once when a key that can sign appears, and Enter signs
   if (renderSign.focusedFor !== c.pubkey) { renderSign.focusedFor = c.pubkey; if (!document.activeElement || document.activeElement === document.body) $('#pin').focus(); }
   $('#sign-btn').onclick = async () => {
-    const pin = $('#pin').value; if (!pin) return toast('Enter the card PIN');
+    const pin = $('#pin').value; if (!pin) return toast('Enter the key’s PIN');
     // A brushed key with Yubico OTP on types 44 letters of "modhex" and presses Enter. Sent to the card as a PIN that would cost
     // one of its three tries, so it is stopped here: nothing a person chooses as a PIN is 32+ characters from these sixteen letters.
     if (/^[cbdefghijklnrtuv]{32,}$/.test(pin)) { $('#pin').value = ''; return toast('That was the key typing a one-time code, not a PIN. Nothing was sent to the card and no PIN try was used. Turn off Yubico OTP on this key to stop it happening.', 9000); }
-    renderSign.signing = true; $('#sign-btn').disabled = true; $('#pin-field').hidden = true; $('#sign-warn').hidden = true;
-    $('#sign-title').textContent = 'Touch the key now';
-    $('#sign-text').textContent = (nano ? 'It is blinking. Touch the gold strip on its top edge' : 'It is blinking. Touch the gold contact') + (st.inputs > 1 ? `, once for each of the ${st.inputs} inputs.` : '.') + ' Keep it plugged in; this moves on by itself when the key has signed.';
-    paintGuide('touch', c.form || 3);
+    // the next action is physical: the software steps back — no buttons, one status line, the picture moves in on the key
+    renderSign.signing = c.pubkey; renderSign.tiles = null; $('#act-row').hidden = true; $('#sign-cancel').hidden = true; $('#sign-warn').hidden = true; $('#sign-waiting').hidden = false;
+    $('#sign-title').textContent = `Touch the ${where} now`;
+    $('#sign-text').textContent = `${nano ? 'It runs along the key’s top edge. Touch it' : 'Touch it'} when its light flashes${st.inputs > 1 ? `, once for each of the ${st.inputs} inputs` : ''}. Keep the key plugged in.`;
+    paintGuide('touch', c.form || 3); renderSign();
     try { const r = await invoke('spend_sign', { name: vault.name, reader: c.reader, pin }); $('#pin').value = ''; toast(`${r.signer} signed ${r.signed_inputs.length} input${r.signed_inputs.length === 1 ? '' : 's'}`); }
     catch (e) { fail(e); }
-    renderSign.signing = false; renderSign();
+    renderSign.signing = false; renderSign.tiles = null; renderSign();
   };
 }
 $('#export-psbt').onclick = async () => { try { const p = await invoke('spend_export', { name: vault.name, what: 'psbt' }); $('#export-note').textContent = 'Saved ' + p; } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
 $('#export-tx').onclick = async () => { try { const p = await invoke('spend_export', { name: vault.name, what: 'tx' }); $('#export-note').textContent = 'Saved ' + p + ' — raw hex, broadcastable from any wallet or explorer.'; } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
+try { $('#export-card').open = localStorage.getItem('a2k-export-open') === '1'; } catch {}
+$('#export-card').addEventListener('toggle', () => { try { localStorage.setItem('a2k-export-open', $('#export-card').open ? '1' : '0'); } catch {} if (!$('#export-card').open) stopQr(); });
 $('#export-pdf').onclick = async () => { try { $('#export-note').textContent = 'Saved ' + await invoke('spend_pdf', { name: vault.name }) + ' — the codes and the text on it are the same PSBT.'; } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
 // QR: UR crypto-psbt. A looping set of parts (plain ones, then fountain mixtures so a late camera still completes), or one still code when it fits.
 const qrShow = { timer: null, parts: [], single: null, still: false, i: 0 };
@@ -472,7 +493,7 @@ $('#psbt-open').onclick = () => loadPsbt(null);
 $('#psbt-paste-toggle').onclick = () => { $('#psbt-paste').hidden = !$('#psbt-paste').hidden; if (!$('#psbt-paste').hidden) $('#psbt-text').focus(); };
 $('#psbt-load').onclick = () => { const t = $('#psbt-text').value.trim(); if (!t) return toast('Paste the PSBT first'); loadPsbt(t); };
 $('#copy-psbt').onclick = async () => { try { const st = await invoke('store_get'); if (!st.last_psbt) return toast('No spend in progress'); await navigator.clipboard.writeText(st.last_psbt); toast('PSBT copied (base64)'); } catch (e) { fail(e); } };
-$('#staged-discard').onclick = async () => { if (!confirm('Discard the transaction that is waiting for signatures? Nothing has been sent; any signatures on it are lost.')) return; await invoke('spend_discard'); built = null; location.reload(); };
+askTwice($('#staged-discard'), 'Discard the transaction that is waiting for signatures? Nothing has been sent; any signatures on it are lost.', 'Yes, discard it', async () => { await invoke('spend_discard'); built = null; location.reload(); });
 $('#sign-cancel').onclick = async () => { await invoke('spend_discard'); built = null; coinPick.clear(); $('#build-btn').textContent = 'Build transaction'; $('#build-btn').onclick = null; show('send'); location.reload(); };
 $('#broadcast-btn').onclick = async () => {
   $('#broadcast-btn').disabled = true;
@@ -650,7 +671,7 @@ $('#save-names').onclick = async () => {
 };
 $('#vault-pdf').onclick = async () => { try { toast('Saved ' + await invoke('vault_pdf', { name: vault.name }), 6000); } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
 $('#copy-desc').onclick = () => navigator.clipboard.writeText(vault._recovery || vault.descriptor).then(() => toast('Recovery line copied'));
-$('#forget-vault').onclick = async () => { if (!confirm(`Forget '${vault.name}' on this computer? The coins stay on the chain; the recovery line and two keys bring it back.`)) return; store = await invoke('vault_forget', { name: vault.name }); vault = null; boot(); };
+askTwice($('#forget-vault'), 'Forget this vault on this computer? The coins stay on the chain; two sealed keys, or the recovery line and two keys, bring it back.', 'Yes, forget it here', async () => { store = await invoke('vault_forget', { name: vault.name }); vault = null; boot(); });
 
 // ---------- setup (enrol) ----------
 function renderSetup() {
@@ -680,11 +701,10 @@ function renderSetup() {
     <div class="row">${has ? '<button class="btn primary" id="use-btn">Use this card\'s key</button><button class="btn" id="replace-btn" style="border-color:var(--no);color:var(--no)">Replace it with a new key…</button>' : '<button class="btn primary" id="enrol-btn">Generate key on card</button>'}</div>`;
   if (has) {
     $('#use-btn').onclick = () => { setup.keys.push({ name: $('#enrol-name').value.trim() || nameGuess, serial: fresh.serial, pubkey: fresh.pubkey }); toast('enrolled with its existing key'); renderSetup(); };
-    $('#replace-btn').onclick = () => {
-      if (!confirm('Generate a NEW key on this card?\n\nThe key it holds now will be destroyed. Any vault that key belongs to loses that cosigner for good. Only do this for a card that has never held funds.')) return;
+    askTwice($('#replace-btn'), 'Generate a NEW key on this card? The key it holds now will be destroyed, and any vault it belongs to loses that cosigner for good. Only for a card that has never held funds.', 'Yes, replace its key', async () => {
       box.innerHTML += '<div class="field" style="margin-top:12px"><div class="label">Admin PIN</div><input id="enrol-admin" type="password" autocomplete="off" style="max-width:260px"></div><button class="btn" id="enrol-btn" style="border-color:var(--no);color:var(--no);margin-top:10px">Generate a new key, destroying the old one</button>';
       wireGenerate();
-    };
+    });
   } else wireGenerate();
   function wireGenerate() { $('#enrol-btn').onclick = async () => {
     const name = $('#enrol-name').value.trim() || nameGuess, admin = $('#enrol-admin').value;

@@ -114,7 +114,7 @@
         <div class="signmain">
           <div class="card" id="ceremony">
             <div class="cer-top">
-              <svg id="cer-ring" viewBox="0 0 120 120" width="124" height="124" role="img" aria-label="Signatures collected"></svg>
+              <svg id="cer-ring" viewBox="0 0 120 120" width="92" height="92" role="img" aria-label="Signatures collected"></svg>
               <div class="cer-head">
                 <div class="cer-count"><b id="cer-have">0</b> of <span id="cer-need">2</span> <span id="cer-word">signatures</span></div>
                 <div id="sign-progress" class="cer-line"></div>
@@ -129,9 +129,9 @@
                 <div class="guide-body">
                   <div class="cer-act-title" id="sign-title">Plug in a key</div>
                   <div class="muted" id="sign-text">Any of the vault's keys that has not signed yet.</div>
-                  <div class="warn" id="sign-warn" hidden>Do not touch the key before this screen asks. An untended touch can type a code into whatever has focus.</div>
-                  <div class="row" style="align-items:flex-end"><div class="field" id="pin-field" hidden style="flex:0 1 220px"><div class="label">Card PIN</div><input type="password" id="pin" autocomplete="off"></div><button class="btn primary" id="sign-btn" disabled>Sign with this key</button><button class="btn" id="sign-cancel">Cancel this spend</button></div>
-                  <button class="linkish" id="guide-toggle" type="button"></button>
+                  <div class="hold" id="sign-warn" hidden>Wait for the touch prompt before touching your key. <details class="why"><summary>Why?</summary>A key with Yubico OTP switched on types a one-time code into whatever has the focus when it is brushed. The app refuses such a code as a PIN, but it is tidier not to touch early.</details></div>
+                  <div class="row act-row" id="act-row" style="align-items:flex-end"><div class="field" id="pin-field" hidden style="flex:0 1 200px"><div class="label">Key PIN</div><input type="password" id="pin" autocomplete="off"></div><button class="btn primary" id="sign-btn" disabled>Sign with this key</button></div><div class="waiting" id="sign-waiting" hidden><i></i>Waiting for your touch…</div>
+                  <div class="act-foot"><button class="linkish" id="guide-toggle" type="button"></button><button class="linkish" id="sign-cancel" type="button">Cancel this spend</button></div>
                 </div>
               </div>
             </div>
@@ -141,7 +141,7 @@
           <div class="card" id="nospend" hidden><div class="cer-act-title" id="nospend-title">No spend in progress</div><div class="muted" id="nospend-text">Build one on the Send screen, or load a PSBT there.</div><div class="row"><button class="btn primary" data-go="send">Go to Send</button></div></div>
         </div>
         <div class="signside">
-          <div class="card" id="export-card" hidden><div class="label">Take it elsewhere</div><div class="muted" style="font-size:14px">Save the transaction to broadcast or finish signing in another wallet. Nothing is sent from here.</div><div class="btn-grid"><button class="btn" id="export-psbt" title="The binary BIP 174 file every PSBT wallet opens">Save as PSBT</button><button class="btn" id="export-qr">Show as QR</button><button class="btn" id="export-pdf">Save as PDF</button><button class="btn" id="export-tx" hidden>Save signed transaction</button><button class="btn" id="copy-psbt">Copy PSBT</button></div><div class="muted" style="font-size:13px" id="export-note"></div><div id="qr-panel" hidden><div class="qr-box"><canvas id="qr-canvas" width="720" height="720"></canvas></div><div class="qr-side"><div class="label" id="qr-title">Scan with the other wallet</div><div class="muted" style="font-size:13px" id="qr-note"></div><div class="row"><button class="btn small" id="qr-mode" hidden>Show one still code</button><button class="btn small" id="qr-close">Hide</button></div></div></div></div>
+          <details class="card quiet" id="export-card" hidden><summary><span class="label">Export transaction</span><span class="muted sumhint">PSBT file · QR · PDF</span></summary><div class="muted" style="font-size:14px">Finish signing on another computer or in another wallet, or keep a copy. Nothing is sent from here.</div><div class="btn-grid"><button class="btn" id="export-psbt" title="The binary BIP 174 file every PSBT wallet opens">Save as PSBT</button><button class="btn" id="export-qr">Show as QR</button><button class="btn" id="export-pdf">Save as PDF</button><button class="btn" id="export-tx" hidden>Save signed transaction</button><button class="btn" id="copy-psbt">Copy PSBT</button></div><div class="muted" style="font-size:13px" id="export-note"></div><div id="qr-panel" hidden><div class="qr-box"><canvas id="qr-canvas" width="720" height="720"></canvas></div><div class="qr-side"><div class="label" id="qr-title">Scan with the other wallet</div><div class="muted" style="font-size:13px" id="qr-note"></div><div class="row"><button class="btn small" id="qr-mode" hidden>Show one still code</button><button class="btn small" id="qr-close">Hide</button></div></div></div></details>
         </div>
       </div>
     </section>

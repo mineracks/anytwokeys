@@ -17,7 +17,7 @@ const store = () => ({ forms: __state.forms || {}, vaults: [V], settings: { netw
 const ceremony = () => { if (!__state.psbt) throw 'no spend in progress'; const full = __state.signed.filter(n => n >= __state.inputs).length; return { ours: __state.ours !== false, inputs: __state.inputs, need: 2, have: Math.min(full, 2), ready: full >= 2, fee: 190, txid: 'bcd3fb3d', bytes: 398,
   keys: V.keys.map((k, i) => ({ name: k.name, pubkey: k.pubkey, signed: __state.signed[i] })), pays: [{ address: 'tb1qrecipient0000000000000000000000000000000000000000000dest', sats: 5000, ours: false }, { address: 'tb1qchange', sats: 4810, ours: true }] }; };
 const H = { store_get: store, cards_list: () => { if (!__state.cards.length) throw 'no YubiKey found'; return __state.cards; }, vault_sync: () => { throw 'offline'; }, fees_get: () => ({ slow: 1, medium: 2, fast: 3 }),
-  key_form_seen: (a) => { __state.forms = Object.assign({}, __state.forms, { [a.pubkey]: a.form }); return store(); }, spend_discard: () => { __state.psbt = false; },
+  key_form_seen: (a) => { __state.forms = Object.assign({}, __state.forms, { [a.pubkey]: a.form }); return store(); }, spend_discard: () => { __state.psbt = false; sessionStorage.setItem('discards', String(1 + +(sessionStorage.getItem('discards') || 0))); },
   spend_sign: async (a) => { __state.signCalls = (__state.signCalls || 0) + 1; await new Promise(r => window.__signRelease = r); const i = +a.reader.slice(-1); __state.signed[i] = __state.inputs; return { signer: V.keys[i].name, signed_inputs: [0, 1], psbt: 'x', status: {} }; },
   spend_ceremony: ceremony, spend_qr: () => ({ parts: %(parts)s, single: %(single)s, bytes: 398 }), spend_pdf: () => '/tmp/x.pdf',
   spend_import: (a) => { __state.imported = a; __state.psbt = true; __state.signed = [2, 0, 0]; return ceremony(); } };
@@ -38,7 +38,7 @@ with sync_playwright() as p:
     tiles = pg.locator("#cer-keys .ckey")
     check("one tile per vault key", tiles.count() == 3)
     check("0 of 2, no arc filled", pg.inner_text("#cer-have") == "0" and pg.locator("#cer-ring .arc[style*='opacity:0']").count() == 2)
-    check("the plugged-in key is the one marked to sign", "here" in tiles.nth(1).get_attribute("class") and "sign now" in tiles.nth(1).inner_text())
+    check("the plugged-in key is the one marked to sign", "here" in tiles.nth(1).get_attribute("class") and "enter PIN" in tiles.nth(1).inner_text())
     check("the sentence names what is left", "2 more keys, any of laptop, keyring, off-site" in pg.inner_text("#sign-progress"), pg.inner_text("#sign-progress"))
     check("it says what the spend pays", "5,000 sats to tb1qrecipien" in pg.inner_text("#sign-summary") and "4,810 back to this vault" in pg.inner_text("#sign-summary"), pg.inner_text("#sign-summary"))
     pg.locator("#ceremony").screenshot(path=str(out / "ceremony-0.png"))
@@ -48,7 +48,9 @@ with sync_playwright() as p:
     pg.evaluate("__state.signed = [0, 2, 0]; __state.cards = %s" % json.dumps([card(2)])); pg.wait_for_timeout(2600)
     check("1 of 2: keyring signed, off-site now marked to sign", "signed" in tiles.nth(1).get_attribute("class") and "here" in tiles.nth(2).get_attribute("class") and pg.inner_text("#cer-have") == "1")
     check("sentence: who signed, who may finish", "keyring has signed. One more key, any of laptop, off-site" in pg.inner_text("#sign-progress"), pg.inner_text("#sign-progress"))
-    check("export card is offered after one signature", pg.locator("#export-card").is_visible() and pg.locator("#export-pdf").is_visible() and pg.locator("#export-qr").is_visible())
+    check("export is offered after one signature, folded away until asked for", pg.locator("#export-card").is_visible() and not pg.locator("#export-pdf").is_visible() and "export transaction" in pg.inner_text("#export-card summary").lower())
+    pg.click("#export-card summary"); pg.wait_for_timeout(150)
+    check("one click opens it, and it stays open next time", pg.locator("#export-pdf").is_visible() and pg.locator("#export-qr").is_visible() and pg.evaluate("localStorage.getItem('a2k-export-open')") == "1")
     pg.locator("#ceremony").screenshot(path=str(out / "ceremony-1.png"))
     # ---- context: where am I, and the way back ----
     lit = lambda: [e.inner_text().split("\n")[0] for e in pg.locator(".side .nav.on, aside .nav.on, #vault-tabs .nav.on, .nav.on").all()]
@@ -73,6 +75,13 @@ with sync_playwright() as p:
     pg.evaluate("show('send')"); pg.wait_for_timeout(400)
     check("Send's breadcrumb is vault > Send", pg.inner_text("#crumbs").split() == "family vault › Send".split(), pg.inner_text("#crumbs"))
     pg.screenshot(path=str(out / "send-staged.png"))
+    pg.evaluate("window.confirm = () => false")   # what the Tauri webview does: shows nothing, answers no
+    pg.click("#staged-discard"); pg.wait_for_timeout(200)
+    check("Discard asks in the page: first press arms it and says what it will do, nothing is discarded yet", pg.inner_text("#staged-discard") == "Yes, discard it" and "Press again to confirm" in pg.inner_text("#toast") and pg.evaluate("__state.psbt") is True)
+    pg.click("#staged-discard"); pg.wait_for_timeout(400)
+    pg.wait_for_timeout(900)   # the app reloads itself after a discard, which resets the mock; the count survives in sessionStorage
+    check("second press really discards, without window.confirm", pg.evaluate("sessionStorage.getItem('discards')") == "1")
+    tiles = pg.locator("#cer-keys .ckey"); pg.evaluate("__state.psbt = true; __state.signed = [0, 2, 0]; show('send')"); pg.wait_for_timeout(600)
     pg.click("#staged-bar [data-go=sign]"); pg.wait_for_timeout(500)
     check("Continue signing returns to the ceremony", pg.locator("#s-sign.on").count() == 1 and not pg.locator("#staged-bar").is_visible())
     pg.set_viewport_size(dict(width=1100, height=1000)); pg.wait_for_timeout(200)
@@ -110,28 +119,42 @@ with sync_playwright() as p:
     # ---- the drawn guide: one scene for the step you are on, for the key you hold ----
     pg.evaluate("__state.psbt = true; __state.ours = true; __state.signed = [0, 0, 0]; __state.cards = []; localStorage.removeItem('a2k-guide'); show('sign')"); pg.wait_for_timeout(2600)
     step = lambda: [li.inner_text() for li in pg.locator("#gsteps li.now").all()]
-    check("no key: step 1, a key with an arrow at the port, and which keys will do", [s.lower() for s in step()] == ["plug in"] and pg.locator("#guide .g-arrow").count() == 1 and pg.locator("#guide .g-finger").count() == 0 and "laptop, keyring, off-site" in pg.inner_text("#sign-text"), f"{step()} {pg.inner_text('#sign-text')}")
+    check("no key: step 1, a key with an arrow at the port, and which keys will do", [s.lower() for s in step()] == ["plug in"] and pg.locator("#guide .g-arrow").count() == 1 and pg.locator("#guide .g-finger").count() == 0 and "‘laptop’, ‘keyring’, ‘off-site’" in pg.inner_text("#sign-text") and pg.inner_text("#sign-title") == "Plug in a key", f"{step()} {pg.inner_text('#sign-text')}")
+    y_plug = pg.locator("#sign-title").bounding_box()["y"]
     pg.locator("#ceremony").screenshot(path=str(out / "guide-1-plug.png"))
     pg.evaluate("__state.cards = %s" % json.dumps([card(1)])); pg.wait_for_timeout(2600)
-    check("full-size key in: step 2, seated, no arrow, no finger, PIN asked", [s.lower() for s in step()] == ["enter pin"] and pg.locator("#guide .g-arrow").count() == 0 and pg.locator("#guide .g-finger").count() == 0 and pg.locator("#guide .g-gold").count() == 1 and pg.locator("#pin").is_visible())
+    check("full-size key in: step 2, seated, no arrow, no finger, PIN asked", [s.lower() for s in step()] == ["enter pin"] and pg.locator("#guide .g-arrow").count() == 0 and pg.locator("#guide .g-finger").count() == 0 and pg.locator("#guide .g-gold").count() == 1 and pg.locator("#pin").is_visible() and pg.inner_text("#sign-title") == "Enter the PIN for ‘keyring’" and "KEY PIN" in pg.inner_text("#pin-field").upper())
+    check("the heading has not moved between steps 1 and 2", abs(pg.locator("#sign-title").bounding_box()["y"] - y_plug) < 2)
+    check("the caution is a calm line with a Why, not a red paragraph", "Wait for the touch prompt" in pg.inner_text("#sign-warn") and pg.locator("#sign-warn.warn").count() == 0 and pg.locator("#sign-warn details").count() == 1)
     pg.locator("#ceremony").screenshot(path=str(out / "guide-2-pin.png"))
     pg.evaluate("__state.cards = %s" % json.dumps([card(0)])); pg.wait_for_timeout(2600)
     check("the Nano is drawn as a Nano: a gold strip, no ring", pg.locator("#guide .g-strip").count() == 1 and pg.locator("#guide .g-gold").count() == 0)
     check("the PIN field has the focus when a key that can sign appears", pg.evaluate("document.activeElement && document.activeElement.id") == "pin")
     pg.keyboard.type("cccccclbhlhvnedtlnuvgbjekrhfhjlfhrdvbkfdtcui"); pg.keyboard.press("Enter"); pg.wait_for_timeout(300)
-    check("a one-time code typed by a brushed key is NOT sent to the card as a PIN", (pg.evaluate("__state.signCalls") or 0) == 0 and pg.input_value("#pin") == "" and "no PIN try was used" in pg.inner_text("#toast") and pg.inner_text("#sign-title") != "Touch the key now", pg.inner_text("#toast"))
+    check("a one-time code typed by a brushed key is NOT sent to the card as a PIN", (pg.evaluate("__state.signCalls") or 0) == 0 and pg.input_value("#pin") == "" and "no PIN try was used" in pg.inner_text("#toast") and not pg.inner_text("#sign-title").startswith("Touch"), pg.inner_text("#toast"))
+    y_pin, gy_pin = pg.locator("#sign-title").bounding_box()["y"], pg.locator("#guide").bounding_box()["y"]
     pg.keyboard.type("123456"); pg.keyboard.press("Enter"); pg.wait_for_timeout(300)
     check("typing the PIN and pressing Enter signs: no mouse", pg.evaluate("__state.signCalls") == 1)
-    check("signing: step 3, a finger on the key, and the Nano is told WHERE", [s.lower() for s in step()] == ["touch"] and pg.locator("#guide .g-finger").count() == 1 and pg.locator("#guide .g-pulse").count() == 1 and "gold strip on its top edge" in pg.inner_text("#sign-text") and pg.inner_text("#sign-title") == "Touch the key now", pg.inner_text("#sign-text"))
+    check("signing: step 3, the heading says what to touch, and a Nano is told where it is", [s.lower() for s in step()] == ["touch"] and pg.inner_text("#sign-title") == "Touch the gold strip now" and "top edge" in pg.inner_text("#sign-text") and "once for each of the 2 inputs" in pg.inner_text("#sign-text"), pg.inner_text("#sign-text"))
+    check("the software steps back: no buttons, one status line, the tile says waiting for touch", not pg.locator("#sign-btn").is_visible() and not pg.locator("#sign-cancel").is_visible() and "Waiting for your touch" in pg.inner_text("#sign-waiting") and "waiting for touch" in tiles.nth(0).inner_text() and "touch" in tiles.nth(0).get_attribute("class"))
+    vb = [float(v) for v in pg.locator("#guide svg").get_attribute("viewBox").split()]
+    fb, sb = pg.locator("#guide .g-finger").bounding_box(), pg.locator("#guide .g-strip").bounding_box()
+    check("the picture has moved in on the key: the strip is big and the finger does not cover it", vb[2] <= 130 and sb["width"] >= 34 and pg.evaluate("() => { const s = document.querySelector('#guide .g-strip').getBoundingClientRect(); const e = document.elementFromPoint(s.x + s.width / 2, s.y + s.height / 2); return !!e && e.classList.contains('g-strip'); }"), f"viewBox={vb} strip={sb}")
+    check("heading and picture stay where they were", abs(pg.locator("#sign-title").bounding_box()["y"] - y_pin) < 2 and abs(pg.locator("#guide").bounding_box()["y"] - gy_pin) < 2)
     pg.locator("#ceremony").screenshot(path=str(out / "guide-3-touch-nano.png"))
     pg.wait_for_timeout(4300)   # two card polls go by while the key waits for a finger
-    check("the card poll does not undo the touch step or re-arm Sign mid-signature", pg.inner_text("#sign-title") == "Touch the key now" and pg.locator("#sign-btn").is_disabled() and not pg.locator("#pin").is_visible() and pg.locator("#guide .g-finger").count() == 1 and pg.evaluate("__state.signCalls") == 1, pg.inner_text("#sign-title"))
+    check("the card poll does not undo the touch step or re-arm Sign mid-signature", pg.inner_text("#sign-title") == "Touch the gold strip now" and not pg.locator("#sign-btn").is_visible() and not pg.locator("#pin").is_visible() and pg.locator("#guide .g-finger").count() == 1 and "waiting for touch" in tiles.nth(0).inner_text() and pg.evaluate("__state.signCalls") == 1, pg.inner_text("#sign-title"))
     pg.evaluate("window.__signRelease()"); pg.wait_for_timeout(700)
-    check("signed: the tile turns, and the guide asks for the next key", "signed" in tiles.nth(0).get_attribute("class") and [s.lower() for s in step()] == ["plug in"] and "keyring or off-site" in pg.inner_text("#sign-text"), pg.inner_text("#sign-text"))
+    check("signed: the tile turns, and the guide asks for the next key", "signed" in tiles.nth(0).get_attribute("class") and [s.lower() for s in step()] == ["plug in"] and pg.inner_text("#sign-title") == "‘laptop’ signed. Plug in another key" and "1 of 2 signatures are on. Use ‘keyring’ or ‘off-site’ next" in pg.inner_text("#sign-text") and "not one of" not in pg.inner_text("#ceremony"), pg.inner_text("#sign-title") + " / " + pg.inner_text("#sign-text"))
+    stranger = dict(card(1)); stranger["pubkey"] = "02" + "ab" * 32
+    pg.evaluate("__state.cards = %s" % json.dumps([stranger])); pg.wait_for_timeout(2600)
+    check("a key that is not this vault's gets its own sentence", pg.inner_text("#sign-title") == "That key is not one of this vault’s" and "Swap it for ‘keyring’ or ‘off-site’" in pg.inner_text("#sign-text"), pg.inner_text("#sign-title"))
+    pg.evaluate("__state.cards = []"); pg.wait_for_timeout(2600)
+    check("nothing plugged in after a signature: the count and who is left", pg.inner_text("#sign-title") == "Plug in a key" and "1 of 2 signatures are on" in pg.inner_text("#sign-text"))
     pg.click("#guide-toggle"); check("the pictures can be put away, and stay away", not pg.locator("#guide").is_visible() and pg.inner_text("#guide-toggle") == "Show me how" and pg.evaluate("localStorage.getItem('a2k-guide')") == "off")
     pg.click("#guide-toggle"); check("and brought back", pg.locator("#guide svg").count() == 1)
     pg.evaluate("__state.cards = %s" % json.dumps([card(1)])); pg.wait_for_timeout(2600); pg.fill("#pin", "1"); pg.click("#sign-btn"); pg.wait_for_timeout(300)
-    check("a full-size key is touched on its gold contact", "Touch the gold contact" in pg.inner_text("#sign-text") and pg.locator("#guide .g-gold").count() == 1 and pg.locator("#guide .g-finger").count() == 1)
+    check("a full-size key is touched on its gold contact", pg.inner_text("#sign-title") == "Touch the gold contact now" and pg.locator("#guide .g-gold").count() == 1 and pg.locator("#guide .g-finger").count() == 1)
     pg.locator("#ceremony").screenshot(path=str(out / "guide-3-touch-full.png"))
     pg.evaluate("window.__signRelease()"); pg.wait_for_timeout(700)
     check("both in: nothing left to teach", not pg.locator("#gsteps").is_visible() and not pg.locator("#guide").is_visible() and pg.inner_text("#sign-title") == "All signatures in")
