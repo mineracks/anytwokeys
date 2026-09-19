@@ -123,10 +123,17 @@
             </div>
             <div class="cer-keys" id="cer-keys"></div>
             <div class="cer-action">
-              <div class="cer-act-title" id="sign-title">Plug in a key</div>
-              <div class="muted" id="sign-text">Any of the vault's keys that has not signed yet.</div>
-              <div class="warn" id="sign-warn" hidden>Do not touch the key before this screen asks. An untended touch can type a code into whatever has focus.</div>
-              <div class="row" style="align-items:flex-end"><div class="field" id="pin-field" hidden style="flex:0 1 220px"><div class="label">Card PIN</div><input type="password" id="pin" autocomplete="off"></div><button class="btn primary" id="sign-btn" disabled>Sign with this key</button><button class="btn" id="sign-cancel">Cancel this spend</button></div>
+              <ol class="gsteps" id="gsteps" aria-label="The three steps of signing with a key"><li data-step="plug">Plug in</li><li data-step="pin">Enter PIN</li><li data-step="touch">Touch</li></ol>
+              <div class="guide-row">
+                <div class="guide" id="guide" aria-hidden="true"></div>
+                <div class="guide-body">
+                  <div class="cer-act-title" id="sign-title">Plug in a key</div>
+                  <div class="muted" id="sign-text">Any of the vault's keys that has not signed yet.</div>
+                  <div class="warn" id="sign-warn" hidden>Do not touch the key before this screen asks. An untended touch can type a code into whatever has focus.</div>
+                  <div class="row" style="align-items:flex-end"><div class="field" id="pin-field" hidden style="flex:0 1 220px"><div class="label">Card PIN</div><input type="password" id="pin" autocomplete="off"></div><button class="btn primary" id="sign-btn" disabled>Sign with this key</button><button class="btn" id="sign-cancel">Cancel this spend</button></div>
+                  <button class="linkish" id="guide-toggle" type="button"></button>
+                </div>
+              </div>
             </div>
           </div>
           <div class="card hot" id="broadcast-card" hidden><div class="label">Ready</div><div id="broadcast-text"></div><div class="row"><button class="btn primary" id="broadcast-btn">Send it</button></div></div>

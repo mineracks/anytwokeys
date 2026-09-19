@@ -18,6 +18,7 @@ const ceremony = () => { if (!__state.psbt) throw 'no spend in progress'; const 
   keys: V.keys.map((k, i) => ({ name: k.name, pubkey: k.pubkey, signed: __state.signed[i] })), pays: [{ address: 'tb1qrecipient0000000000000000000000000000000000000000000dest', sats: 5000, ours: false }, { address: 'tb1qchange', sats: 4810, ours: true }] }; };
 const H = { store_get: store, cards_list: () => { if (!__state.cards.length) throw 'no YubiKey found'; return __state.cards; }, vault_sync: () => { throw 'offline'; }, fees_get: () => ({ slow: 1, medium: 2, fast: 3 }),
   key_form_seen: (a) => { __state.forms = Object.assign({}, __state.forms, { [a.pubkey]: a.form }); return store(); }, spend_discard: () => { __state.psbt = false; },
+  spend_sign: async (a) => { __state.signCalls = (__state.signCalls || 0) + 1; await new Promise(r => window.__signRelease = r); const i = +a.reader.slice(-1); __state.signed[i] = __state.inputs; return { signer: V.keys[i].name, signed_inputs: [0, 1], psbt: 'x', status: {} }; },
   spend_ceremony: ceremony, spend_qr: () => ({ parts: %(parts)s, single: %(single)s, bytes: 398 }), spend_pdf: () => '/tmp/x.pdf',
   spend_import: (a) => { __state.imported = a; __state.psbt = true; __state.signed = [2, 0, 0]; return ceremony(); } };
 window.__TAURI__ = { core: { invoke: async (cmd, args) => { if (!H[cmd]) throw 'unmocked: ' + cmd; return H[cmd](args || {}); } }, event: { listen: async () => () => {} } };
@@ -106,6 +107,34 @@ with sync_playwright() as p:
     pg.evaluate("__state.psbt = false; __state.ours = true")
     pg.evaluate("show('send')"); pg.click("#psbt-paste-toggle"); pg.fill("#psbt-text", "cHNidP8BAH0C"); pg.click("#psbt-load"); pg.wait_for_timeout(700)
     check("pasted PSBT goes to the backend and lands on the Sign screen", pg.evaluate("__state.imported && __state.imported.text") == "cHNidP8BAH0C" and pg.locator("#s-sign.on").count() == 1 and pg.inner_text("#cer-have") == "1")
+    # ---- the drawn guide: one scene for the step you are on, for the key you hold ----
+    pg.evaluate("__state.psbt = true; __state.ours = true; __state.signed = [0, 0, 0]; __state.cards = []; localStorage.removeItem('a2k-guide'); show('sign')"); pg.wait_for_timeout(2600)
+    step = lambda: [li.inner_text() for li in pg.locator("#gsteps li.now").all()]
+    check("no key: step 1, a key with an arrow at the port, and which keys will do", [s.lower() for s in step()] == ["plug in"] and pg.locator("#guide .g-arrow").count() == 1 and pg.locator("#guide .g-finger").count() == 0 and "laptop, keyring, off-site" in pg.inner_text("#sign-text"), f"{step()} {pg.inner_text('#sign-text')}")
+    pg.locator("#ceremony").screenshot(path=str(out / "guide-1-plug.png"))
+    pg.evaluate("__state.cards = %s" % json.dumps([card(1)])); pg.wait_for_timeout(2600)
+    check("full-size key in: step 2, seated, no arrow, no finger, PIN asked", [s.lower() for s in step()] == ["enter pin"] and pg.locator("#guide .g-arrow").count() == 0 and pg.locator("#guide .g-finger").count() == 0 and pg.locator("#guide .g-gold").count() == 1 and pg.locator("#pin").is_visible())
+    pg.locator("#ceremony").screenshot(path=str(out / "guide-2-pin.png"))
+    pg.evaluate("__state.cards = %s" % json.dumps([card(0)])); pg.wait_for_timeout(2600)
+    check("the Nano is drawn as a Nano: a gold strip, no ring", pg.locator("#guide .g-strip").count() == 1 and pg.locator("#guide .g-gold").count() == 0)
+    check("the PIN field has the focus when a key that can sign appears", pg.evaluate("document.activeElement && document.activeElement.id") == "pin")
+    pg.keyboard.type("cccccclbhlhvnedtlnuvgbjekrhfhjlfhrdvbkfdtcui"); pg.keyboard.press("Enter"); pg.wait_for_timeout(300)
+    check("a one-time code typed by a brushed key is NOT sent to the card as a PIN", (pg.evaluate("__state.signCalls") or 0) == 0 and pg.input_value("#pin") == "" and "no PIN try was used" in pg.inner_text("#toast") and pg.inner_text("#sign-title") != "Touch the key now", pg.inner_text("#toast"))
+    pg.keyboard.type("123456"); pg.keyboard.press("Enter"); pg.wait_for_timeout(300)
+    check("typing the PIN and pressing Enter signs: no mouse", pg.evaluate("__state.signCalls") == 1)
+    check("signing: step 3, a finger on the key, and the Nano is told WHERE", [s.lower() for s in step()] == ["touch"] and pg.locator("#guide .g-finger").count() == 1 and pg.locator("#guide .g-pulse").count() == 1 and "gold strip on its top edge" in pg.inner_text("#sign-text") and pg.inner_text("#sign-title") == "Touch the key now", pg.inner_text("#sign-text"))
+    pg.locator("#ceremony").screenshot(path=str(out / "guide-3-touch-nano.png"))
+    pg.wait_for_timeout(4300)   # two card polls go by while the key waits for a finger
+    check("the card poll does not undo the touch step or re-arm Sign mid-signature", pg.inner_text("#sign-title") == "Touch the key now" and pg.locator("#sign-btn").is_disabled() and not pg.locator("#pin").is_visible() and pg.locator("#guide .g-finger").count() == 1 and pg.evaluate("__state.signCalls") == 1, pg.inner_text("#sign-title"))
+    pg.evaluate("window.__signRelease()"); pg.wait_for_timeout(700)
+    check("signed: the tile turns, and the guide asks for the next key", "signed" in tiles.nth(0).get_attribute("class") and [s.lower() for s in step()] == ["plug in"] and "keyring or off-site" in pg.inner_text("#sign-text"), pg.inner_text("#sign-text"))
+    pg.click("#guide-toggle"); check("the pictures can be put away, and stay away", not pg.locator("#guide").is_visible() and pg.inner_text("#guide-toggle") == "Show me how" and pg.evaluate("localStorage.getItem('a2k-guide')") == "off")
+    pg.click("#guide-toggle"); check("and brought back", pg.locator("#guide svg").count() == 1)
+    pg.evaluate("__state.cards = %s" % json.dumps([card(1)])); pg.wait_for_timeout(2600); pg.fill("#pin", "1"); pg.click("#sign-btn"); pg.wait_for_timeout(300)
+    check("a full-size key is touched on its gold contact", "Touch the gold contact" in pg.inner_text("#sign-text") and pg.locator("#guide .g-gold").count() == 1 and pg.locator("#guide .g-finger").count() == 1)
+    pg.locator("#ceremony").screenshot(path=str(out / "guide-3-touch-full.png"))
+    pg.evaluate("window.__signRelease()"); pg.wait_for_timeout(700)
+    check("both in: nothing left to teach", not pg.locator("#gsteps").is_visible() and not pg.locator("#guide").is_visible() and pg.inner_text("#sign-title") == "All signatures in")
     check("no page errors", not errs, "; ".join(errs))
     b.close()
 sys.exit(1 if fails else 0)

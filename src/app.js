@@ -341,6 +341,39 @@ function drawRing(have, need, ready) {
   el.setAttribute('aria-label', `${have} of ${need} signatures collected`);
 }
 const canSign0 = (st, k) => !st.ready && k.signed < st.inputs && cards.some(c => c.pubkey === k.pubkey);
+// One drawn scene for where the person is: key and arrow at the port, key seated, finger on the contact.
+// `form` picks the key: a Nano sits nearly flush and is touched on the gold strip along its top edge.
+function guideArt(step, form) {
+  const f = form & 0x0F, nano = [2, 4].includes(f), usbA = [1, 2].includes(f), seated = step !== 'plug';
+  const caps = [0, 1, 2].map(i => `<rect class="g-cap" x="${180 + i * 30}" y="28" width="24" height="22" rx="4"/><rect class="g-cap" x="${180 + i * 30}" y="56" width="24" height="22" rx="4"/><rect class="g-cap" x="${180 + i * 30}" y="84" width="24" height="22" rx="4"/>`).join('');
+  const lap = `<rect class="g-lap" x="158" y="14" width="120" height="104" rx="12"/>${caps}<rect class="g-port" x="158" y="${usbA ? 55 : 58}" width="7" height="${usbA ? 22 : 16}" rx="${usbA ? 1.5 : 3.5}"/>`;
+  let key, touchAt;
+  if (nano) {
+    const x = seated ? 136 : 82;   // only the head shows once it is in
+    key = `<g${seated ? '' : ' class="g-nudge"'}><rect class="g-line" x="${x + 22}" y="${usbA ? 57 : 60}" width="18" height="${usbA ? 18 : 12}" rx="${usbA ? 1.5 : 5}"/><rect class="g-ink" x="${x}" y="52" width="24" height="28" rx="5"/><rect class="g-strip" x="${x + 3}" y="52" width="18" height="4" rx="2"/>${step === 'touch' ? `<circle class="g-led g-blink" cx="${x + 12}" cy="68" r="2.4"/>` : ''}</g>`;
+    touchAt = [x + 12, 54];
+  } else {
+    const x = seated ? 60 : 26;
+    key = `<g${seated ? '' : ' class="g-nudge"'}><rect class="g-line" x="${x + 84}" y="${usbA ? 55 : 58}" width="${usbA ? 24 : 20}" height="${usbA ? 22 : 16}" rx="${usbA ? 1.5 : 6}"/><rect class="g-ink" x="${x}" y="46" width="88" height="40" rx="9"/><circle class="g-hole" cx="${x + 14}" cy="66" r="4.5"/><circle class="g-gold" cx="${x + 52}" cy="66" r="10"/><circle class="g-led${step === 'touch' ? ' g-blink' : ''}" cx="${x + 52}" cy="66" r="2.6"/></g>`;
+    touchAt = [x + 52, 66];
+  }
+  const arrow = seated ? '' : `<path class="g-arrow g-nudge" d="M${nano ? 128 : 134} ${usbA ? 66 : 66}h16m-6 -6l6 6l-6 6"/>`;
+  const [tx, ty] = touchAt;
+  // a finger as a rounded capsule with a nail, coming in from the upper left, its pad resting on the touch point
+  const finger = step !== 'touch' ? '' : `<circle class="g-pulse" cx="${tx}" cy="${ty}" r="15"/><g transform="translate(${tx} ${ty}) rotate(-42)"><rect class="g-finger" x="-14" y="-118" width="28" height="126" rx="14"/><path class="g-nail" d="M-8 -14 v-10 a8 8 0 0 1 16 0 v10"/></g>`;
+  // the laptop is drawn over the plug, so a seated key's plug disappears into the port
+  return `<svg viewBox="0 0 250 132" role="img">${seated ? key + lap : lap + key}${arrow}${finger}</svg>`;
+}
+let guideOn = true; try { guideOn = localStorage.getItem('a2k-guide') !== 'off'; } catch {}
+function paintGuide(step, form) {
+  $$('#gsteps li').forEach(li => { const order = ['plug', 'pin', 'touch'], i = order.indexOf(li.dataset.step), n = order.indexOf(step); li.classList.toggle('now', i === n); li.classList.toggle('done', i < n); });
+  $('#guide-toggle').textContent = guideOn ? 'Hide the pictures' : 'Show me how';
+  const g = $('#guide'), sig = guideOn ? step + ':' + (form & 0x0F) : 'off';
+  g.hidden = !guideOn; if (g._sig === sig) return; g._sig = sig;   // the 2 s card poll must not restart the animation
+  g.innerHTML = guideOn ? guideArt(step, form) : '';
+}
+$('#pin').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); if (!$('#sign-btn').disabled) $('#sign-btn').click(); } });
+$('#guide-toggle').onclick = () => { guideOn = !guideOn; try { localStorage.setItem('a2k-guide', guideOn ? 'on' : 'off'); } catch {} $('#guide')._sig = null; renderSign(); };
 async function renderSign() {
   if (!vault) return;
   let st = null; try { st = await invoke('spend_ceremony', { name: vault.name }); } catch {}
@@ -373,18 +406,37 @@ async function renderSign() {
   $('#message-card').hidden = !(st.ready && staged);
   $('#broadcast-card').hidden = !st.ready || !!staged;
   $('#export-card').hidden = !!staged; $('#export-tx').hidden = !st.ready;
-  if (st.ready) { $('#sign-title').textContent = 'All signatures in'; $('#sign-text').textContent = staged ? 'Produce the signature below; nothing is broadcast.' : 'Nothing has been sent. Review the summary, then send it.'; $('#pin-field').hidden = true; $('#sign-warn').hidden = true; $('#sign-btn').disabled = true; $('#broadcast-text').textContent = `Broadcast to ${netName()} through the Electrum server.`; return; }
+  if (st.ready) { $('#gsteps').hidden = true; $('#guide').hidden = true; $('#guide-toggle').textContent = ''; $('#sign-title').textContent = 'All signatures in'; $('#sign-text').textContent = staged ? 'Produce the signature below; nothing is broadcast.' : 'Nothing has been sent. Review the summary, then send it.'; $('#pin-field').hidden = true; $('#sign-warn').hidden = true; $('#sign-btn').disabled = true; $('#broadcast-text').textContent = `Broadcast to ${netName()} through the Electrum server.`; return; }
+  // while a key is signing, the 2 s poll redraws the ring and tiles above but must not touch this part:
+  // it used to flip "TOUCH THE KEY NOW" back to "plugged in" and re-arm the Sign button mid-signature
+  if (renderSign.signing) return;
   const usable = cards.filter(c => c.pubkey && st.keys.some(k => k.pubkey === c.pubkey && !full(k)));
-  if (!usable.length) { $('#sign-title').textContent = 'Plug in a key'; $('#sign-text').textContent = cards.length ? 'The plugged-in key is not one of this vault\'s, or it has already signed.' : 'Any of the vault\'s keys that has not signed yet.'; $('#pin-field').hidden = true; $('#sign-warn').hidden = true; $('#sign-btn').disabled = true; return; }
-  const c = usable[0]; const k = vault.keys.find(k => k.pubkey === c.pubkey);
-  $('#sign-title').textContent = `${k.name} is plugged in`; $('#sign-text').textContent = `${cardLabel(c)}. Enter its PIN, press Sign, then touch the key when it blinks — once per input.`;
+  $('#gsteps').hidden = false;
+  if (!usable.length) {
+    const open = st.keys.filter(k => !full(k)), next = open[0];
+    $('#sign-title').textContent = open.length === 1 ? `Plug in ${open[0].name}` : 'Plug in a key';
+    $('#sign-text').textContent = cards.length ? 'The key that is plugged in is not one of this vault\'s, or it has already signed. Swap it for ' + open.map(k => k.name).join(' or ') + '.' : (open.length > 1 ? 'Any of ' + open.map(k => k.name).join(', ') + '.' : 'It is the last signature this spend needs.');
+    $('#pin-field').hidden = true; $('#sign-warn').hidden = true; $('#sign-btn').disabled = true;
+    renderSign.focusedFor = null; paintGuide('plug', next ? (packedForm(next.pubkey) || 3) : 3); return;
+  }
+  const c = usable[0]; const k = vault.keys.find(k => k.pubkey === c.pubkey), nano = [2, 4].includes(c.form & 0x0F);
+  $('#sign-title').textContent = `${k.name} is plugged in`; $('#sign-text').textContent = `${modelName(c.form, c.nfc)} · serial ${c.serial}. Enter its PIN and press Sign. Then the key blinks: touch it then, not before${st.inputs > 1 ? ', once for each of the ' + st.inputs + ' inputs' : ''}.`;
   $('#pin-field').hidden = false; $('#sign-warn').hidden = false; $('#sign-btn').disabled = false;
+  paintGuide('pin', c.form || 3);
+  // hands stay on the keyboard: the PIN field takes focus once when a key that can sign appears, and Enter signs
+  if (renderSign.focusedFor !== c.pubkey) { renderSign.focusedFor = c.pubkey; if (!document.activeElement || document.activeElement === document.body) $('#pin').focus(); }
   $('#sign-btn').onclick = async () => {
     const pin = $('#pin').value; if (!pin) return toast('Enter the card PIN');
-    $('#sign-btn').disabled = true; $('#sign-title').textContent = 'TOUCH THE KEY NOW'; $('#sign-text').textContent = 'It is blinking. Touch it once per input. This closes by itself when the card has signed.';
+    // A brushed key with Yubico OTP on types 44 letters of "modhex" and presses Enter. Sent to the card as a PIN that would cost
+    // one of its three tries, so it is stopped here: nothing a person chooses as a PIN is 32+ characters from these sixteen letters.
+    if (/^[cbdefghijklnrtuv]{32,}$/.test(pin)) { $('#pin').value = ''; return toast('That was the key typing a one-time code, not a PIN. Nothing was sent to the card and no PIN try was used. Turn off Yubico OTP on this key to stop it happening.', 9000); }
+    renderSign.signing = true; $('#sign-btn').disabled = true; $('#pin-field').hidden = true; $('#sign-warn').hidden = true;
+    $('#sign-title').textContent = 'Touch the key now';
+    $('#sign-text').textContent = (nano ? 'It is blinking. Touch the gold strip on its top edge' : 'It is blinking. Touch the gold contact') + (st.inputs > 1 ? `, once for each of the ${st.inputs} inputs.` : '.') + ' Keep it plugged in; this moves on by itself when the key has signed.';
+    paintGuide('touch', c.form || 3);
     try { const r = await invoke('spend_sign', { name: vault.name, reader: c.reader, pin }); $('#pin').value = ''; toast(`${r.signer} signed ${r.signed_inputs.length} input${r.signed_inputs.length === 1 ? '' : 's'}`); }
     catch (e) { fail(e); }
-    renderSign();
+    renderSign.signing = false; renderSign();
   };
 }
 $('#export-psbt').onclick = async () => { try { const p = await invoke('spend_export', { name: vault.name, what: 'psbt' }); $('#export-note').textContent = 'Saved ' + p; } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
