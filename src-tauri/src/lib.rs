@@ -146,7 +146,7 @@ fn vault_create(name: String, threshold: usize, keys: Vec<NewKey>, rotating: Opt
     let mut v = Vault { name, network: s.settings.network.clone(), threshold,
         keys: keys.into_iter().map(|k| wallet::KeyRef { name: k.name, serial: k.serial, pubkey: k.pubkey.to_lowercase() }).collect(),
         descriptor, address: String::new(), created: now(),
-        chain_code: if rotating.unwrap_or(true) { Some(fresh_chain_code()) } else { None }, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), labels_synced: 0, seal: Default::default() };
+        chain_code: if rotating.unwrap_or(true) { Some(fresh_chain_code()) } else { None }, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), labels_synced: 0, seal: Default::default() };
     v.address = wallet::address_at(&v, 0)?;
     let _ = network;
     s.vaults.push(v.clone());
@@ -164,7 +164,7 @@ fn descriptor_parse(text: String) -> R<Parsed> {
     let (threshold, keys) = wallet::keys_of(&desc_text)?;
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
     let tmp = Vault { name: String::new(), network: s.settings.network.clone(), threshold, keys: keys.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.clone() }).collect(),
-        descriptor: descriptor.clone(), address: String::new(), created: 0, chain_code: cc.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), labels_synced: 0, seal: Default::default() };
+        descriptor: descriptor.clone(), address: String::new(), created: 0, chain_code: cc.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), labels_synced: 0, seal: Default::default() };
     let address = wallet::address_at(&tmp, 0)?;
     Ok(Parsed { threshold, keys, descriptor: wallet::recovery_line(&tmp), address, rotating: cc.is_some() })
 }
@@ -178,7 +178,7 @@ fn vault_restore(name: String, text: String, names: Vec<String>) -> R<Vault> {
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
     let mut v = Vault { name, network: s.settings.network.clone(), threshold,
         keys: keys.iter().enumerate().map(|(i, k)| wallet::KeyRef { name: names.get(i).cloned().unwrap_or_else(|| format!("key {}", i + 1)), serial: 0, pubkey: k.clone() }).collect(),
-        descriptor, address: String::new(), created: now(), chain_code: cc, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), labels_synced: 0, seal: Default::default() };
+        descriptor, address: String::new(), created: now(), chain_code: cc, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), labels_synced: 0, seal: Default::default() };
     v.address = wallet::address_at(&v, 0)?;
     s.vaults.push(v.clone());
     wallet::save(&s)?;
@@ -728,7 +728,7 @@ fn seal_vault(rec: &seal::Record, name: String, shares: Vec<String>, sealed: Vec
     let descriptor = wallet::descriptor_for(rec.threshold, &rec.pubkeys)?;
     let mut v = Vault { name, network: rec.network.clone(), threshold: rec.threshold,
         keys: rec.pubkeys.iter().zip(&rec.key_names).map(|(p, n)| wallet::KeyRef { name: n.clone(), serial: 0, pubkey: p.clone() }).collect(),
-        descriptor, address: String::new(), created: now(), chain_code: rec.chain_code.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), labels_synced: 0,
+        descriptor, address: String::new(), created: now(), chain_code: rec.chain_code.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), labels_synced: 0,
         seal: wallet::Seal { shares, sealed } };
     v.address = wallet::address_at(&v, 0)?;
     Ok(v)
@@ -820,6 +820,21 @@ async fn label_set(name: String, key: String, label: String) -> R<Store> {
     Ok(wallet::load())
 }
 
+/// The long note on a transaction, an address or a coin. It rides in the same synced record as the label.
+#[tauri::command]
+async fn note_set(name: String, key: String, note: String) -> R<Store> {
+    if !(key.starts_with("addr:") || key.starts_with("tx:") || key.starts_with("out:")) { return Err("note key must be addr:, tx: or out:".into()); }
+    if note.chars().count() > 20_000 { return Err("a note holds up to 20,000 characters".into()); }
+    let nm = name.clone();
+    wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) {
+        let note = note.trim_end().to_string();
+        v.label_meta.insert(key.clone(), now());
+        if note.trim().is_empty() { v.notes.remove(&key); } else { v.notes.insert(key, note); }
+    })?;
+    let _ = labels_sync(name).await;
+    Ok(wallet::load())
+}
+
 #[derive(Serialize, Clone)]
 struct LabelsStatus { backed_up: bool, host: String, count: usize, synced: u64, note: String }
 
@@ -833,14 +848,19 @@ async fn labels_sync(name: String) -> R<LabelsStatus> {
     if host.is_empty() { return Ok(LabelsStatus { backed_up: false, host, count, synced: v.labels_synced, note: "Labels stay on this computer: no label host is set (App settings).".into() }); }
     let root = match labels::root_from_shares(&v.seal.shares) { Some(r) => r, None => return Ok(LabelsStatus { backed_up: false, host, count, synced: 0, note: "Seal this vault's keys to back its labels up: they are encrypted so that any two keys bring them back with the vault.".into() }) };
     let keys = labels::keys(&root);
-    let local = labels::Envelope::from_vault(&v.labels, &v.label_meta);
+    let local = labels::Envelope::from_vault(&v.labels, &v.label_meta, &v.notes, &v.files);
     match labels::sync(&host, &keys, &local).await {
         Ok((merged, _wrote)) => {
             let t = now();
             wallet::update(|s| if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == name) {
                 for (k, r) in &merged.records {
                     let mine_t = *vm.label_meta.get(k).unwrap_or(&0);
-                    if r.t >= mine_t { vm.label_meta.insert(k.clone(), r.t); if r.label.is_empty() { vm.labels.remove(k); } else { vm.labels.insert(k.clone(), r.label.clone()); } }
+                    if r.t >= mine_t {
+                        vm.label_meta.insert(k.clone(), r.t);
+                        if r.label.is_empty() { vm.labels.remove(k); } else { vm.labels.insert(k.clone(), r.label.clone()); }
+                        if r.note.is_empty() { vm.notes.remove(k); } else { vm.notes.insert(k.clone(), r.note.clone()); }
+                        if r.files.is_empty() { vm.files.remove(k); } else { vm.files.insert(k.clone(), r.files.clone()); }
+                    }
                 }
                 vm.labels_synced = t;
             })?;
@@ -1027,7 +1047,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| { watch::start(app.handle().clone()); Ok(()) })
-        .invoke_handler(tauri::generate_handler![open_url, vault_activity, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![open_url, vault_activity, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])

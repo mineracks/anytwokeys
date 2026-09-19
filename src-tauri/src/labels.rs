@@ -69,14 +69,22 @@ pub struct Rec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")] pub files: Vec<serde_json::Value>,
 }
 
+impl Rec {
+    /// A record with a label, a note or a file is alive; one with none of them is a deletion that travels.
+    pub fn live(&self) -> bool { !self.label.is_empty() || !self.note.is_empty() || !self.files.is_empty() }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Envelope { pub v: u32, pub records: BTreeMap<String, Rec> }
 
 impl Envelope {
-    pub fn from_vault(labels: &HashMap<String, String>, meta: &HashMap<String, u64>) -> Envelope {
+    /// Everything this computer holds for each key. A key that only appears in `meta` is a tombstone.
+    pub fn from_vault(labels: &HashMap<String, String>, meta: &HashMap<String, u64>, notes: &HashMap<String, String>, files: &HashMap<String, Vec<serde_json::Value>>) -> Envelope {
         let mut records = BTreeMap::new();
-        for (k, l) in labels { records.insert(k.clone(), Rec { label: l.clone(), t: *meta.get(k).unwrap_or(&0), ..Default::default() }); }
-        for (k, t) in meta { if !labels.contains_key(k) { records.insert(k.clone(), Rec { label: String::new(), t: *t, ..Default::default() }); } }
+        for k in labels.keys().chain(notes.keys()).chain(files.keys()).chain(meta.keys()) {
+            records.entry(k.clone()).or_insert_with(|| Rec { label: labels.get(k).cloned().unwrap_or_default(), t: *meta.get(k).unwrap_or(&0),
+                note: notes.get(k).cloned().unwrap_or_default(), files: files.get(k).cloned().unwrap_or_default() });
+        }
         Envelope { v: 1, records }
     }
     /// Newest wins per key; equal times prefer the non-empty (a label over its own tombstone).
@@ -84,7 +92,7 @@ impl Envelope {
         let mut out = self.clone();
         for (k, r) in &other.records {
             match out.records.get(k) {
-                Some(mine) if mine.t > r.t || (mine.t == r.t && (!mine.label.is_empty() || r.label.is_empty())) => {}
+                Some(mine) if mine.t > r.t || (mine.t == r.t && (mine.live() || !r.live())) => {}
                 _ => { out.records.insert(k.clone(), r.clone()); }
             }
         }
@@ -168,7 +176,7 @@ mod tests {
         let k = keys(&root_from_shares(&shares()).unwrap());
         let mut labels = HashMap::new(); labels.insert("tx:ab".to_string(), "rent".to_string());
         let mut meta = HashMap::new(); meta.insert("tx:ab".to_string(), 5u64); meta.insert("addr:gone".to_string(), 7u64);
-        let e = Envelope::from_vault(&labels, &meta);
+        let e = Envelope::from_vault(&labels, &meta, &HashMap::new(), &HashMap::new());
         assert_eq!(e.records.len(), 2);
         assert_eq!(e.records["addr:gone"].label, "");
         let wire = e.seal(&k, [7u8; 24]).unwrap();
@@ -176,6 +184,24 @@ mod tests {
         let other = keys(&root_from_shares(&vec!["aa".repeat(40), "bb".repeat(40), "cd".repeat(40)]).unwrap());
         assert!(Envelope::open(&other, &wire).is_err());
         assert!(Envelope::open(&k, &wire[..30]).is_err());
+    }
+    #[test]
+    fn a_note_or_a_file_keeps_a_record_alive_and_is_never_dropped_on_the_way_through() {
+        // a transaction with a note and a receipt but NO label is not a deletion
+        let mut notes = HashMap::new(); notes.insert("tx:cd".to_string(), "paid the plumber; invoice attached".to_string());
+        let mut files = HashMap::new(); files.insert("tx:cd".to_string(), vec![serde_json::json!({"name": "invoice.pdf", "sha256": "ab", "size": 9})]);
+        let mut meta = HashMap::new(); meta.insert("tx:cd".to_string(), 5u64);
+        let mine = Envelope::from_vault(&HashMap::new(), &meta, &notes, &files);
+        assert!(mine.records["tx:cd"].live() && mine.records["tx:cd"].label.is_empty());
+        // same second, the other computer deleted its (empty) label: the live record wins the tie, both ways round
+        let mut theirs = Envelope { v: 1, records: BTreeMap::new() }; theirs.records.insert("tx:cd".into(), Rec { t: 5, ..Default::default() });
+        assert_eq!(mine.merge(&theirs).records["tx:cd"].note, "paid the plumber; invoice attached");
+        assert_eq!(theirs.merge(&mine).records["tx:cd"].files.len(), 1);
+        // an older build's label edit here must not wipe what another computer attached: from_vault carries all of it
+        let mut labels = HashMap::new(); labels.insert("tx:cd".to_string(), "plumber".to_string()); meta.insert("tx:cd".to_string(), 9);
+        let newer = Envelope::from_vault(&labels, &meta, &notes, &files);
+        let out = theirs.merge(&mine).merge(&newer);
+        assert_eq!((out.records["tx:cd"].label.as_str(), out.records["tx:cd"].note.len() > 0, out.records["tx:cd"].files.len()), ("plumber", true, 1));
     }
     #[test]
     fn merge_is_newest_wins_and_a_tombstone_beats_an_older_label() {
