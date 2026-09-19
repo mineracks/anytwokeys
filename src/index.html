@@ -201,15 +201,20 @@
           <dl class="tx-dl" id="tx-dl"></dl>
           <div class="row"><button class="btn" id="tx-explorer">Open in explorer</button><button class="btn" id="tx-copyid">Copy the transaction id</button></div>
         </div>
-        <div class="card" id="tx-notes">
-          <div class="label">Your record</div>
-          <div class="field"><div class="label">Label</div><input id="tx-label" maxlength="200" placeholder="A few words: who, or what for"></div>
-          <div class="field"><div class="label">Note</div><textarea id="tx-note" maxlength="20000" placeholder="Anything worth keeping with this transaction: what it paid for, an invoice number, who to ask." style="min-height:150px"></textarea></div>
-          <div class="muted" style="font-size:13px" id="tx-saved"></div>
-          <div class="field"><div class="row" style="justify-content:space-between"><div class="label">Attachments</div><button class="btn small" id="tx-addfiles" type="button">Add files…</button></div>
+        <div class="card record" id="tx-notes">
+          <div class="rec-head"><h3>Your record</h3><span class="rec-saved" id="tx-saved"></span></div>
+          <div class="field"><label class="cap" for="tx-label">Label</label><input id="tx-label" class="rec-title" maxlength="200" placeholder="A few words: who, or what for"></div>
+          <div class="field"><label class="cap" for="tx-note">Note</label><textarea id="tx-note" maxlength="20000" rows="4" placeholder="Anything worth keeping with this transaction: what it paid for, an invoice number, who to ask."></textarea><div class="rec-count" id="tx-count" hidden></div></div>
+          <div class="field">
+            <div class="rec-sub"><span class="cap">Attachments</span><span class="rec-sum" id="tx-files-sum"></span></div>
             <div class="att-grid" id="tx-files"></div>
-            <div class="muted" style="font-size:13px" id="tx-files-note">Drop files anywhere on this screen, or paste a picture. Photos are re-saved without their location and camera data.</div>
-            <label class="muted keepo"><input type="checkbox" id="tx-keep" style="width:auto;min-height:0"> keep photos exactly as they are, location data included</label></div>
+            <button type="button" class="dropzone" id="tx-addfiles">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v11"/><path d="m7.5 9.5 4.5 4.5 4.5-4.5"/><path d="M4 14v4a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-4"/></svg>
+              <span class="dz-main" id="tx-dz-main">Drop files here</span>
+              <span class="dz-sub" id="tx-dz-sub">or <u>choose files</u> · paste a picture with ⌘V</span>
+            </button>
+            <div class="keeprow"><div><b>Clean photos as they come in</b><small id="tx-strip-note"></small></div><div class="toggle on" id="tx-strip" role="switch" aria-checked="true" aria-label="Clean photos as they come in" tabindex="0"><i></i></div></div>
+          </div>
         </div>
       </div>
       <details class="card quiet" id="tx-chain"><summary><span class="label">Blockchain data</span><span class="muted sumhint" id="tx-proof"></span></summary><div id="tx-chain-body"></div></details>
@@ -293,7 +298,6 @@
 </div></div>
 
 <div class="toast" id="toast"></div>
-<div id="dropveil" hidden><div>Drop to attach to this transaction</div></div>
 <div id="notices" aria-live="polite"></div>
 <script src="vendor/jsQR.js"></script>
 <script src="vendor/qrcode.js"></script>

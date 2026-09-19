@@ -221,6 +221,7 @@ async function renderTx() {
   $('#tx-when').textContent = f && f.time ? new Date(f.time * 1000).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : (txView.height > 0 ? '' : 'Not in a block yet');
   if (document.activeElement !== $('#tx-label')) $('#tx-label').value = labelOf(key);
   if (document.activeElement !== $('#tx-note')) $('#tx-note').value = (vault.notes || {})[key] || '';
+  fitNote(); if (renderTx.last !== name + txid) { renderTx.last = name + txid; recSaid(''); }
   renderFiles();
   $('#tx-chain').open = (() => { try { return localStorage.getItem('a2k-chain-open') === '1'; } catch { return false; } })();
   let d; try { d = await invoke('tx_detail', { name, txid, height: txView.height }); } catch (e) { if (mine === txView.seq) { $('#tx-dl').innerHTML = `<dt>Details</dt><dd class="warn">${esc(e)}</dd>`; $('#tx-proof').textContent = ''; } return; }
@@ -265,7 +266,10 @@ async function renderFiles() {
   let here = []; try { here = await invoke('attach_have', { hashes: list.map(e => e.sha256) }); } catch {}
   if (!vault || vault.name !== name || key !== 'tx:' + txView.txid) return;
   const kind = (e) => (e.mime || '').startsWith('image/') ? 'IMG' : e.mime === 'application/pdf' ? 'PDF' : e.mime === 'text/plain' ? 'TXT' : 'FILE';
-  $('#tx-files').innerHTML = list.map((e, i) => `<div class="att${here[i] ? '' : ' away'}" role="button" tabindex="0" data-att="${i}" title="${esc(e.name)}${here[i] ? '' : ' — not on this computer yet'}"><div class="pic" data-thumb="${esc(e.thumb || '')}">${kind(e)}</div><div class="nm">${esc(e.name)}</div><div class="sz">${here[i] ? sizeWords(e.size) + (e.meta === 'original' && kind(e) === 'IMG' ? ' · as taken' : '') : 'not on this computer yet'}</div><button type="button" class="att-x" data-att-x="${i}" aria-label="Remove ${esc(e.name)}">×</button></div>`).join('');
+  $('#tx-files').innerHTML = list.map((e, i) => `<div class="att${here[i] ? '' : ' away'}" role="button" tabindex="0" data-att="${i}" title="${esc(e.name)}${here[i] ? '' : ' — not on this computer yet'}"><div class="pic" data-thumb="${esc(e.thumb || '')}"><span class="doc">${kind(e)}</span></div><div class="nm">${nameParts(e.name)}</div><div class="sz">${here[i] ? sizeWords(e.size) + (e.meta === 'original' && kind(e) === 'IMG' ? ' · as taken' : '') : 'not on this computer yet'}</div><button type="button" class="att-x" data-att-x="${i}" aria-label="Remove ${esc(e.name)}">×</button></div>`).join('');
+  const total = list.reduce((n, e) => n + (e.size || 0), 0);
+  $('#tx-files-sum').textContent = list.length ? `${list.length} file${list.length === 1 ? '' : 's'} · ${sizeWords(total)}` : '';
+  paintZone(false);
   $$('#tx-files [data-thumb]').forEach(async (pic) => { const h = pic.dataset.thumb; if (!h) return;
     try { if (!thumbCache.has(h)) thumbCache.set(h, await invoke('attach_thumb', { sha256: h })); const img = new Image(); img.alt = ''; img.src = thumbCache.get(h); pic.replaceChildren(img); } catch {} });
   $$('#tx-files [data-att]').forEach(t => { const e = list[+t.dataset.att];
@@ -277,20 +281,33 @@ async function renderFiles() {
       if (!b.classList.contains('armed')) { b.classList.add('armed'); b.textContent = 'Remove?'; setTimeout(() => { if (b.isConnected) { b.classList.remove('armed'); b.textContent = '×'; } }, 5000); return; }
       try { store = await invoke('attach_remove', { name, key, sha256: e.sha256 }); vault = store.vaults.find(v => v.name === name) || vault; renderFiles(); } catch (err) { fail(err); } }; });
 }
+// a file name keeps its ending when it has to be shortened: "a very long invoi….pdf"
+const nameParts = (n) => { const i = n.lastIndexOf('.'); return i > 0 && n.length - i <= 8 ? `<span class="stem">${esc(n.slice(0, i))}</span><span class="ext">${esc(n.slice(i))}</span>` : `<span class="stem">${esc(n)}</span>`; };
+const stripOn = () => $('#tx-strip').classList.contains('on');
+function paintStrip() { const on = stripOn(); $('#tx-strip').setAttribute('aria-checked', on ? 'true' : 'false');
+  $('#tx-strip-note').textContent = on ? 'Location and camera details are removed before a photo is kept.' : 'Off: photos are kept exactly as taken, location included.'; $('#tx-strip-note').classList.toggle('warn', !on); }
+// the drop zone says what will happen: tall and inviting on an empty record, one line once there are files, lit while something is held over the window
+function paintZone(over, busy) { const z = $('#tx-addfiles'), has = !!$('#tx-files').children.length;
+  z.classList.toggle('slim', has && !over); z.classList.toggle('over', !!over); z.classList.toggle('busy', !!busy); z.disabled = !!busy;
+  $('#tx-dz-main').textContent = busy ? 'Adding…' : over ? 'Let go to attach' : has ? 'Drop more files' : 'Drop files here';
+  $('#tx-dz-sub').innerHTML = busy ? '' : over ? 'to this transaction' : has ? 'or <u>choose files</u>' : 'or <u>choose files</u> · paste a picture with ⌘V'; }
+const toggleStrip = () => { $('#tx-strip').classList.toggle('on'); paintStrip(); };
+$('#tx-strip').onclick = toggleStrip; $('#tx-strip').onkeydown = (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggleStrip(); } };
+paintStrip();
 function attachDone(r, name) {
   store = r.store; vault = store.vaults.find(v => v.name === name) || vault; renderFiles();
   const said = [r.added ? `${r.added} file${r.added === 1 ? '' : 's'} attached` : '', ...r.notes, ...r.errors].filter(Boolean).join(' · ');
   if (said) toast(said, r.errors.length || r.notes.length ? 9000 : 3500);
 }
 const onTx = () => $('#s-tx').classList.contains('on') && vault && txView.txid;
-$('#tx-addfiles').onclick = async () => { const name = vault.name; try { attachDone(await invoke('attach_pick', { name, key: 'tx:' + txView.txid, keepOriginal: $('#tx-keep').checked }), name); } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
+$('#tx-addfiles').onclick = async () => { const name = vault.name; paintZone(false, true); try { attachDone(await invoke('attach_pick', { name, key: 'tx:' + txView.txid, keepOriginal: !stripOn() }), name); } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } finally { paintZone(false); } };
 // an OS drop reaches a Tauri window as PATHS in an event, never as File objects in the page
-for (const [ev, on] of [['tauri://drag-enter', true], ['tauri://drag-over', true], ['tauri://drag-leave', false]]) window.__TAURI__.event.listen(ev, () => { $('#dropveil').hidden = !(on && onTx()); });
+for (const [ev, on] of [['tauri://drag-enter', true], ['tauri://drag-over', true], ['tauri://drag-leave', false]]) window.__TAURI__.event.listen(ev, () => { const lit = on && onTx(); if (lit && !$('#tx-addfiles').classList.contains('over')) $('#tx-addfiles').scrollIntoView({ block: 'nearest', behavior: 'smooth' }); paintZone(lit); });
 window.__TAURI__.event.listen('tauri://drag-drop', async (e) => {
-  $('#dropveil').hidden = true;
+  paintZone(false);
   const paths = (e.payload && e.payload.paths) || []; if (!paths.length) return;
   if (!onTx()) return toast('Open a transaction first: files attach to the one on screen');
-  const name = vault.name; try { attachDone(await invoke('attach_paths', { name, key: 'tx:' + txView.txid, paths, keepOriginal: $('#tx-keep').checked }), name); } catch (err) { fail(err); }
+  const name = vault.name; paintZone(false, true); try { attachDone(await invoke('attach_paths', { name, key: 'tx:' + txView.txid, paths, keepOriginal: !stripOn() }), name); } catch (err) { fail(err); } finally { paintZone(false); }
 });
 document.addEventListener('paste', async (e) => {
   if (!onTx()) return; const item = [...(e.clipboardData ? e.clipboardData.items : [])].find(i => i.kind === 'file' && i.type.startsWith('image/')); if (!item) return;   // text pastes into the note as usual
@@ -308,15 +325,20 @@ async function saveTxField(which) {
   const name = vault.name, key = 'tx:' + txView.txid, val = which === 'label' ? $('#tx-label').value.trim() : $('#tx-note').value;
   const cur = which === 'label' ? labelOf(key) : ((vault.notes || {})[key] || '');
   if (val.trimEnd() === cur) return;
-  $('#tx-saved').textContent = 'saving…';
+  recSaid('Saving…');
   try { store = await invoke(which === 'label' ? 'label_set' : 'note_set', which === 'label' ? { name, key, label: val } : { name, key, note: val }); vault = store.vaults.find(v => v.name === name) || vault;
-    $('#tx-saved').textContent = 'Saved ' + new Date().toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) + (vault.seal && vault.seal.shares && vault.seal.shares.length ? ' · backed up with this vault\'s labels' : ' · on this computer');
+    const sealed = vault.seal && vault.seal.shares && vault.seal.shares.length;
+    recSaid('Saved ' + new Date().toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) + (sealed ? ' · backed up' : ' · on this computer'), true, sealed ? 'Encrypted and backed up with this vault\'s labels; any two keys bring it back' : 'Kept on this computer only. Seal the keys to back it up.');
     if (which === 'label') { paintCrumbs('tx'); $('#title').textContent = txHeadline(); } }
-  catch (e) { $('#tx-saved').textContent = ''; fail(e); }
+  catch (e) { recSaid(''); fail(e); }
 }
 $('#tx-label').addEventListener('blur', () => saveTxField('label'));
 $('#tx-label').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#tx-label').blur(); } });
-$('#tx-note').addEventListener('input', () => { clearTimeout(saveTxField.t); $('#tx-saved').textContent = 'not saved yet…'; saveTxField.t = setTimeout(() => saveTxField('note'), 1200); });
+function recSaid(text, ok, why) { const el = $('#tx-saved'); el.textContent = text; el.classList.toggle('ok', !!ok); el.title = why || ''; }
+// the note is as tall as what is in it (to a limit), and only mentions its ceiling when it is close
+function fitNote() { const n = $('#tx-note'); n.style.height = 'auto'; n.style.height = (n.scrollHeight + 2) + 'px';
+  const left = 20000 - n.value.length, c = $('#tx-count'); c.hidden = left > 2000; c.classList.toggle('near', left < 200); c.textContent = `${sats(left)} characters left`; }
+$('#tx-note').addEventListener('input', () => { fitNote(); clearTimeout(saveTxField.t); recSaid('Not saved yet…'); saveTxField.t = setTimeout(() => saveTxField('note'), 1200); });
 $('#tx-note').addEventListener('blur', () => { clearTimeout(saveTxField.t); saveTxField('note'); });
 $('#tx-prev').onclick = () => stepTx(-1); $('#tx-next').onclick = () => stepTx(1);
 document.addEventListener('keydown', (e) => { if (!$('#s-tx').classList.contains('on') || /INPUT|TEXTAREA/.test(document.activeElement.tagName) || e.metaKey || e.ctrlKey || e.altKey) return; if (e.key === 'ArrowLeft') stepTx(-1); if (e.key === 'ArrowRight') stepTx(1); });
