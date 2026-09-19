@@ -60,8 +60,50 @@ pub fn parse(input: &[u8]) -> Result<Psbt, String> {
     Psbt::from_str(&compact).map_err(|e| format!("not a valid PSBT: {e}"))
 }
 
+/// The vault's recovery sheet: descriptor (and chain code) as one sturdy code the Restore screen scans, the keys, the line as text.
+pub fn recovery_sheet(v: &crate::wallet::Vault) -> Result<Sheet, String> {
+    let line = crate::wallet::recovery_line(v);
+    let rotating = v.chain_code.is_some();
+    let sealed = v.keys.iter().filter(|k| v.seal.sealed.contains(&k.pubkey)).count();
+    Ok(Sheet {
+        title: "Vault recovery sheet (output descriptor)".into(),
+        facts: vec![("Vault".into(), format!("{} \u{b7} {} of {} \u{b7} {}", v.name, v.threshold, v.keys.len(), v.network)),
+            ("Addresses".into(), if rotating { "a fresh one for every deposit (the chain code below derives them)".into() } else { "one fixed address".into() }),
+            ("First address".into(), crate::wallet::address_at(v, 0)?), ("Created".into(), ymd(v.created)),
+            ("Sealed on keys".into(), format!("{sealed} of {}{}", v.keys.len(), if sealed == v.keys.len() { " \u{2014} any of them also rebuild this vault without this sheet".to_string() } else { String::new() }))],
+        rows: v.keys.iter().enumerate().map(|(i, k)| (format!("Key {}", i + 1), k.pubkey.clone(), if k.serial > 0 { format!("{} \u{b7} YubiKey serial {}", k.name, k.serial) } else { k.name.clone() })).collect(),
+        codes: vec![line.clone()], sturdy: true,
+        code_hint: format!("To restore: Any Two Keys \u{203a} Restore \u{203a} Scan the sheet, then plug in any {} of the keys to spend.", v.threshold),
+        text_heading: "The recovery line (the same as the code)".into(), text: line,
+        note: format!("Public keys only: this sheet cannot spend. It does show whoever reads it what the vault holds and has done, so keep it private, and keep it away from the PINs. {}",
+            if rotating { "The part before cc= is a standard output descriptor for the first address (Bitcoin Core: importdescriptors); the chain code after it derives every other address." }
+            else { "The line is a standard output descriptor: Bitcoin Core imports it with importdescriptors as a watch-only wallet." }) })
+}
+
 // ---------- a small PDF writer: three built-in fonts, text and filled squares ----------
-pub struct Sheet { pub title: String, pub facts: Vec<(String, String)>, pub pays: Vec<(String, String)>, pub note: String, pub parts: Vec<String>, pub base64: String }
+/// A printable sheet. `rows` are two-line entries (label, a monospaced line, a plain line); `codes` are drawn as QR
+/// codes (one large, or two to a row with `code_caption` numbering them); `text` repeats the payload for retyping.
+pub struct Sheet { pub title: String, pub facts: Vec<(String, String)>, pub rows: Vec<(String, String, String)>, pub codes: Vec<String>, pub sturdy: bool,
+    pub code_hint: String, pub text_heading: String, pub text: String, pub note: String }
+
+fn wrap(s: &str, width: usize) -> Vec<String> {
+    let mut lines = vec![String::new()];
+    for w in s.split_whitespace() {
+        let last = lines.last_mut().unwrap();
+        if !last.is_empty() && last.chars().count() + 1 + w.chars().count() > width { lines.push(w.to_string()); } else { if !last.is_empty() { last.push(' '); } last.push_str(w); }
+    }
+    lines
+}
+
+/// YYYY-MM-DD for a Unix time, UTC (civil-from-days; no date crate for one line on a sheet).
+pub fn ymd(secs: u64) -> String {
+    let z = (secs / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097); let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); let mp = (5 * doy + 2) / 153;
+    let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
+    format!("{:04}-{:02}-{:02}", yoe + era * 400 + if m <= 2 { 1 } else { 0 }, m, d)
+}
 
 const W: f32 = 595.0; const H: f32 = 842.0; const M: f32 = 48.0;
 
@@ -81,8 +123,8 @@ impl Page {
     }
     fn rule(&mut self, y: f32) { self.0.extend(format!("0.75 G 0.5 w {M} {y:.1} m {:.1} {y:.1} l S 0 G\n", W - M).bytes()); }
     /// The code with its quiet zone inside a `size`-point square whose top-left corner is (x, top).
-    fn qr(&mut self, x: f32, top: f32, size: f32, data: &str) -> Result<(), String> {
-        let code = qrcode::QrCode::with_error_correction_level(data, qrcode::EcLevel::L).map_err(|e| format!("QR: {e}"))?;
+    fn qr(&mut self, x: f32, top: f32, size: f32, data: &str, sturdy: bool) -> Result<(), String> {
+        let code = qrcode::QrCode::with_error_correction_level(data, if sturdy { qrcode::EcLevel::M } else { qrcode::EcLevel::L }).map_err(|e| format!("QR: {e}"))?;
         let (n, cells) = (code.width(), code.to_colors());
         let m = size / (n as f32 + 8.0);
         for r in 0..n {
@@ -108,28 +150,27 @@ pub fn pdf(s: &Sheet) -> Result<Vec<u8>, String> {
     page!().rule(y); y -= 20.0;
     for (k, v) in &s.facts { page!().text(2, 9.0, M, y, &k.to_uppercase()); page!().text(1, 11.0, M + 110.0, y, v); y -= 17.0; }
     y -= 4.0;
-    for (i, (addr, amt)) in s.pays.iter().enumerate() { page!().text(2, 9.0, M, y, if i == 0 { "PAYS" } else { "" }); page!().text(3, 9.0, M + 110.0, y, addr); page!().text(1, 10.0, M + 110.0, y - 12.0, amt); y -= 29.0; }
+    for (label, mono, plain) in &s.rows { page!().text(2, 9.0, M, y, &label.to_uppercase()); page!().text(3, 8.5, M + 110.0, y, mono); page!().text(1, 10.0, M + 110.0, y - 12.0, plain); y -= 29.0; }
     page!().rule(y); y -= 16.0;
     // the codes: one large, or two to a row
-    let n = s.parts.len();
+    let n = s.codes.len();
     let (size, cols) = if n == 1 { (300.0, 1) } else { (240.0, 2) };
-    for (i, part) in s.parts.iter().enumerate() {
+    for (i, part) in s.codes.iter().enumerate() {
         let col = i % cols;
         if col == 0 && y - size - 16.0 < M { pages.push(Page(Vec::new())); y = H - M; }
         let x = if cols == 1 { (W - size) / 2.0 } else { M + col as f32 * (size + (W - 2.0 * M - 2.0 * size)) };
-        page!().qr(x, y, size, part)?;
+        page!().qr(x, y, size, part, s.sturdy)?;
         if n > 1 { page!().text(2, 9.0, x + 16.0, y - size - 2.0, &format!("PART {} OF {}", i + 1, n)); }
         if col == cols - 1 || i == n - 1 { y -= size + 18.0; }
     }
-    if n > 1 { if y < M + 30.0 { pages.push(Page(Vec::new())); y = H - M; } page!().text(1, 9.5, M, y, "Scan the parts in any order with a wallet that reads UR (crypto-psbt) codes."); y -= 18.0; }
+    if !s.code_hint.is_empty() { if y < M + 30.0 { pages.push(Page(Vec::new())); y = H - M; } for l in wrap(&s.code_hint, 104) { page!().text(1, 9.5, M, y, &l); y -= 13.0; } y -= 6.0; }
     // the same PSBT as text
-    let lines: Vec<&str> = s.base64.as_bytes().chunks(112).map(|c| std::str::from_utf8(c).unwrap_or("")).collect();
+    let lines: Vec<&str> = s.text.as_bytes().chunks(112).map(|c| std::str::from_utf8(c).unwrap_or("")).collect();
     if y - 30.0 - lines.len() as f32 * 9.0 < M { pages.push(Page(Vec::new())); y = H - M; }
-    page!().text(2, 9.0, M, y, "THE SAME PSBT AS TEXT (BASE64, BIP 174)"); y -= 14.0;
+    page!().text(2, 9.0, M, y, &s.text_heading.to_uppercase()); y -= 14.0;
     for l in lines { if y < M + 24.0 { pages.push(Page(Vec::new())); y = H - M; } page!().text(3, 7.0, M, y, l); y -= 9.0; }
     y -= 10.0;
-    if y < M + 24.0 { pages.push(Page(Vec::new())); y = H - M; }
-    page!().text(1, 9.5, M, y, &s.note);
+    for l in wrap(&s.note, 104) { if y < M + 12.0 { pages.push(Page(Vec::new())); y = H - M; } page!().text(1, 9.5, M, y, &l); y -= 13.0; }
 
     // assemble: 1 catalog, 2 pages, 3-5 fonts, then a page object and a content stream per page
     let mut out: Vec<u8> = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
@@ -176,12 +217,35 @@ mod tests {
         assert!(parse(many[..1].join("\n").as_bytes()).is_err());
         assert!(parse(b"ur:crypto-seed/oeadgdaxbt").is_err());
     }
+    pub(super) fn vault(cc: Option<&str>) -> crate::wallet::Vault {
+        let keys = ["03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2", "032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe", "038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47"];
+        let descriptor = crate::wallet::descriptor_for(2, &keys.iter().map(|k| k.to_string()).collect::<Vec<_>>()).unwrap();
+        crate::wallet::Vault { name: "f\u{e4}mily vault".into(), network: "signet".into(), threshold: 2, keys: keys.iter().zip(["laptop", "keyring", "off-site"]).enumerate().map(|(i, (k, n))| crate::wallet::KeyRef { name: n.to_string(), serial: 27446043 + i as u32, pubkey: k.to_string() }).collect(),
+            descriptor, address: String::new(), created: 1_789_700_000, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), seal: Default::default() }
+    }
+    #[test]
+    fn the_recovery_sheet_carries_the_line_the_restore_screen_reads() {
+        assert_eq!(ymd(0), "1970-01-01"); assert_eq!(ymd(951_782_400), "2000-02-29"); assert_eq!(ymd(1_789_700_000), "2026-09-18");
+        for cc in [None, Some("ab".repeat(32))] {
+            let v = vault(cc.as_deref());
+            let sheet = recovery_sheet(&v).unwrap();
+            assert_eq!(sheet.codes, vec![crate::wallet::recovery_line(&v)]);
+            // what the code says is what descriptor_parse / vault_restore take
+            let (desc, got_cc) = crate::wallet::split_recovery(&sheet.codes[0]);
+            assert_eq!(crate::wallet::keys_of(&desc).unwrap(), (2, v.keys.iter().map(|k| k.pubkey.clone()).collect::<Vec<_>>()));
+            assert_eq!(got_cc, v.chain_code);
+            let pdf = pdf(&sheet).unwrap();
+            let text = String::from_utf8_lossy(&pdf);
+            for k in &v.keys { assert!(text.contains(&k.pubkey) && text.contains(&k.name)); }
+            assert!(text.contains("2026-09-18") && text.contains("cannot spend"));
+        }
+    }
     #[test]
     fn the_pdf_is_a_pdf_with_every_part_on_it() {
         let raw = sample();
         let parts = ur_parts(&raw, 120, false).unwrap();
-        let sheet = Sheet { title: "Partially signed transaction".into(), facts: vec![("Vault".into(), "f\u{e4}mily (vault) \u{20bf}".into())], pays: vec![("tb1qexample".into(), "5,000 sats".into())],
-            note: "Public data.".into(), base64: Psbt::deserialize(&raw).unwrap().to_string(), parts: parts.clone() };
+        let sheet = Sheet { title: "Partially signed transaction".into(), facts: vec![("Vault".into(), "f\u{e4}mily (vault) \u{20bf}".into())], rows: vec![("Pays".into(), "tb1qexample".into(), "5,000 sats".into())], sturdy: false, code_hint: "Scan the parts in any order.".into(), text_heading: "The same PSBT as text".into(),
+            note: "Public data.".into(), text: Psbt::deserialize(&raw).unwrap().to_string(), codes: parts.clone() };
         let pdf = pdf(&sheet).unwrap();
         assert!(pdf.starts_with(b"%PDF-1.4") && pdf.ends_with(b"%%EOF\n"));
         let text = String::from_utf8_lossy(&pdf);
@@ -204,13 +268,18 @@ mod dump {
         let b64 = bitcoin::psbt::Psbt::deserialize(raw).unwrap().to_string();
         std::fs::write(dir.join("parts.txt"), super::ur_parts(raw, 160, true).unwrap().join("\n")).unwrap();
         std::fs::write(dir.join("single.txt"), super::ur_parts(raw, usize::MAX, false).unwrap().join("\n")).unwrap();
+        for (name, cc) in [("recovery-fixed", None), ("recovery-rotating", Some("ab".repeat(32)))] {
+            let v = super::tests::vault(cc.as_deref());
+            std::fs::write(dir.join(format!("{name}.pdf")), super::pdf(&super::recovery_sheet(&v).unwrap()).unwrap()).unwrap();
+            std::fs::write(dir.join(format!("{name}.txt")), crate::wallet::recovery_line(&v)).unwrap();
+        }
         for (name, frag) in [("multi", 120usize), ("single", usize::MAX)] {
             let sheet = super::Sheet { title: "Partially signed transaction (PSBT, BIP 174)".into(),
                 facts: vec![("Vault".into(), "vault \u{b7} 2 of 3 \u{b7} signet".into()), ("Signatures".into(), "1 of 2 on every input".into()), ("Signed by".into(), "laptop".into()), ("Not yet".into(), "keyring, off-site".into()),
                     ("Transaction".into(), "bcd3fb3da2e6abd3381b2dd5cde0b3cc0357c0eb999bcba5027eec2786a391e1".into()), ("Inputs \u{b7} fee".into(), "1 \u{b7} 190 sats".into())],
-                pays: vec![("tb1q2n7mza35dzyea6du9dh4amzqxjg6ysgtc45kfklfd7revryppuxqfegkkp".into(), "4,810 sats \u{b7} back to this vault (change)".into())],
+                rows: vec![("Pays".into(), "tb1q2n7mza35dzyea6du9dh4amzqxjg6ysgtc45kfklfd7revryppuxqfegkkp".into(), "4,810 sats \u{b7} back to this vault (change)".into())], sturdy: false, code_hint: String::new(), text_heading: "The same PSBT as text (base64, BIP 174)".into(),
                 note: "Needs 1 more signature. Load it in Any Two Keys (Send \u{203a} Load a PSBT) or any PSBT wallet. It cannot spend as it is.".into(),
-                parts: super::ur_parts(raw, frag, false).unwrap(), base64: b64.clone() };
+                codes: super::ur_parts(raw, frag, false).unwrap(), text: b64.clone() };
             std::fs::write(dir.join(format!("{name}.pdf")), super::pdf(&sheet).unwrap()).unwrap();
         }
     }

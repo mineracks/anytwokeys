@@ -211,3 +211,8 @@ tr:hover .lbl .pencil,.coin:hover .lbl .pencil,.lbl .pencil:focus-visible{color:
 #ceremony.can-sign{border-color:var(--gold)}
 .ckey.nano svg{margin-top:0}
 .ckey.nano.here .khalo{transform-origin:22px 65px}
+
+/* a set of equal actions: same width, same height, filling the card edge to edge however many fit on a row */
+.btn-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:10px}
+.btn-grid .btn{width:100%;white-space:nowrap;padding-inline:10px}
+.btn-grid .btn[hidden]{display:none}

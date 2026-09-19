@@ -504,6 +504,7 @@ $('#save-names').onclick = async () => {
     $('#edit-panel').hidden = true; $('#edit-names').hidden = false; paintNet(); renderKeys(); $('#title').textContent = vault.name; toast('Names saved');
   } catch (e) { fail(e); }
 };
+$('#vault-pdf').onclick = async () => { try { toast('Saved ' + await invoke('vault_pdf', { name: vault.name }), 6000); } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
 $('#copy-desc').onclick = () => navigator.clipboard.writeText(vault._recovery || vault.descriptor).then(() => toast('Recovery line copied'));
 $('#forget-vault').onclick = async () => { if (!confirm(`Forget '${vault.name}' on this computer? The coins stay on the chain; the recovery line and two keys bring it back.`)) return; store = await invoke('vault_forget', { name: vault.name }); vault = null; boot(); };
 
