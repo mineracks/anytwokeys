@@ -66,6 +66,38 @@ async fn vault_activity(name: String, history: Vec<(String, i32)>, ccy: String) 
     }).await
 }
 
+// ---------- the address book ----------
+/// Save a destination, or rename the one already saved for that address. The address is checked against the network first.
+#[tauri::command]
+fn contact_save(name: String, address: String, network: String) -> R<Store> {
+    let name = name.trim().to_string();
+    if name.is_empty() || name.chars().count() > 60 { return Err("give it a name of up to 60 characters".into()); }
+    let address = wallet::checked_address(&address, &network)?;
+    wallet::update(move |s| match s.contacts.iter_mut().find(|c| c.address == address && c.network == network) {
+        Some(c) => c.name = name,
+        None => s.contacts.push(wallet::Contact { name, address, network, added: now(), used: 0, last_used: 0 }),
+    })
+}
+
+#[tauri::command]
+fn contact_delete(address: String, network: String) -> R<Store> {
+    wallet::update(move |s| s.contacts.retain(|c| !(c.address == address && c.network == network)))
+}
+
+/// A payment to a saved address went out: count it, so the book can say how often that address has been used.
+#[tauri::command]
+fn contact_used(address: String, network: String) -> R<Store> {
+    wallet::update(move |s| if let Some(c) = s.contacts.iter_mut().find(|c| c.address == address && c.network == network) { c.used += 1; c.last_used = now(); })
+}
+
+/// A fresh address of one of this person's OWN vaults: the way to pay yourself without ever reusing an address.
+#[tauri::command]
+fn vault_receive_address(name: String) -> R<String> {
+    let s = wallet::load();
+    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
+    wallet::address_at(v, if v.chain_code.is_some() { v.next } else { 0 })
+}
+
 #[tauri::command]
 fn device_locale() -> activity::Device { activity::device() }
 
@@ -889,7 +921,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| { watch::start(app.handle().clone()); Ok(()) })
-        .invoke_handler(tauri::generate_handler![open_url, vault_activity, device_locale, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_preview, seal_restore, label_set, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![open_url, vault_activity, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_preview, seal_restore, label_set, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])

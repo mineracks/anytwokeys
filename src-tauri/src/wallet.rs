@@ -60,6 +60,17 @@ pub fn default_gap() -> u32 { GAP }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StagedMessage { pub vault: String, pub address: String, pub message: String, pub index: u32 }
 
+/// A saved destination. Addresses are per network; `used` counts payments made to it from this app.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Contact { pub name: String, pub address: String, pub network: String, #[serde(default)] pub added: u64, #[serde(default)] pub used: u32, #[serde(default)] pub last_used: u64 }
+
+/// The address as the network spells it (bech32 lower-cased), or why it is not one for this network.
+pub fn checked_address(address: &str, network: &str) -> Result<String, String> {
+    let a = Address::from_str(address.trim()).map_err(|_| "that is not a Bitcoin address".to_string())?
+        .require_network(network_of(network)).map_err(|_| format!("that address is not a {network} address"))?;
+    Ok(a.to_string())
+}
+
 /// What the watcher last saw for a vault: txid → height, and the coins it held.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Seen { pub txs: std::collections::HashMap<String, i32>, pub coins: std::collections::HashMap<String, u64>, pub primed: bool }
@@ -72,6 +83,8 @@ pub struct Store {
     /// when `last_psbt` is a BIP 322 proof rather than a spend
     #[serde(default)] pub last_message: Option<StagedMessage>,
     #[serde(default)] pub seen: std::collections::HashMap<String, Seen>,
+    /// the address book: places this person pays more than once
+    #[serde(default)] pub contacts: Vec<Contact>,
     /// public key → YubiKey form factor, learnt when the card is plugged in, so a Nano is drawn as one
     #[serde(default)] pub forms: std::collections::HashMap<String, u8>,
 }
@@ -517,6 +530,16 @@ mod tests {
         let dead = Servers { electrum: "tcp://127.0.0.1:1".into(), explorer: "http://127.0.0.1:1".into() };
         assert!(scan(&vault(Some(&"ab".repeat(32))), &dead, 20).is_err());
         assert!(scan(&vault(None), &dead, 20).is_err());
+    }
+    #[test]
+    fn an_address_is_checked_against_its_network_before_it_is_saved() {
+        let main = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";   // BIP 173's own example
+        assert_eq!(checked_address(&format!("  {main} "), "mainnet").unwrap(), main);
+        assert_eq!(checked_address(&main.to_uppercase(), "mainnet").unwrap(), main);
+        assert!(checked_address(main, "signet").unwrap_err().contains("not a signet address"));
+        assert!(checked_address("tb1q2n7mza35dzyea6du9dh4amzqxjg6ysgtc45kfklfd7revryppuxqfegkkp", "mainnet").is_err());
+        assert!(checked_address("tb1q2n7mza35dzyea6du9dh4amzqxjg6ysgtc45kfklfd7revryppuxqfegkkp", "signet").is_ok());
+        assert!(checked_address("bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdx", "mainnet").unwrap_err().contains("not a Bitcoin address"));   // one character wrong: the checksum catches it
     }
     #[test]
     fn fixed_vault_keeps_the_known_address() {

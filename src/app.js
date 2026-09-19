@@ -61,7 +61,7 @@ function show(name) {
   if (name !== 'sign') stopQr();
   if (name === 'home') sync();
   if (name === 'receive') { drawAddress(); renderAddresses(); }
-  if (name === 'send') { loadFees(); if (vault && !vault._coins) sync().then(renderCoins); else renderCoins(); }
+  if (name === 'send') { closeBook(); paintTo(); loadFees(); if (vault && !vault._coins) sync().then(renderCoins); else renderCoins(); }
   if (name === 'messages') renderMessages();
   if (name === 'keys') renderKeys();
   if (name === 'setup') renderSetup();
@@ -265,6 +265,46 @@ async function loadFees() {
 }
 function inVb(k, n) { if (n === 1) return 68; const sl = 1 + 34 * n + 2; return 41 + Math.ceil((1 + 1 + k * 73 + (sl < 76 ? 1 : 2) + sl) / 4); }
 // paste and scan into the To field
+// ---------- the address book ----------
+const bookOf = () => (store.contacts || []).filter(c => c.network === (vault ? vault.network : store.settings.network));
+const shortAddr = (a) => a.length > 26 ? a.slice(0, 12) + '…' + a.slice(-8) : a;
+const chunked = (a) => a.replace(/(.{4})/g, '$1 ').trim();
+function closeBook() { $('#book').hidden = true; $('#book-to').setAttribute('aria-expanded', 'false'); }
+function renderBook() {
+  const own = store.vaults.filter(v => vault && v.network === vault.network && v.name !== vault.name), saved = bookOf().slice().sort((a, b) => (b.last_used || b.added) - (a.last_used || a.added));
+  $('#book').innerHTML =
+    (own.length ? '<h4>Your own vaults · a fresh address every time</h4>' + own.map(v => `<button type="button" class="entry" data-own="${esc(v.name)}"><span class="nm">${esc(v.name)}</span><span class="ad">${v.chain_code ? 'next unused address' : 'its one fixed address'}</span><span class="ct">${v.threshold} of ${v.keys.length}</span></button>`).join('') : '')
+    + '<h4>Saved addresses</h4>' + (saved.length ? saved.map(c => `<div class="rowwrap"><button type="button" class="entry" data-addr="${esc(c.address)}"><span class="nm">${esc(c.name)}</span><span class="ad" title="${esc(c.address)}">${esc(shortAddr(c.address))}</span><span class="ct">${c.used ? 'paid ' + c.used + (c.used === 1 ? ' time' : ' times') : 'not yet paid'}</span></button><button type="button" class="del" data-del="${esc(c.address)}" title="Remove from the address book">Remove</button></div>`).join('')
+      : '<div class="empty">None yet. Paste or scan an address, then “Save this address”.</div>');
+  $$('#book [data-del]').forEach(b => askTwice(b, 'Remove this address from the book? Payments already made are not affected.', 'Yes, remove', async () => { store = await invoke('contact_delete', { address: b.dataset.del, network: vault.network }); renderBook(); paintTo(); }));
+}
+$('#book').addEventListener('click', async (e) => {
+  const own = e.target.closest('[data-own]'), c = e.target.closest('[data-addr]');
+  if (own) { try { $('#send-to').value = await invoke('vault_receive_address', { name: own.dataset.own }); paintTo.own = { name: own.dataset.own, address: $('#send-to').value }; } catch (err) { return fail(err); } }
+  else if (c) { $('#send-to').value = c.dataset.addr; paintTo.own = null; }
+  else return;
+  closeBook(); paintTo(); $('#send-amount').focus();
+});
+$('#book-to').onclick = () => { const open = $('#book').hidden; if (open) renderBook(); $('#book').hidden = !open; $('#book-to').setAttribute('aria-expanded', String(open)); };
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#book').hidden) { closeBook(); $('#book-to').focus(); } });
+// under the To field: who this address is, how often it has been paid, or the offer to save it
+function paintTo() {
+  const who = $('#to-who'), a = $('#send-to').value.trim(); who.hidden = true; who.innerHTML = '';
+  if (!a || !vault) return;
+  const own = paintTo.own && paintTo.own.address === a ? paintTo.own : null, c = bookOf().find(c => c.address.toLowerCase() === a.toLowerCase());
+  if (own) who.innerHTML = `<span>To your own vault <b>${esc(own.name)}</b>, at an address it has not used before.</span>`;
+  else if (c) who.innerHTML = `<span>To <b>${esc(c.name)}</b> · <span class="mono" style="font-size:12.5px">${esc(chunked(c.address))}</span></span><span>${c.used ? `Paid ${c.used} time${c.used === 1 ? '' : 's'} before: anyone watching that address can link these payments.` : 'Saved, not yet paid.'}</span>`;
+  else if (/^(bc1|tb1|[13mn2])[a-zA-Z0-9]{20,}$/.test(a)) who.innerHTML = `<button type="button" class="linkish" id="save-addr">Save this address…</button>`;
+  else return;
+  who.hidden = false;
+  if ($('#save-addr')) $('#save-addr').onclick = () => {
+    who.innerHTML = `<div class="savebar"><input id="save-addr-name" placeholder="A name for it, e.g. exchange deposit" maxlength="60"><button type="button" class="btn small primary" id="save-addr-go">Save</button><button type="button" class="linkish" id="save-addr-no">Cancel</button></div>`;
+    const go = async () => { try { store = await invoke('contact_save', { name: $('#save-addr-name').value, address: a, network: vault.network }); toast('Saved to the address book'); paintTo(); } catch (e) { fail(e); } };
+    $('#save-addr-go').onclick = go; $('#save-addr-no').onclick = paintTo; $('#save-addr-name').focus();
+    $('#save-addr-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } if (e.key === 'Escape') paintTo(); });
+  };
+}
+$('#send-to').addEventListener('input', () => { paintTo.own = null; paintTo(); });
 $('#paste-to').onclick = async () => {
   try { const t = (await navigator.clipboard.readText()).trim(); if (!t) return toast('Clipboard is empty'); fillDestination(t); }
   catch { toast('Could not read the clipboard'); }
@@ -276,7 +316,7 @@ function fillDestination(text) {
     t = addr;
     if (q) { const amt = new URLSearchParams(q).get('amount'); if (amt) { $('#send-amount').value = String(Math.round(parseFloat(amt) * 1e8)); } }
   }
-  $('#send-to').value = t;
+  $('#send-to').value = t; paintTo.own = null; paintTo();
   toast('Destination filled');
 }
 let cam2Stream = null, cam2Timer = null;
@@ -497,7 +537,11 @@ askTwice($('#staged-discard'), 'Discard the transaction that is waiting for sign
 $('#sign-cancel').onclick = async () => { await invoke('spend_discard'); built = null; coinPick.clear(); $('#build-btn').textContent = 'Build transaction'; $('#build-btn').onclick = null; show('send'); location.reload(); };
 $('#broadcast-btn').onclick = async () => {
   $('#broadcast-btn').disabled = true;
-  try { const r = await invoke('spend_broadcast', { name: vault.name }); built = null; coinPick.clear(); toast('Sent. ' + r.txid.slice(0, 16) + '…', 8000); $('#broadcast-text').innerHTML = `Broadcast. <a href="#" data-tx="${r.txid}">${r.txid}</a>`; setTimeout(() => show('home'), 2500); }
+  try { // who is being paid is read from the transaction itself, not from what the Send form remembered: a spend loaded from a file, or finished after a relaunch, counts too
+    let dests = []; try { dests = (await invoke('spend_ceremony', { name: vault.name })).pays.filter(p => !p.ours).map(p => p.address.toLowerCase()); } catch {}
+    const r = await invoke('spend_broadcast', { name: vault.name }); const paid = bookOf().find(c => dests.includes(c.address.toLowerCase()));
+    if (paid) { try { store = await invoke('contact_used', { address: paid.address, network: vault.network }); if (!labelOf('tx:' + r.txid)) await invoke('label_set', { name: vault.name, key: 'tx:' + r.txid, label: 'to ' + paid.name }); } catch {} }
+    built = null; coinPick.clear(); toast('Sent. ' + r.txid.slice(0, 16) + '…', 8000); $('#broadcast-text').innerHTML = `Broadcast. <a href="#" data-tx="${r.txid}">${r.txid}</a>`; setTimeout(() => show('home'), 2500); }
   catch (e) { fail(e); $('#broadcast-btn').disabled = false; }
 };
 
