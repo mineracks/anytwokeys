@@ -10,7 +10,7 @@ Standard library only. The format is described in docs/SEAL.md.
   Then combine k shares of the same vault id:
       seal-recover.py combine <x>:<sharehex> <x>:<sharehex> [...]
 """
-import hashlib, sys
+import hashlib, hmac, sys
 
 # GF(2^8) over x^8+x^4+x^3+x+1 by log/antilog tables, generator 3
 EXP, LOG = [0] * 510, [0] * 256
@@ -67,8 +67,29 @@ def container(b):
     i, out = 4, []
     while i < len(b):
         ident, k, x, ln = b[i:i + 4].hex(), b[i + 4], b[i + 5], int.from_bytes(b[i + 6:i + 8], "big")
-        out.append((ident, k, x, b[i + 8:i + 8 + ln])); i += 8 + ln
+        out.append((ident, k & 0x7F, x, b[i + 8:i + 8 + ln], bool(k & 0x80))); i += 8 + ln
     return out
+
+def _prf(key, label, ident, k, x, nonce, tail):
+    return hmac.new(key, label + ident + bytes([k, x]) + nonce + tail, hashlib.sha256).digest()
+
+def lock_share(key, ident, k, x, share, nonce):
+    ct = bytes(d ^ s for c in range(0, len(share), 32) for d, s in zip(share[c:c + 32], _prf(key, b"a2k-seal-v2-stream", ident, k, x, nonce, (c // 32).to_bytes(4, "big"))))
+    return nonce + ct + _prf(key, b"a2k-seal-v2-tag", ident, k, x, nonce, ct)[:8]
+
+def unlock_share(key, ident, k, x, body):
+    """A locked entry (bit 7 of its k byte) is nonce[8] + ciphertext + tag[8]; `key` is the 32 bytes after "A2K\x02" in the
+    card's private object 0103, which the card gives up only after its PIN (VERIFY with P2 = 82)."""
+    nonce, ct, tag = body[:8], body[8:-8], body[-8:]
+    if not hmac.compare_digest(_prf(key, b"a2k-seal-v2-tag", ident, k, x, nonce, ct)[:8], tag):
+        raise SystemExit("that share was not locked by that key's secret")
+    return bytes(d ^ s for c in range(0, len(ct), 32) for d, s in zip(ct[c:c + 32], _prf(key, b"a2k-seal-v2-stream", ident, k, x, nonce, (c // 32).to_bytes(4, "big"))))
+
+def lock_vector():
+    share = bytes((i * 7 % 251) for i in range(171))
+    body = lock_share(bytes([7]) * 32, bytes.fromhex("deadbeef"), 2, 3, share, bytes(range(1, 9)))
+    assert unlock_share(bytes([7]) * 32, bytes.fromhex("deadbeef"), 2, 3, body) == share
+    return hashlib.sha256(body).hexdigest()
 
 def vector():
     """The frozen test vector the Rust build checks itself against (src-tauri/src/seal.rs)."""
@@ -89,7 +110,11 @@ if __name__ == "__main__":
     a = sys.argv[1:]
     if a[:1] == ["vector"]: print(vector())
     elif a[:1] == ["container"] and len(a) == 2:
-        for ident, k, x, share in container(bytes.fromhex(a[1])): print(f"vault {ident}: share {x}, any {k} rebuild it\n  {x}:{share.hex()}")
+        for ident, k, x, share, locked in container(bytes.fromhex(a[1])):
+            print(f"vault {ident}: share {x}, any {k} rebuild it" + (" · LOCKED: open it first with  unlock <0103 secret hex> " + f"{ident} {k} {x} {share.hex()}" if locked else f"\n  {x}:{share.hex()}"))
+    elif a[:1] == ["unlock"] and len(a) == 6:
+        print(f"{a[4]}:" + unlock_share(bytes.fromhex(a[1])[-32:], bytes.fromhex(a[2]), int(a[3]), int(a[4]), bytes.fromhex(a[5])).hex())
+    elif a[:1] == ["lock-vector"]: print(lock_vector())
     elif a[:1] == ["combine"] and len(a) >= 2:
         pts = [(int(s.split(":")[0]), bytes.fromhex(s.split(":")[1])) for s in a[1:]]
         r = decode(interpolate(pts))

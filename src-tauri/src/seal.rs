@@ -1,7 +1,7 @@
 //! The seal: a vault's recovery record, split k-of-n and kept on the cards themselves.
 //! Any k cards rebuild the vault; fewer learn nothing beyond their own public key.
 //! The format is public and frozen by the tests below — see docs/SEAL.md and tools/seal-recover.py.
-use bitcoin::hashes::{sha256, Hash};
+use bitcoin::hashes::{hmac, sha256, Hash, HashEngine};
 use serde::{Deserialize, Serialize};
 
 pub const MAGIC: &[u8; 4] = b"A2K\x01";
@@ -96,8 +96,38 @@ pub fn vault_id(network: &str, threshold: usize, pubkeys: &[String], chain_code:
 }
 
 // ---------- what sits on a card ----------
+/// `locked`: the share is encrypted under a secret that the key only gives up after its PIN (see `lock_share`).
+/// On the card that is bit 7 of the k byte; `share` is then hex of nonce(8) ‖ ciphertext ‖ tag(8).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Entry { pub id: String, pub k: u8, pub x: u8, pub share: String }
+pub struct Entry { pub id: String, pub k: u8, pub x: u8, pub share: String, #[serde(default)] pub locked: bool }
+
+pub const LOCKED: u8 = 0x80;
+/// What sits in the card's PIN-protected private object 0103: this magic, then 32 random bytes.
+pub const KEY_MAGIC: &[u8; 4] = b"A2K\x02";
+
+// HMAC-SHA256 as the PRF, in counter mode for the keystream and once more for the tag. The share is random bytes already;
+// the tag is there so a wrong secret says "wrong key" instead of handing back noise.
+fn prf(key: &[u8; 32], label: &[u8], id: &[u8], k: u8, x: u8, nonce: &[u8], tail: &[u8]) -> [u8; 32] {
+    let mut e = hmac::HmacEngine::<sha256::Hash>::new(key);
+    e.input(label); e.input(id); e.input(&[k, x]); e.input(nonce); e.input(tail);
+    hmac::Hmac::<sha256::Hash>::from_engine(e).to_byte_array()
+}
+fn stream(key: &[u8; 32], id: &[u8], k: u8, x: u8, nonce: &[u8], data: &[u8]) -> Vec<u8> {
+    data.chunks(32).enumerate().flat_map(|(c, block)| { let ks = prf(key, b"a2k-seal-v2-stream", id, k, x, nonce, &(c as u32).to_be_bytes()); block.iter().zip(ks).map(|(d, s)| d ^ s).collect::<Vec<u8>>() }).collect()
+}
+pub fn lock_share(key: &[u8; 32], id_hex: &str, k: u8, x: u8, share: &[u8], nonce: [u8; 8]) -> Result<Vec<u8>, String> {
+    let id = hex::decode(id_hex).map_err(|e| e.to_string())?;
+    let ct = stream(key, &id, k, x, &nonce, share);
+    let tag = prf(key, b"a2k-seal-v2-tag", &id, k, x, &nonce, &ct);
+    Ok([&nonce[..], &ct[..], &tag[..8]].concat())
+}
+pub fn unlock_share(key: &[u8; 32], id_hex: &str, k: u8, x: u8, body: &[u8]) -> Result<Vec<u8>, String> {
+    let id = hex::decode(id_hex).map_err(|e| e.to_string())?;
+    if body.len() < 17 { return Err("the locked share is too short".into()); }
+    let (nonce, rest) = body.split_at(8); let (ct, tag) = rest.split_at(rest.len() - 8);
+    if prf(key, b"a2k-seal-v2-tag", &id, k, x, nonce, ct)[..8] != *tag { return Err("this share was not locked by this key's secret".into()); }
+    Ok(stream(key, &id, k, x, nonce, ct))
+}
 
 /// A card's container: MAGIC, then entries of id(4) k(1) x(1) len(2, big-endian) share. Empty = no entries.
 pub fn parse_container(b: &[u8]) -> Result<Vec<Entry>, String> {
@@ -108,7 +138,7 @@ pub fn parse_container(b: &[u8]) -> Result<Vec<Entry>, String> {
         let h = b.get(i..i + 8).ok_or("truncated entry")?;
         let len = u16::from_be_bytes([h[6], h[7]]) as usize;
         let share = b.get(i + 8..i + 8 + len).ok_or("truncated share")?;
-        out.push(Entry { id: hex::encode(&h[..4]), k: h[4], x: h[5], share: hex::encode(share) });
+        out.push(Entry { id: hex::encode(&h[..4]), k: h[4] & !LOCKED, x: h[5], share: hex::encode(share), locked: h[4] & LOCKED != 0 });
         i += 8 + len;
     }
     Ok(out)
@@ -119,7 +149,8 @@ pub fn build_container(entries: &[Entry]) -> Result<Vec<u8>, String> {
     for e in entries {
         let (id, share) = (hex::decode(&e.id).map_err(|e| e.to_string())?, hex::decode(&e.share).map_err(|e| e.to_string())?);
         if id.len() != 4 || share.len() > 0xFFFF { return Err("malformed entry".into()); }
-        b.extend(id); b.push(e.k); b.push(e.x); b.extend((share.len() as u16).to_be_bytes()); b.extend(share);
+        if e.k & LOCKED != 0 { return Err("a threshold above 127 cannot be stored".into()); }
+        b.extend(id); b.push(if e.locked { e.k | LOCKED } else { e.k }); b.push(e.x); b.extend((share.len() as u16).to_be_bytes()); b.extend(share);
     }
     Ok(b)
 }
@@ -173,8 +204,27 @@ mod tests {
         assert_eq!(vault_id(&r.network, 2, &r.pubkeys, r.chain_code.as_deref()), vault_id(&r.network, 2, &r.pubkeys.iter().rev().cloned().collect::<Vec<_>>(), r.chain_code.as_deref()));
     }
     #[test]
+    fn a_locked_share_opens_only_with_its_own_secret_and_is_frozen_too() {
+        let (key, other) = ([7u8; 32], [8u8; 32]);
+        let share: Vec<u8> = (0..171u16).map(|i| (i * 7 % 251) as u8).collect();
+        let body = lock_share(&key, "deadbeef", 2, 3, &share, [1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        assert_eq!(body.len(), 8 + share.len() + 8);
+        assert_ne!(&body[8..8 + share.len()], &share[..]);
+        assert_eq!(unlock_share(&key, "deadbeef", 2, 3, &body).unwrap(), share);
+        // the wrong secret, the wrong position, the wrong vault, or a flipped bit: refused, never noise
+        assert!(unlock_share(&other, "deadbeef", 2, 3, &body).is_err());
+        assert!(unlock_share(&key, "deadbeef", 2, 1, &body).is_err());
+        assert!(unlock_share(&key, "deadbee0", 2, 3, &body).is_err());
+        let mut bent = body.clone(); bent[20] ^= 1; assert!(unlock_share(&key, "deadbeef", 2, 3, &bent).is_err());
+        // two lockings of one share under one secret must not share a keystream
+        let again = lock_share(&key, "deadbeef", 2, 3, &share, [9; 8]).unwrap();
+        assert_ne!(&again[8..40], &body[8..40]);
+        // frozen against the Python tool: if this fails, cards locked by an earlier build cannot be opened
+        assert_eq!(hex::encode(sha256::Hash::hash(&body)), include_str!("../../tools/seal-lock-vector.sha256").trim());
+    }
+    #[test]
     fn containers_round_trip_and_refuse_strangers() {
-        let es = vec![Entry { id: "01020304".into(), k: 2, x: 1, share: "aabbcc".into() }, Entry { id: "0a0b0c0d".into(), k: 3, x: 5, share: "00".repeat(300) }];
+        let es = vec![Entry { id: "01020304".into(), k: 2, x: 1, share: "aabbcc".into(), locked: false }, Entry { id: "0a0b0c0d".into(), k: 3, x: 5, share: "00".repeat(300), locked: true }];
         assert_eq!(parse_container(&build_container(&es).unwrap()).unwrap(), es);
         assert_eq!(parse_container(&[]).unwrap(), vec![]);
         assert!(parse_container(b"\x30\x82\x01\x0a certificate").is_err());

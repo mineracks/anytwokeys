@@ -29,6 +29,8 @@ pub enum CardError {
     Changed,
     #[error("the card did not read back what was written")]
     Unverified,
+    #[error("this key's private data object (0103) holds something that is not ours; it was left alone")]
+    PrivateInUse,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -287,6 +289,30 @@ pub fn write_sealed(reader: &str, admin_pin: &str, expect: &[u8], data: &[u8]) -
     }
     if apdu(&card, 0x00, 0xCA, 0x7F, 0x21, &[])? != data { return Err(CardError::Unverified); }
     Ok(())
+}
+
+/// The secret that locks this key's shares. It lives in the OpenPGP private object 0103, which the card gives up only
+/// after the USER PIN (VERIFY with P2 = 82, the mode for everything that is not a signature) and lets be written under
+/// the same PIN. `create`: make and store a fresh 32 random bytes if the object is empty. Anything else found there is
+/// left alone. The write is read back before it is trusted.
+pub fn seal_key(reader: &str, pin: &str, create: bool) -> Result<Option<[u8; 32]>, CardError> {
+    let ctx = Context::establish(Scope::User)?;
+    let card = connect(&ctx, reader)?;
+    apdu(&card, 0x00, 0x20, 0x00, 0x82, pin.as_bytes())?;
+    let parse = |v: &[u8]| -> Result<Option<[u8; 32]>, CardError> {
+        if v.is_empty() { return Ok(None); }
+        if v.len() != 36 || &v[..4] != crate::seal::KEY_MAGIC { return Err(CardError::PrivateInUse); }
+        let mut k = [0u8; 32]; k.copy_from_slice(&v[4..]); Ok(Some(k))
+    };
+    if let Some(k) = parse(&apdu(&card, 0x00, 0xCA, 0x01, 0x03, &[])?)? { return Ok(Some(k)); }
+    if !create { return Ok(None); }
+    use bitcoin::secp256k1::rand::RngCore;
+    let mut k = [0u8; 32];
+    bitcoin::secp256k1::rand::rngs::OsRng.fill_bytes(&mut k);
+    let body = [&crate::seal::KEY_MAGIC[..], &k[..]].concat();
+    apdu(&card, 0x00, 0xDA, 0x01, 0x03, &body)?;
+    if apdu(&card, 0x00, 0xCA, 0x01, 0x03, &[])? != body { return Err(CardError::Unverified); }
+    Ok(Some(k))
 }
 
 fn is_low_s(s: &[u8; 32]) -> bool {

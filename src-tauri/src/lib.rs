@@ -594,6 +594,8 @@ fn seal_shares(v: &Vault, cards: &[cards::Sealed]) -> R<Option<Vec<String>>> {
     let id = seal_id(v);
     let on_cards: Vec<seal::Entry> = cards.iter().filter_map(|c| seal::parse_container(&c.container).ok()).flatten().filter(|e| e.id == id).collect();
     if !on_cards.is_empty() {
+        // locked shares cannot be read without their PINs: adopting those goes through Restore › From the keys
+        let on_cards: Vec<seal::Entry> = on_cards.into_iter().filter(|e| !e.locked).collect();
         return match seal_combine(&on_cards.iter().collect::<Vec<_>>()) {
             Some((rec, all)) if rec.pubkeys == seal_record(v).pubkeys => Ok(Some(all)),
             _ => Ok(None),   // cards carry an earlier sealing we cannot rebuild yet
@@ -613,7 +615,7 @@ fn seal_shares(v: &Vault, cards: &[cards::Sealed]) -> R<Option<Vec<String>>> {
 #[derive(Serialize)]
 struct SealKey { name: String, pubkey: String, here: bool, state: String }
 #[derive(Serialize)]
-struct SealStatus { id: String, threshold: usize, keys: Vec<SealKey>, sealed: usize, earlier: bool }
+struct SealStatus { id: String, threshold: usize, keys: Vec<SealKey>, sealed: usize, open: usize, earlier: bool }
 
 #[tauri::command]
 async fn seal_status(name: String) -> R<SealStatus> {
@@ -631,7 +633,9 @@ async fn seal_status(name: String) -> R<SealStatus> {
                 Some(c) => match seal::parse_container(&c.container) {
                     Err(_) => "foreign",
                     Ok(es) => match (es.iter().find(|e| e.id == id), &shares) {
-                        (Some(e), Some(sh)) if e.share == sh[i] && e.x as usize == i + 1 => { if !sealed.contains(&k.pubkey) { sealed.push(k.pubkey.clone()); } "sealed" }
+                        // a locked share cannot be compared without the PIN; its place and vault id are what can be checked
+                        (Some(e), _) if e.locked && e.x as usize == i + 1 => { if !sealed.contains(&k.pubkey) { sealed.push(k.pubkey.clone()); } "sealed" }
+                        (Some(e), Some(sh)) if e.share == sh[i] && e.x as usize == i + 1 => { if !sealed.contains(&k.pubkey) { sealed.push(k.pubkey.clone()); } "open" }
                         (Some(_), _) => { sealed.retain(|p| p != &k.pubkey); "other" }
                         (None, _) => { sealed.retain(|p| p != &k.pubkey); "unsealed" }
                     },
@@ -640,19 +644,21 @@ async fn seal_status(name: String) -> R<SealStatus> {
             SealKey { name: k.name.clone(), pubkey: k.pubkey.clone(), here: card.is_some(), state: state.into() }
         }).collect();
         let id2 = id.clone();
-        let adopted = v.seal.shares.is_empty() && cards.iter().filter_map(|c| seal::parse_container(&c.container).ok()).flatten().any(|e| e.id == id2);
+        let adopted = v.seal.shares.is_empty() && cards.iter().filter_map(|c| seal::parse_container(&c.container).ok()).flatten().any(|e| e.id == id2 && !e.locked);
         let shares_keep = if adopted { shares.clone() } else { None };   // fresh shares are saved by the first successful write, not by looking
         if sealed != v.seal.sealed || shares_keep.is_some() {
             let (nm, sh, sd) = (v.name.clone(), shares_keep, sealed.clone());
             wallet::update(move |s| if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == nm) { if vm.seal.shares.is_empty() { if let Some(sh) = sh { vm.seal.shares = sh; } } vm.seal.sealed = sd; })?;
         }
-        Ok(SealStatus { id, threshold: v.threshold, sealed: keys.iter().filter(|k| k.state == "sealed").count(), earlier: shares.is_none(), keys })
+        Ok(SealStatus { id, threshold: v.threshold, sealed: keys.iter().filter(|k| k.state == "sealed" || k.state == "open").count(), open: keys.iter().filter(|k| k.state == "open").count(), earlier: shares.is_none(), keys })
     }).await
 }
 
-/// Write this vault's share onto the card in `reader`. `replace` overwrites a share from a different sealing.
+/// Write this vault's share onto the card in `reader`, LOCKED under a secret the card only gives up after its user PIN.
+/// `pin` is that PIN (it makes or reads the secret); `admin_pin` writes the certificate object. `replace` overwrites a share
+/// from a different sealing. An unlocked share of the same sealing is simply rewritten locked.
 #[tauri::command]
-async fn seal_write(name: String, reader: String, admin_pin: String, replace: bool) -> R<String> {
+async fn seal_write(name: String, reader: String, admin_pin: String, pin: String, replace: bool) -> R<String> {
     block(move || {
         let s = wallet::load();
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
@@ -664,12 +670,21 @@ async fn seal_write(name: String, reader: String, admin_pin: String, replace: bo
         let shares = match seal_shares(&v2, if replace { &[] } else { &cards })? { Some(sh) => sh, None => return Err("This vault's cards carry shares from an earlier sealing. Plug in enough of them together to adopt it, or reseal every card.".into()) };
         let id = seal_id(&v);
         let mut entries = seal::parse_container(&card.container)?;
+        if pin.is_empty() { return Err("enter this key's own PIN as well: it locks the share, so that nobody who only HOLDS the key can read it".into()); }
         if let Some(e) = entries.iter().find(|e| e.id == id) {
-            if e.share == shares[i] { return Ok("already sealed".into()); }
-            if !replace { return Err("This key already carries a different share of this vault. Reseal every card to replace it.".into()); }
+            if e.locked && !replace { return Ok("already sealed and locked".into()); }
+            if !e.locked && e.share != shares[i] && !replace { return Err("This key already carries a different share of this vault. Reseal every card to replace it.".into()); }
         }
+        let key = cards::seal_key(&reader, &pin, true).map_err(|e| e.to_string())?.ok_or("the key would not keep a secret for the seal")?;
+        use bitcoin::secp256k1::rand::RngCore;
+        let mut nonce = [0u8; 8];
+        bitcoin::secp256k1::rand::rngs::OsRng.fill_bytes(&mut nonce);
+        let plain = hex::decode(&shares[i]).map_err(|e| e.to_string())?;
+        let body = seal::lock_share(&key, &id, v.threshold as u8, i as u8 + 1, &plain, nonce)?;
+        // never write a lock that has not been seen to open
+        if seal::unlock_share(&key, &id, v.threshold as u8, i as u8 + 1, &body)? != plain { return Err("the lock did not open again; nothing was written".into()); }
         entries.retain(|e| e.id != id);
-        entries.push(seal::Entry { id, k: v.threshold as u8, x: i as u8 + 1, share: shares[i].clone() });
+        entries.push(seal::Entry { id, k: v.threshold as u8, x: i as u8 + 1, share: hex::encode(body), locked: true });
         let data = seal::build_container(&entries)?;
         if data.len() > card.room { return Err(format!("this key has no room left ({} of {} bytes)", data.len(), card.room)); }
         cards::write_sealed(&reader, &admin_pin, &card.container, &data).map_err(|e| e.to_string())?;
@@ -678,7 +693,7 @@ async fn seal_write(name: String, reader: String, admin_pin: String, replace: bo
             if vm.seal.shares != shares { vm.seal.shares = shares; vm.seal.sealed.clear(); }
             if !vm.seal.sealed.contains(&pk) { vm.seal.sealed.push(pk); }
         })?;
-        Ok(format!("sealed, {} bytes on the key", data.len()))
+        Ok(format!("sealed and locked, {} bytes on the key", data.len()))
     }).await
 }
 
@@ -704,7 +719,7 @@ async fn seal_read() -> R<SealRead> {
 }
 
 #[derive(Serialize)]
-struct Candidate { id: String, have: usize, need: usize, record: Option<seal::Record>, line: Option<String>, address: Option<String>, known_as: Option<String> }
+struct Candidate { id: String, have: usize, locked: usize, need: usize, record: Option<seal::Record>, line: Option<String>, address: Option<String>, known_as: Option<String> }
 
 fn seal_vault(rec: &seal::Record, name: String, shares: Vec<String>, sealed: Vec<String>) -> R<Vault> {
     let descriptor = wallet::descriptor_for(rec.threshold, &rec.pubkeys)?;
@@ -729,20 +744,51 @@ fn seal_preview(found: Vec<Found>) -> R<Vec<Candidate>> {
     let mut ids: Vec<String> = found.iter().map(|f| f.entry.id.clone()).collect();
     ids.sort(); ids.dedup();
     Ok(ids.into_iter().map(|id| {
-        let mine: Vec<&Found> = found.iter().filter(|f| f.entry.id == id).collect();
-        let need = mine[0].entry.k as usize;
+        let all: Vec<&Found> = found.iter().filter(|f| f.entry.id == id).collect();
+        let need = all[0].entry.k as usize;
+        let locked = all.iter().filter(|f| f.entry.locked).count();
+        let mine: Vec<&Found> = all.into_iter().filter(|f| !f.entry.locked).collect();
         let built = seal_combine(&mine.iter().map(|f| &f.entry).collect::<Vec<_>>());
         let known_as = s.vaults.iter().find(|v| seal_id(v) == id).map(|v| v.name.clone());
         match built.and_then(|(rec, sh)| seal_vault(&rec, rec.name.clone(), sh, vec![]).ok().map(|v| (rec, v))) {
-            Some((rec, v)) => Candidate { id, have: mine.len(), need, line: Some(wallet::recovery_line(&v)), address: Some(v.address.clone()), record: Some(rec), known_as },
-            None => Candidate { id, have: mine.len(), need, record: None, line: None, address: None, known_as },
+            Some((rec, v)) => Candidate { id, have: mine.len(), locked, need, line: Some(wallet::recovery_line(&v)), address: Some(v.address.clone()), record: Some(rec), known_as },
+            None => Candidate { id, have: mine.len(), locked, need, record: None, line: None, address: None, known_as },
         }
     }).collect())
 }
 
+/// Open the locked shares on one key with its PIN. A wrong PIN costs one of the key's tries, as it would when signing.
+#[tauri::command]
+async fn seal_unlock(reader: String, pin: String) -> R<Vec<Found>> {
+    block(move || {
+        let cards = seal_cards()?;
+        let card = cards.iter().find(|c| c.reader == reader).ok_or("that key is no longer plugged in")?;
+        let entries = seal::parse_container(&card.container)?;
+        let key = cards::seal_key(&reader, &pin, false).map_err(|e| e.to_string())?.ok_or("this key holds no secret for a seal: its shares were not locked by this app")?;
+        entries.into_iter().filter(|e| e.locked).map(|e| {
+            let plain = seal::unlock_share(&key, &e.id, e.k, e.x, &hex::decode(&e.share).map_err(|e| e.to_string())?)?;
+            Ok(Found { pubkey: card.pubkey.clone().unwrap_or_default(), serial: card.serial, entry: seal::Entry { share: hex::encode(plain), locked: false, ..e } })
+        }).collect()
+    }).await
+}
+
+/// A vault this computer already has (restored from paper, say) learns its shares from its own keys, once they are open.
+#[tauri::command]
+fn seal_adopt(name: String, found: Vec<Found>) -> R<Store> {
+    let s = wallet::load();
+    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+    let id = seal_id(&v);
+    let mine: Vec<Found> = found.into_iter().filter(|f| f.entry.id == id && !f.entry.locked).collect();
+    let (rec, shares) = seal_combine(&mine.iter().map(|f| &f.entry).collect::<Vec<_>>()).ok_or("not enough open shares yet")?;
+    seal_check(&rec, &mine)?;
+    if rec.pubkeys != seal_record(&v).pubkeys { return Err("those shares describe a different vault".into()); }
+    let sealed: Vec<String> = mine.iter().map(|f| f.pubkey.clone()).collect();
+    wallet::update(move |s| if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == name) { vm.seal.shares = shares; for p in sealed { if !vm.seal.sealed.contains(&p) { vm.seal.sealed.push(p); } } })
+}
+
 #[tauri::command]
 fn seal_restore(id: String, name: String, found: Vec<Found>) -> R<Vault> {
-    let mine: Vec<Found> = found.into_iter().filter(|f| f.entry.id == id).collect();
+    let mine: Vec<Found> = found.into_iter().filter(|f| f.entry.id == id && !f.entry.locked).collect();
     let (rec, shares) = seal_combine(&mine.iter().map(|f| &f.entry).collect::<Vec<_>>()).ok_or("not enough keys yet to rebuild this vault")?;
     seal_check(&rec, &mine)?;
     if seal::vault_id(&rec.network, rec.threshold, &rec.pubkeys, rec.chain_code.as_deref()) != id { return Err("the record does not match the vault it was filed under".into()); }
@@ -941,7 +987,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| { watch::start(app.handle().clone()); Ok(()) })
-        .invoke_handler(tauri::generate_handler![open_url, vault_activity, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_preview, seal_restore, label_set, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![open_url, vault_activity, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])

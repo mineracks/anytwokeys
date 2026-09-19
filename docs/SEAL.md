@@ -14,7 +14,8 @@ cards instead, split so that the same k cards that can spend can also rebuild �
 
 OpenPGP applet, data object `7F21` (cardholder certificate), first instance. On a YubiKey 5 it holds 2,048
 bytes, is **readable without a PIN** and writable with the admin PIN (PW3). The signing key is never touched.
-If the object holds anything that does not start with the magic below, the app leaves it alone.
+If the object holds anything that does not start with the magic below, the app leaves it alone. The object itself is
+readable without a PIN; what keeps a share private is that it is LOCKED (below).
 
     container = "A2K" 0x01 , entry*
     entry     = id[4] , k[1] , x[1] , len[2, big-endian] , share[len]
@@ -48,11 +49,31 @@ wrong set of shares. k−1 shares are statistically independent of the record.
 The shares of a vault are made **once** and kept in the app's store, so cards sealed on different days agree.
 A computer that does not have them (a vault restored from paper) adopts them from any k sealed cards.
 
+## Locked shares (format unchanged, entries flagged)
+
+A share that anyone holding the card could read was a privacy hole: two found keys would show what the vault holds. Since
+2026-09-19 every share is written **locked**, and the app offers to lock shares written before that.
+
+- The card keeps a 32-byte secret in OpenPGP private object **`0103`**: `"A2K" 0x02`, then 32 random bytes. The card gives
+  that object up only after the **user PIN** (`VERIFY`, `P2 = 82`) and lets it be written under the same PIN. One secret per
+  card serves every vault on it. Anything else found in `0103` is left alone.
+- A locked entry sets **bit 7 of its `k` byte**. Its body is `nonce[8] , ciphertext , tag[8]`.
+- `PRF(label, tail) = HMAC-SHA256(secret, label ‖ id[4] ‖ k ‖ x ‖ nonce ‖ tail)`, with the unflagged `k`.
+  Keystream block `c` is `PRF("a2k-seal-v2-stream", c as 4 bytes big-endian)`; `tag = PRF("a2k-seal-v2-tag", ciphertext)[0..8]`.
+- Frozen by `tools/seal-lock-vector.sha256`, which the Rust tests and `seal-recover.py lock-vector` both reproduce.
+
+So recovery asks each key for its PIN — the same PIN it signs with, with the same three tries. Nothing is readable from
+keys someone merely holds.
+
+    gpg-connect-agent "scd apdu 00 A4 04 00 06 D2 76 00 01 24 01" "scd apdu 00 20 00 82 06 <PIN as hex>" "scd apdu 00 CA 01 03 00" /bye
+    tools/seal-recover.py unlock <hex of 0103> <vault id> <k> <x> <entry body hex>      → prints  x:<share>
+
 ## What a finder of one card learns
 
-That card's own public key (always readable from an OpenPGP card) and a share that is random noise. Not the
-other keys, not the addresses, not the balance. A finder of k cards learns the descriptor — what the vault
-holds and has done — but cannot spend without the PINs and a touch on each key.
+That card's own public key (always readable from an OpenPGP card), the 4-byte vault id, and ciphertext. Not the other
+keys, not the addresses, not the balance. A finder of k cards learns no more than that, unless they also have the PINs —
+and with k cards and their PINs they could spend anyway. (A share written before locking existed is readable on sight
+until it is locked: the app says which keys those are.)
 
 ## Recovery without the app
 

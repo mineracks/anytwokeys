@@ -16,12 +16,14 @@ window.__forgot = 0;
 const H = { vault_rename: (a) => { window.__renamed = a.keyNames[1]; const st = store(); st.vaults[0].keys[1].name = a.keyNames[1]; return st; }, vault_forget: () => { __forgot++; return { vaults: [], settings: { network: 'signet', custom: false, electrum: '', explorer: '', gap: 20 }, seen: {} }; },
   store_get: store, cards_list: () => { if (!__state.cards.length) throw 'no YubiKey found'; return __state.cards; },
   vault_recovery: () => 'wsh(sortedmulti(2,03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2,032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe,038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47))#5va274yx cc=' + 'ab'.repeat(32), vault_sync: () => { throw 'offline in the harness'; },
-  seal_status: () => ({ id: 'deadbeef', threshold: 2, earlier: false, sealed: __state.sealed.length,
-    keys: store().vaults[0].keys.map(k => ({ name: k.name, pubkey: k.pubkey, here: __state.cards.some(c => c.pubkey === k.pubkey), state: __state.sealed.includes(k.pubkey) ? 'sealed' : 'unsealed' })) }),
-  seal_write: (a) => { if (a.adminPin !== '12345678') throw 'wrong PIN, 2 tries left'; const c = __state.cards.find(c => c.reader === a.reader); __state.sealed.push(c.pubkey); return 'sealed, 172 bytes on the key'; },
-  seal_read: () => ({ cards: __state.cards.length, foreign: [], found: __state.cards.filter(c => __state.sealedCards.includes(c.pubkey)).map(c => ({ pubkey: c.pubkey, serial: c.serial, entry: { id: 'deadbeef', k: 2, x: %(keys)s.indexOf(c.pubkey) + 1, share: 'aa' } })) }),
-  seal_preview: (a) => [a.found.length >= 2 ? { id: 'deadbeef', have: a.found.length, need: 2, known_as: null, address: 'tb1qexample', line: 'wsh(sortedmulti(2,…)) cc=abab',
-      record: { name: 'family vault', threshold: 2, network: 'signet', pubkeys: %(keys)s, chain_code: 'abab', key_names: ['laptop', 'keyring', 'off-site'] } } : { id: 'deadbeef', have: a.found.length, need: 2, record: null, line: null, address: null, known_as: null }],
+  seal_status: () => ({ id: 'deadbeef', threshold: 2, earlier: false, sealed: __state.sealed.length + (__state.open || []).length, open: (__state.open || []).length,
+    keys: store().vaults[0].keys.map(k => ({ name: k.name, pubkey: k.pubkey, here: __state.cards.some(c => c.pubkey === k.pubkey), state: __state.sealed.includes(k.pubkey) ? 'sealed' : (__state.open || []).includes(k.pubkey) ? 'open' : 'unsealed' })) }),
+  seal_write: (a) => { __state.lastWrite = a; if (!a.pin) throw "enter the key PIN as well"; if (a.adminPin !== '12345678' || a.pin !== '123456') throw 'wrong PIN, 2 tries left'; const c = __state.cards.find(c => c.reader === a.reader); __state.open = (__state.open || []).filter(p => p !== c.pubkey); __state.sealed.push(c.pubkey); return 'sealed and locked, 188 bytes on the key'; },
+  seal_unlock: (a) => { __state.unlockTries = (__state.unlockTries || 0) + 1; if (a.pin !== '123456') throw 'wrong PIN, 2 tries left'; const c = __state.cards.find(c => c.reader === a.reader); return [{ pubkey: c.pubkey, serial: c.serial, entry: { id: 'deadbeef', k: 2, x: %(keys)s.indexOf(c.pubkey) + 1, share: 'aa', locked: false } }]; },
+  seal_adopt: (a) => { __state.adopted = a; return store(); },
+  seal_read: () => ({ cards: __state.cards.length, foreign: [], found: __state.cards.filter(c => __state.sealedCards.includes(c.pubkey)).map(c => ({ pubkey: c.pubkey, serial: c.serial, entry: { id: 'deadbeef', k: 2, x: %(keys)s.indexOf(c.pubkey) + 1, share: 'aa', locked: !!__state.lockedShares } })) }),
+  seal_preview: (a) => [a.found.filter(f => !f.entry.locked).length >= 2 ? { locked: 0, id: 'deadbeef', have: a.found.length, need: 2, known_as: null, address: 'tb1qexample', line: 'wsh(sortedmulti(2,…)) cc=abab',
+      record: { name: 'family vault', threshold: 2, network: 'signet', pubkeys: %(keys)s, chain_code: 'abab', key_names: ['laptop', 'keyring', 'off-site'] } } : { id: 'deadbeef', have: a.found.filter(f => !f.entry.locked).length, locked: a.found.filter(f => f.entry.locked).length, need: 2, record: null, line: null, address: null, known_as: null }],
   seal_restore: (a) => { __state.restored = a; return store().vaults[0]; },
 };
 window.__TAURI__ = { core: { invoke: async (cmd, args) => { __calls.push(cmd); if (!H[cmd]) throw 'unmocked: ' + cmd; return H[cmd](args || {}); } }, event: { listen: async () => () => {} } };
@@ -42,14 +44,17 @@ with sync_playwright() as p:
     pg.evaluate("show('keys')"); pg.wait_for_timeout(500)
     rows = pg.locator("#keys-list .keyrow")
     check("three seal rows", rows.count() == 3, str(rows.count()))
-    check("plugged-in key offers a PIN field, absent keys do not", pg.locator("#keys-list [data-seal-pin]").count() == 1)
-    check("note explains sealing", "admin PIN" in pg.inner_text("#seal-note"))
+    check("the plugged-in key asks for BOTH PINs, absent keys for none", pg.locator("#keys-list [data-seal-pin]").count() == 1 and pg.locator("#keys-list [data-seal-upin]").count() == 1)
+    check("the note says what the PIN is for", "locked by its PIN" in pg.inner_text("#seal-note") and "admin PIN" in pg.inner_text("#seal-note"))
     pg.fill("#keys-list [data-seal-pin]", "1234"); pg.wait_for_timeout(2600)   # a card poll happens meanwhile
     check("a poll does not wipe a half-typed PIN", pg.input_value("#keys-list [data-seal-pin]") == "1234")
-    pg.click("[data-seal-go]"); pg.wait_for_timeout(400)
+    pg.click("[data-seal-go]"); pg.wait_for_timeout(300)
+    check("sealing without the key's own PIN is refused before anything is sent", pg.evaluate("__state.lastWrite") is None and "Enter both" in pg.inner_text("#toast"), pg.inner_text("#toast"))
+    pg.fill("#keys-list [data-seal-upin]", "123456"); pg.click("[data-seal-go]"); pg.wait_for_timeout(400)
     check("wrong PIN is reported", "wrong PIN" in pg.locator("#toast").inner_text(), pg.locator("#toast").inner_text())
-    pg.fill("#keys-list [data-seal-pin]", "12345678"); pg.click("[data-seal-go]"); pg.wait_for_timeout(500)
-    check("the row's seal slot turns to sealed, its PIN field gone", "sealed" in rows.nth(0).locator(".kseal").inner_text() and rows.nth(0).locator("[data-seal-pin]").count() == 0)
+    pg.fill("#keys-list [data-seal-upin]", "123456"); pg.fill("#keys-list [data-seal-pin]", "12345678"); pg.click("[data-seal-go]"); pg.wait_for_timeout(500)
+    check("both PINs reach the backend", pg.evaluate("__state.lastWrite.pin") == "123456" and pg.evaluate("__state.lastWrite.adminPin") == "12345678")
+    check("the row's seal slot turns to sealed, its PIN field gone", "PIN-locked" in rows.nth(0).locator(".kseal").inner_text() and rows.nth(0).locator("[data-seal-pin]").count() == 0)
     check("note counts 1 of 3", "1 of 3" in pg.inner_text("#seal-note"), pg.inner_text("#seal-note"))
     # nothing overflows or collapses: each row is one line high-ish and inside the card
     boxes = [rows.nth(i).bounding_box() for i in range(3)]; cardbox = pg.locator("#keys-list").bounding_box()
@@ -102,7 +107,7 @@ with sync_playwright() as p:
     pg2.goto((src / "index.html").as_uri()); pg2.wait_for_timeout(600)
     pg2.evaluate("__state.sealedCards = %s; show('restore')" % json.dumps(K)); pg2.wait_for_timeout(2600)
     check("keys tab is the default and the camera stays off", pg2.locator("#tab-keys").is_visible() and not pg2.locator("#tab-scan").is_visible())
-    check("one key: says one more is needed", "1 of the 2" in pg2.locator("#restore-card").inner_text(), pg2.locator("#restore-card").inner_text())
+    check("one key: says one more is needed", "needs 2 keys: 1 open" in pg2.locator("#restore-card").inner_text(), pg2.locator("#restore-card").inner_text())
     pg2.evaluate("__state.cards = %s" % json.dumps([card(2)])); pg2.wait_for_timeout(2600)
     txt = pg2.locator("#restore-card").inner_text()
     check("second key swapped in: vault rebuilt", "Rebuilt from 2 keys" in txt and "family vault" in txt, txt)
@@ -113,6 +118,33 @@ with sync_playwright() as p:
     check("restore sends both shares and the name", sent and len(sent["found"]) == 2 and sent["name"] == "family vault", json.dumps(sent)[:200])
     pg2.evaluate("show('restore'); restoreTab('paste')"); pg2.wait_for_timeout(200)
     check("paste tab still works", pg2.locator("#desc-in").is_visible() and not pg2.locator("#tab-keys").is_visible())
+    # ---- PIN-locked shares: holding the keys is not enough; each key is asked for its PIN ----
+    pg3 = b.new_page(viewport=dict(width=1180, height=900)); errs3 = []
+    pg3.on("pageerror", lambda e: errs3.append(str(e)))
+    pg3.add_init_script(MOCK % dict(cards=json.dumps([card(1)]), vault=json.dumps(vault), keys=json.dumps(K)))
+    pg3.goto((src / "index.html").as_uri()); pg3.wait_for_timeout(600)
+    pg3.evaluate("__state.sealedCards = %s; __state.lockedShares = true; show('restore')" % json.dumps(K)); pg3.wait_for_timeout(2600)
+    check("a locked share is NOT usable on sight: the key asks for its PIN, and nothing is rebuilt", pg3.locator("[data-unlock-pin]").count() == 1 and "Rebuilt" not in pg3.inner_text("#restore-card") and "1 still locked" in pg3.inner_text("#restore-card"), pg3.inner_text("#restore-card"))
+    check("the PIN field has the focus", pg3.evaluate("document.activeElement && document.activeElement.hasAttribute('data-unlock-pin')"))
+    pg3.keyboard.type("000000"); pg3.keyboard.press("Enter"); pg3.wait_for_timeout(400)
+    check("a wrong PIN is reported, opens nothing, and the field is cleared", "wrong PIN" in pg3.inner_text("#toast") and "Rebuilt" not in pg3.inner_text("#restore-card") and pg3.input_value("[data-unlock-pin]") == "")
+    pg3.fill("[data-unlock-pin]", "123456"); pg3.keyboard.press("Enter"); pg3.wait_for_timeout(500)
+    check("the right PIN opens that key's share", "1 share(s) open" in pg3.inner_text("#seal-read-list") and "needs 2 keys: 1 open" in pg3.inner_text("#restore-card"), pg3.inner_text("#restore-card"))
+    pg3.evaluate("__state.cards = %s" % json.dumps([card(2)])); pg3.wait_for_timeout(2600)
+    pg3.locator("#s-restore").screenshot(path=str(out / "restore-locked.png"))
+    pg3.fill("[data-unlock-pin]", "123456"); pg3.click("[data-unlock]"); pg3.wait_for_timeout(600)
+    check("second key, second PIN: the vault is rebuilt", "Rebuilt from 2 keys" in pg3.inner_text("#restore-card") and pg3.evaluate("__state.unlockTries") == 3, pg3.inner_text("#restore-card")[:120])
+    check("no page errors with locked shares", not errs3, "; ".join(errs3))
+    # ---- a key sealed before locking existed: said plainly, and lockable in place ----
+    pg4 = b.new_page(viewport=dict(width=1180, height=900))
+    pg4.add_init_script(MOCK % dict(cards=json.dumps([card(0)]), vault=json.dumps(vault), keys=json.dumps(K)))
+    pg4.goto((src / "index.html").as_uri()); pg4.wait_for_timeout(600)
+    pg4.evaluate("__state.open = %s; show('keys')" % json.dumps(K)); pg4.wait_for_timeout(700)
+    r4 = pg4.locator("#keys-list .keyrow")
+    check("an unlocked share is called what it is, on the row and in the note", "sealed, not locked" in r4.nth(0).inner_text() and "sealed, not locked · plug it in" in r4.nth(1).inner_text() and "without any PIN" in pg4.inner_text("#seal-note"), pg4.inner_text("#seal-note"))
+    pg4.locator("#s-keys .card").first.screenshot(path=str(out / "keys-open.png"))
+    pg4.fill("#keys-list [data-seal-upin]", "123456"); pg4.fill("#keys-list [data-seal-pin]", "12345678"); pg4.click("[data-seal-go]"); pg4.wait_for_timeout(600)
+    check("Lock it with the PIN: the row becomes PIN-locked and the count of open ones drops", "PIN-locked" in r4.nth(0).inner_text() and pg4.evaluate("__state.open.length") == 2 and pg4.evaluate("__state.lastWrite.replace") is False, r4.nth(0).inner_text())
     check("no page errors on Restore", not errs2, "; ".join(errs2))
     b.close()
 sys.exit(1 if fails else 0)

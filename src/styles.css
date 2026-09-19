@@ -352,3 +352,5 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .btn.small-icon{width:32px;flex:0 0 32px;min-height:32px;height:32px;border-color:var(--line)}
 .btn.small-icon.done{border-color:var(--signal);color:var(--signal)}
 .keyrow.vk .who .mono{white-space:nowrap}
+.state.warnish{color:var(--gold)} .state.warnish i{background:var(--gold)}
+.kseal input{width:112px}

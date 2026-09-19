@@ -803,23 +803,27 @@ function paintSealSlots() {
   st.keys.forEach((key, i) => {
     const slot = $(`[data-seal-slot="${i}"]`); if (!slot) return;
     const here = cards.some(c => c.pubkey === key.pubkey);
-    const form = (label, replace) => `<input type="password" autocomplete="off" placeholder="admin PIN" data-seal-pin="${i}" aria-label="Admin PIN of ${esc(key.name)}"><button class="btn" data-seal-go="${i}" data-replace="${replace ? 1 : ''}">${label}</button>`;
+    // sealing takes two PINs: the key's own (it locks the share, so holding the key is not enough to read it) and the admin PIN (it writes the card)
+    const form = (label, replace) => `<input type="password" autocomplete="off" placeholder="key PIN" data-seal-upin="${i}" aria-label="PIN of ${esc(key.name)}"><input type="password" autocomplete="off" placeholder="admin PIN" data-seal-pin="${i}" aria-label="Admin PIN of ${esc(key.name)}"><button class="btn" data-seal-go="${i}" data-replace="${replace ? 1 : ''}">${label}</button>`;
     slot.title = `share ${i + 1} of ${n}`;
-    slot.innerHTML = key.state === 'sealed' ? '<div class="state ok"><i></i>sealed</div>'
+    slot.innerHTML = key.state === 'sealed' ? '<div class="state ok"><i></i>sealed · PIN-locked</div>'
+      : key.state === 'open' ? (here ? '<div class="state warnish" title="Anyone holding this key can read its share without a PIN"><i></i>sealed, not locked</div>' + form('Lock it with the PIN', false) : '<div class="state warnish"><i></i>sealed, not locked · plug it in</div>')
       : key.state === 'foreign' ? '<div class="state"><i></i>certificate slot in use · left alone</div>'
       : !here ? '<div class="state"><i></i>seal not confirmed · plug it in</div>'
       : key.state === 'other' ? form('Replace its share', true) : form('Seal this key', false);
   });
   $$('[data-seal-go]').forEach(b => b.onclick = async () => {
-    const i = +b.dataset.sealGo, key = st.keys[i], card = cards.find(c => c.pubkey === key.pubkey), pin = $(`[data-seal-pin="${i}"]`).value;
+    const i = +b.dataset.sealGo, key = st.keys[i], card = cards.find(c => c.pubkey === key.pubkey), pin = $(`[data-seal-pin="${i}"]`).value, upin = $(`[data-seal-upin="${i}"]`).value;
     if (!card) return toast('That key is no longer plugged in');
-    if (!pin) return toast('Enter the admin PIN of this key');
+    if (!upin || !pin) return toast('Enter both: the key’s own PIN locks the share, its admin PIN writes it');
+    if (/^[cbdefghijklnrtuv]{32,}$/.test(upin) || /^[cbdefghijklnrtuv]{32,}$/.test(pin)) { $(`[data-seal-upin="${i}"]`).value = ''; $(`[data-seal-pin="${i}"]`).value = ''; return toast('That was the key typing a one-time code, not a PIN. Nothing was sent to the card.', 8000); }
     b.disabled = true; b.textContent = 'writing…';
-    try { const r = await invoke('seal_write', { name: vault.name, reader: card.reader, adminPin: pin, replace: !!b.dataset.replace }); toast(`${key.name}: ${r}`, 5000); store = await invoke('store_get'); vault = store.vaults.find(v => v.name === vault.name) || vault; }
+    try { const r = await invoke('seal_write', { name: vault.name, reader: card.reader, adminPin: pin, pin: upin, replace: !!b.dataset.replace }); toast(`${key.name}: ${r}`, 5000); store = await invoke('store_get'); vault = store.vaults.find(v => v.name === vault.name) || vault; }
     catch (e) { fail(e); }
-    $(`[data-seal-pin="${i}"]`) && ($(`[data-seal-pin="${i}"]`).value = ''); renderSeal(true);
+    $$(`[data-seal-pin="${i}"], [data-seal-upin="${i}"]`).forEach(x => x.value = ''); renderSeal(true);
   });
   $$('[data-seal-pin]').forEach(inp => inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $(`[data-seal-go="${inp.dataset.sealPin}"]`).click(); } }));
+  $$('[data-seal-upin]').forEach(inp => inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $(`[data-seal-pin="${inp.dataset.sealUpin}"]`).focus(); } }));
 }
 async function renderSeal(force) {
   if (!vault) return;
@@ -829,38 +833,53 @@ async function renderSeal(force) {
   st.forVault = name; renderSeal.st = st;
   const n = st.keys.length, k = st.threshold;
   $('#seal-note').textContent = st.sealed === n
-    ? `Any ${k} of these ${n} keys sign, and any ${k} rebuild this vault on a new computer with no sheet and no file: every key carries its share. One key alone gives nothing away.`
+    ? `Any ${k} of these ${n} keys sign, and any ${k} of them, with their PINs, rebuild this vault on a new computer with no sheet and no file.` + (st.open ? '' : ' Without the PINs the keys give nothing away.')
     : st.sealed ? `Any ${k} of these ${n} keys sign. ${st.sealed} of ${n} are confirmed sealed; recovery from the keys alone needs sealed keys, and you cannot choose which ones you will be left with, so plug in the rest.`
-    : `Any ${k} of these ${n} keys sign. Each can also carry a share of this vault's recovery record, so that any ${k} of them rebuild it on a new computer with nothing else. Sealing takes a key's admin PIN once and never touches its signing key.`;
-  if (st.earlier) $('#seal-note').textContent += ` These keys carry shares from an earlier sealing this computer does not know: plug in ${k} of them together and it is adopted.`;
+    : `Any ${k} of these ${n} keys sign. Each can also carry a share of this vault's recovery record, locked by its PIN, so that any ${k} of them rebuild the vault on a new computer with nothing else. Sealing takes the key's PIN and its admin PIN once, and never touches its signing key.`;
+  if (st.open) $('#seal-note').textContent += ` ${st.open === 1 ? 'One key holds its share' : st.open + ' keys hold their shares'} from before shares were PIN-locked: whoever holds ${k} such keys can read what this vault holds without any PIN. Plug each in and lock it.`;
+  if (st.earlier) $('#seal-note').textContent += ` These keys carry shares this computer does not know. Open ${k} of them under New vault › Restore › From the keys and it will offer to adopt them.`;
   if (keysBusy() && !force) return;   // a poll must not wipe a half-typed PIN
   paintSealSlots();
 }
 
 // restore, from the keys: shares are remembered across card swaps, so one port is enough
-let sealFound = [];
-async function readSeals() {
-  const sig = cards.map(c => c.serial + ':' + c.pubkey).sort().join(',');
-  if (sig === readSeals.sig) return; readSeals.sig = sig;
+let sealFound = [];                       // shares that are open: read without a PIN (old sealings) or unlocked with one
+async function readSeals(force) {
+  const sig = cards.map(c => c.serial + ':' + c.pubkey).sort().join(',') + '|' + sealFound.length;
+  // the card poll must not wipe a half-typed PIN; the redraw after an unlock is asked for, and the field it would protect is already empty
+  if (!force && (sig === readSeals.sig || $$('#seal-read-list input').some(i => i.value || i === document.activeElement))) return; readSeals.sig = sig;
   let r; try { r = await invoke('seal_read'); } catch (e) { $('#seal-read-list').innerHTML = `<div class="warn">${esc(e)}</div>`; readSeals.sig = null; return; }
-  for (const f of r.found) if (!sealFound.some(o => o.entry.id === f.entry.id && o.entry.x === f.entry.x)) sealFound.push(f);
+  const have = (f) => sealFound.some(o => o.entry.id === f.entry.id && o.entry.x === f.entry.x);
+  for (const f of r.found) if (!f.entry.locked && !have(f)) sealFound.push(f);
+  const lockedHere = cards.filter(c => r.found.some(f => f.serial === c.serial && f.entry.locked && !have(f)));
   const seen = [...new Set(sealFound.map(f => f.serial))];
-  $('#seal-read-list').innerHTML = (seen.length ? seen.map(sn => `<div class="keyrow"><svg width="22" height="22"><use href="#ring"/></svg><div class="who"><div class="name">YubiKey ${sn}</div><div class="muted" style="font-size:13px">${sealFound.filter(f => f.serial === sn).length} share(s) read${cards.some(c => c.serial === sn) ? '' : ' · unplugged, remembered'}</div></div><div class="state ok"><i></i>read</div></div>`).join('') : '')
+  $('#seal-read-list').innerHTML =
+    lockedHere.map(c => `<div class="keyrow vk"><span class="keyart">${keyArt(c.form || 3, !!c.nfc, 52)}</span><div class="who"><div class="name">${esc(modelName(c.form, c.nfc))} · serial ${c.serial}</div><div class="muted" style="font-size:13px">Its share is locked. The key gives it up for its PIN, the same one it signs with.</div></div><div class="kseal"><input type="password" autocomplete="off" placeholder="key PIN" data-unlock-pin="${esc(c.reader)}" aria-label="PIN of key ${c.serial}"><button class="btn" data-unlock="${esc(c.reader)}">Unlock</button></div></div>`).join('')
+    + seen.map(sn => `<div class="keyrow"><svg width="22" height="22"><use href="#ring"/></svg><div class="who"><div class="name">YubiKey ${sn}</div><div class="muted" style="font-size:13px">${sealFound.filter(f => f.serial === sn).length} share(s) open${cards.some(c => c.serial === sn) ? '' : ' · unplugged, remembered'}</div></div><div class="state ok"><i></i>open</div></div>`).join('')
     + (r.cards && !r.found.length ? `<div class="muted" style="font-size:13px">${r.foreign.length ? 'This key\'s certificate object holds something that is not a seal.' : 'The key plugged in now is not sealed. A vault sealed by this app writes a share to each key from the Keys screen.'}</div>` : '')
     + (!r.cards && !seen.length ? '<div class="muted" style="font-size:13px">No YubiKey plugged in.</div>' : '');
-  if (!sealFound.length) return;
-  const cands = await invoke('seal_preview', { found: sealFound });
+  $$('[data-unlock]').forEach(b => { const inp = $(`[data-unlock-pin="${CSS.escape(b.dataset.unlock)}"]`);
+    const go = async () => { const pin = inp.value; if (!pin) return toast('Enter this key’s PIN');
+      if (/^[cbdefghijklnrtuv]{32,}$/.test(pin)) { inp.value = ''; return toast('That was the key typing a one-time code, not a PIN. Nothing was sent to the card.', 8000); }
+      b.disabled = true; b.textContent = 'opening…';
+      try { const opened = await invoke('seal_unlock', { reader: b.dataset.unlock, pin }); inp.value = ''; for (const f of opened) if (!have(f)) sealFound.push(f); toast(`${opened.length} share${opened.length === 1 ? '' : 's'} opened`); }
+      catch (e) { inp.value = ''; fail(e); }
+      readSeals(true); };
+    b.onclick = go; inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } }); });
+  const first = $('#seal-read-list [data-unlock-pin]'); if (first && (!document.activeElement || document.activeElement === document.body)) first.focus();
+  if (!sealFound.length && !r.found.length) return;
+  const cands = await invoke('seal_preview', { found: sealFound.concat(r.found.filter(f => f.entry.locked && !have(f))) });
   $('#restore-card').innerHTML = cands.map((c, ci) => c.record ? `<div style="display:flex;flex-direction:column;gap:10px${ci ? ';border-top:1px solid var(--line);padding-top:14px' : ''}">
       <div class="ok">Rebuilt from ${c.need} keys: ${esc(c.record.name)} · ${c.record.threshold} of ${c.record.pubkeys.length} · ${c.record.network}${c.record.chain_code ? ' · rotating addresses' : ' · one fixed address'}</div>
       <div class="muted" style="font-size:13px">Keys: ${c.record.key_names.map(esc).join(' · ')}. First address: <span class="mono">${c.address}</span></div>
-      <div class="mono muted" style="background:var(--ground);padding:12px;border-radius:6px;border:1px solid var(--line);-webkit-user-select:text;user-select:text">${esc(c.line)}</div>
-      ${c.known_as ? `<div class="muted" style="font-size:13px">Already on this computer as “${esc(c.known_as)}”.</div>` : `<div class="field"><div class="label">Vault name</div><input data-seal-name="${c.id}" value="${esc(c.record.name)}"></div><button class="btn primary" data-seal-restore="${c.id}">Restore this vault</button>`}</div>`
-    : `<div class="muted"${ci ? ' style="border-top:1px solid var(--line);padding-top:14px"' : ''}>A vault with ${c.have} of the ${c.need} keys it needs. Unplug this key and plug in another of the same vault; what was read is remembered.</div>`).join('') || '<div class="muted">Nothing read yet.</div>';
+      ${c.known_as ? `<div class="muted" style="font-size:13px">Already on this computer as “${esc(c.known_as)}”.</div><button class="btn" data-seal-adopt="${esc(c.known_as)}">Let “${esc(c.known_as)}” learn its shares from these keys</button>` : `<div class="field"><div class="label">Vault name</div><input data-seal-name="${c.id}" value="${esc(c.record.name)}"></div><button class="btn primary" data-seal-restore="${c.id}">Restore this vault</button>`}</div>`
+    : `<div class="muted"${ci ? ' style="border-top:1px solid var(--line);padding-top:14px"' : ''}>A vault that needs ${c.need} keys: ${c.have} open${c.locked ? `, ${c.locked} still locked (enter ${c.locked === 1 ? 'its' : 'their'} PIN on the left)` : ''}. ${c.have + c.locked < c.need ? 'Unplug this key and plug in another of the same vault; what was opened is remembered.' : ''}</div>`).join('') || '<div class="muted">Nothing read yet.</div>';
   $$('[data-seal-restore]').forEach(b => b.onclick = async () => {
     const id = b.dataset.sealRestore;
     try { vault = await invoke('seal_restore', { id, name: $(`[data-seal-name="${id}"]`).value, found: sealFound }); store = await invoke('store_get'); try { localStorage.setItem('a2k-vault', vault.name); } catch {} sealFound = []; readSeals.sig = null; toast('Vault restored from its keys'); paintNet(); renderTabs(); show('home'); }
     catch (e) { fail(e); }
   });
+  $$('[data-seal-adopt]').forEach(b => b.onclick = async () => { try { store = await invoke('seal_adopt', { name: b.dataset.sealAdopt, found: sealFound }); toast('Shares learnt. That vault’s Keys screen now knows its seal.'); } catch (e) { fail(e); } });
 }
 
 // ---------- restore ----------
