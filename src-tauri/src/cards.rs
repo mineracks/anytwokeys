@@ -39,6 +39,8 @@ pub struct CardInfo {
     pub pubkey: Option<String>,   // compressed secp256k1, hex — None if the SIG slot is empty or not secp256k1
     pub touch: String,            // OFF | ON | FIXED | ?
     pub form: u8,                 // YubiKey form factor: 1 USB-A · 2 USB-A Nano · 3 USB-C · 4 USB-C Nano · 5 USB-C/Lightning · 0 unknown
+    pub nfc: bool,                // the key has an NFC antenna (management config tag 0x0D)
+    pub firmware: String,         // e.g. 5.4.3, from the management applet; empty if it would not say
 }
 
 fn hint_for(sw: u16) -> String {
@@ -160,13 +162,16 @@ fn readers(ctx: &Context) -> Result<Vec<String>, CardError> {
     Ok(names.map(|n| n.to_string_lossy().into_owned()).filter(|n| n.to_lowercase().contains("yubi")).collect())
 }
 
-/// The key's shape, from the YubiKey management applet (READ CONFIG, tag 0x04). Leaves OpenPGP selected again.
-fn form_factor(card: &Card) -> u8 {
+/// The key's shape, NFC and firmware, from the YubiKey management applet (READ CONFIG). Leaves OpenPGP selected again.
+fn hardware(card: &Card) -> (u8, bool, String) {
     const AID_MGMT: &[u8] = &[0xA0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17];
-    let form = apdu(card, 0x00, 0xA4, 0x04, 0x00, AID_MGMT).and_then(|_| apdu(card, 0x00, 0x1D, 0x00, 0x00, &[])).ok()
-        .and_then(|cfg| find(cfg.get(1..)?, 0x04).and_then(|v| v.first().copied())).map(|f| f & 0x0F).unwrap_or(0);
+    let cfg = apdu(card, 0x00, 0xA4, 0x04, 0x00, AID_MGMT).and_then(|_| apdu(card, 0x00, 0x1D, 0x00, 0x00, &[])).ok();
+    let tlvs = cfg.as_deref().and_then(|c| c.get(1..)).unwrap_or(&[]);
+    let form = find(tlvs, 0x04).and_then(|v| v.first().copied()).map(|f| f & 0x0F).unwrap_or(0);
+    let nfc = find(tlvs, 0x0D).map(|v| v.iter().any(|b| *b != 0)).unwrap_or(false);
+    let firmware = find(tlvs, 0x05).filter(|v| v.len() == 3).map(|v| format!("{}.{}.{}", v[0], v[1], v[2])).unwrap_or_default();
     let _ = select(card);
-    form
+    (form, nfc, firmware)
 }
 
 pub fn list() -> Result<Vec<CardInfo>, CardError> {
@@ -191,8 +196,8 @@ pub fn list() -> Result<Vec<CardInfo>, CardError> {
             .and_then(|v| v.first().copied())
             .map(|u| match u { 0 => "OFF", 1 => "ON", 2 => "FIXED", 3 => "CACHED", 4 => "CACHED_FIXED", _ => "?" }.to_string())
             .unwrap_or_else(|| "?".into());
-        let form = form_factor(&card);
-        out.push(CardInfo { reader, serial, version, pubkey, touch, form });
+        let (form, nfc, firmware) = hardware(&card);
+        out.push(CardInfo { reader, serial, version, pubkey, touch, form, nfc, firmware });
     }
     if out.is_empty() {
         return Err(CardError::NotFound);

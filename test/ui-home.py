@@ -15,12 +15,13 @@ const V = %(vault)s;
 const store = () => ({ forms: {}, vaults: [V], settings: { network: V.network, custom: false, electrum: '', explorer: '', gap: 20, fiat: __state.fiat, prices: '' }, seen: {}, last_psbt: null, last_message: null });
 const H = { store_get: store, device_locale: () => __state.os, cards_list: () => { throw 'no YubiKey found'; }, spend_ceremony: () => { throw 'no spend in progress'; }, fees_get: () => ({ slow: 1, medium: 2, fast: 3 }),
   settings_set: (a) => { if (a.fiat !== undefined) __state.fiat = a.fiat; return store(); },
-  vault_sync: () => ({ coins: [{ txid: '%(t0)s', vout: 0, value: 9430, height: 967374 }], balance: 9430, height: 967685, rotating: false, receive: 'bc1qexample', receive_index: 0, next_change: 0, gap: 20, servers: { electrum: 'ssl://electrum.mineracks.com:50002', explorer: 'https://mempool.mineracks.com' },
+  vault_sync: (a) => ({ coins: [{ txid: '%(t0)s', vout: 0, value: 9430, height: 967374 }], balance: a.name === 'other vault' ? 111 : 9430, height: 967685, rotating: false, receive: 'bc1qexample', receive_index: 0, next_change: 0, gap: 20, servers: { electrum: 'ssl://electrum.mineracks.com:50002', explorer: 'https://mempool.mineracks.com' },
     history: [{ txid: '%(t0)s', height: 967374, index: 0 }, { txid: '%(t1)s', height: 967410, index: 0 }, { txid: '%(t2)s', height: 967497, index: 0 }, { txid: '%(t3)s', height: 0, index: 0 }] }),
   vault_activity: (a) => { __state.asked = a; if (__state.fail) throw 'electrum: connection refused'; const q = (p, b) => a.ccy ? { price: p, basis: b } : null; return { ccy: a.ccy, note: null, now: q(114209.6, 'daily 2026-09-19'), rows: [
     { txid: '%(t0)s', time: 1789627614, net: 20000, fee: null, quote: q(107389.64, 'hourly 2026-09-17 06:00 UTC') }, { txid: '%(t1)s', time: 1789648528, net: -5190, fee: 190, quote: q(107768.03, 'hourly 2026-09-17 12:00 UTC') },
     { txid: '%(t2)s', time: 1789699744, net: -5380, fee: 380, quote: null }, { txid: '%(t3)s', time: null, net: 1000, fee: null, quote: null }] }; } };
-window.__TAURI__ = { core: { invoke: async (cmd, args) => { if (!H[cmd]) throw 'unmocked: ' + cmd; return H[cmd](args || {}); } }, event: { listen: async () => () => {} } };
+window.__TAURI__ = { core: { invoke: async (cmd, args) => { if (!H[cmd]) throw 'unmocked: ' + cmd; if (cmd === 'vault_sync' && window.__hold === (args || {}).name) await new Promise(r => window.__release = r);   // a slow server, on demand
+  return H[cmd](args || {}); } }, event: { listen: async () => () => {} } };
 """
 fails = []
 def check(name, ok, detail=""):
@@ -60,6 +61,14 @@ with sync_playwright() as p:
     pg.evaluate("sync()"); pg.wait_for_timeout(500); check("the choice survives a sync", "$10.77" in pg.inner_text("#balance"))
     pg.evaluate("__state.fail = true; sync()"); pg.wait_for_timeout(500)
     check("if dates and amounts cannot be fetched: dashes and the reason, and the balance still shows", "—" in rows.nth(3).inner_text() and "connection refused" in pg.inner_text("#activity-note") and "9,430" in pg.inner_text("#balance"), pg.inner_text("#activity-note"))
+    # ---- switching vaults while a sync is in flight: the late answer belongs to the vault that was left ----
+    pg.evaluate("""() => { __state.fail = false; store.vaults.push(Object.assign({}, store.vaults[0], { name: 'other vault', network: 'signet' })); window.__hold = 'demo vault'; sync(); vault = store.vaults[1]; show('home'); }""")
+    pg.wait_for_timeout(300)
+    check("the slow sync really is still in flight", pg.evaluate("typeof window.__release") == "function")
+    pg.evaluate("window.__hold = null; window.__release()"); pg.wait_for_timeout(600)
+    asked = pg.evaluate("__state.asked && __state.asked.name")
+    check("a sync that returns after the switch is dropped: the other vault keeps its own balance and no lookup is made for the wrong vault", pg.inner_text("#title") == "other vault" and asked == "other vault" and "111" in pg.inner_text("#balance") and "9,430" not in pg.inner_text("#s-home"), f"title={pg.inner_text('#title')} asked={asked} balance={pg.inner_text('#balance')}")
+    pg.evaluate("vault = store.vaults[0]; show('home')"); pg.wait_for_timeout(600)
     # ---- Settings ----
     pg.evaluate("__state.fail = false; show('settings')"); pg.wait_for_timeout(300)
     check("Settings: automatic names the currency and why", "Automatic: AUD" in pg.locator("#fiat-pick option").first.inner_text() and "region is AU" in pg.inner_text("#fiat-note"), pg.inner_text("#fiat-note"))

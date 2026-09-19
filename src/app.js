@@ -148,7 +148,7 @@ const basisWords = (q, ccy) => `1 BTC = ${money(q.price, ccy)} · ${q.basis} · 
 // ---------- cards ----------
 async function pollCards() {
   try { cards = await invoke('cards_list'); cardsErr = ''; } catch (e) { cards = []; cardsErr = String(e); }
-  for (const c of cards) if (c.pubkey && c.form && (store.forms || {})[c.pubkey] !== c.form) { try { store = await invoke('key_form_seen', { pubkey: c.pubkey, form: c.form }); renderSign.tiles = null; } catch {} }
+  for (const c of cards) if (c.pubkey && c.form && packedForm(c.pubkey) !== ((c.form & 0x0F) | (c.nfc ? 0x80 : 0))) { try { store = await invoke('key_form_seen', { pubkey: c.pubkey, form: c.form, nfc: !!c.nfc }); renderSign.tiles = null; if ($('#s-keys').classList.contains('on') && !$('#keys-list input')) renderKeys(); } catch {} }
   if ($('#s-setup').classList.contains('on')) renderSetup();
   if ($('#s-keys').classList.contains('on')) { const sig = cards.map(c => c.serial + ':' + c.pubkey).sort().join(','); if (sig !== pollCards.sig) { pollCards.sig = sig; if (!$('#keys-list input')) renderKeys(); } else renderKeysNow(); }
   if (vault) for (const c of cards) { const k = vault.keys.find(k => c.pubkey && k.pubkey === c.pubkey && !k.serial); if (k && c.serial) { invoke('vault_key_seen', { name: vault.name, pubkey: c.pubkey, serial: c.serial }).then(st => { store = st; vault = st.vaults.find(v => v.name === vault.name) || vault; if ($('#s-keys').classList.contains('on')) renderKeys(); }).catch(() => {}); } }
@@ -196,8 +196,14 @@ async function sync() {
   $('#vault-kind').textContent = vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
   $('#vault-keys').textContent = vault.keys.map(k => k.name).join(' · ');
   $('#balance-sub').textContent = 'syncing…';
+  // Nothing of another vault may sit under this vault's name, not even for the seconds a sync takes:
+  // a vault that has not been drawn yet starts from a blank screen, and an answer that comes back after the person has
+  // moved to another vault is for that OTHER vault and is dropped here.
+  const me = vault.name;
+  if (sync.shown !== me) { sync.shown = me; vault._balance = undefined; vault._now = null; $('#balance').innerHTML = '— <small>sats</small>'; $('#balance-fiat').hidden = true; $('#activity').innerHTML = '<tr><td class="muted" colspan="5">syncing…</td></tr>'; $('#activity-note').hidden = true; $('#conn').textContent = ''; }
   try {
-    const s = await invoke('vault_sync', { name: vault.name });
+    const s = await invoke('vault_sync', { name: me });
+    if (!vault || vault.name !== me) return;
     vault._coins = s.coins; vault._receive = s.receive; vault._receiveIndex = s.receive_index; vault._rotating = s.rotating; vault._height = s.height; vault._history = s.history; vault._nextChange = s.next_change; vault._gap = s.gap;
     if ($('#s-send').classList.contains('on')) renderCoins();
     if ($('#s-receive').classList.contains('on')) renderAddresses();
@@ -214,7 +220,7 @@ async function sync() {
     }
     fillActivity(vault.name, s);   // dates, amounts and values arrive after the balance; the balance never waits for them
     $('#send-have').textContent = `${sats(s.balance)} sats`;
-  } catch (e) { $('#balance-sub').textContent = 'could not reach the server'; $('#conn').textContent = String(e); }
+  } catch (e) { if (!vault || vault.name !== me) return; $('#balance-sub').textContent = 'could not reach the server'; $('#conn').textContent = String(e); }
 }
 document.addEventListener('click', (e) => { const a = e.target.closest('[data-tx]'); if (a) { e.preventDefault(); const base = ($('#conn').textContent.includes('signet') ? 'https://signet.mineracks.com' : (store.settings.custom && store.settings.explorer) || (netName() === 'mainnet' ? 'https://mempool.mineracks.com' : 'https://signet.mineracks.com')); invoke('open_url', { url: `${base}/tx/${a.dataset.tx}` }).catch(fail); } });
 
@@ -296,7 +302,22 @@ $('#build-btn').onclick = async () => {
 };
 
 // ---------- sign ----------
-const isNano = (pub) => [2, 4].includes((store.forms || {})[pub]);
+const packedForm = (pub) => (store.forms || {})[pub] || 0;        // low 4 bits: form factor; top bit: NFC
+const isNano = (pub) => [2, 4].includes(packedForm(pub) & 0x0F);
+const modelName = (form, nfc) => ({ 1: nfc ? 'YubiKey 5 NFC' : 'YubiKey 5 (USB-A)', 2: 'YubiKey 5 Nano', 3: nfc ? 'YubiKey 5C NFC' : 'YubiKey 5C', 4: 'YubiKey 5C Nano', 5: 'YubiKey 5Ci' }[form & 0x0F] || 'YubiKey 5');
+// our own drawings of each shape (not Yubico's artwork): body, gold touch contact, the plug that tells A from C, the keyring hole, an NFC mark
+function keyArt(form, nfc, h = 44) {
+  const f = form & 0x0F, usbC = [3, 4, 5].includes(f), nano = [2, 4].includes(f);
+  const plug = usbC ? '<rect x="15" y="2" width="14" height="9" rx="4.5" fill="none" stroke="var(--muted)" stroke-width="1.8"/>' : '<rect x="12" y="2" width="20" height="12" rx="1.5" fill="none" stroke="var(--muted)" stroke-width="1.8"/><rect x="16" y="5" width="4" height="4" fill="var(--muted)"/><rect x="24" y="5" width="4" height="4" fill="var(--muted)"/>';
+  const top = usbC ? 10 : 13;
+  const body = nano ? `<rect x="9" y="${top}" width="26" height="22" rx="5" fill="var(--ink)"/><circle cx="22" cy="${top + 11}" r="6" fill="none" stroke="var(--gold)" stroke-width="3"/><circle cx="22" cy="${top + 11}" r="1.8" fill="var(--signal)"/>`
+    : `<rect x="7" y="${top}" width="30" height="${f === 5 ? 50 : 58}" rx="7" fill="var(--ink)"/><circle cx="22" cy="${top + 22}" r="8" fill="none" stroke="var(--gold)" stroke-width="3.5"/><circle cx="22" cy="${top + 22}" r="2.2" fill="var(--signal)"/>`
+      + (f === 5 ? `<rect x="17" y="${top + 50}" width="10" height="9" rx="2" fill="none" stroke="var(--muted)" stroke-width="1.8"/>` : `<circle cx="22" cy="${top + 47}" r="4" fill="var(--panel)"/>`)
+      + (nfc ? `<path d="M15 ${top + 8}a10 10 0 0 1 14 0M18 ${top + 11}a6 6 0 0 1 8 0" fill="none" stroke="var(--gold)" stroke-width="1.4" stroke-linecap="round" opacity=".8"/>` : '');
+  const H = nano ? top + 24 : top + 62;
+  const unit = h / 75;   // one scale for every model, so a Nano is drawn as small as it is
+  return `<svg viewBox="0 0 44 ${H}" height="${Math.round(H * unit)}" width="${Math.round(44 * unit)}" aria-hidden="true" style="flex:0 0 auto">${plug}${body}</svg>`;
+}
 const keyGlyph = (pub) => isNano(pub)
   ? '<svg viewBox="0 0 44 84" width="34" height="65" aria-hidden="true"><circle class="khalo" cx="22" cy="65" r="15"/><rect class="kplug" x="13" y="38" width="18" height="14" rx="2"/><rect class="kbody" x="7" y="50" width="30" height="30" rx="7"/><circle class="kring" cx="22" cy="65" r="7"/><circle class="kdot" cx="22" cy="65" r="2"/></svg>'
   : '<svg viewBox="0 0 44 84" width="34" height="65" aria-hidden="true"><circle class="khalo" cx="22" cy="40" r="17"/><rect class="kplug" x="13" y="2" width="18" height="14" rx="2"/><rect class="kbody" x="5" y="14" width="34" height="66" rx="8"/><circle class="kring" cx="22" cy="40" r="9"/><circle class="kdot" cx="22" cy="40" r="2.5"/></svg>';
@@ -514,8 +535,13 @@ function renderKeys() {
   invoke('vault_recovery', { name: vault.name }).then(l => { $('#keys-desc').textContent = l; vault._recovery = l; }); $('#keys-k').textContent = vault.threshold; $$('.keys-k2').forEach(e => e.textContent = vault.threshold);
   renderKeysNow(); renderSeal();
 }
-function keyRow(name, sub, pub, state, idx) { const pen = idx === undefined ? '' : `<button class="pencil" data-edit-idx="${idx}" title="Rename this key"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>`; return `<div class="keyrow"><svg width="22" height="22"><use href="#ring"/></svg><div class="who"><div class="name"><span class="name-text">${name}</span>${pen}</div><div class="muted" style="font-size:13px">${sub} · <span class="mono">${pub.slice(0, 12)}…</span></div></div><div class="state ${state}"><i></i>${{ ok: 'enrolled', off: 'not plugged in', here: 'plugged in' }[state]}</div></div>`; }
-function renderKeysNow() { $('#keys-now').innerHTML = cards.length ? cards.map(c => `${cardLabel(c)} · ${c.pubkey ? 'signing key present' : 'no signing key'} · touch ${c.touch}`).join('<br>') : (cardsErr && !/no YubiKey found/i.test(cardsErr) ? 'Card reader problem: ' + cardsErr : 'No YubiKey plugged in.'); }
+function keyRow(name, sub, pub, state, idx) { const pen = idx === undefined ? '' : `<button class="pencil" data-edit-idx="${idx}" title="Rename this key"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>`; const pf = packedForm(pub); return `<div class="keyrow"><span class="keyart">${pf ? keyArt(pf, !!(pf & 0x80), 44) : '<svg width="22" height="22"><use href="#ring"/></svg>'}</span><div class="who"><div class="name"><span class="name-text">${name}</span>${pen}</div><div class="muted" style="font-size:13px">${pf ? modelName(pf, !!(pf & 0x80)) + ' · ' : ''}${sub} · <span class="mono">${pub.slice(0, 12)}…</span></div></div><div class="state ${state}"><i></i>${{ ok: 'enrolled', off: 'not plugged in', here: 'plugged in' }[state]}</div></div>`; }
+function renderKeysNow() {
+  const html = cards.length ? cards.map(c => { const k = vault && vault.keys.find(k => k.pubkey === c.pubkey);
+    return `<div class="nowkey">${keyArt(c.form || 3, !!c.nfc, 92)}<div><div class="nowname">${esc(modelName(c.form, c.nfc))}${k ? ` <span class="muted">· ${esc(k.name)}</span>` : ''}</div><div class="muted" style="font-size:14px">serial ${c.serial}${c.firmware ? ' · firmware ' + c.firmware : ''} · ${c.version}</div><div class="muted" style="font-size:14px">${c.pubkey ? 'signing key present' : 'no signing key yet'} · touch ${String(c.touch).toLowerCase()}${k ? '' : vault ? ' · not one of this vault\'s keys' : ''}</div></div></div>`; }).join('')
+    : `<span class="muted">${cardsErr && !/no YubiKey found/i.test(cardsErr) ? 'Card reader problem: ' + esc(cardsErr) : 'No YubiKey plugged in.'}</span>`;
+  if (renderKeysNow.html !== html) { renderKeysNow.html = html; $('#keys-now').innerHTML = html; }
+}
 // rename a key in place from the pencil on its row
 $('#keys-list').addEventListener('click', (e) => {
   const b = e.target.closest('[data-edit-idx]'); if (!b || $('#keys-list input')) return;
