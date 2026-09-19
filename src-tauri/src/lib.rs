@@ -98,6 +98,23 @@ fn vault_receive_address(name: String) -> R<String> {
     wallet::address_at(v, if v.chain_code.is_some() { v.next } else { 0 })
 }
 
+#[derive(Serialize)]
+struct NodeStatus { electrum: String, height: u32, ms: u128, ours: bool }
+
+/// Does the Electrum server for this network answer right now, and how fast? Opens a fresh connection on purpose:
+/// a light that stays green on a cached answer is worse than no light.
+#[tauri::command]
+async fn node_status(network: String) -> R<NodeStatus> {
+    block(move || {
+        let s = wallet::load();
+        let servers = wallet::servers_for(&s, &network);
+        let ours = servers.electrum == chain::defaults(wallet::network_of(&network)).electrum;
+        let t = std::time::Instant::now();
+        let height = chain::height(&servers)?;
+        Ok(NodeStatus { electrum: servers.electrum, height, ms: t.elapsed().as_millis(), ours })
+    }).await
+}
+
 #[tauri::command]
 fn device_locale() -> activity::Device { activity::device() }
 
@@ -924,7 +941,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| { watch::start(app.handle().clone()); Ok(()) })
-        .invoke_handler(tauri::generate_handler![open_url, vault_activity, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_preview, seal_restore, label_set, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![open_url, vault_activity, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_preview, seal_restore, label_set, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])

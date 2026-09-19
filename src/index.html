@@ -44,13 +44,18 @@
   <div id="vault-tabs" style="display:flex;flex-direction:column;gap:2px;margin-bottom:8px"></div>
   <div class="nav" id="new-vault-nav" style="font-weight:400;color:var(--muted)"><span style="width:18px;text-align:center;font-weight:800">+</span>New vault…</div>
   <div style="border-top:1px solid var(--line);margin:8px 0"></div>
+  <div class="label sidegroup" id="side-vault" title="These screens are about the selected vault">This vault</div>
   <div class="nav" data-go="home"><svg><use href="#i-home"/></svg>Home</div>
   <div class="nav" data-go="send"><svg><use href="#i-send"/></svg>Send</div>
   <div class="nav" data-go="receive"><svg><use href="#i-receive"/></svg>Receive</div>
   <div class="nav" data-go="messages"><svg><use href="#i-msg"/></svg>Messages</div>
   <div class="nav" data-go="keys"><svg><use href="#i-keys"/></svg>Keys</div>
-  <div class="nav" data-go="settings"><svg><use href="#i-settings"/></svg>Settings</div>
-  <div class="foot">v0.1 · research build</div>
+  <div class="sidefoot">
+    <div class="label sidegroup">Any Two Keys</div>
+    <div class="nav" data-go="settings"><svg><use href="#i-settings"/></svg>App settings</div>
+    <button type="button" class="node" id="node" data-state="checking" title="Checking the connection…"><i></i><span id="node-text">Connecting…</span></button>
+    <div class="foot">v0.1 · research build</div>
+  </div>
 </div>
 <div class="divider" id="divider" title="Drag to resize"></div>
 <div class="main">
@@ -64,7 +69,7 @@
         <div class="card"><div class="label">Vault</div><div style="font-family:var(--display);font-weight:600;font-size:18px" id="vault-kind"></div><div class="muted" id="vault-keys"></div></div>
         <div class="card"><div class="label">Actions</div><div class="row"><button class="btn primary" data-go="send" style="min-width:120px">Send</button><button class="btn" data-go="receive" style="min-width:120px">Receive</button></div></div>
       </div>
-      <div class="card"><div class="label">Activity</div><table class="act"><thead><tr><th>When</th><th>Transaction</th><th>Label</th><th class="r">Amount</th><th class="r">Status</th></tr></thead><tbody id="activity"><tr><td class="muted" colspan="5">nothing yet</td></tr></tbody></table><div class="muted" style="font-size:13px" id="activity-note" hidden></div></div>
+      <div class="card"><div class="label">Activity</div><table class="act"><thead><tr><th>When</th><th>Transaction</th><th>Label</th><th class="r">Amount</th><th class="r">Status</th></tr></thead><tbody id="activity"><tr><td class="muted" colspan="5">nothing yet</td></tr></tbody></table><div class="muted" style="font-size:13px" id="activity-note" hidden></div><div class="row actfoot"><span class="muted" style="font-size:13px;flex-grow:1" id="labels-out">Labels are this vault’s own notes on its addresses, coins and transactions (BIP 329, as Sparrow uses).</span><button class="btn small" id="labels-export">Export labels</button><button class="btn small" id="labels-import">Import labels</button></div></div>
       <div class="muted" style="font-size:13px" id="conn"></div>
     </section>
 
@@ -245,8 +250,6 @@
             <div class="muted" style="font-size:13px">How many unused addresses past the last used one a scan looks at, on the receive chain and the change chain each. 20 is the usual. Raise it if you hand out many addresses before any is paid; every scan costs one server query per address.</div></div>
           <div class="card"><div class="label">Notifications</div><div class="row" style="align-items:center;gap:12px"><button class="btn" id="notify-test">Send a test notification</button><span class="muted" style="font-size:13px" id="notify-out"></span></div>
             <div class="muted" style="font-size:13px">Arrivals, spends and confirmations are checked every minute in the background. The log is at <span class="mono" id="watch-log-path"></span>.</div></div>
-          <div class="card"><div class="label">Labels</div><div class="row" style="gap:10px"><button class="btn" id="labels-export">Export labels</button><button class="btn" id="labels-import">Import labels</button></div>
-            <div class="muted" style="font-size:13px" id="labels-out">BIP 329 format, the same file Sparrow reads and writes: address, transaction and coin labels for the current vault.</div></div>
           <div class="card"><div class="label">About</div><div class="muted" style="font-size:13px">v0.1 research build. Source and checksums at anytwokeys.com. Not affiliated with Yubico.</div></div>
         </div>
       </div>

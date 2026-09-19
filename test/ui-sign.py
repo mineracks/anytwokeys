@@ -71,7 +71,7 @@ with sync_playwright() as p:
     check("walking back to Send keeps the spend in view", pg.locator("#s-send.on").count() == 1 and pg.locator("#staged-bar").is_visible() and "1 of 2" in pg.inner_text("#staged-text") and "5,000 sats" in pg.inner_text("#staged-text"), pg.inner_text("#staged-text"))
     check("the vault stays lit after walking back", "family vault" in lit() and "Send" in lit(), str(lit()))
     pg.evaluate("show('settings')"); pg.wait_for_timeout(200)
-    check("app settings are not about a vault: no vault lit", lit() == ["Settings"], str(lit()))
+    check("app settings are not about a vault: no vault lit, and the screen says whose settings these are", lit() == ["App settings"] and pg.inner_text("#title") == "App settings" and pg.inner_text("#crumbs").split() == "Any Two Keys › App settings".split(), str(lit()) + pg.inner_text("#crumbs"))
     pg.evaluate("show('send')"); pg.wait_for_timeout(400)
     check("Send's breadcrumb is vault > Send", pg.inner_text("#crumbs").split() == "family vault › Send".split(), pg.inner_text("#crumbs"))
     pg.screenshot(path=str(out / "send-staged.png"))

@@ -60,9 +60,11 @@ function show(name) {
   // the vault you are in stays lit on every screen that is about it, matching the breadcrumb; not while making another, nor in app settings
   const inVault = vault && !['setup', 'restore', 'settings'].includes(name);
   $$('#vault-tabs .nav').forEach(n => n.classList.toggle('on', !!inVault && n.dataset.vault === vault.name));
-  $('#title').textContent = { home: vault ? vault.name : 'Vault', send: 'Send', receive: 'Receive', keys: 'Keys', settings: 'Settings', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
+  $('#title').textContent = { home: vault ? vault.name : 'Vault', send: 'Send', receive: 'Receive', keys: 'Keys', settings: 'App settings', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
   $('#title-edit').hidden = !(name === 'home' && vault); $('#title-input').hidden = true; $('#title').hidden = false;
   paintCrumbs(name); paintStaged(name);
+  $('#side-vault').textContent = vault ? vault.name : 'No vault yet'; $('#side-vault').title = vault ? `These screens are about “${vault.name}”` : '';
+  if (checkNode.net !== (vault ? vault.network : store.settings.network)) checkNode();
   if (name !== 'restore') stopCam();
   if (name !== 'sign') stopQr();
   if (name === 'home') sync();
@@ -85,7 +87,8 @@ function paintCrumbs(name) {
     if (name !== 'home') trail.push([vault.name, 'home']);
     if (name === 'sign') trail.push(paintCrumbs.via === 'messages' ? ['Messages', 'messages'] : ['Send', 'send']);
   }
-  const here = { home: '', send: 'Send', receive: 'Receive', keys: 'Keys', settings: '', setup: 'New vault', restore: 'Restore', sign: 'Sign', messages: 'Messages' }[name] || '';
+  if (name === 'settings') trail.push(['Any Two Keys', null]);
+  const here = { home: '', send: 'Send', receive: 'Receive', keys: 'Keys', settings: 'App settings', setup: 'New vault', restore: 'Restore', sign: 'Sign', messages: 'Messages' }[name] || '';
   const el = $('#crumbs'); el.hidden = !trail.length;
   const html = trail.map(([t, go]) => (go ? `<a tabindex="0" role="link" data-crumb="${go}">${esc(t)}</a>` : `<span>${esc(t)}</span>`) + '<span class="sep">›</span>').join('') + `<span class="here">${esc(here)}</span>`;
   if (el._html !== html) { el._html = html; el.innerHTML = html; }   // a poll must not take focus off a crumb
@@ -237,7 +240,7 @@ async function sync() {
     }
     fillActivity(vault.name, s);   // dates, amounts and values arrive after the balance; the balance never waits for them
     $('#send-have').textContent = `${sats(s.balance)} sats`;
-  } catch (e) { if (!vault || vault.name !== me) return; $('#balance-sub').textContent = 'could not reach the server'; $('#conn').textContent = String(e); }
+  } catch (e) { if (!vault || vault.name !== me) return; checkNode(); $('#balance-sub').textContent = 'could not reach the server'; $('#conn').textContent = String(e); }
 }
 document.addEventListener('click', (e) => { const a = e.target.closest('[data-tx]'); if (a) { e.preventDefault(); const base = ($('#conn').textContent.includes('signet') ? 'https://signet.mineracks.com' : (store.settings.custom && store.settings.explorer) || (netName() === 'mainnet' ? 'https://mempool.mineracks.com' : 'https://signet.mineracks.com')); invoke('open_url', { url: `${base}/tx/${a.dataset.tx}` }).catch(fail); } });
 
@@ -890,6 +893,23 @@ $('#own-servers').onclick = async () => { store = await invoke('settings_set', {
 $('#save-settings').onclick = async () => { try { store = await invoke('settings_set', { network: netName(), custom: true, electrum: $('#c-electrum').value, explorer: $('#c-explorer').value, prices: $('#c-prices').value }); renderSettings(); toast('Using your servers'); } catch (e) { fail(e); } };
 $('#fiat-pick').onchange = async () => { try { store = await invoke('settings_set', { network: netName(), custom: store.settings.custom, electrum: store.settings.electrum, explorer: store.settings.explorer, fiat: $('#fiat-pick').value }); renderSettings(); toast($('#fiat-pick').value ? 'Values shown in ' + fiatCcy() : 'Values hidden'); } catch (e) { fail(e); } };
 $('#test-servers').onclick = async () => { $('#test-out').textContent = 'testing…'; try { $('#test-out').textContent = await invoke('servers_test', { electrum: $('#c-electrum').value, explorer: $('#c-explorer').value }); } catch (e) { $('#test-out').textContent = String(e); } };
+
+// ---------- is the node there? a light at the foot of the sidebar ----------
+// Green only on a fresh answer from the Electrum server of the network on screen; asked every 30 s, on a vault switch, and on a click.
+function paintNode(state, text, title) { const n = $('#node'); n.dataset.state = state; $('#node-text').textContent = text; n.title = title; }
+async function checkNode() {
+  const net = vault ? vault.network : store.settings.network; checkNode.net = net; const mine = ++checkNode.n;
+  if ($('#node').dataset.state !== 'online') paintNode('checking', 'Connecting…', 'Asking the ' + net + ' server…');
+  try {
+    const r = await invoke('node_status', { network: net }); if (mine !== checkNode.n) return;
+    const host = r.electrum.replace(/^\w+:\/\//, '');
+    paintNode('online', 'Online · ' + (r.ours ? 'mineracks node' : host), `${net} · ${host} · block ${sats(r.height)} · answered in ${r.ms} ms · checked ${new Date().toLocaleTimeString()}. Click to check again.`);
+  } catch (e) { if (mine !== checkNode.n) return; paintNode('offline', 'Offline · no answer', `${net}: ${String(e)}. Balances and sends need the server. Click to try again.`); }
+}
+checkNode.n = 0;
+$('#node').onclick = () => { paintNode('checking', 'Checking…', ''); checkNode(); };
+setInterval(() => { if (!document.hidden) checkNode(); }, 30000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) checkNode(); });
 
 // money moved: say so in the window too. Cards stack, stay ten seconds, and a click opens that vault's Home.
 function notice(ev) {

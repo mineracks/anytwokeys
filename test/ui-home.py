@@ -14,7 +14,7 @@ window.__state = { fiat: %(fiat)s, asked: null, fail: false, os: %(os)s };
 const V = %(vault)s; window.V = V;
 window.__contacts = []; window.__extra = [];
 const store = () => ({ forms: {}, contacts: __contacts, vaults: [V].concat(__extra), settings: { network: V.network, custom: false, electrum: '', explorer: '', gap: 20, fiat: __state.fiat, prices: '' }, seen: {}, last_psbt: null, last_message: null });
-const H = { store_get: store,
+const H = { store_get: store, node_status: (a) => { (window.__nodeAsked = window.__nodeAsked || []).push(a.network); if (window.__nodeDown) throw 'electrum ssl://electrum.mineracks.com:50002: connection refused'; return { electrum: 'ssl://electrum.mineracks.com:50002', height: 967686, ms: 84, ours: true }; },
   contact_save: (a) => { if (!/^(bc1|tb1)/.test(a.address)) throw 'that is not a Bitcoin address'; const c = __contacts.find(c => c.address === a.address); if (c) c.name = a.name; else __contacts.push({ name: a.name, address: a.address, network: a.network, added: 1, used: 0, last_used: 0 }); return store(); },
   contact_delete: (a) => { __contacts = __contacts.filter(c => c.address !== a.address); return store(); }, contact_used: (a) => { __contacts.find(c => c.address === a.address).used += 1; return store(); },
   vault_receive_address: (a) => 'bc1qfreshaddressof' + a.name.replace(/[^a-z]/gi, '') + '0000000000000000000000007', device_locale: () => __state.os, cards_list: () => { throw 'no YubiKey found'; }, spend_ceremony: () => { throw 'no spend in progress'; }, fees_get: () => ({ slow: 1, medium: 2, fast: 3 }),
@@ -109,6 +109,17 @@ with sync_playwright() as p:
     pg.locator("#notices .notice-card").first.click(); pg.wait_for_timeout(500)
     check("clicking a notice opens THAT vault", pg.inner_text("#title") == "savings vault" and pg.locator("#notices .notice-card").count() == 0)
     pg.evaluate("vault = store.vaults[0]; show('home')"); pg.wait_for_timeout(500)
+    # ---- whose screens are these, and is the node there? ----
+    side = pg.inner_text(".side")
+    check("the sidebar heads the vault's screens with the vault's name, and keeps the app's own things apart", pg.inner_text("#side-vault").lower() == "demo vault" and "App settings" in side and pg.evaluate("() => { const s = [...document.querySelectorAll('.side .nav[data-go]')].map(n => n.dataset.go); return s.indexOf('settings') === s.length - 1 && !!document.querySelector('.sidefoot .nav[data-go=settings]'); }"), side[:200])
+    check("the light is green on a fresh answer and names the node", pg.get_attribute("#node", "data-state") == "online" and pg.inner_text("#node-text") == "Online · mineracks node" and "block 967,686" in pg.get_attribute("#node", "title") and "84 ms" in pg.get_attribute("#node", "title"), pg.inner_text("#node-text"))
+    nb = pg.locator("#node").bounding_box(); check("bottom left of the window", nb["x"] < 60 and nb["y"] > 700, str(nb))
+    pg.evaluate("window.__nodeDown = true"); pg.click("#node"); pg.wait_for_timeout(300)
+    check("no answer: red, says so, and the reason is on hover", pg.get_attribute("#node", "data-state") == "offline" and "Offline" in pg.inner_text("#node-text") and "connection refused" in pg.get_attribute("#node", "title"))
+    pg.evaluate("window.__nodeDown = false"); pg.click("#node"); pg.wait_for_timeout(300)
+    check("a click asks again", pg.get_attribute("#node", "data-state") == "online")
+    pg.locator(".side").screenshot(path=str(out / "sidebar.png"))
+    check("labels live with the vault they belong to, on its Home", pg.locator("#s-home #labels-export").count() == 1 and pg.locator("#s-settings #labels-export").count() == 0)
     # ---- Settings ----
     pg.evaluate("__state.fail = false; show('settings')"); pg.wait_for_timeout(300)
     check("Settings: automatic names the currency and why", "Automatic: AUD" in pg.locator("#fiat-pick option").first.inner_text() and "region is AU" in pg.inner_text("#fiat-note"), pg.inner_text("#fiat-note"))
@@ -118,6 +129,7 @@ with sync_playwright() as p:
     check("None: no money anywhere, sats lead again", pg.evaluate("__state.asked.ccy") == "" and "EUR" not in pg.inner_text("#s-home") and "$" not in pg.inner_text("#s-home") and "9,430" in pg.inner_text("#balance"))
     check("no page errors", not pg.errs, "; ".join(pg.errs)); pg.context.close()
     pg = page(b, "en-AU", "Australia/Brisbane", net="signet"); 
+    check("a signet vault asks about the SIGNET server", 'signet' in pg.evaluate("window.__nodeAsked || []"))
     check("signet: dates and amounts, never a value", pg.evaluate("__state.asked.ccy") == "" and "+20,000 sats" in pg.inner_text("#activity") and "$" not in pg.inner_text("#s-home"))
     b.close()
 sys.exit(1 if fails else 0)

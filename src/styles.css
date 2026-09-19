@@ -315,3 +315,17 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .notice-card:hover{border-color:var(--gold)}
 @keyframes noticein{from{opacity:0;transform:translateX(16px)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion: reduce){.notice-card{animation:none}}
+
+/* the sidebar says which screens belong to the selected vault and which to the app, and whether the node answers */
+.sidegroup{padding:8px 12px 2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sidefoot{margin-top:auto;display:flex;flex-direction:column;gap:4px;border-top:1px solid var(--line);padding-top:8px}
+.side .sidefoot .foot{margin-top:0}
+.node{display:flex;align-items:center;gap:9px;width:100%;background:none;border:0;border-radius:6px;padding:8px 12px;font-family:var(--display);font-size:12.5px;color:var(--muted);cursor:pointer;text-align:left;min-width:0}
+.node:hover{background:var(--ground);color:var(--ink)}
+.node i{flex:0 0 9px;width:9px;height:9px;border-radius:50%;background:var(--line)}
+.node span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.node[data-state="online"] i{background:var(--signal);box-shadow:0 0 0 3px color-mix(in srgb,var(--signal) 22%,transparent)}
+.node[data-state="checking"] i{background:var(--gold);animation:gblink 1s steps(2,start) infinite}
+.node[data-state="offline"] i{background:var(--no)} .node[data-state="offline"]{color:var(--no)}
+.actfoot{border-top:1px solid var(--line);padding-top:12px;gap:10px}
+@media (prefers-reduced-motion: reduce){.node[data-state="checking"] i{animation:none}}
