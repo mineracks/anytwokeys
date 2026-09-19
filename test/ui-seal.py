@@ -53,6 +53,13 @@ with sync_playwright() as p:
     pg.fill("#keys-list [data-seal-upin]", "123456"); pg.click("[data-seal-go]"); pg.wait_for_timeout(400)
     check("wrong PIN is reported", "wrong PIN" in pg.locator("#toast").inner_text(), pg.locator("#toast").inner_text())
     pg.fill("#keys-list [data-seal-upin]", "123456"); pg.fill("#keys-list [data-seal-pin]", "12345678"); pg.click("[data-seal-go]"); pg.wait_for_timeout(500)
+    # the store was just re-read, so `vault` is a fresh object that has not fetched its recovery line
+    pg.evaluate("vault._recovery = undefined"); pg.locator("#desc-reveal").scroll_into_view_if_needed(); pg.click("#desc-reveal"); pg.wait_for_timeout(400)
+    shown_ = pg.evaluate("document.querySelector('#keys-desc').textContent")
+    check("Reveal straight after a seal shows the line, never an empty box", shown_.startswith("wsh(sortedmulti(2,0337") and pg.get_attribute("#desc-wrap", "data-hidden") == "0", repr(shown_[:40]))
+    pg.click("#desc-hide")
+    pg.evaluate("vault._recovery = undefined; window.__copied = null; navigator.clipboard.writeText = async (x) => { window.__copied = x; }"); pg.click("#copy-desc"); pg.wait_for_timeout(400)
+    check("Copy descriptor on a fresh vault object copies the FULL line, chain code included, never the bare descriptor", (pg.evaluate("window.__copied") or "").endswith("cc=" + "ab" * 32), repr((pg.evaluate("window.__copied") or "")[-30:]))
     check("both PINs reach the backend", pg.evaluate("__state.lastWrite.pin") == "123456" and pg.evaluate("__state.lastWrite.adminPin") == "12345678")
     check("the row's seal slot turns to sealed, its PIN field gone", "PIN-locked" in rows.nth(0).locator(".kseal").inner_text() and rows.nth(0).locator("[data-seal-pin]").count() == 0)
     check("note counts 1 of 3", "1 of 3" in pg.inner_text("#seal-note"), pg.inner_text("#seal-note"))

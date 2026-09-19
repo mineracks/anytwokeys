@@ -661,14 +661,21 @@ $('#bsms-open').onclick = async () => { try { const r = await invoke('bsms_impor
 // shape, blurred — so a screenshot, a screen share or a screen reader gets nothing. Copy and Save as PDF work without revealing.
 const standIn = (line) => { let x = line.length * 2654435761 >>> 0; return line.replace(/[a-z0-9]/gi, () => { x = (x * 1664525 + 1013904223) >>> 0; return '0123456789abcdef'[x >>> 28]; }); };
 function paintDesc() {
-  const line = (vault && vault._recovery) || '', shown = !!hideDesc.shown;
+  const line = (vault && vault._recovery) || '', shown = !!hideDesc.shown && !!line;   // an empty line is never 'revealed'
   $('#keys-desc').textContent = shown ? line : standIn(line); $('#keys-desc').setAttribute('aria-hidden', String(!shown));
   $('#desc-wrap').dataset.hidden = shown ? '0' : '1'; $('#desc-hide').hidden = !shown; $('#desc-copy').hidden = !shown;
 }
 function hideDesc() { clearTimeout(hideDesc.t); hideDesc.shown = false; paintDesc(); }
-$('#desc-reveal').onclick = () => { hideDesc.shown = true; paintDesc(); clearTimeout(hideDesc.t); hideDesc.t = setTimeout(hideDesc, 120000); };   // two minutes, then it goes away again
+// The vault object is replaced whenever the store is re-read (after a seal, a rename, a label), and the fresh one has not
+// fetched its line yet: Reveal used to show an empty box then. It fetches when it has to, and never reveals nothing.
+$('#desc-reveal').onclick = async () => {
+  const name = vault.name;
+  if (!vault._recovery) { try { const l = await invoke('vault_recovery', { name }); if (!vault || vault.name !== name) return; vault._recovery = l; } catch (e) { return fail(e); } }
+  if (!vault._recovery) return toast('The recovery line could not be read');
+  hideDesc.shown = true; paintDesc(); clearTimeout(hideDesc.t); hideDesc.t = setTimeout(hideDesc, 120000);   // two minutes, then it goes away again
+};
 $('#desc-hide').onclick = hideDesc;
-$('#desc-copy').onclick = async () => { try { await navigator.clipboard.writeText(vault._recovery || ''); const b = $('#desc-copy'); b.classList.add('done'); b.title = 'Copied'; toast('Recovery line copied'); setTimeout(() => { b.classList.remove('done'); b.title = 'Copy the recovery line'; }, 1800); } catch (e) { fail(e); } };
+$('#desc-copy').onclick = async () => { try { if (!vault._recovery) vault._recovery = await invoke('vault_recovery', { name: vault.name }); await navigator.clipboard.writeText(vault._recovery); const b = $('#desc-copy'); b.classList.add('done'); b.title = 'Copied'; toast('Recovery line copied'); setTimeout(() => { b.classList.remove('done'); b.title = 'Copy the recovery line'; }, 1800); } catch (e) { fail(e); } };
 window.addEventListener('blur', hideDesc);   // switching to another app is when a screen gets shared
 
 // Keys is ONE list. Each row is one key and says everything about it: what it is, whether it is plugged in, whether it
@@ -736,7 +743,8 @@ async function commitTitle() {
 $('#title-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); commitTitle(); } if (e.key === 'Escape') { $('#title-input').value = vault.name; commitTitle(); } });
 $('#title-input').addEventListener('blur', () => { if (!$('#title-input').hidden) commitTitle(); });
 $('#vault-pdf').onclick = async () => { try { toast('Saved ' + await invoke('vault_pdf', { name: vault.name }), 6000); } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
-$('#copy-desc').onclick = () => navigator.clipboard.writeText(vault._recovery || vault.descriptor).then(() => toast('Recovery line copied'));
+// never fall back to `vault.descriptor`: for a rotating vault that is the line WITHOUT its chain code, which restores the wrong addresses
+$('#copy-desc').onclick = async () => { try { if (!vault._recovery) vault._recovery = await invoke('vault_recovery', { name: vault.name }); if (!vault._recovery) throw 'the recovery line could not be read'; await navigator.clipboard.writeText(vault._recovery); toast('Recovery line copied'); } catch (e) { fail(e); } };
 askTwice($('#forget-vault'), 'Forget this vault on this computer? The coins stay on the chain; two sealed keys, or the recovery line and two keys, bring it back.', 'Yes, forget it here', async () => { store = await invoke('vault_forget', { name: vault.name }); vault = null; boot(); });
 
 // ---------- setup (enrol) ----------
