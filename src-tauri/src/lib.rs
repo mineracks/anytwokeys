@@ -825,7 +825,9 @@ mod watch {
     use tauri::{AppHandle, Emitter};
     use tauri_plugin_notification::NotificationExt;
 
-    pub struct Event { pub vault: String, pub title: String, pub body: String }
+    /// `kind`: "in" | "out" | "tx" (no net change) | "confirmed" — the window draws each differently
+    #[derive(Clone, serde::Serialize)]
+    pub struct Event { pub vault: String, pub kind: &'static str, pub title: String, pub body: String, pub txid: String }
 
     /// One pass over every vault: what changed since last time, as notifications.
     pub fn log(line: &str) {
@@ -869,15 +871,15 @@ mod watch {
                             let net = gained as i64 - lost as i64;
                             let short = format!("{}…{}", &txid[..8], &txid[txid.len() - 6..]);
                             if net == 0 {
-                                out.push(Event { vault: v.name.clone(), title: format!("{}: new transaction", v.name), body: format!("{short} · {}", if *h > 0 { "confirmed" } else { "in the mempool" }) });
+                                out.push(Event { vault: v.name.clone(), kind: "tx", txid: txid.clone(), title: format!("{}: new transaction", v.name), body: format!("{short} · {}", if *h > 0 { "confirmed" } else { "in the mempool" }) });
                             } else if net > 0 {
-                                out.push(Event { vault: v.name.clone(), title: format!("{}: {} sats arrived", v.name, fmt(net as u64)), body: format!("{short} · {}", if *h > 0 { "confirmed" } else { "waiting for a confirmation" }) });
+                                out.push(Event { vault: v.name.clone(), kind: "in", txid: txid.clone(), title: format!("{}: {} sats arrived", v.name, fmt(net as u64)), body: format!("{short} · {}", if *h > 0 { "confirmed" } else { "waiting for a confirmation" }) });
                             } else {
-                                out.push(Event { vault: v.name.clone(), title: format!("{}: {} sats sent", v.name, fmt((-net) as u64)), body: format!("{short} · {}", if *h > 0 { "confirmed" } else { "in the mempool" }) });
+                                out.push(Event { vault: v.name.clone(), kind: "out", txid: txid.clone(), title: format!("{}: {} sats sent", v.name, fmt((-net) as u64)), body: format!("{short} · {}", if *h > 0 { "confirmed" } else { "in the mempool" }) });
                             }
                         }
                         Some(prev) if *prev <= 0 && *h > 0 => {
-                            out.push(Event { vault: v.name.clone(), title: format!("{}: confirmed", v.name), body: format!("{}…{} is in block {}", &txid[..8], &txid[txid.len() - 6..], fmt(*h as u64)) });
+                            out.push(Event { vault: v.name.clone(), kind: "confirmed", txid: txid.clone(), title: format!("{}: confirmed", v.name), body: format!("{}…{} is in block {}", &txid[..8], &txid[txid.len() - 6..], fmt(*h as u64)) });
                         }
                         _ => {}
                     }
@@ -909,6 +911,7 @@ mod watch {
                     let r = app.notification().builder().title(&e.title).body(&e.body).show();
                     log(&format!("notify '{}': {}", e.title, match &r { Ok(_) => "sent".to_string(), Err(e) => format!("FAILED {e}") }));
                     let _ = app.emit("vault-changed", &e.vault);
+                    let _ = app.emit("vault-event", e);   // the window shows its own notice too: a Focus can silence the system one
                 }
                 std::thread::sleep(std::time::Duration::from_secs(60));
             }

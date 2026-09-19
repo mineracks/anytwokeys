@@ -33,13 +33,19 @@ document.addEventListener('click', (e) => {
 // window.confirm() is inert in the Tauri webview: it shows nothing and answers "no", so a button guarded by it does nothing at all.
 // A destructive button asks in the page instead: the first press arms it and says what it will do; a second press within 8 s does it.
 function askTwice(btn, question, yesLabel, act) {
-  const disarm = () => { clearTimeout(btn._t); if (btn.dataset.armed) { delete btn.dataset.armed; btn.textContent = btn._label; btn.classList.remove('armed'); } };
+  // The question is written into the page right under the button's row, never into the toast: the toast sits at the bottom
+  // centre of the window, which is exactly where a bottom-of-page button is, and it covered the button it was asking about.
+  const disarm = () => { clearTimeout(btn._t); if (btn._note) { btn._note.remove(); btn._note = null; } if (btn.dataset.armed) { delete btn.dataset.armed; btn.textContent = btn._label; btn.classList.remove('armed'); } };
   btn.onclick = async () => {
     if (btn.dataset.armed) { disarm(); try { await act(); } catch (e) { fail(e); } return; }
     btn._label = btn.textContent; btn.dataset.armed = '1'; btn.textContent = yesLabel; btn.classList.add('armed');
-    toast(question + ' Press again to confirm.', 8000); btn._t = setTimeout(disarm, 8000);
+    const note = document.createElement('div'); note.className = 'asknote'; note.setAttribute('role', 'alert');
+    note.innerHTML = `<span>${esc(question)} Press “${esc(yesLabel)}” to go ahead.</span><button type="button" class="linkish">Keep it</button>`;
+    note.querySelector('button').onclick = disarm;
+    (btn.closest('.row, .rowwrap, #staged-bar, .btn-grid') || btn).insertAdjacentElement('afterend', note); btn._note = note;
+    note.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    btn._t = setTimeout(disarm, 15000);
   };
-  btn.addEventListener('blur', () => setTimeout(disarm, 150));
 }
 function toast(t, ms = 3500) { const el = $('#toast'); el.textContent = t; el.classList.add('on'); clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove('on'), ms); }
 function fail(e) { toast(String(e && e.message || e), 6000); console.error(e); }
@@ -640,7 +646,7 @@ $('#gap-save').onclick = async () => {
   const gap = +($('#gap-in').value.replace(/[^0-9]/g, '') || 0);
   try { store = await invoke('settings_set', { network: netName(), custom: store.settings.custom, electrum: store.settings.electrum, explorer: store.settings.explorer, gap }); renderSettings(); toast(`Gap limit ${gap}`); if (vault) vault._coins = undefined; } catch (e) { fail(e); }
 };
-$('#notify-test').onclick = async () => { try { $('#notify-out').textContent = await invoke('notify_test'); } catch (e) { $('#notify-out').textContent = String(e); } };
+$('#notify-test').onclick = async () => { notice({ vault: vault ? vault.name : '', kind: 'in', title: (vault ? vault.name : 'vault') + ': 9,171 sats arrived', body: 'a sample · this is how the window itself tells you' }); try { $('#notify-out').textContent = await invoke('notify_test'); } catch (e) { $('#notify-out').textContent = String(e); } };
 $('#labels-export').onclick = async () => { try { $('#labels-out').textContent = 'Saved ' + await invoke('labels_export', { name: vault.name }); } catch (e) { if (!/cancelled/.test(String(e))) $('#labels-out').textContent = String(e); } };
 $('#labels-import').onclick = async () => { try { const n = await invoke('labels_import', { name: vault.name }); store = await invoke('store_get'); vault = store.vaults.find(x => x.name === vault.name) || vault; $('#labels-out').textContent = `${n} label${n === 1 ? '' : 's'} imported into ${vault.name}.`; } catch (e) { if (!/cancelled/.test(String(e))) $('#labels-out').textContent = String(e); } };
 $('#bsms-export').onclick = async () => { try { toast('Saved ' + await invoke('bsms_export', { name: vault.name }), 6000); } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
@@ -885,6 +891,17 @@ $('#save-settings').onclick = async () => { try { store = await invoke('settings
 $('#fiat-pick').onchange = async () => { try { store = await invoke('settings_set', { network: netName(), custom: store.settings.custom, electrum: store.settings.electrum, explorer: store.settings.explorer, fiat: $('#fiat-pick').value }); renderSettings(); toast($('#fiat-pick').value ? 'Values shown in ' + fiatCcy() : 'Values hidden'); } catch (e) { fail(e); } };
 $('#test-servers').onclick = async () => { $('#test-out').textContent = 'testing…'; try { $('#test-out').textContent = await invoke('servers_test', { electrum: $('#c-electrum').value, explorer: $('#c-explorer').value }); } catch (e) { $('#test-out').textContent = String(e); } };
 
+// money moved: say so in the window too. Cards stack, stay ten seconds, and a click opens that vault's Home.
+function notice(ev) {
+  const el = document.createElement('div'); el.className = 'notice-card ' + (ev.kind || ''); el.setAttribute('role', 'status');
+  el.innerHTML = `<div><div class="nt">${esc(ev.title)}</div><div class="nb">${esc(ev.body)}</div></div><button type="button" class="nx" aria-label="Dismiss">×</button>`;
+  const close = () => el.remove();
+  el.querySelector('.nx').onclick = (e) => { e.stopPropagation(); close(); };
+  el.onclick = () => { const v = store.vaults.find(v => v.name === ev.vault); if (v) { vault = v; try { localStorage.setItem('a2k-vault', v.name); } catch {} paintNet(); renderTabs(); show('home'); } close(); };
+  $('#notices').appendChild(el); while ($('#notices').children.length > 4) $('#notices').firstChild.remove();
+  setTimeout(close, 10000);
+}
+window.__TAURI__.event.listen('vault-event', (ev) => notice(ev.payload));
 // the background watcher saw a deposit, a spend or a confirmation: refresh what is on screen
 window.__TAURI__.event.listen('vault-changed', (ev) => {
   if (!vault || ev.payload !== vault.name) { return; }

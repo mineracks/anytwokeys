@@ -77,7 +77,7 @@ with sync_playwright() as p:
     pg.screenshot(path=str(out / "send-staged.png"))
     pg.evaluate("window.confirm = () => false")   # what the Tauri webview does: shows nothing, answers no
     pg.click("#staged-discard"); pg.wait_for_timeout(200)
-    check("Discard asks in the page: first press arms it and says what it will do, nothing is discarded yet", pg.inner_text("#staged-discard") == "Yes, discard it" and "Press again to confirm" in pg.inner_text("#toast") and pg.evaluate("__state.psbt") is True)
+    check("Discard asks in the page: first press arms it and says what it will do, nothing is discarded yet", pg.inner_text("#staged-discard") == "Yes, discard it" and "Discard the transaction" in pg.inner_text(".asknote") and pg.evaluate("__state.psbt") is True and pg.evaluate("() => { const b = document.querySelector('#staged-discard'), r = b.getBoundingClientRect(); return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) === b; }"))
     pg.click("#staged-discard"); pg.wait_for_timeout(400)
     pg.wait_for_timeout(900)   # the app reloads itself after a discard, which resets the mock; the count survives in sessionStorage
     check("second press really discards, without window.confirm", pg.evaluate("sessionStorage.getItem('discards')") == "1")

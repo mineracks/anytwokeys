@@ -25,7 +25,7 @@ const H = { store_get: store,
     { txid: '%(t0)s', time: 1789627614, net: 20000, fee: null, quote: q(107389.64, 'hourly 2026-09-17 06:00 UTC') }, { txid: '%(t1)s', time: 1789648528, net: -5190, fee: 190, quote: q(107768.03, 'hourly 2026-09-17 12:00 UTC') },
     { txid: '%(t2)s', time: 1789699744, net: -5380, fee: 380, quote: null }, { txid: '%(t3)s', time: null, net: 1000, fee: null, quote: null }] }; } };
 window.__TAURI__ = { core: { invoke: async (cmd, args) => { if (!H[cmd]) throw 'unmocked: ' + cmd; if (cmd === 'vault_sync' && window.__hold === (args || {}).name) await new Promise(r => window.__release = r);   // a slow server, on demand
-  return H[cmd](args || {}); } }, event: { listen: async () => () => {} } };
+  return H[cmd](args || {}); } }, event: { listen: async (name, fn) => { (window.__listeners = window.__listeners || {})[name] = fn; return () => {}; } } };
 """
 fails = []
 def check(name, ok, detail=""):
@@ -98,6 +98,17 @@ with sync_playwright() as p:
     check("and then removes", pg.evaluate("__contacts.length") == 0 and "None yet" in pg.inner_text("#book"))
     pg.keyboard.press("Escape"); check("Escape closes the book", not pg.locator("#book").is_visible())
     pg.evaluate("show('home')"); pg.wait_for_timeout(500)
+    # ---- money moved while the window is open: a notice in the window, as well as the system one ----
+    pg.evaluate("""() => { __listeners['vault-event']({ payload: { vault: 'savings vault', kind: 'in', title: 'savings vault: 20,000 sats arrived', body: '758adfd2…a98e00 · waiting for a confirmation', txid: 'x' } });
+                           __listeners['vault-event']({ payload: { vault: 'demo vault', kind: 'out', title: 'demo vault: 5,190 sats sent', body: 'bcd3fb3d…391e11 · in the mempool', txid: 'y' } }); }""")
+    pg.wait_for_timeout(400); cards_ = pg.locator("#notices .notice-card")
+    check("an arrival and a spend each get a notice in the window, stacked", cards_.count() == 2 and "20,000 sats arrived" in cards_.nth(0).inner_text() and "in" in cards_.nth(0).get_attribute("class") and "5,190 sats sent" in cards_.nth(1).inner_text())
+    nb = cards_.nth(0).bounding_box(); check("top right, clear of the header and of every button row", nb["y"] >= 90 and nb["x"] + nb["width"] <= 1300 and nb["x"] > 800, str(nb))
+    pg.locator("#notices").screenshot(path=str(out / "notices.png"))
+    cards_.nth(1).locator(".nx").click(); check("× dismisses one", pg.locator("#notices .notice-card").count() == 1)
+    pg.locator("#notices .notice-card").first.click(); pg.wait_for_timeout(500)
+    check("clicking a notice opens THAT vault", pg.inner_text("#title") == "savings vault" and pg.locator("#notices .notice-card").count() == 0)
+    pg.evaluate("vault = store.vaults[0]; show('home')"); pg.wait_for_timeout(500)
     # ---- Settings ----
     pg.evaluate("__state.fail = false; show('settings')"); pg.wait_for_timeout(300)
     check("Settings: automatic names the currency and why", "Automatic: AUD" in pg.locator("#fiat-pick option").first.inner_text() and "region is AU" in pg.inner_text("#fiat-note"), pg.inner_text("#fiat-note"))

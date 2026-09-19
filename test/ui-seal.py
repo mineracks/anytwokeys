@@ -12,7 +12,8 @@ MOCK = """
 window.__calls = [];
 window.__state = { cards: %(cards)s, sealed: [], found: [] };
 const store = () => ({ vaults: [%(vault)s], settings: { network: 'signet', custom: false, electrum: '', explorer: '', gap: 20 }, seen: {} });
-const H = {
+window.__forgot = 0;
+const H = { vault_forget: () => { __forgot++; return { vaults: [], settings: { network: 'signet', custom: false, electrum: '', explorer: '', gap: 20 }, seen: {} }; },
   store_get: store, cards_list: () => { if (!__state.cards.length) throw 'no YubiKey found'; return __state.cards; },
   vault_recovery: () => 'wsh(sortedmulti(2,…))#abcdefgh cc=abab', vault_sync: () => { throw 'offline in the harness'; },
   seal_status: () => ({ id: 'deadbeef', threshold: 2, earlier: false, sealed: __state.sealed.length,
@@ -58,6 +59,15 @@ with sync_playwright() as p:
     hit = pg.evaluate("() => { const r = document.querySelector('#keys-now .nowname').getBoundingClientRect(); const e = document.elementFromPoint(r.x + 8, r.y + r.height / 2); return !!e && !!e.closest('#keys-now'); }")
     check("Plugged in now: the key's name is inside its card and is what a click there would hit", nb and cb["x"] <= nb["x"] and nb["x"] + nb["width"] <= cb["x"] + cb["width"] + 1 and hit and "YubiKey" in pg.inner_text("#keys-now"), f"name={nb} card={cb} hit={hit}")
     ab = pg.locator("#keys-now svg").bounding_box(); check("and so is its drawing", ab and ab["x"] >= cb["x"] and ab["width"] > 10, str(ab))
+    # ---- a destructive button at the very bottom of the page, in a short window: the question must not sit on top of it ----
+    pg.set_viewport_size(dict(width=1180, height=620)); pg.evaluate("window.confirm = () => false")
+    pg.locator("#forget-vault").scroll_into_view_if_needed(); pg.click("#forget-vault"); pg.wait_for_timeout(700)
+    hit = pg.evaluate("() => { const b = document.querySelector('#forget-vault'), r = b.getBoundingClientRect(); const e = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2); return { armed: b.textContent, onTop: e === b, inView: r.top >= 0 && r.bottom <= innerHeight, toast: /Forget/.test(document.querySelector('#toast').textContent) }; }")
+    check("Forget: first press arms it, and the armed button is in view with NOTHING on top of it", hit["armed"] == "Yes, forget it here" and hit["onTop"] and hit["inView"] and not hit["toast"], str(hit))
+    check("the question is written beside the button, with a way out", "Forget this vault on this computer?" in pg.inner_text(".asknote") and pg.locator(".asknote button").is_visible() and pg.evaluate("__forgot") == 0)
+    pg.click(".asknote button"); check("Keep it: disarmed, nothing forgotten", pg.inner_text("#forget-vault") != "Yes, forget it here" and pg.locator(".asknote").count() == 0 and pg.evaluate("__forgot") == 0)
+    pg.click("#forget-vault"); pg.wait_for_timeout(500); pg.click("#forget-vault"); pg.wait_for_timeout(400)
+    check("second press forgets", pg.evaluate("__forgot") == 1)
     check("no page errors on Keys", not errs, "; ".join(errs))
     # ---- Restore: one port, two cards in turn ----
     pg2 = b.new_page(viewport=dict(width=1180, height=900)); errs2 = []
