@@ -283,8 +283,8 @@ details.card.quiet > *:not(summary){margin-top:12px}
 @media (prefers-reduced-motion: reduce){.waiting i{animation:none}}
 .act-foot{display:flex;gap:18px;flex-wrap:wrap}
 .act-foot .linkish:empty{display:none}
-.btn.armed{background:var(--no);border-color:var(--no);color:#fff}
-.btn.armed:hover{background:var(--no);border-color:var(--no);color:#fff}
+/* !important: two of these buttons carry an inline red text colour, which made the armed label red on red */
+.btn.armed,.btn.armed:hover{background:var(--no) !important;border-color:var(--no) !important;color:#fff !important}
 
 /* the address book, under the To field */
 .to-who{font-size:14px;color:var(--muted);display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
@@ -298,7 +298,7 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .book .entry .ct{font-size:12.5px;color:var(--muted);white-space:nowrap;flex:0 0 auto}
 .book .rowwrap{display:flex;align-items:center;gap:2px}
 .book .del{flex:0 0 auto;background:none;border:0;color:var(--muted);cursor:pointer;padding:8px;border-radius:6px;font-family:var(--display);font-size:12px}
-.book .del:hover{color:var(--no)} .book .del.armed{background:var(--no);color:#fff}
+.book .del:hover{color:var(--no)} .book .del.armed,.book .del.armed:hover{background:var(--no);color:#fff}
 .book .empty{padding:10px;font-size:14px;color:var(--muted)}
 .savebar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .savebar input{flex:1 1 180px;min-width:0;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font:inherit;font-size:14px}
