@@ -354,3 +354,19 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .keyrow.vk .who .mono{white-space:nowrap}
 .state.warnish{color:var(--gold)} .state.warnish i{background:var(--gold)}
 .kseal input{width:112px}
+
+/* one transaction: the facts, your record of it, and the chain's view of it folded away */
+#activity tr[data-txid]{cursor:pointer} #activity tr[data-txid]:hover td{background:var(--ground)}
+.txgrid{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(300px,1fr);gap:22px;align-items:start;max-width:1240px}
+@media (max-width:1100px){.txgrid{grid-template-columns:minmax(0,1fr)}}
+#tx-chain{max-width:1240px}
+.tx-head{display:flex;align-items:baseline;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.tx-amt{font-family:var(--display);font-weight:800;font-size:40px;letter-spacing:-.03em;line-height:1.05;font-variant-numeric:tabular-nums} .tx-amt small{font-size:18px;font-weight:600;letter-spacing:0;color:var(--muted)} .tx-amt.in{color:var(--signal)}
+.tx-dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:10px 22px;margin:6px 0 2px;font-size:15px}
+.tx-dl dt{font-family:var(--display);font-weight:600;font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding-top:3px}
+.tx-dl dd{margin:0;min-width:0;overflow-wrap:anywhere} .tx-dl dd .mono{font-size:13px} .tx-dl dd small{display:block;color:var(--muted);font-size:13px}
+#tx-note{width:100%;resize:vertical;font-family:var(--serif,inherit);font-size:15px;line-height:1.5}
+.chain-kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 22px;font-size:14px;margin-bottom:16px} .chain-kv dt{color:var(--muted)} .chain-kv dd{margin:0;overflow-wrap:anywhere;font-family:var(--mono);font-size:12.5px}
+.chain-t{width:100%;font-size:13px;margin-bottom:14px} .chain-t td,.chain-t th{padding:7px 8px;vertical-align:top} .chain-t .mono{font-size:12px;overflow-wrap:anywhere}
+.chain-hex{font-family:var(--mono);font-size:11.5px;line-height:1.45;overflow-wrap:anywhere;background:var(--ground);border:1px solid var(--line);border-radius:6px;padding:10px 12px;max-height:160px;overflow:auto;-webkit-user-select:text;user-select:text}
+.tag{display:inline-block;font-family:var(--display);font-size:11px;font-weight:600;padding:1px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted);margin-left:6px;white-space:nowrap} .tag.ours{border-color:var(--signal);color:var(--signal)} .tag.who{border-color:var(--gold);color:var(--gold)}

@@ -55,7 +55,7 @@ function show(name) {
   const first = ['setup', 'restore'].includes(name) && !vault;
   $('#welcome').hidden = true; $('#shell').hidden = false;
   $$('.screen').forEach(s => s.classList.toggle('on', s.id === 's-' + name));
-  const navName = name === 'sign' ? (paintCrumbs.via || 'send') : name;   // Sign has no sidebar entry of its own: light the screen it came from
+  const navName = name === 'sign' ? (paintCrumbs.via || 'send') : name === 'tx' ? 'home' : name;   // Sign has no sidebar entry of its own: light the screen it came from
   $$('.nav[data-go]').forEach(n => n.classList.toggle('on', n.dataset.go === navName));
   // the vault you are in stays lit on every screen that is about it, matching the breadcrumb; not while making another, nor in app settings
   const inVault = vault && !['setup', 'restore', 'settings'].includes(name);
@@ -73,6 +73,7 @@ function show(name) {
   if (name === 'send') { closeBook(); paintTo(); loadFees(); if (vault && !vault._coins) sync().then(renderCoins); else renderCoins(); }
   if (name === 'messages') renderMessages();
   if (name === 'keys') renderKeys();
+  if (name === 'tx') renderTx();
   if (name === 'setup') renderSetup();
   if (name === 'restore') restoreTab(restoreTab.now || 'keys');
   if (name === 'settings') renderSettings();
@@ -87,9 +88,10 @@ function paintCrumbs(name) {
   else if (name !== 'settings' && vault) {
     if (name !== 'home') trail.push([vault.name, 'home']);
     if (name === 'sign') trail.push(paintCrumbs.via === 'messages' ? ['Messages', 'messages'] : ['Send', 'send']);
+    if (name === 'tx') trail.push(['Activity', 'home']);
   }
   if (name === 'settings') trail.push(['Any Two Keys', null]);
-  const here = { home: '', send: 'Send', receive: 'Receive', keys: 'Keys', settings: 'App settings', setup: 'New vault', restore: 'Restore', sign: 'Sign', messages: 'Messages' }[name] || '';
+  const here = { home: '', send: 'Send', receive: 'Receive', keys: 'Keys', settings: 'App settings', setup: 'New vault', restore: 'Restore', sign: 'Sign', messages: 'Messages', tx: name === 'tx' && vault && txView.txid ? txHeadline() : '' }[name] || '';
   const el = $('#crumbs'); el.hidden = !trail.length;
   const html = trail.map(([t, go]) => (go ? `<a tabindex="0" role="link" data-crumb="${go}">${esc(t)}</a>` : `<span>${esc(t)}</span>`) + '<span class="sep">›</span>').join('') + `<span class="here">${esc(here)}</span>`;
   if (el._html !== html) { el._html = html; el.innerHTML = html; }   // a poll must not take focus off a crumb
@@ -193,11 +195,88 @@ function paintBalance() {
 }
 $('#balance').onclick = () => { if (!vault || !vault._now) return; balUnit = balUnit === 'fiat' ? 'sats' : 'fiat'; try { localStorage.setItem('a2k-balance-unit', balUnit); } catch {} paintBalance(); };
 $('#balance').addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('#balance').click(); } });
+// ---------- one transaction ----------
+const txFacts = {};                        // vault name → { rows: { txid: {time, net, fee, quote} }, now, ccy }
+const txView = { txid: null, height: 0, seq: 0 };
+function openTx(txid) { const h = ((vault && vault._history) || []).find(x => x.txid === txid); txView.txid = txid; txView.height = h ? h.height : 0; show('tx'); }
+const txHeadline = () => { const f = ((txFacts[vault.name] || {}).rows || {})[txView.txid], lab = labelOf('tx:' + txView.txid);
+  if (lab) return lab; if (!f || f.net === null) return txView.txid.slice(0, 10) + '…';
+  return (f.time ? new Date(f.time * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) + ' · ' : '') + (f.net > 0 ? '+' : f.net < 0 ? '−' : '') + sats(Math.abs(f.net)) + ' sats'; };
+async function renderTx() {
+  if (!vault || !txView.txid) return show('home');
+  const name = vault.name, txid = txView.txid, mine = ++txView.seq, key = 'tx:' + txid;
+  const facts = txFacts[name] || {}, f = (facts.rows || {})[txid];
+  paintCrumbs('tx'); $('#title').textContent = txHeadline();
+  // what the activity list already knows is on screen at once; the decoded transaction fills the rest in
+  const amt = $('#tx-amt'); amt.className = 'tx-amt' + (f && f.net > 0 ? ' in' : ''); amt.innerHTML = f && f.net !== null ? `${f.net > 0 ? '+' : f.net < 0 ? '−' : ''}${sats(Math.abs(f.net))} <small>sats</small>` : '…';
+  const fiat = $('#tx-fiat');
+  fiat.hidden = !(f && f.net !== null && (f.quote || facts.now));
+  if (!fiat.hidden) { fiat.textContent = [f.quote ? worth(Math.abs(f.net), f.quote, facts.ccy) + ' then' : '', facts.now ? worth(Math.abs(f.net), facts.now, facts.ccy) + ' now' : ''].filter(Boolean).join(' · '); fiat.title = f.quote ? basisWords(f.quote, facts.ccy) : ''; }
+  $('#tx-when').textContent = f && f.time ? new Date(f.time * 1000).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : (txView.height > 0 ? '' : 'Not in a block yet');
+  if (document.activeElement !== $('#tx-label')) $('#tx-label').value = labelOf(key);
+  if (document.activeElement !== $('#tx-note')) $('#tx-note').value = (vault.notes || {})[key] || '';
+  $('#tx-chain').open = (() => { try { return localStorage.getItem('a2k-chain-open') === '1'; } catch { return false; } })();
+  let d; try { d = await invoke('tx_detail', { name, txid, height: txView.height }); } catch (e) { if (mine === txView.seq) { $('#tx-dl').innerHTML = `<dt>Details</dt><dd class="warn">${esc(e)}</dd>`; $('#tx-proof').textContent = ''; } return; }
+  if (mine !== txView.seq || !vault || vault.name !== name) return;   // the person has moved on; this answer is for another screen
+  const conf = d.height > 0 ? Math.max(1, d.tip - d.height + 1) : 0, st = $('#tx-status');
+  st.className = 'state ' + (conf ? 'ok' : 'here'); st.querySelector('span').textContent = conf ? `confirmed · ${sats(conf)} block${conf === 1 ? '' : 's'} deep` : 'in the mempool';
+  if (!f) { amt.className = 'tx-amt' + (d.net > 0 ? ' in' : ''); amt.innerHTML = `${d.net > 0 ? '+' : d.net < 0 ? '−' : ''}${sats(Math.abs(d.net))} <small>sats</small>`; }
+  const book = bookOf(), who = (a) => { const c = a && book.find(c => c.address.toLowerCase() === a.toLowerCase()); return c ? `<span class="tag who">${esc(c.name)}</span>` : ''; };
+  const place = (i) => `<span class="tag ours">${esc(vault.name)} · ${i >= CHANGE ? 'change #' + (i - CHANGE) : 'receive #' + i}</span>`;
+  const outLine = (o) => `<div><span class="mono">${esc(o.address || o.kind)}</span>${o.ours !== null ? place(o.ours) : who(o.address)}<small>${sats(o.sats)} sats</small></div>`;
+  const oursIn = d.inputs.filter(i => i.ours !== null), foreignOut = d.outputs.filter(o => o.ours === null), oursOut = d.outputs.filter(o => o.ours !== null);
+  const signers = [...new Set(oursIn.flatMap(i => i.signers))];
+  const rows = [];
+  if (oursIn.length) {            // a spend from this vault
+    rows.push(['To', foreignOut.length ? foreignOut.map(outLine).join('') : 'Nowhere outside this vault: the coins moved between its own addresses.']);
+    if (oursOut.length) rows.push(['Change', oursOut.map(outLine).join('')]);
+    rows.push(['Fee', d.fee !== null ? `${sats(d.fee)} sats<small>${d.fee_rate.toFixed(2)} sat/vB · ${sats(d.vsize)} vB</small>` : 'not known']);
+    rows.push(['Signed by', signers.length ? signers.map(esc).join(' and ') + `<small>read from the signatures on the transaction</small>` : 'could not be read from the witness']);
+  } else {                        // a deposit
+    rows.push(['From', `outside this vault · ${d.inputs.length} input${d.inputs.length === 1 ? '' : 's'}`]);
+    rows.push(['To', oursOut.map(outLine).join('') || '—']);
+    rows.push(['Fee', d.fee !== null ? `${sats(d.fee)} sats, paid by the sender` : 'paid by the sender']);
+  }
+  $('#tx-dl').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+  $('#tx-proof').textContent = d.proof === 'proved' ? `the node proved it is in block ${sats(d.height)}` : d.proof === 'unconfirmed' ? 'not in a block yet' : d.proof;
+  $('#tx-proof').classList.toggle('warn', d.proof !== 'proved' && d.proof !== 'unconfirmed');
+  const kv = [['Transaction id', d.txid], ['Witness id', d.wtxid], ['Version · locktime', `${d.version} · ${d.locktime}`], ['Size', `${sats(d.size)} B · ${sats(d.vsize)} vB · ${sats(d.weight)} WU`], ['Fee', d.fee !== null ? `${sats(d.fee)} sats · ${d.fee_rate.toFixed(2)} sat/vB` : 'unknown (an input could not be fetched)'],
+    ['Replaceable (RBF)', d.rbf ? 'signalled' : 'not signalled'], ['Block', d.block ? `${sats(d.height)} · ${d.block}` : '—'], ['Position in block', d.position !== null ? String(d.position) : '—'],
+    ['Block time', d.time ? new Date(d.time * 1000).toISOString().replace('.000Z', ' UTC').replace('T', ' ') : '—'], ['Inclusion', d.proof === 'proved' ? 'proved: the server\'s merkle path hashes up to the root in that block\'s header' : d.proof]];
+  $('#tx-chain-body').innerHTML = `<dl class="chain-kv">${kv.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('')}</dl>`
+    + `<table class="chain-t"><thead><tr><th>Input</th><th>Address</th><th class="r">Sats</th><th>Sequence</th><th>Witness</th></tr></thead><tbody>${d.inputs.map(i => `<tr><td class="mono">${esc(i.outpoint.slice(0, 12))}…:${esc(i.outpoint.split(':')[1])}</td><td class="mono">${esc(i.address || '—')}${i.ours !== null ? place(i.ours) : ''}</td><td class="r">${i.sats !== null ? sats(i.sats) : '—'}</td><td class="mono">${i.sequence.toString(16)}</td><td>${i.witness} item${i.witness === 1 ? '' : 's'}${i.signers.length ? ' · ' + i.signers.map(esc).join(', ') : ''}</td></tr>`).join('')}</tbody></table>`
+    + `<table class="chain-t"><thead><tr><th>Output</th><th>Address</th><th class="r">Sats</th><th>Script</th><th></th></tr></thead><tbody>${d.outputs.map(o => { const unspent = o.ours !== null && (vault._coins || []).some(c => c.txid === d.txid && c.vout === o.n); return `<tr><td>#${o.n}</td><td class="mono">${esc(o.address || '—')}${o.ours !== null ? place(o.ours) : who(o.address)}</td><td class="r">${sats(o.sats)}</td><td>${esc(o.kind)}</td><td class="muted">${o.ours !== null ? (unspent ? 'unspent' : 'spent') : ''}</td></tr>`; }).join('')}</tbody></table>`
+    + `<div class="row" style="justify-content:space-between"><div class="label">Raw transaction</div><button class="btn small" id="tx-copyhex">Copy hex</button></div><div class="chain-hex" id="tx-hex">${esc(d.hex)}</div>`;
+  $('#tx-copyhex').onclick = () => navigator.clipboard.writeText(d.hex).then(() => toast('Raw transaction copied'));
+}
+$('#tx-chain').addEventListener('toggle', () => { try { localStorage.setItem('a2k-chain-open', $('#tx-chain').open ? '1' : '0'); } catch {} });
+$('#tx-explorer').onclick = () => { const a = document.createElement('a'); a.dataset.tx = txView.txid; document.body.appendChild(a); a.click(); a.remove(); };
+$('#tx-copyid').onclick = () => navigator.clipboard.writeText(txView.txid).then(() => toast('Transaction id copied'));
+// the record saves itself: the label when you leave the field or press Enter, the note a moment after you stop typing
+async function saveTxField(which) {
+  if (!vault || !txView.txid) return;
+  const name = vault.name, key = 'tx:' + txView.txid, val = which === 'label' ? $('#tx-label').value.trim() : $('#tx-note').value;
+  const cur = which === 'label' ? labelOf(key) : ((vault.notes || {})[key] || '');
+  if (val.trimEnd() === cur) return;
+  $('#tx-saved').textContent = 'saving…';
+  try { store = await invoke(which === 'label' ? 'label_set' : 'note_set', which === 'label' ? { name, key, label: val } : { name, key, note: val }); vault = store.vaults.find(v => v.name === name) || vault;
+    $('#tx-saved').textContent = 'Saved ' + new Date().toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) + (vault.seal && vault.seal.shares && vault.seal.shares.length ? ' · backed up with this vault\'s labels' : ' · on this computer');
+    if (which === 'label') { paintCrumbs('tx'); $('#title').textContent = txHeadline(); } }
+  catch (e) { $('#tx-saved').textContent = ''; fail(e); }
+}
+$('#tx-label').addEventListener('blur', () => saveTxField('label'));
+$('#tx-label').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#tx-label').blur(); } });
+$('#tx-note').addEventListener('input', () => { clearTimeout(saveTxField.t); $('#tx-saved').textContent = 'not saved yet…'; saveTxField.t = setTimeout(() => saveTxField('note'), 1200); });
+$('#tx-note').addEventListener('blur', () => { clearTimeout(saveTxField.t); saveTxField('note'); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('#s-tx').classList.contains('on') && !/INPUT|TEXTAREA/.test(document.activeElement.tagName)) show('home'); });
+
 async function fillActivity(name, s) {
   const ccy = s.servers && vault.network === 'mainnet' ? fiatCcy() : '';
   let a; try { a = await invoke('vault_activity', { name, history: s.history.map(h => [h.txid, h.height]), ccy }); }
   catch (e) { if (vault && vault.name === name) { $$('#activity .when, #activity .amt').forEach(td => { if (td.textContent === '…') td.textContent = '—'; }); $('#activity-note').textContent = 'Dates and amounts could not be fetched: ' + e; $('#activity-note').hidden = false; } return; }
   if (!vault || vault.name !== name) return;
+  txFacts[name] = { rows: Object.fromEntries(a.rows.map(r => [r.txid, r])), now: a.now, ccy: a.ccy };   // kept by vault NAME and txid, never on the vault object, which is replaced on every store re-read
+  if ($('#s-tx').classList.contains('on')) renderTx();
   for (const r of a.rows) {
     const tr = $(`#activity tr[data-txid="${r.txid}"]`); if (!tr) continue;
     const when = tr.querySelector('.when'), amt = tr.querySelector('.amt');
@@ -236,9 +315,10 @@ async function sync() {
     if (!s.history.length) tb.innerHTML = '<tr><td class="muted" colspan="5">nothing yet</td></tr>';
     for (const h of s.history.slice().reverse()) {
       const tr = document.createElement('tr'); tr.dataset.txid = h.txid;
-      tr.innerHTML = `<td class="when muted">${h.height > 0 ? '…' : 'pending'}</td><td><a href="#" data-tx="${h.txid}" class="mono">${h.txid.slice(0, 10)}…${h.txid.slice(-6)}</a>${s.rotating ? ' <span class="muted">· ' + fmtIndex(h.index) + '</span>' : ''}</td><td>${lblHtml('tx:' + h.txid)}</td><td class="r amt muted">…</td><td class="r ${h.height > 0 ? 'ok' : 'muted'}">${h.height > 0 ? 'confirmed · ' + sats(h.height) : 'unconfirmed'}</td>`;
+      tr.innerHTML = `<td class="when muted">${h.height > 0 ? '…' : 'pending'}</td><td><span class="mono">${h.txid.slice(0, 10)}…${h.txid.slice(-6)}</span>${s.rotating ? ' <span class="muted">· ' + fmtIndex(h.index) + '</span>' : ''}</td><td>${lblHtml('tx:' + h.txid)}</td><td class="r amt muted">…</td><td class="r ${h.height > 0 ? 'ok' : 'muted'}">${h.height > 0 ? 'confirmed · ' + sats(h.height) : 'unconfirmed'}</td>`;
       tb.appendChild(tr);
     }
+    tb.onclick = (e) => { if (e.target.closest('.lbl, a, button, input')) return; const tr = e.target.closest('tr[data-txid]'); if (tr) openTx(tr.dataset.txid); };
     fillActivity(vault.name, s);   // dates, amounts and values arrive after the balance; the balance never waits for them
     $('#send-have').textContent = `${sats(s.balance)} sats`;
   } catch (e) { if (!vault || vault.name !== me) return; checkNode(); $('#balance-sub').textContent = 'could not reach the server'; $('#conn').textContent = String(e); }

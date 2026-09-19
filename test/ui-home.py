@@ -14,7 +14,15 @@ window.__state = { fiat: %(fiat)s, asked: null, fail: false, os: %(os)s };
 const V = %(vault)s; window.V = V;
 window.__contacts = []; window.__extra = [];
 const store = () => ({ forms: {}, contacts: __contacts, vaults: [V].concat(__extra), settings: { network: V.network, custom: false, electrum: '', explorer: '', gap: 20, fiat: __state.fiat, prices: '' }, seen: {}, last_psbt: null, last_message: null });
-const H = { store_get: store, node_status: (a) => { (window.__nodeAsked = window.__nodeAsked || []).push(a.network); if (window.__nodeDown) throw 'electrum ssl://electrum.mineracks.com:50002: connection refused'; return { electrum: 'ssl://electrum.mineracks.com:50002', height: 967686, ms: 84, ours: true }; },
+const H = {
+  label_set: (a) => { V.labels = V.labels || {}; if (a.label) V.labels[a.key] = a.label; else delete V.labels[a.key]; return store(); },
+  note_set: (a) => { window.__noteCalls = (window.__noteCalls || 0) + 1; V.notes = V.notes || {}; if (a.note.trim()) V.notes[a.key] = a.note; else delete V.notes[a.key]; return store(); },
+  tx_detail: (a) => { window.__detailAsked = a; if (window.__detailDown) throw 'electrum: connection refused'; const spend = a.txid === '%(t1)s';
+    return { txid: a.txid, wtxid: 'ff'.repeat(32), version: 2, locktime: 0, size: 380, vsize: 189, weight: 756, rbf: true, net: spend ? -5190 : 20000, fee: spend ? 190 : 642, fee_rate: spend ? 1.005 : 2.77, height: a.height, tip: 967685,
+      block: a.height ? '00000000000000000001' + 'ab'.repeat(22) : null, time: a.height ? 1789648528 : null, proof: a.height ? (window.__badProof ? "the server's proof does NOT lead to that block's root" : 'proved') : 'unconfirmed', position: a.height ? 1757 : null, hex: '0200000001' + 'cd'.repeat(180),
+      inputs: spend ? [{ outpoint: '%(t0)s:1', address: 'bc1qvaultaddr', sats: 20000, ours: 0, sequence: 4294967293, witness: 4, signers: ['laptop', 'off-site'] }] : [{ outpoint: 'ee'.repeat(32) + ':0', address: 'bc1psender', sats: 723914, ours: null, sequence: 4294967295, witness: 1, signers: [] }],
+      outputs: spend ? [{ n: 0, address: 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4', sats: 5000, kind: 'P2WPKH', ours: null }, { n: 1, address: 'bc1qvaultchange', sats: 14810, kind: 'P2WSH', ours: 2147483648 }] : [{ n: 0, address: 'bc1pother', sats: 703272, kind: 'P2TR', ours: null }, { n: 1, address: 'bc1qvaultaddr', sats: 20000, kind: 'P2WSH', ours: 0 }] }; },
+  store_get: store, node_status: (a) => { (window.__nodeAsked = window.__nodeAsked || []).push(a.network); if (window.__nodeDown) throw 'electrum ssl://electrum.mineracks.com:50002: connection refused'; return { electrum: 'ssl://electrum.mineracks.com:50002', height: 967686, ms: 84, ours: true }; },
   contact_save: (a) => { if (!/^(bc1|tb1)/.test(a.address)) throw 'that is not a Bitcoin address'; const c = __contacts.find(c => c.address === a.address); if (c) c.name = a.name; else __contacts.push({ name: a.name, address: a.address, network: a.network, added: 1, used: 0, last_used: 0 }); return store(); },
   contact_delete: (a) => { __contacts = __contacts.filter(c => c.address !== a.address); return store(); }, contact_used: (a) => { __contacts.find(c => c.address === a.address).used += 1; return store(); },
   vault_receive_address: (a) => 'bc1qfreshaddressof' + a.name.replace(/[^a-z]/gi, '') + '0000000000000000000000007', device_locale: () => __state.os, cards_list: () => { throw 'no YubiKey found'; }, spend_ceremony: () => { throw 'no spend in progress'; }, fees_get: () => ({ slow: 1, medium: 2, fast: 3 }),
@@ -65,6 +73,32 @@ with sync_playwright() as p:
     pg.evaluate("sync()"); pg.wait_for_timeout(500); check("the choice survives a sync", "$10.77" in pg.inner_text("#balance"))
     pg.evaluate("__state.fail = true; sync()"); pg.wait_for_timeout(500)
     check("if dates and amounts cannot be fetched: dashes and the reason, and the balance still shows", "—" in rows.nth(3).inner_text() and "connection refused" in pg.inner_text("#activity-note") and "9,430" in pg.inner_text("#balance"), pg.inner_text("#activity-note"))
+    # ---- one transaction: click in, read it, write about it, walk back ----
+    pg.evaluate("__contacts.push({ name: 'hardware shop', address: 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4', network: 'mainnet', added: 1, used: 1, last_used: 1 }); sync()"); pg.wait_for_timeout(700)
+    rows = pg.locator("#activity tr"); rows.nth(2).click(); pg.wait_for_timeout(600)
+    check("a click on an activity row opens that transaction, with the way back in the breadcrumb", pg.locator("#s-tx.on").count() == 1 and pg.evaluate("__detailAsked.txid") == T[1] and pg.inner_text("#crumbs").replace("\n", " ").split()[:5] == "demo vault › Activity ›".split(), pg.inner_text("#crumbs"))
+    facts = pg.inner_text("#tx-facts")
+    check("a spend: amount, value then and now, when, who it paid (from the address book), change, fee, and WHICH KEYS SIGNED", "−5,190" in facts and "then" in facts and "now" in facts and "hardware shop" in facts and "change #0" in facts and "190 sats" in facts and "laptop and off-site" in facts and "blocks deep" in facts, facts[:400])
+    check("the sidebar still says Home, and the title is the date and amount until there is a label", "Home" in [e.inner_text().split("\n")[0] for e in pg.locator(".side .nav.on").all()] and "−5,190 sats" in pg.inner_text("#title"), pg.inner_text("#title"))
+    check("blockchain data is folded away, with the proof in its heading", not pg.locator("#tx-chain-body").is_visible() and "the node proved it is in block" in pg.inner_text("#tx-proof"))
+    pg.click("#tx-chain summary"); pg.wait_for_timeout(150); chain = pg.inner_text("#tx-chain-body")
+    check("opened: ids, size, RBF, block and position, every input and output marked, the raw hex", all(x in chain for x in ["Witness id", "189 vB", "signalled", "1757", "spent", "P2WSH", "laptop, off-site"]) and pg.locator("#tx-hex").is_visible(), chain[:300])
+    pg.locator("#s-tx").screenshot(path=str(out / "tx-detail.png"))
+    pg.fill("#tx-label", "laptop stand"); pg.keyboard.press("Enter"); pg.wait_for_timeout(400)
+    check("a label becomes the title and the last breadcrumb", pg.inner_text("#title") == "laptop stand" and "laptop stand" in pg.inner_text("#crumbs") and "Saved" in pg.inner_text("#tx-saved"), pg.inner_text("#title"))
+    pg.click("#tx-note"); pg.keyboard.type("Ordered 17 Sep, invoice 4471.\nAsk Sam about the warranty."); pg.wait_for_timeout(300)
+    check("a note is not saved on every keystroke", (pg.evaluate("window.__noteCalls") or 0) == 0 and "not saved yet" in pg.inner_text("#tx-saved"))
+    pg.wait_for_timeout(1400)
+    check("it saves itself a moment after you stop, line breaks and all", pg.evaluate("window.__noteCalls") == 1 and pg.evaluate("V.notes['tx:' + %s]" % json.dumps(T[1])).count("\n") == 1 and "Saved" in pg.inner_text("#tx-saved"))
+    pg.evaluate("window.__badProof = true"); pg.click("#crumbs [data-crumb=home]"); pg.wait_for_timeout(500)
+    check("the breadcrumb walks back to Home, where the row now shows its label", pg.locator("#s-home.on").count() == 1 and "laptop stand" in pg.inner_text("#activity"))
+    pg.locator("#activity tr").nth(3).click(); pg.wait_for_timeout(600)
+    facts = pg.inner_text("#tx-facts")
+    check("a deposit reads the other way round, and a proof that does not check out is said in red", "+20,000" in facts and "outside this vault" in facts and "receive #0" in facts and "paid by the sender" in facts and "does NOT lead" in pg.inner_text("#tx-proof") and "warn" in pg.get_attribute("#tx-proof", "class"), facts[:200])
+    check("reopening shows the note that belongs to THIS transaction (none), not the last one's", pg.input_value("#tx-note") == "" and pg.input_value("#tx-label") == "")
+    pg.evaluate("window.__badProof = false; window.__detailDown = true"); pg.keyboard.press("Escape"); pg.wait_for_timeout(300); pg.locator("#activity tr").nth(2).click(); pg.wait_for_timeout(600)
+    check("Escape goes back; with the server down the facts from the list still show, the note is still there, and the failure is named", "−5,190" in pg.inner_text("#tx-facts") and "connection refused" in pg.inner_text("#tx-dl") and "invoice 4471" in pg.input_value("#tx-note"))
+    pg.evaluate("window.__detailDown = false; __contacts.length = 0; show('home')"); pg.wait_for_timeout(500)
     # ---- switching vaults while a sync is in flight: the late answer belongs to the vault that was left ----
     pg.evaluate("""() => { __state.fail = false; store.vaults.push(Object.assign({}, store.vaults[0], { name: 'other vault', network: 'signet' })); window.__hold = 'demo vault'; sync(); vault = store.vaults[1]; show('home'); }""")
     pg.wait_for_timeout(300)

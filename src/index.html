@@ -191,6 +191,25 @@
       </div>
     </section>
 
+    <section id="s-tx" class="screen">
+      <div class="txgrid">
+        <div class="card" id="tx-facts">
+          <div class="tx-head"><div class="tx-amt" id="tx-amt">…</div><div class="state" id="tx-status"><i></i><span></span></div></div>
+          <div class="fiat" id="tx-fiat" hidden></div>
+          <div class="muted" id="tx-when"></div>
+          <dl class="tx-dl" id="tx-dl"></dl>
+          <div class="row"><button class="btn" id="tx-explorer">Open in explorer</button><button class="btn" id="tx-copyid">Copy the transaction id</button></div>
+        </div>
+        <div class="card" id="tx-notes">
+          <div class="label">Your record</div>
+          <div class="field"><div class="label">Label</div><input id="tx-label" maxlength="200" placeholder="A few words: who, or what for"></div>
+          <div class="field"><div class="label">Note</div><textarea id="tx-note" maxlength="20000" placeholder="Anything worth keeping with this transaction: what it paid for, an invoice number, who to ask." style="min-height:150px"></textarea></div>
+          <div class="muted" style="font-size:13px" id="tx-saved"></div>
+        </div>
+      </div>
+      <details class="card quiet" id="tx-chain"><summary><span class="label">Blockchain data</span><span class="muted sumhint" id="tx-proof"></span></summary><div id="tx-chain-body"></div></details>
+    </section>
+
     <section id="s-messages" class="screen">
       <div style="display:flex;flex-direction:column;gap:22px;max-width:880px">
         <div class="card">
