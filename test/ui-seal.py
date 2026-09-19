@@ -61,6 +61,7 @@ with sync_playwright() as p:
     ab, cb = rows.nth(0).locator(".keyart svg").bounding_box(), pg.locator("#keys-list").bounding_box()
     check("its drawing is inside the list and on top", ab and ab["x"] >= cb["x"] and ab["width"] > 10 and pg.evaluate("() => { const r = document.querySelector('#keys-list .keyart svg').getBoundingClientRect(); const e = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2); return !!e && !!e.closest('.keyart'); }"), str(ab))
     check("a key that is away and unconfirmed says so without claiming it is unsealed", "seal not confirmed" in rows.nth(1).inner_text())
+    check("no separate Edit names panel: the pencil on each row is the way, and it can be seen without hovering", pg.locator("#edit-names").count() == 0 and pg.locator("#edit-panel").count() == 0 and pg.evaluate("() => { const p = document.querySelector('#keys-list .pencil'), s = getComputedStyle(p); return s.color !== 'rgba(0, 0, 0, 0)' && +s.opacity > 0.3; }"))
     pg.click("#keys-list [data-edit-idx='1']"); pg.keyboard.type("spare"); pg.keyboard.press("Enter"); pg.wait_for_timeout(300)
     check("renaming from the pencil still works with PIN fields in the list", pg.evaluate("window.__renamed") == "spare" or "spare" in pg.inner_text("#keys-list"), pg.inner_text("#keys-list")[:120])
     pg.evaluate("__state.cards = __state.cards.concat([{ reader: 'z', serial: 999, version: 'OpenPGP 3.4', pubkey: '02' + 'cd'.repeat(32), touch: 'FIXED', form: 1, nfc: true, firmware: '5.7.1' }])"); pg.wait_for_timeout(2600)

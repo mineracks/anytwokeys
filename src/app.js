@@ -720,21 +720,6 @@ async function commitTitle() {
 }
 $('#title-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); commitTitle(); } if (e.key === 'Escape') { $('#title-input').value = vault.name; commitTitle(); } });
 $('#title-input').addEventListener('blur', () => { if (!$('#title-input').hidden) commitTitle(); });
-$('#edit-names').onclick = () => {
-  $('#edit-vault-name').value = vault.name;
-  $('#edit-key-names').innerHTML = vault.keys.map((k, i) => `<div class="row"><span class="mono muted" style="width:140px;font-size:12px">${k.serial ? 'serial ' + k.serial : k.pubkey.slice(0, 12) + '…'}</span><input data-edit-key="${i}" value="${k.name.replace(/"/g, '&quot;')}" style="max-width:260px;padding:8px 12px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink)"></div>`).join('');
-  $('#edit-panel').hidden = false; $('#edit-names').hidden = true;
-};
-$('#cancel-names').onclick = () => { $('#edit-panel').hidden = true; $('#edit-names').hidden = false; };
-$('#save-names').onclick = async () => {
-  const old = vault.name;
-  try {
-    store = await invoke('vault_rename', { name: old, newName: $('#edit-vault-name').value, keyNames: $$('[data-edit-key]').map(i => i.value) });
-    vault = store.vaults.find(v => v.name === ($('#edit-vault-name').value.trim() || old)) || store.vaults[0];
-    try { localStorage.setItem('a2k-vault', vault.name); } catch {}
-    $('#edit-panel').hidden = true; $('#edit-names').hidden = false; paintNet(); renderKeys(); $('#title').textContent = vault.name; toast('Names saved');
-  } catch (e) { fail(e); }
-};
 $('#vault-pdf').onclick = async () => { try { toast('Saved ' + await invoke('vault_pdf', { name: vault.name }), 6000); } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
 $('#copy-desc').onclick = () => navigator.clipboard.writeText(vault._recovery || vault.descriptor).then(() => toast('Recovery line copied'));
 askTwice($('#forget-vault'), 'Forget this vault on this computer? The coins stay on the chain; two sealed keys, or the recovery line and two keys, bring it back.', 'Yes, forget it here', async () => { store = await invoke('vault_forget', { name: vault.name }); vault = null; boot(); });

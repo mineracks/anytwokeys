@@ -97,7 +97,7 @@ a{color:var(--gold)}
 #shell:not([hidden]){display:contents}
 [hidden]{display:none !important}
 .btn.icon{padding:0;width:44px;flex:0 0 44px}
-.pencil{border:0;background:transparent;color:var(--line);padding:6px;border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;min-height:0}
+.pencil{border:0;background:transparent;color:var(--muted);opacity:.55;padding:6px;border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;min-height:0}
 .top:hover .pencil,.pencil:focus-visible{color:var(--muted)}
 .pencil:hover{color:var(--gold);background:var(--gold-soft)}
 #title-input{font-family:var(--display);font-weight:800;font-size:22px;letter-spacing:-.02em;border:0;border-bottom:2px solid var(--gold);background:transparent;color:var(--ink);padding:0 2px;min-width:120px;max-width:60vw;outline:none}
@@ -109,7 +109,7 @@ body.resizing{cursor:col-resize;-webkit-user-select:none;user-select:none}
 #vault-tabs .nav span:last-child{white-space:nowrap;flex:0 0 auto}
 .nav{min-width:0}
 .keyrow .name{display:flex;align-items:center;gap:6px;min-height:24px}
-.keyrow .pencil{padding:3px;color:transparent}
+.keyrow .pencil{padding:3px;color:var(--line)}   /* always faintly there: it is the only way to rename a key now */
 .keyrow:hover .pencil,.keyrow .pencil:focus-visible{color:var(--muted)}
 .keyrow .pencil:hover{color:var(--gold)}
 .key-input{font-family:var(--display);font-weight:600;font-size:14px;border:0;border-bottom:2px solid var(--gold);background:transparent;color:var(--ink);padding:0 2px;min-width:100px;max-width:240px;outline:none}
@@ -339,3 +339,4 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .kseal{display:flex;align-items:center;gap:8px;min-height:36px}
 .kseal input{width:130px;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font:inherit;font-size:14px}
 .kseal .btn{min-height:36px;padding:6px 14px;font-size:13px;white-space:nowrap}
+.pencil:hover,.pencil:focus-visible,.top:hover .pencil,.keyrow:hover .pencil{opacity:1}
