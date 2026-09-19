@@ -192,6 +192,7 @@
     </section>
 
     <section id="s-tx" class="screen">
+      <div class="txnav"><button class="btn small" id="tx-prev" type="button" title="The transaction above this one in the list (←)">‹ Newer</button><span class="muted" id="tx-pos"></span><button class="btn small" id="tx-next" type="button" title="The transaction below this one in the list (→)">Older ›</button></div>
       <div class="txgrid">
         <div class="card" id="tx-facts">
           <div class="tx-head"><div class="tx-amt" id="tx-amt">…</div><div class="state" id="tx-status"><i></i><span></span></div></div>
@@ -205,6 +206,10 @@
           <div class="field"><div class="label">Label</div><input id="tx-label" maxlength="200" placeholder="A few words: who, or what for"></div>
           <div class="field"><div class="label">Note</div><textarea id="tx-note" maxlength="20000" placeholder="Anything worth keeping with this transaction: what it paid for, an invoice number, who to ask." style="min-height:150px"></textarea></div>
           <div class="muted" style="font-size:13px" id="tx-saved"></div>
+          <div class="field"><div class="row" style="justify-content:space-between"><div class="label">Attachments</div><button class="btn small" id="tx-addfiles" type="button">Add files…</button></div>
+            <div class="att-grid" id="tx-files"></div>
+            <div class="muted" style="font-size:13px" id="tx-files-note">Drop files anywhere on this screen, or paste a picture. Photos are re-saved without their location and camera data.</div>
+            <label class="muted keepo"><input type="checkbox" id="tx-keep" style="width:auto;min-height:0"> keep photos exactly as they are, location data included</label></div>
         </div>
       </div>
       <details class="card quiet" id="tx-chain"><summary><span class="label">Blockchain data</span><span class="muted sumhint" id="tx-proof"></span></summary><div id="tx-chain-body"></div></details>
@@ -288,6 +293,7 @@
 </div></div>
 
 <div class="toast" id="toast"></div>
+<div id="dropveil" hidden><div>Drop to attach to this transaction</div></div>
 <div id="notices" aria-live="polite"></div>
 <script src="vendor/jsQR.js"></script>
 <script src="vendor/qrcode.js"></script>

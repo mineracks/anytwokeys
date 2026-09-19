@@ -1,4 +1,5 @@
 mod activity;
+mod attach;
 mod cards;
 mod chain;
 mod export;
@@ -846,6 +847,94 @@ async fn note_set(name: String, key: String, note: String) -> R<Store> {
     Ok(wallet::load())
 }
 
+// ---------- attachments: files kept with a record (attach.rs) ----------
+#[derive(Serialize)]
+struct Attached { store: Store, added: usize, notes: Vec<String>, errors: Vec<String> }
+
+fn record_key_ok(key: &str) -> R<()> { if key.starts_with("addr:") || key.starts_with("tx:") || key.starts_with("out:") { Ok(()) } else { Err("the record key must be addr:, tx: or out:".into()) } }
+
+async fn attach_into(name: String, key: String, items: Vec<(String, Vec<u8>)>, keep_original: bool, mut errors: Vec<String>) -> R<Attached> {
+    record_key_ok(&key)?;
+    let (mut entries, mut notes) = (Vec::new(), Vec::new());
+    for (fname, bytes) in items {
+        match attach::add(&fname, &bytes, keep_original, now()) { Ok(a) => { if let Some(n) = a.note { notes.push(n); } entries.push(a.entry); } Err(e) => errors.push(e) }
+    }
+    let added = entries.len();
+    if added > 0 {
+        let nm = name.clone();
+        wallet::update(move |s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) {
+            let list = v.files.entry(key.clone()).or_default();
+            for e in entries { if !list.iter().any(|x| x.get("sha256") == e.get("sha256")) { list.push(e); } }   // the same file twice is one file
+            v.label_meta.insert(key, now());
+        })?;
+        let _ = labels_sync(name).await;   // the RECORD travels now; the bytes stay on this computer until attachments sync is built
+    }
+    Ok(Attached { store: wallet::load(), added, notes, errors })
+}
+
+fn read_capped(path: &std::path::Path) -> Result<(String, Vec<u8>), String> {
+    let shown = attach::safe_name(&path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+    let meta = std::fs::metadata(path).map_err(|e| format!("{shown}: {e}"))?;
+    if !meta.is_file() { return Err(format!("{shown} is a folder; drop the files inside it")); }
+    if meta.len() > attach::MAX_FILE { return Err(format!("{shown} is larger than 25 MB")); }
+    Ok((shown.clone(), std::fs::read(path).map_err(|e| format!("{shown}: {e}"))?))
+}
+
+/// Files dropped on the window arrive as PATHS (Tauri reads the drop, the webview never sees the bytes).
+#[tauri::command]
+async fn attach_paths(name: String, key: String, paths: Vec<String>, keep_original: bool) -> R<Attached> {
+    let (mut items, mut errors) = (Vec::new(), Vec::new());
+    for p in paths.iter().take(40) { match read_capped(std::path::Path::new(p)) { Ok(i) => items.push(i), Err(e) => errors.push(e) } }
+    attach_into(name, key, items, keep_original, errors).await
+}
+
+#[tauri::command]
+async fn attach_pick(name: String, key: String, keep_original: bool) -> R<Attached> {
+    let picked = rfd::FileDialog::new().set_title("Add files to this record").pick_files().ok_or("cancelled")?;
+    attach_paths(name, key, picked.into_iter().map(|p| p.to_string_lossy().into_owned()).collect(), keep_original).await
+}
+
+/// A picture pasted from the clipboard comes through the window as base64.
+#[tauri::command]
+async fn attach_bytes(name: String, key: String, filename: String, base64: String, keep_original: bool) -> R<Attached> {
+    use bitcoin::base64::Engine;
+    let bytes = bitcoin::base64::engine::general_purpose::STANDARD.decode(base64.trim()).map_err(|_| "that paste could not be read".to_string())?;
+    attach_into(name, key, vec![(filename, bytes)], keep_original, vec![]).await
+}
+
+#[tauri::command]
+async fn attach_remove(name: String, key: String, sha256: String) -> R<Store> {
+    record_key_ok(&key)?;
+    let nm = name.clone();
+    let mut gone: Vec<String> = Vec::new();
+    let st = wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) {
+        if let Some(list) = v.files.get_mut(&key) {
+            for e in list.iter().filter(|e| e.get("sha256").and_then(|x| x.as_str()) == Some(&sha256)) { for f in ["sha256", "thumb"] { if let Some(h) = e.get(f).and_then(|x| x.as_str()) { gone.push(h.to_string()); } } }
+            list.retain(|e| e.get("sha256").and_then(|x| x.as_str()) != Some(&sha256));
+            if list.is_empty() { v.files.remove(&key); }
+            v.label_meta.insert(key.clone(), now());
+        }
+    })?;
+    // bytes go only when no record of ANY vault on this computer still names them
+    let in_use: std::collections::HashSet<String> = st.vaults.iter().flat_map(|v| v.files.values().flatten()).flat_map(|e| ["sha256", "thumb"].into_iter().filter_map(|f| e.get(f).and_then(|x| x.as_str()).map(String::from)).collect::<Vec<_>>()).collect();
+    attach::sweep(&gone, &in_use);
+    let _ = labels_sync(name).await;
+    Ok(wallet::load())
+}
+
+#[tauri::command]
+fn attach_open(sha256: String, name: String, mime: String) -> R<String> { attach::open(&sha256, &name, &mime).map(String::from) }
+
+/// Which of these are on this computer (a record can arrive from another computer before its bytes do).
+#[tauri::command]
+fn attach_have(hashes: Vec<String>) -> Vec<bool> { hashes.iter().map(|h| attach::have(h)).collect() }
+
+#[tauri::command]
+fn attach_thumb(sha256: String) -> R<String> {
+    use bitcoin::base64::Engine;
+    Ok(format!("data:image/jpeg;base64,{}", bitcoin::base64::engine::general_purpose::STANDARD.encode(attach::small(&sha256)?)))
+}
+
 #[derive(Serialize, Clone)]
 struct LabelsStatus { backed_up: bool, host: String, count: usize, synced: u64, note: String }
 
@@ -1058,7 +1147,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| { watch::start(app.handle().clone()); Ok(()) })
-        .invoke_handler(tauri::generate_handler![open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])

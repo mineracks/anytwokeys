@@ -15,6 +15,15 @@ const V = %(vault)s; window.V = V;
 window.__contacts = []; window.__extra = [];
 const store = () => ({ forms: {}, contacts: __contacts, vaults: [V].concat(__extra), settings: { network: V.network, custom: false, electrum: '', explorer: '', gap: 20, fiat: __state.fiat, prices: '' }, seen: {}, last_psbt: null, last_message: null });
 const H = {
+  attach_have: (a) => a.hashes.map(h => !(window.__away || []).includes(h)),
+  attach_thumb: () => 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7',
+  attach_open: (a) => { window.__opened = a; return a.mime === 'application/octet-stream' ? 'shown in its folder: this kind of file is not opened from here' : 'opened'; },
+  attach_remove: (a) => { V.files[a.key] = (V.files[a.key] || []).filter(e => e.sha256 !== a.sha256); return store(); },
+  attach_paths: (a) => { window.__dropped = a; V.files = V.files || {}; const list = V.files[a.key] = V.files[a.key] || []; const errors = [];
+    for (const p of a.paths) { if (/huge/.test(p)) { errors.push('huge.mov is larger than 25 MB'); continue; } const img = /[.](jpe?g|png|heic)$/i.test(p), nm = p.split('/').pop().replace(/[.]heic$/i, '.jpg');
+      list.push({ name: nm, mime: img ? 'image/jpeg' : /pdf$/.test(p) ? 'application/pdf' : 'application/octet-stream', size: img ? 412000 : 88000, sha256: (list.length + 1).toString(16).padStart(64, 'a'), t: 1, meta: img ? (a.keepOriginal ? 'original' : 'stripped') : 'n/a', thumb: img ? 'b'.repeat(64) : undefined }); }
+    return { store: store(), added: a.paths.length - errors.length, notes: [], errors }; },
+  attach_bytes: (a) => { window.__pasted = a; V.files = V.files || {}; (V.files[a.key] = V.files[a.key] || []).push({ name: a.filename, mime: 'image/png', size: 20000, sha256: 'c'.repeat(64), t: 1, meta: 'stripped', thumb: 'd'.repeat(64) }); return { store: store(), added: 1, notes: [], errors: [] }; },
   label_set: (a) => { V.labels = V.labels || {}; if (a.label) V.labels[a.key] = a.label; else delete V.labels[a.key]; return store(); },
   note_set: (a) => { window.__noteCalls = (window.__noteCalls || 0) + 1; V.notes = V.notes || {}; if (a.note.trim()) V.notes[a.key] = a.note; else delete V.notes[a.key]; return store(); },
   tx_detail: (a) => { window.__detailAsked = a; if (window.__detailDown) throw 'electrum: connection refused'; const spend = a.txid === '%(t1)s';
@@ -75,7 +84,9 @@ with sync_playwright() as p:
     check("if dates and amounts cannot be fetched: dashes and the reason, and the balance still shows", "—" in rows.nth(3).inner_text() and "connection refused" in pg.inner_text("#activity-note") and "9,430" in pg.inner_text("#balance"), pg.inner_text("#activity-note"))
     # ---- one transaction: click in, read it, write about it, walk back ----
     pg.evaluate("__contacts.push({ name: 'hardware shop', address: 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4', network: 'mainnet', added: 1, used: 1, last_used: 1 }); sync()"); pg.wait_for_timeout(700)
+    pg.evaluate("(async () => { store = await window.__TAURI__.core.invoke('store_get'); vault = store.vaults.find(v => v.name === vault.name); })()"); pg.wait_for_timeout(200)   # what a label sync or a seal does: a fresh vault object
     rows = pg.locator("#activity tr"); rows.nth(2).click(); pg.wait_for_timeout(600)
+    check("the block height survives the vault object being replaced: a confirmed transaction is never called unconfirmed", pg.evaluate("__detailAsked.height") == 967410 and "blocks deep" in pg.inner_text("#tx-status"), str(pg.evaluate("__detailAsked.height")))
     check("a click on an activity row opens that transaction, with the way back in the breadcrumb", pg.locator("#s-tx.on").count() == 1 and pg.evaluate("__detailAsked.txid") == T[1] and pg.inner_text("#crumbs").replace("\n", " ").split()[:5] == "demo vault › Activity ›".split(), pg.inner_text("#crumbs"))
     facts = pg.inner_text("#tx-facts")
     check("a spend: amount, value then and now, when, who it paid (from the address book), change, fee, and WHICH KEYS SIGNED", "−5,190" in facts and "then" in facts and "now" in facts and "hardware shop" in facts and "change #0" in facts and "190 sats" in facts and "laptop and off-site" in facts and "blocks deep" in facts, facts[:400])
@@ -83,6 +94,9 @@ with sync_playwright() as p:
     check("blockchain data is folded away, with the proof in its heading", not pg.locator("#tx-chain-body").is_visible() and "the node proved it is in block" in pg.inner_text("#tx-proof"))
     pg.click("#tx-chain summary"); pg.wait_for_timeout(150); chain = pg.inner_text("#tx-chain-body")
     check("opened: ids, size, RBF, block and position, every input and output marked, the raw hex", all(x in chain for x in ["Witness id", "189 vB", "signalled", "1757", "spent", "P2WSH", "laptop, off-site"]) and pg.locator("#tx-hex").is_visible(), chain[:300])
+    check("older and newer: the list's neighbours are one press away, and the ends are disabled", pg.locator("#tx-prev").is_enabled() and pg.locator("#tx-next").is_enabled() and "3 of 4" in pg.inner_text("#tx-pos"), pg.inner_text("#tx-pos"))
+    pg.click("#tx-next"); pg.wait_for_timeout(500); check("Older goes down the list", pg.evaluate("__detailAsked.txid") == T[0] and "4 of 4" not in "" and "+20,000" in pg.inner_text("#tx-facts") and pg.locator("#tx-next").is_disabled(), pg.inner_text("#tx-pos"))
+    pg.keyboard.press("ArrowLeft"); pg.wait_for_timeout(500); check("the left arrow key comes back up it", pg.evaluate("__detailAsked.txid") == T[1] and "−5,190" in pg.inner_text("#tx-facts"))
     pg.locator("#s-tx").screenshot(path=str(out / "tx-detail.png"))
     pg.fill("#tx-label", "laptop stand"); pg.keyboard.press("Enter"); pg.wait_for_timeout(400)
     check("a label becomes the title and the last breadcrumb", pg.inner_text("#title") == "laptop stand" and "laptop stand" in pg.inner_text("#crumbs") and "Saved" in pg.inner_text("#tx-saved"), pg.inner_text("#title"))
@@ -90,6 +104,24 @@ with sync_playwright() as p:
     check("a note is not saved on every keystroke", (pg.evaluate("window.__noteCalls") or 0) == 0 and "not saved yet" in pg.inner_text("#tx-saved"))
     pg.wait_for_timeout(1400)
     check("it saves itself a moment after you stop, line breaks and all", pg.evaluate("window.__noteCalls") == 1 and pg.evaluate("V.notes['tx:' + %s]" % json.dumps(T[1])).count("\n") == 1 and "Saved" in pg.inner_text("#tx-saved"))
+    # ---- attachments: an OS drop arrives as a Tauri event carrying PATHS ----
+    pg.evaluate("__listeners['tauri://drag-enter']({ payload: {} })"); check("dragging over the window shows where the drop will go", pg.locator("#dropveil").is_visible() and "attach to this transaction" in pg.inner_text("#dropveil"))
+    pg.evaluate("__listeners['tauri://drag-drop']({ payload: { paths: ['/Users/p/Desktop/IMG_0412.HEIC', '/Users/p/Downloads/invoice-4471.pdf', '/Users/p/huge.mov', '/Users/p/tool.bin'] } })"); pg.wait_for_timeout(600)
+    tiles_ = pg.locator("#tx-files .att")
+    check("dropped files attach to THIS transaction; the oversize one is refused by name and the rest still go in", pg.evaluate("__dropped.key") == "tx:" + T[1] and tiles_.count() == 3 and "larger than 25 MB" in pg.inner_text("#toast") and "3 files attached" in pg.inner_text("#toast") and not pg.locator("#dropveil").is_visible(), pg.inner_text("#toast"))
+    check("photos are re-saved without their data unless asked, and a picture shows its thumbnail", pg.evaluate("__dropped.keepOriginal") is False and tiles_.nth(0).locator("img").count() == 1 and "IMG_0412.jpg" in tiles_.nth(0).inner_text() and "PDF" in tiles_.nth(1).inner_text())
+    tiles_.nth(1).click(); pg.wait_for_timeout(200); check("a click opens it with the system viewer", pg.evaluate("__opened.mime") == "application/pdf" and "opened" in pg.inner_text("#toast"))
+    tiles_.nth(2).click(); pg.wait_for_timeout(200); check("a file of no viewable kind is shown in its folder, not opened", "not opened from here" in pg.inner_text("#toast"))
+    pg.evaluate("window.__away = ['a'.repeat(63) + '1'.padStart(1, 'a')]; window.__away = [V.files['tx:' + %s][0].sha256]; renderFiles()" % json.dumps(T[1])); pg.wait_for_timeout(300)
+    check("a file whose bytes are on another computer says so and does not pretend to open", "away" in tiles_.nth(0).get_attribute("class") and "not on this computer yet" in tiles_.nth(0).inner_text())
+    pg.evaluate("window.__away = []; renderFiles()"); pg.wait_for_timeout(300)
+    tiles_.nth(2).hover(); pg.click("#tx-files [data-att-x='2']"); check("remove asks first", tiles_.count() == 3 and pg.inner_text("#tx-files [data-att-x='2']") == "Remove?")
+    pg.click("#tx-files [data-att-x='2']"); pg.wait_for_timeout(300); check("and then removes", tiles_.count() == 2)
+    pg.locator("#tx-notes").screenshot(path=str(out / "tx-attachments.png"))
+    pg.evaluate("show('home')"); pg.wait_for_timeout(300); pg.evaluate("__listeners['tauri://drag-drop']({ payload: { paths: ['/x/y.pdf'] } })"); pg.wait_for_timeout(200)
+    check("a drop with no transaction open attaches nothing and says why", "Open a transaction first" in pg.inner_text("#toast") and pg.evaluate("__dropped.paths.length") == 4)
+    pg.locator("#activity tr").nth(2).click(); pg.wait_for_timeout(600)
+    check("coming back, the attachments are still on that transaction", pg.locator("#tx-files .att").count() == 2)
     pg.evaluate("window.__badProof = true"); pg.click("#crumbs [data-crumb=home]"); pg.wait_for_timeout(500)
     check("the breadcrumb walks back to Home, where the row now shows its label", pg.locator("#s-home.on").count() == 1 and "laptop stand" in pg.inner_text("#activity"))
     pg.locator("#activity tr").nth(3).click(); pg.wait_for_timeout(600)

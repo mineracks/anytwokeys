@@ -198,7 +198,12 @@ $('#balance').addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.ke
 // ---------- one transaction ----------
 const txFacts = {};                        // vault name → { rows: { txid: {time, net, fee, quote} }, now, ccy }
 const txView = { txid: null, height: 0, seq: 0 };
-function openTx(txid) { const h = ((vault && vault._history) || []).find(x => x.txid === txid); txView.txid = txid; txView.height = h ? h.height : 0; show('tx'); }
+// The list of a vault's transactions, newest first, kept by vault NAME. It used to be read off `vault._history`, and the vault
+// object is replaced on every store re-read: the height came back 0 and a transaction confirmed days ago read "in the mempool".
+const txList = {};
+const txOrder = () => (txList[vault.name] || []);
+function openTx(txid) { const h = txOrder().find(x => x.txid === txid); txView.txid = txid; txView.height = h ? h.height : 0; show('tx'); }
+function stepTx(by) { const l = txOrder(), i = l.findIndex(x => x.txid === txView.txid); if (i < 0 || !l[i + by]) return; clearTimeout(saveTxField.t); saveTxField('note'); openTx(l[i + by].txid); }
 const txHeadline = () => { const f = ((txFacts[vault.name] || {}).rows || {})[txView.txid], lab = labelOf('tx:' + txView.txid);
   if (lab) return lab; if (!f || f.net === null) return txView.txid.slice(0, 10) + '…';
   return (f.time ? new Date(f.time * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) + ' · ' : '') + (f.net > 0 ? '+' : f.net < 0 ? '−' : '') + sats(Math.abs(f.net)) + ' sats'; };
@@ -207,6 +212,7 @@ async function renderTx() {
   const name = vault.name, txid = txView.txid, mine = ++txView.seq, key = 'tx:' + txid;
   const facts = txFacts[name] || {}, f = (facts.rows || {})[txid];
   paintCrumbs('tx'); $('#title').textContent = txHeadline();
+  { const l = txOrder(), i = l.findIndex(x => x.txid === txid); $('#tx-prev').disabled = i <= 0; $('#tx-next').disabled = i < 0 || i >= l.length - 1; $('#tx-pos').textContent = i >= 0 ? `${i + 1} of ${l.length}` : ''; }
   // what the activity list already knows is on screen at once; the decoded transaction fills the rest in
   const amt = $('#tx-amt'); amt.className = 'tx-amt' + (f && f.net > 0 ? ' in' : ''); amt.innerHTML = f && f.net !== null ? `${f.net > 0 ? '+' : f.net < 0 ? '−' : ''}${sats(Math.abs(f.net))} <small>sats</small>` : '…';
   const fiat = $('#tx-fiat');
@@ -215,6 +221,7 @@ async function renderTx() {
   $('#tx-when').textContent = f && f.time ? new Date(f.time * 1000).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : (txView.height > 0 ? '' : 'Not in a block yet');
   if (document.activeElement !== $('#tx-label')) $('#tx-label').value = labelOf(key);
   if (document.activeElement !== $('#tx-note')) $('#tx-note').value = (vault.notes || {})[key] || '';
+  renderFiles();
   $('#tx-chain').open = (() => { try { return localStorage.getItem('a2k-chain-open') === '1'; } catch { return false; } })();
   let d; try { d = await invoke('tx_detail', { name, txid, height: txView.height }); } catch (e) { if (mine === txView.seq) { $('#tx-dl').innerHTML = `<dt>Details</dt><dd class="warn">${esc(e)}</dd>`; $('#tx-proof').textContent = ''; } return; }
   if (mine !== txView.seq || !vault || vault.name !== name) return;   // the person has moved on; this answer is for another screen
@@ -249,6 +256,49 @@ async function renderTx() {
     + `<div class="row" style="justify-content:space-between"><div class="label">Raw transaction</div><button class="btn small" id="tx-copyhex">Copy hex</button></div><div class="chain-hex" id="tx-hex">${esc(d.hex)}</div>`;
   $('#tx-copyhex').onclick = () => navigator.clipboard.writeText(d.hex).then(() => toast('Raw transaction copied'));
 }
+// ---------- attachments on the transaction ----------
+const thumbCache = new Map();
+const sizeWords = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : n >= 1024 ? Math.round(n / 1024) + ' KB' : n + ' B';
+async function renderFiles() {
+  if (!vault || !txView.txid) return;
+  const name = vault.name, key = 'tx:' + txView.txid, list = ((vault.files || {})[key] || []).slice();
+  let here = []; try { here = await invoke('attach_have', { hashes: list.map(e => e.sha256) }); } catch {}
+  if (!vault || vault.name !== name || key !== 'tx:' + txView.txid) return;
+  const kind = (e) => (e.mime || '').startsWith('image/') ? 'IMG' : e.mime === 'application/pdf' ? 'PDF' : e.mime === 'text/plain' ? 'TXT' : 'FILE';
+  $('#tx-files').innerHTML = list.map((e, i) => `<div class="att${here[i] ? '' : ' away'}" role="button" tabindex="0" data-att="${i}" title="${esc(e.name)}${here[i] ? '' : ' — not on this computer yet'}"><div class="pic" data-thumb="${esc(e.thumb || '')}">${kind(e)}</div><div class="nm">${esc(e.name)}</div><div class="sz">${here[i] ? sizeWords(e.size) + (e.meta === 'original' && kind(e) === 'IMG' ? ' · as taken' : '') : 'not on this computer yet'}</div><button type="button" class="att-x" data-att-x="${i}" aria-label="Remove ${esc(e.name)}">×</button></div>`).join('');
+  $$('#tx-files [data-thumb]').forEach(async (pic) => { const h = pic.dataset.thumb; if (!h) return;
+    try { if (!thumbCache.has(h)) thumbCache.set(h, await invoke('attach_thumb', { sha256: h })); const img = new Image(); img.alt = ''; img.src = thumbCache.get(h); pic.replaceChildren(img); } catch {} });
+  $$('#tx-files [data-att]').forEach(t => { const e = list[+t.dataset.att];
+    const openIt = async () => { if (t.classList.contains('away')) return toast('That file was added on another computer; fetching it from there is not built yet'); try { toast(`${e.name}: ${await invoke('attach_open', { sha256: e.sha256, name: e.name, mime: e.mime })}`); } catch (err) { fail(err); } };
+    t.onclick = (ev) => { if (ev.target.closest('.att-x')) return; openIt(); };
+    t.onkeydown = (ev) => { if (ev.key === 'Enter' && !ev.target.closest('.att-x')) openIt(); }; });
+  $$('#tx-files [data-att-x]').forEach(b => { const e = list[+b.dataset.attX];
+    b.onclick = async (ev) => { ev.stopPropagation();
+      if (!b.classList.contains('armed')) { b.classList.add('armed'); b.textContent = 'Remove?'; setTimeout(() => { if (b.isConnected) { b.classList.remove('armed'); b.textContent = '×'; } }, 5000); return; }
+      try { store = await invoke('attach_remove', { name, key, sha256: e.sha256 }); vault = store.vaults.find(v => v.name === name) || vault; renderFiles(); } catch (err) { fail(err); } }; });
+}
+function attachDone(r, name) {
+  store = r.store; vault = store.vaults.find(v => v.name === name) || vault; renderFiles();
+  const said = [r.added ? `${r.added} file${r.added === 1 ? '' : 's'} attached` : '', ...r.notes, ...r.errors].filter(Boolean).join(' · ');
+  if (said) toast(said, r.errors.length || r.notes.length ? 9000 : 3500);
+}
+const onTx = () => $('#s-tx').classList.contains('on') && vault && txView.txid;
+$('#tx-addfiles').onclick = async () => { const name = vault.name; try { attachDone(await invoke('attach_pick', { name, key: 'tx:' + txView.txid, keepOriginal: $('#tx-keep').checked }), name); } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
+// an OS drop reaches a Tauri window as PATHS in an event, never as File objects in the page
+for (const [ev, on] of [['tauri://drag-enter', true], ['tauri://drag-over', true], ['tauri://drag-leave', false]]) window.__TAURI__.event.listen(ev, () => { $('#dropveil').hidden = !(on && onTx()); });
+window.__TAURI__.event.listen('tauri://drag-drop', async (e) => {
+  $('#dropveil').hidden = true;
+  const paths = (e.payload && e.payload.paths) || []; if (!paths.length) return;
+  if (!onTx()) return toast('Open a transaction first: files attach to the one on screen');
+  const name = vault.name; try { attachDone(await invoke('attach_paths', { name, key: 'tx:' + txView.txid, paths, keepOriginal: $('#tx-keep').checked }), name); } catch (err) { fail(err); }
+});
+document.addEventListener('paste', async (e) => {
+  if (!onTx()) return; const item = [...(e.clipboardData ? e.clipboardData.items : [])].find(i => i.kind === 'file' && i.type.startsWith('image/')); if (!item) return;   // text pastes into the note as usual
+  e.preventDefault(); const f = item.getAsFile(), name = vault.name;
+  const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = rej; r.readAsDataURL(f); });
+  try { attachDone(await invoke('attach_bytes', { name, key: 'tx:' + txView.txid, filename: 'pasted ' + new Date().toISOString().slice(0, 16).replace('T', ' ').replace(':', '.') + '.png', base64: b64, keepOriginal: false }), name); } catch (err) { fail(err); }
+});
+
 $('#tx-chain').addEventListener('toggle', () => { try { localStorage.setItem('a2k-chain-open', $('#tx-chain').open ? '1' : '0'); } catch {} });
 $('#tx-explorer').onclick = () => { const a = document.createElement('a'); a.dataset.tx = txView.txid; document.body.appendChild(a); a.click(); a.remove(); };
 $('#tx-copyid').onclick = () => navigator.clipboard.writeText(txView.txid).then(() => toast('Transaction id copied'));
@@ -268,6 +318,8 @@ $('#tx-label').addEventListener('blur', () => saveTxField('label'));
 $('#tx-label').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#tx-label').blur(); } });
 $('#tx-note').addEventListener('input', () => { clearTimeout(saveTxField.t); $('#tx-saved').textContent = 'not saved yet…'; saveTxField.t = setTimeout(() => saveTxField('note'), 1200); });
 $('#tx-note').addEventListener('blur', () => { clearTimeout(saveTxField.t); saveTxField('note'); });
+$('#tx-prev').onclick = () => stepTx(-1); $('#tx-next').onclick = () => stepTx(1);
+document.addEventListener('keydown', (e) => { if (!$('#s-tx').classList.contains('on') || /INPUT|TEXTAREA/.test(document.activeElement.tagName) || e.metaKey || e.ctrlKey || e.altKey) return; if (e.key === 'ArrowLeft') stepTx(-1); if (e.key === 'ArrowRight') stepTx(1); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('#s-tx').classList.contains('on') && !/INPUT|TEXTAREA/.test(document.activeElement.tagName)) show('home'); });
 
 async function fillActivity(name, s) {
@@ -318,6 +370,7 @@ async function sync() {
       tr.innerHTML = `<td class="when muted">${h.height > 0 ? '…' : 'pending'}</td><td><span class="mono">${h.txid.slice(0, 10)}…${h.txid.slice(-6)}</span>${s.rotating ? ' <span class="muted">· ' + fmtIndex(h.index) + '</span>' : ''}</td><td>${lblHtml('tx:' + h.txid)}</td><td class="r amt muted">…</td><td class="r ${h.height > 0 ? 'ok' : 'muted'}">${h.height > 0 ? 'confirmed · ' + sats(h.height) : 'unconfirmed'}</td>`;
       tb.appendChild(tr);
     }
+    txList[vault.name] = s.history.slice().reverse();
     tb.onclick = (e) => { if (e.target.closest('.lbl, a, button, input')) return; const tr = e.target.closest('tr[data-txid]'); if (tr) openTx(tr.dataset.txid); };
     fillActivity(vault.name, s);   // dates, amounts and values arrive after the balance; the balance never waits for them
     $('#send-have').textContent = `${sats(s.balance)} sats`;
