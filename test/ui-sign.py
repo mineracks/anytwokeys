@@ -80,7 +80,7 @@ with sync_playwright() as p:
     pg.evaluate("__state.cards = %s" % json.dumps([card(2)])); pg.wait_for_timeout(2600)
     # ---- the QR panel: read the canvas back with a real decoder ----
     pg.click("#export-qr"); pg.wait_for_timeout(300)
-    check("QR panel opens on the animated code", pg.locator("#qr-panel").is_visible() and pg.inner_text("#qr-title").lower().startswith("part "), pg.inner_text("#qr-title"))
+    check("QR panel opens on the animated code", pg.locator("#qr-panel").is_visible() and pg.inner_text("#qr-title").lower().startswith("frame "), pg.inner_text("#qr-title"))
     try:
         import zxingcpp; from PIL import Image
         read = lambda: [r.text for r in zxingcpp.read_barcodes(Image.open(io.BytesIO(pg.locator("#qr-canvas").screenshot())).convert("RGB"))]

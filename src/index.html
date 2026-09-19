@@ -59,11 +59,11 @@
 
     <section id="s-home" class="screen">
       <div class="grid3">
-        <div class="card"><div class="label">Balance</div><div class="big" id="balance">— <small>sats</small></div><div class="muted" id="balance-sub">syncing…</div></div>
+        <div class="card"><div class="label">Balance</div><div class="big" id="balance" tabindex="0" role="button" aria-label="Balance. Press to switch between sats and money">— <small>sats</small></div><div class="fiat" id="balance-fiat" hidden></div><div class="muted" id="balance-sub">syncing…</div></div>
         <div class="card"><div class="label">Vault</div><div style="font-family:var(--display);font-weight:600;font-size:18px" id="vault-kind"></div><div class="muted" id="vault-keys"></div></div>
         <div class="card"><div class="label">Actions</div><div class="row"><button class="btn primary" data-go="send" style="min-width:120px">Send</button><button class="btn" data-go="receive" style="min-width:120px">Receive</button></div></div>
       </div>
-      <div class="card"><div class="label">Activity</div><table><thead><tr><th>Transaction</th><th>Label</th><th class="r">Status</th></tr></thead><tbody id="activity"><tr><td class="muted" colspan="3">nothing yet</td></tr></tbody></table></div>
+      <div class="card"><div class="label">Activity</div><table class="act"><thead><tr><th>When</th><th>Transaction</th><th>Label</th><th class="r">Amount</th><th class="r">Status</th></tr></thead><tbody id="activity"><tr><td class="muted" colspan="5">nothing yet</td></tr></tbody></table><div class="muted" style="font-size:13px" id="activity-note" hidden></div></div>
       <div class="muted" style="font-size:13px" id="conn"></div>
     </section>
 
@@ -228,9 +228,10 @@
         <div style="display:flex;flex-direction:column;gap:18px">
           <div class="card" id="custom-card"><div class="label">Your own servers</div>
             <div class="field"><div class="label">Electrum server</div><input id="c-electrum" class="mono" placeholder="ssl://my-node.local:50002" spellcheck="false"></div>
-            <div class="field"><div class="label">Block explorer</div><input id="c-explorer" class="mono" placeholder="http://umbrel.local:3006" spellcheck="false"></div>
+            <div class="field"><div class="label">Block explorer</div><input id="c-explorer" class="mono" placeholder="http://umbrel.local:3006" spellcheck="false"></div><div class="field"><div class="label">Price server</div><input id="c-prices" class="mono" placeholder="https://prices.example  (blank = no fiat values)" spellcheck="false"></div>
             <div class="row"><button class="btn" id="test-servers">Test connection</button><button class="btn primary" id="save-settings">Save</button></div>
             <div class="muted" style="font-size:13px" id="test-out"></div></div>
+          <div class="card"><div class="label">Currency</div><div class="field"><select id="fiat-pick" style="max-width:420px"></select></div><div class="muted" style="font-size:13px" id="fiat-note"></div></div>
           <div class="card"><div class="label">Addresses</div>
             <div class="field"><div class="label">Gap limit</div><div class="row" style="gap:10px;align-items:center"><input id="gap-in" inputmode="numeric" style="max-width:110px"><button class="btn" id="gap-save">Save</button></div></div>
             <div class="muted" style="font-size:13px">How many unused addresses past the last used one a scan looks at, on the receive chain and the change chain each. 20 is the usual. Raise it if you hand out many addresses before any is paid; every scan costs one server query per address.</div></div>

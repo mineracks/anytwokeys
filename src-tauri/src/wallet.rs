@@ -49,7 +49,12 @@ pub struct Settings {
     pub explorer: String,
     /// how many unused addresses past the last used one a scan looks at, per chain
     #[serde(default = "default_gap")] pub gap: u32,
+    /// currency the Home screen values mainnet coins in: "auto", an ISO code, or empty for none
+    #[serde(default = "default_fiat")] pub fiat: String,
+    /// price service when the person runs their own servers; empty there = no fiat
+    #[serde(default)] pub prices: String,
 }
+pub fn default_fiat() -> String { "auto".into() }   // "auto" = from the device's region; "" = none; else an ISO code
 pub fn default_gap() -> u32 { GAP }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

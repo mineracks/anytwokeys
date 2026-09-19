@@ -1,3 +1,4 @@
+mod activity;
 mod cards;
 mod chain;
 mod export;
@@ -48,6 +49,24 @@ fn vault_key_seen(name: String, pubkey: String, serial: u32) -> R<Store> {
 fn key_form_seen(pubkey: String, form: u8) -> R<Store> {
     wallet::update(move |s| { s.forms.insert(pubkey, form); })
 }
+
+/// When each transaction happened, what it moved, and what that was worth. Separate from the sync so the balance never waits on it.
+#[tauri::command]
+async fn vault_activity(name: String, history: Vec<(String, i32)>, ccy: String) -> R<activity::Activity> {
+    block(move || {
+        let s = wallet::load();
+        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+        let servers = wallet::servers_for(&s, &v.network);
+        // our price service goes with our servers; someone running their own names their own, or has none
+        let prices = if s.settings.custom { s.settings.prices.clone() } else { activity::PRICES.to_string() };
+        // `ccy` is what the screen resolved the setting to ("auto" is worked out from the device there); empty = no fiat
+        if !(ccy.is_empty() || (ccy.len() == 3 && ccy.chars().all(|c| c.is_ascii_uppercase()))) { return Err("the currency is a three-letter code".into()); }
+        activity::build(&v, &servers, &history, &ccy, &prices)
+    }).await
+}
+
+#[tauri::command]
+fn device_locale() -> activity::Device { activity::device() }
 
 #[tauri::command]
 fn store_get() -> Store {
@@ -148,12 +167,16 @@ fn vault_forget(name: String) -> R<Store> {
 }
 
 #[tauri::command]
-fn settings_set(network: String, custom: bool, electrum: String, explorer: String, gap: Option<u32>) -> R<Store> {
+fn settings_set(network: String, custom: bool, electrum: String, explorer: String, gap: Option<u32>, fiat: Option<String>, prices: Option<String>) -> R<Store> {
     let mut s = wallet::load();
     if network != "mainnet" && network != "signet" { return Err("network must be mainnet or signet".into()); }
     let gap = gap.unwrap_or(s.settings.gap);
     if !(1..=500).contains(&gap) { return Err("the gap limit must be between 1 and 500".into()); }
-    s.settings = wallet::Settings { network, custom, electrum: electrum.trim().to_string(), explorer: explorer.trim().to_string(), gap };
+    let fiat = fiat.map(|f| { let f = f.trim(); if f.eq_ignore_ascii_case("auto") { "auto".to_string() } else { f.to_uppercase() } }).unwrap_or_else(|| s.settings.fiat.clone());
+    if !(fiat.is_empty() || fiat == "auto" || (fiat.len() == 3 && fiat.chars().all(|c| c.is_ascii_uppercase()))) { return Err("the currency is a three-letter code, or empty for none".into()); }
+    let prices = prices.map(|p| p.trim().to_string()).unwrap_or_else(|| s.settings.prices.clone());
+    if !(prices.is_empty() || prices.starts_with("https://") || prices.starts_with("http://")) { return Err("the price server is a web address".into()); }
+    s.settings = wallet::Settings { network, custom, electrum: electrum.trim().to_string(), explorer: explorer.trim().to_string(), gap, fiat, prices };
     wallet::save(&s)?;
     Ok(s)
 }
@@ -865,7 +888,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| { watch::start(app.handle().clone()); Ok(()) })
-        .invoke_handler(tauri::generate_handler![open_url, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_preview, seal_restore, label_set, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![open_url, vault_activity, device_locale, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_preview, seal_restore, label_set, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])

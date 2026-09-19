@@ -104,6 +104,7 @@ function renderTabs() {
 
 async function boot() {
   store = await invoke('store_get');
+  try { osLocale = await invoke('device_locale'); } catch {}   // without it the language list and the clock still answer
   paintNet();
   let want = null; try { want = localStorage.getItem('a2k-vault'); } catch {}
   vault = store.vaults.find(v => v.name === want) || store.vaults[0] || null;
@@ -111,6 +112,38 @@ async function boot() {
   if (vault) show('home'); else showWelcome();
   pollCards();
 }
+
+// ---------- fiat: which currency, worked out from the device unless the person chose ----------
+const CCYS = { AUD: 'Australian dollar', USD: 'US dollar', EUR: 'Euro', GBP: 'Pound sterling', NZD: 'New Zealand dollar', CAD: 'Canadian dollar', CHF: 'Swiss franc', JPY: 'Japanese yen', SGD: 'Singapore dollar', HKD: 'Hong Kong dollar',
+  SEK: 'Swedish krona', NOK: 'Norwegian krone', DKK: 'Danish krone', PLN: 'Polish zloty', CZK: 'Czech koruna', HUF: 'Hungarian forint', RON: 'Romanian leu', ISK: 'Icelandic krona', TRY: 'Turkish lira', ILS: 'Israeli shekel', ZAR: 'South African rand',
+  BRL: 'Brazilian real', MXN: 'Mexican peso', ARS: 'Argentine peso', INR: 'Indian rupee', IDR: 'Indonesian rupiah', MYR: 'Malaysian ringgit', PHP: 'Philippine peso', THB: 'Thai baht', KRW: 'South Korean won', TWD: 'New Taiwan dollar', CNY: 'Chinese yuan', MAD: 'Moroccan dirham', DZD: 'Algerian dinar', RUB: 'Russian rouble' };
+const EURO = 'AT BE CY DE EE ES FI FR GR HR IE IT LT LU LV MT NL PT SI SK BG AD MC SM VA ME XK'.split(' ');
+const REGION_CCY = Object.assign({ AU: 'AUD', US: 'USD', GB: 'GBP', NZ: 'NZD', CA: 'CAD', CH: 'CHF', LI: 'CHF', JP: 'JPY', SG: 'SGD', HK: 'HKD', SE: 'SEK', NO: 'NOK', DK: 'DKK', PL: 'PLN', CZ: 'CZK', HU: 'HUF', RO: 'RON', IS: 'ISK', TR: 'TRY', IL: 'ILS', ZA: 'ZAR',
+  BR: 'BRL', MX: 'MXN', AR: 'ARS', IN: 'INR', ID: 'IDR', MY: 'MYR', PH: 'PHP', TH: 'THB', KR: 'KRW', TW: 'TWD', CN: 'CNY', MA: 'MAD', DZ: 'DZD', RU: 'RUB' }, Object.fromEntries(EURO.map(r => [r, 'EUR'])));
+// a timezone says where the computer IS; good enough to name a country for the currencies we can price
+const ZONE_REGION = [[/^Australia\//, 'AU'], [/^Pacific\/(Auckland|Chatham)$/, 'NZ'], [/^Europe\/(London|Belfast|Jersey|Guernsey|Isle_of_Man)$/, 'GB'], [/^Europe\/Zurich$/, 'CH'], [/^Europe\/Stockholm$/, 'SE'], [/^Europe\/Oslo$/, 'NO'], [/^Europe\/Copenhagen$/, 'DK'],
+  [/^Europe\/Warsaw$/, 'PL'], [/^Europe\/Prague$/, 'CZ'], [/^Europe\/Budapest$/, 'HU'], [/^Europe\/Bucharest$/, 'RO'], [/^Europe\/Istanbul$/, 'TR'], [/^Atlantic\/Reykjavik$/, 'IS'], [/^Europe\/(Moscow|Samara|Volgograd|Kaliningrad)$/, 'RU'], [/^Europe\//, 'DE'],
+  [/^Asia\/Tokyo$/, 'JP'], [/^Asia\/Seoul$/, 'KR'], [/^Asia\/Hong_Kong$/, 'HK'], [/^Asia\/Taipei$/, 'TW'], [/^Asia\/(Shanghai|Chongqing|Urumqi)$/, 'CN'], [/^Asia\/Singapore$/, 'SG'], [/^Asia\/Bangkok$/, 'TH'], [/^Asia\/Kuala_Lumpur$/, 'MY'], [/^Asia\/Manila$/, 'PH'],
+  [/^Asia\/(Jakarta|Makassar|Jayapura)$/, 'ID'], [/^Asia\/(Kolkata|Calcutta)$/, 'IN'], [/^Asia\/(Jerusalem|Tel_Aviv)$/, 'IL'], [/^Africa\/Johannesburg$/, 'ZA'], [/^Africa\/Casablanca$/, 'MA'], [/^Africa\/Algiers$/, 'DZ'], [/^America\/(Sao_Paulo|Manaus|Bahia|Fortaleza|Recife|Belem)$/, 'BR'],
+  [/^America\/(Mexico_City|Monterrey|Cancun|Tijuana|Merida)$/, 'MX'], [/^America\/(Argentina\/|Buenos_Aires)/, 'AR'], [/^America\/(Toronto|Vancouver|Edmonton|Winnipeg|Halifax|St_Johns|Regina|Moncton|Whitehorse)$/, 'CA'],
+  [/^America\/(New_York|Chicago|Denver|Los_Angeles|Phoenix|Anchorage|Detroit|Boise|Indiana\/|Kentucky\/)|^Pacific\/Honolulu$/, 'US']];
+let osLocale = { region: null, currency: null };   // the operating system's Region setting, asked for once at start
+function deviceCurrency(os = osLocale, langs = navigator.languages || [navigator.language], zone = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { return ''; } })()) {
+  // 1. the OS region: deliberate, does not move when the person travels, independent of the language they read
+  if (os && os.currency && CCYS[os.currency]) return { ccy: os.currency, why: `this computer's currency is set to ${os.currency}` };
+  if (os && os.region) return { ccy: REGION_CCY[os.region] || 'USD', why: REGION_CCY[os.region] ? `this computer's region is ${os.region}` : `there is no price for the currency of ${os.region}, so US dollars` };
+  // 2. the language list's region; 3. the clock, which moves with a traveller, so only when nothing else speaks
+  let region = ''; for (const l of langs) { try { const r = new Intl.Locale(l).region; if (r) { region = r; break; } } catch {} }
+  const zoned = (ZONE_REGION.find(([re]) => re.test(zone || '')) || [])[1] || '';
+  // en-US is what a Mac ships with everywhere; a clock set to another country is the better clue
+  if (zoned && (!region || (region === 'US' && zoned !== 'US'))) return { ccy: REGION_CCY[zoned] || 'USD', why: `this computer's clock is set to ${zone}` };
+  if (region) return { ccy: REGION_CCY[region] || 'USD', why: REGION_CCY[region] ? `this computer's language region is ${region}` : `no price for the currency of ${region}, so US dollars` };
+  return { ccy: 'USD', why: 'this computer names no region' };
+}
+const fiatCcy = () => { const f = (store.settings.fiat ?? 'auto'); return f === 'auto' ? deviceCurrency().ccy : f; };
+const money = (amount, ccy) => { try { return new Intl.NumberFormat(undefined, { style: 'currency', currency: ccy, maximumFractionDigits: Math.abs(amount) >= 100 ? 0 : 2 }).format(amount); } catch { return amount.toFixed(2) + ' ' + ccy; } };
+const worth = (satsN, q, ccy) => money(satsN / 1e8 * q.price, ccy);
+const basisWords = (q, ccy) => `1 BTC = ${money(q.price, ccy)} · ${q.basis} · Bitstamp price × ECB reference rate`;
 
 // ---------- cards ----------
 async function pollCards() {
@@ -127,6 +160,37 @@ async function pollCards() {
 function cardLabel(c) { return `YubiKey 5 · serial ${c.serial} · ${c.version}`; }
 
 // ---------- home ----------
+// the balance leads with sats or with money, whichever the person last clicked it to; the other sits underneath
+let balUnit = 'sats'; try { balUnit = localStorage.getItem('a2k-balance-unit') || 'sats'; } catch {}
+function paintBalance() {
+  if (!vault || vault._balance === undefined) return;
+  const n = vault._now, big = $('#balance'), small = $('#balance-fiat');
+  big.classList.toggle('switch', !!n); big.title = n ? 'Click to lead with ' + (balUnit === 'fiat' ? 'sats' : n.ccy) : '';
+  if (n && balUnit === 'fiat') { big.innerHTML = `${worth(vault._balance, n.q, n.ccy)} <small>${n.ccy}</small>`; small.textContent = `${sats(vault._balance)} sats`; }
+  else { big.innerHTML = `${sats(vault._balance)} <small>sats</small>`; small.textContent = n ? `≈ ${worth(vault._balance, n.q, n.ccy)}` : ''; }
+  small.title = n ? basisWords(n.q, n.ccy) : ''; small.hidden = !n;
+}
+$('#balance').onclick = () => { if (!vault || !vault._now) return; balUnit = balUnit === 'fiat' ? 'sats' : 'fiat'; try { localStorage.setItem('a2k-balance-unit', balUnit); } catch {} paintBalance(); };
+$('#balance').addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('#balance').click(); } });
+async function fillActivity(name, s) {
+  const ccy = s.servers && vault.network === 'mainnet' ? fiatCcy() : '';
+  let a; try { a = await invoke('vault_activity', { name, history: s.history.map(h => [h.txid, h.height]), ccy }); }
+  catch (e) { if (vault && vault.name === name) { $$('#activity .when, #activity .amt').forEach(td => { if (td.textContent === '…') td.textContent = '—'; }); $('#activity-note').textContent = 'Dates and amounts could not be fetched: ' + e; $('#activity-note').hidden = false; } return; }
+  if (!vault || vault.name !== name) return;
+  for (const r of a.rows) {
+    const tr = $(`#activity tr[data-txid="${r.txid}"]`); if (!tr) continue;
+    const when = tr.querySelector('.when'), amt = tr.querySelector('.amt');
+    if (r.time) { const d = new Date(r.time * 1000); when.classList.remove('muted'); when.innerHTML = `${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}<small>${d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</small>`; when.title = d.toISOString().replace('.000Z', ' UTC').replace('T', ' ') + ' · the time in the block header'; }
+    else when.textContent = 'pending';
+    if (r.net === null) { amt.textContent = '—'; continue; }
+    const q = r.quote || (!r.time ? a.now : null);
+    amt.classList.remove('muted'); amt.classList.toggle('in', r.net > 0);
+    amt.innerHTML = `${r.net > 0 ? '+' : r.net < 0 ? '−' : ''}${sats(Math.abs(r.net))} sats<small>${q ? worth(Math.abs(r.net), q, a.ccy) + (r.time ? ' then' : ' now') : ''}${r.fee !== null && r.net < 0 ? (q ? ' · ' : '') + 'fee ' + sats(r.fee) : ''}</small>`;
+    if (q) amt.title = basisWords(q, a.ccy);
+  }
+  vault._now = a.now ? { q: a.now, ccy: a.ccy } : null; paintBalance();
+  if (a.note && vault.network === 'mainnet') { $('#activity-note').textContent = a.note; $('#activity-note').hidden = false; }
+}
 async function sync() {
   if (!vault) return;
   $('#vault-kind').textContent = vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
@@ -137,17 +201,18 @@ async function sync() {
     vault._coins = s.coins; vault._receive = s.receive; vault._receiveIndex = s.receive_index; vault._rotating = s.rotating; vault._height = s.height; vault._history = s.history; vault._nextChange = s.next_change; vault._gap = s.gap;
     if ($('#s-send').classList.contains('on')) renderCoins();
     if ($('#s-receive').classList.contains('on')) renderAddresses();
-    $('#balance').innerHTML = `${sats(s.balance)} <small>sats</small>`;
+    vault._balance = s.balance; vault._now = null; paintBalance();
     const unconf = s.coins.filter(c => c.height === 0).reduce((a, c) => a + c.value, 0);
     $('#balance-sub').textContent = `${s.coins.length} coin${s.coins.length === 1 ? '' : 's'}` + (unconf ? ` · ${sats(unconf)} unconfirmed` : ' · all confirmed');
     $('#conn').textContent = `Connected to ${s.servers.electrum.replace(/^\w+:\/\//, '')} · block ${sats(s.height)}`;
-    const tb = $('#activity'); tb.innerHTML = '';
-    if (!s.history.length) tb.innerHTML = '<tr><td class="muted" colspan="3">nothing yet</td></tr>';
+    const tb = $('#activity'); tb.innerHTML = ''; $('#activity-note').hidden = true;
+    if (!s.history.length) tb.innerHTML = '<tr><td class="muted" colspan="5">nothing yet</td></tr>';
     for (const h of s.history.slice().reverse()) {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td><a href="#" data-tx="${h.txid}" class="mono">${h.txid.slice(0, 16)}…${h.txid.slice(-6)}</a>${s.rotating ? ' <span class="muted">· ' + fmtIndex(h.index) + '</span>' : ''}</td><td>${lblHtml('tx:' + h.txid)}</td><td class="r ${h.height > 0 ? 'ok' : 'muted'}">${h.height > 0 ? 'confirmed · ' + sats(h.height) : 'unconfirmed'}</td>`;
+      const tr = document.createElement('tr'); tr.dataset.txid = h.txid;
+      tr.innerHTML = `<td class="when muted">${h.height > 0 ? '…' : 'pending'}</td><td><a href="#" data-tx="${h.txid}" class="mono">${h.txid.slice(0, 10)}…${h.txid.slice(-6)}</a>${s.rotating ? ' <span class="muted">· ' + fmtIndex(h.index) + '</span>' : ''}</td><td>${lblHtml('tx:' + h.txid)}</td><td class="r amt muted">…</td><td class="r ${h.height > 0 ? 'ok' : 'muted'}">${h.height > 0 ? 'confirmed · ' + sats(h.height) : 'unconfirmed'}</td>`;
       tb.appendChild(tr);
     }
+    fillActivity(vault.name, s);   // dates, amounts and values arrive after the balance; the balance never waits for them
     $('#send-have').textContent = `${sats(s.balance)} sats`;
   } catch (e) { $('#balance-sub').textContent = 'could not reach the server'; $('#conn').textContent = String(e); }
 }
@@ -317,8 +382,8 @@ function playQr() {
   const still = qrShow.still && qrShow.single, plain = qrShow.parts.length / 2;
   $('#qr-mode').hidden = !qrShow.single || qrShow.parts.length < 2; $('#qr-mode').textContent = still ? 'Show the animated code' : 'Show one still code';
   if (still || qrShow.parts.length < 2) { drawQr(qrShow.single || qrShow.parts[0]); $('#qr-title').textContent = 'One code'; $('#qr-note').textContent = 'UR crypto-psbt, the format Sparrow, Keystone, Passport, Jade and SeedSigner scan. Dense: hold the camera steady, or use the animated code.'; return; }
-  const tick = () => { const i = qrShow.i++ % qrShow.parts.length; drawQr(qrShow.parts[i]); $('#qr-title').textContent = i < plain ? `Part ${i + 1} of ${plain}` : `Part ${plain} of ${plain} · repair`; };
-  $('#qr-note').textContent = 'An animated UR crypto-psbt code, as Sparrow, Keystone, Passport, Jade and SeedSigner scan. Point the other wallet\'s camera at it and wait; it can join at any moment.';
+  const tick = () => { const i = qrShow.i++ % qrShow.parts.length; drawQr(qrShow.parts[i]); $('#qr-title').textContent = `Frame ${i + 1} of ${qrShow.parts.length}`; };
+  $('#qr-note').textContent = `Point the other wallet's camera at it and wait. Frames 1 to ${plain} carry the transaction; the rest are spare frames, each a mix of several parts, so a camera that starts late or misses one still finishes. UR crypto-psbt, as Sparrow, Keystone, Passport, Jade and SeedSigner scan.`;
   tick(); qrShow.timer = setInterval(tick, 260);
 }
 $('#export-qr').onclick = async () => { if (!$('#qr-panel').hidden) return stopQr(); try { const r = await invoke('spend_qr'); qrShow.parts = r.parts; qrShow.single = r.single; qrShow.still = !!r.single && r.parts.length < 2; qrShow.i = 0; $('#qr-panel').hidden = false; playQr(); } catch (e) { fail(e); } };
@@ -664,11 +729,17 @@ function renderSettings() {
   $('#c-electrum').value = store.settings.electrum || ''; $('#c-explorer').value = store.settings.explorer || '';
   $('#custom-card').style.opacity = store.settings.custom ? 1 : .6;
   $('#gap-in').value = store.settings.gap || 20;
+  $('#c-prices').value = store.settings.prices || '';
+  const dev = deviceCurrency(), cur = store.settings.fiat ?? 'auto';
+  $('#fiat-pick').innerHTML = `<option value="auto">Automatic: ${dev.ccy} · ${CCYS[dev.ccy] || ''}</option><option value="">None: show sats only</option>` + Object.entries(CCYS).map(([c, n]) => `<option value="${c}">${c} · ${n}</option>`).join('');
+  $('#fiat-pick').value = cur;
+  $('#fiat-note').textContent = (cur === 'auto' ? `Chosen because ${dev.why}. ` : '') + (store.settings.custom ? (store.settings.prices ? `Prices come from ${store.settings.prices}.` : 'You run your own servers and have named no price server, so no values are shown.') : 'Prices come from prices.mineracks.com: the hour of each transaction is asked for, never an address or an amount.') + ' Test networks show no values.';
   invoke('store_get').then(() => {}); $('#watch-log-path').textContent = '~/Library/Application Support/Any Two Keys/watch.log';
 }
 $('#net-pick').addEventListener('click', async (e) => { const o = e.target.closest('.opt'); if (!o) return; store = await invoke('settings_set', { network: o.dataset.net, custom: store.settings.custom, electrum: store.settings.electrum, explorer: store.settings.explorer }); toast('New vaults will use ' + o.dataset.net); renderSettings(); $('#welcome-net').textContent = store.settings.network; });
 $('#own-servers').onclick = async () => { store = await invoke('settings_set', { network: netName(), custom: !store.settings.custom, electrum: $('#c-electrum').value, explorer: $('#c-explorer').value }); renderSettings(); };
-$('#save-settings').onclick = async () => { try { store = await invoke('settings_set', { network: netName(), custom: true, electrum: $('#c-electrum').value, explorer: $('#c-explorer').value }); renderSettings(); toast('Using your servers'); } catch (e) { fail(e); } };
+$('#save-settings').onclick = async () => { try { store = await invoke('settings_set', { network: netName(), custom: true, electrum: $('#c-electrum').value, explorer: $('#c-explorer').value, prices: $('#c-prices').value }); renderSettings(); toast('Using your servers'); } catch (e) { fail(e); } };
+$('#fiat-pick').onchange = async () => { try { store = await invoke('settings_set', { network: netName(), custom: store.settings.custom, electrum: store.settings.electrum, explorer: store.settings.explorer, fiat: $('#fiat-pick').value }); renderSettings(); toast($('#fiat-pick').value ? 'Values shown in ' + fiatCcy() : 'Values hidden'); } catch (e) { fail(e); } };
 $('#test-servers').onclick = async () => { $('#test-out').textContent = 'testing…'; try { $('#test-out').textContent = await invoke('servers_test', { electrum: $('#c-electrum').value, explorer: $('#c-explorer').value }); } catch (e) { $('#test-out').textContent = String(e); } };
 
 // the background watcher saw a deposit, a spend or a confirmation: refresh what is on screen

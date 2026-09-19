@@ -216,3 +216,14 @@ tr:hover .lbl .pencil,.coin:hover .lbl .pencil,.lbl .pencil:focus-visible{color:
 .btn-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:10px}
 .btn-grid .btn{width:100%;white-space:nowrap;padding-inline:10px}
 .btn-grid .btn[hidden]{display:none}
+
+/* activity: when, how much, what it was worth */
+table.act td{vertical-align:top}
+table.act .when{white-space:nowrap;font-variant-numeric:tabular-nums}
+table.act .when small,table.act .amt small{display:block;color:var(--muted);font-size:12px;font-family:var(--serif,inherit)}
+table.act .amt{white-space:nowrap;font-family:var(--display);font-weight:600;font-variant-numeric:tabular-nums}
+table.act .amt.in{color:var(--signal)}
+.fiat{font-family:var(--display);font-size:15px;color:var(--muted);font-variant-numeric:tabular-nums}
+.big.switch{cursor:pointer;border-radius:6px}
+.big.switch:hover small{color:var(--gold)}
+.big:focus-visible{outline:3px solid var(--gold);outline-offset:4px}
