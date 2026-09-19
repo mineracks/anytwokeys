@@ -231,6 +231,6 @@ table.act .amt.in{color:var(--signal)}
 /* the keys as objects: a drawing of each model */
 .keyart{display:flex;align-items:center;justify-content:center;flex:0 0 34px;width:34px;min-height:44px}
 .nowkey{display:flex;align-items:center;gap:22px}
-.nowkey > svg{margin-inline:calc((54px - 100%) / 2)}
+.nowart{flex:0 0 60px;display:flex;justify-content:center;align-items:center}
 .nowkey + .nowkey{margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}
 .nowname{font-family:var(--display);font-weight:600;font-size:17px;color:var(--ink)}

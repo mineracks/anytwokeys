@@ -54,6 +54,10 @@ with sync_playwright() as p:
     boxes = [rows.nth(i).bounding_box() for i in range(3)]; cardbox = pg.locator("#seal-card").bounding_box()
     check("rows sit inside the card at sane heights", all(40 <= bx["height"] <= 90 and bx["x"] >= cardbox["x"] and bx["x"] + bx["width"] <= cardbox["x"] + cardbox["width"] + 1 for bx in boxes), str(boxes))
     pg.screenshot(path=str(out / "keys-seal.png"), full_page=True)
+    nb, cb = pg.locator("#keys-now .nowname").bounding_box(), pg.locator("#keys-now").bounding_box()
+    hit = pg.evaluate("() => { const r = document.querySelector('#keys-now .nowname').getBoundingClientRect(); const e = document.elementFromPoint(r.x + 8, r.y + r.height / 2); return !!e && !!e.closest('#keys-now'); }")
+    check("Plugged in now: the key's name is inside its card and is what a click there would hit", nb and cb["x"] <= nb["x"] and nb["x"] + nb["width"] <= cb["x"] + cb["width"] + 1 and hit and "YubiKey" in pg.inner_text("#keys-now"), f"name={nb} card={cb} hit={hit}")
+    ab = pg.locator("#keys-now svg").bounding_box(); check("and so is its drawing", ab and ab["x"] >= cb["x"] and ab["width"] > 10, str(ab))
     check("no page errors on Keys", not errs, "; ".join(errs))
     # ---- Restore: one port, two cards in turn ----
     pg2 = b.new_page(viewport=dict(width=1180, height=900)); errs2 = []
