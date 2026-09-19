@@ -349,3 +349,6 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .reveal:hover{border-color:var(--gold)}
 .secret[data-hidden="0"] .reveal{display:none}
 @media (prefers-reduced-motion: reduce){.secret #keys-desc{transition:none}}
+.btn.small-icon{width:32px;flex:0 0 32px;min-height:32px;height:32px;border-color:var(--line)}
+.btn.small-icon.done{border-color:var(--signal);color:var(--signal)}
+.keyrow.vk .who .mono{white-space:nowrap}

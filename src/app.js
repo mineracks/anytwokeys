@@ -663,11 +663,12 @@ const standIn = (line) => { let x = line.length * 2654435761 >>> 0; return line.
 function paintDesc() {
   const line = (vault && vault._recovery) || '', shown = !!hideDesc.shown;
   $('#keys-desc').textContent = shown ? line : standIn(line); $('#keys-desc').setAttribute('aria-hidden', String(!shown));
-  $('#desc-wrap').dataset.hidden = shown ? '0' : '1'; $('#desc-hide').hidden = !shown;
+  $('#desc-wrap').dataset.hidden = shown ? '0' : '1'; $('#desc-hide').hidden = !shown; $('#desc-copy').hidden = !shown;
 }
 function hideDesc() { clearTimeout(hideDesc.t); hideDesc.shown = false; paintDesc(); }
 $('#desc-reveal').onclick = () => { hideDesc.shown = true; paintDesc(); clearTimeout(hideDesc.t); hideDesc.t = setTimeout(hideDesc, 120000); };   // two minutes, then it goes away again
 $('#desc-hide').onclick = hideDesc;
+$('#desc-copy').onclick = async () => { try { await navigator.clipboard.writeText(vault._recovery || ''); const b = $('#desc-copy'); b.classList.add('done'); b.title = 'Copied'; toast('Recovery line copied'); setTimeout(() => { b.classList.remove('done'); b.title = 'Copy the recovery line'; }, 1800); } catch (e) { fail(e); } };
 window.addEventListener('blur', hideDesc);   // switching to another app is when a screen gets shared
 
 // Keys is ONE list. Each row is one key and says everything about it: what it is, whether it is plugged in, whether it
