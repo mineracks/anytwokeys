@@ -119,6 +119,17 @@ async fn node_status(network: String) -> R<NodeStatus> {
 #[tauri::command]
 fn device_locale() -> activity::Device { activity::device() }
 
+/// One transaction in full: decoded inputs and outputs, which are this vault's, which keys signed, the fee, and whether the
+/// node PROVED it is in its block. `height` is what the history said (0 = unconfirmed).
+#[tauri::command]
+async fn tx_detail(name: String, txid: String, height: i32) -> R<activity::Detail> {
+    block(move || {
+        let s = wallet::load();
+        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+        activity::detail(&v, &wallet::servers_for(&s, &v.network), &txid, height)
+    }).await
+}
+
 #[tauri::command]
 fn store_get() -> Store {
     wallet::load()
@@ -1047,7 +1058,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| { watch::start(app.handle().clone()); Ok(()) })
-        .invoke_handler(tauri::generate_handler![open_url, vault_activity, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])

@@ -93,6 +93,83 @@ pub fn build(v: &wallet::Vault, servers: &Servers, history: &[(String, i32)], cc
     Ok(Activity { ccy: ccy.to_string(), rows, now, note })
 }
 
+// ---------- one transaction, in full ----------
+#[derive(Debug, Serialize)]
+pub struct TxInput { pub outpoint: String, pub address: Option<String>, pub sats: Option<u64>, pub ours: Option<u32>, pub sequence: u32, pub witness: usize, pub signers: Vec<String> }
+#[derive(Debug, Serialize)]
+pub struct TxOutput { pub n: usize, pub address: Option<String>, pub sats: u64, pub kind: String, pub ours: Option<u32> }
+#[derive(Debug, Serialize)]
+pub struct Detail { pub txid: String, pub wtxid: String, pub version: i32, pub locktime: u32, pub size: usize, pub vsize: usize, pub weight: u64, pub rbf: bool,
+    pub net: i64, pub fee: Option<u64>, pub fee_rate: Option<f64>, pub height: i32, pub tip: u32, pub block: Option<String>, pub time: Option<u32>,
+    /// "proved" — the server's merkle path hashes up to the root in the block header; "unconfirmed"; or why it could not be shown
+    pub proof: String, pub position: Option<usize>, pub inputs: Vec<TxInput>, pub outputs: Vec<TxOutput>, pub hex: String }
+
+fn kind_of(spk: &bitcoin::ScriptBuf) -> &'static str {
+    if spk.is_p2wpkh() { "P2WPKH" } else if spk.is_p2wsh() { "P2WSH" } else if spk.is_p2tr() { "P2TR" } else if spk.is_p2pkh() { "P2PKH" } else if spk.is_p2sh() { "P2SH" } else if spk.is_op_return() { "OP_RETURN" } else { "other" }
+}
+
+/// Which of the vault's keys made the signatures on input `i`, read off the witness: each signature is checked against each
+/// key's child at that address until one verifies. Nothing is taken on trust from a label.
+fn signers_of(v: &wallet::Vault, tx: &Transaction, i: usize, index: u32, value: bitcoin::Amount) -> Vec<String> {
+    use bitcoin::sighash::{EcdsaSighashType, SighashCache};
+    let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+    let wit: Vec<&[u8]> = tx.input[i].witness.iter().collect();
+    let Some(script) = wit.last().filter(|_| v.keys.len() > 1).map(|b| bitcoin::ScriptBuf::from_bytes(b.to_vec())) else { return vec![] };
+    let children: Vec<(String, bitcoin::secp256k1::PublicKey)> = v.keys.iter().filter_map(|k| wallet::child_key(v, &k.pubkey, index).ok().map(|c| (k.name.clone(), c))).collect();
+    let mut cache = SighashCache::new(tx);
+    let mut out = Vec::new();
+    for sig in &wit[..wit.len() - 1] {
+        let Some((ty, der)) = sig.split_last() else { continue };   // the empty item multisig needs is skipped here
+        let (Ok(ty), Ok(parsed)) = (EcdsaSighashType::from_standard(*ty as u32), bitcoin::secp256k1::ecdsa::Signature::from_der(der)) else { continue };
+        let Ok(h) = cache.p2wsh_signature_hash(i, &script, value, ty) else { continue };
+        let msg = bitcoin::secp256k1::Message::from_digest(bitcoin::hashes::Hash::to_byte_array(h));
+        if let Some((name, _)) = children.iter().find(|(_, pk)| secp.verify_ecdsa(&msg, &parsed, pk).is_ok()) { out.push(name.clone()); }
+    }
+    out
+}
+
+pub fn detail(v: &wallet::Vault, servers: &Servers, txid: &str, height: i32) -> Result<Detail, String> {
+    use bitcoin::consensus::encode::serialize_hex;
+    let client = crate::chain::client(servers)?;
+    let id = Txid::from_str(txid).map_err(|_| "that is not a transaction id".to_string())?;
+    let tx = client.transaction_get(&id).map_err(|e| format!("transaction {}: {e}", &txid[..8.min(txid.len())]))?;
+    let net_kind = wallet::network_of(&v.network);
+    let addr = |spk: &bitcoin::ScriptBuf| bitcoin::Address::from_script(spk, net_kind).ok().map(|a| a.to_string());
+    let ours = |spk: &bitcoin::ScriptBuf| wallet::index_of_input(v, spk).ok().flatten();
+    // what each input spent: its parent has to be fetched. Past 40 inputs the amounts are left out rather than hammering the server.
+    let mut parents: HashMap<Txid, Transaction> = HashMap::new();
+    let (mut total_in, mut complete) = (0u64, tx.input.len() <= 40 && !tx.is_coinbase());
+    let mut inputs = Vec::new();
+    for (i, inp) in tx.input.iter().enumerate() {
+        let prev = if complete { if !parents.contains_key(&inp.previous_output.txid) { match client.transaction_get(&inp.previous_output.txid) { Ok(p) => { parents.insert(inp.previous_output.txid, p); } Err(_) => complete = false } }
+            parents.get(&inp.previous_output.txid).and_then(|p| p.output.get(inp.previous_output.vout as usize)).cloned() } else { None };
+        if prev.is_none() { complete = false; }
+        let mine = prev.as_ref().and_then(|o| ours(&o.script_pubkey));
+        if let Some(o) = &prev { total_in += o.value.to_sat(); }
+        let signers = match (&prev, mine) { (Some(o), Some(index)) => signers_of(v, &tx, i, index, o.value), _ => vec![] };
+        inputs.push(TxInput { outpoint: inp.previous_output.to_string(), address: prev.as_ref().and_then(|o| addr(&o.script_pubkey)), sats: prev.as_ref().map(|o| o.value.to_sat()),
+            ours: mine, sequence: inp.sequence.0, witness: inp.witness.len(), signers });
+    }
+    let outputs: Vec<TxOutput> = tx.output.iter().enumerate().map(|(n, o)| TxOutput { n, address: addr(&o.script_pubkey), sats: o.value.to_sat(), kind: kind_of(&o.script_pubkey).into(), ours: ours(&o.script_pubkey) }).collect();
+    let total_out: u64 = outputs.iter().map(|o| o.sats).sum();
+    let net = outputs.iter().filter(|o| o.ours.is_some()).map(|o| o.sats as i64).sum::<i64>() - inputs.iter().filter(|i| i.ours.is_some()).map(|i| i.sats.unwrap_or(0) as i64).sum::<i64>();
+    let fee = if complete { Some(total_in.saturating_sub(total_out)) } else { None };
+    let (weight, vsize) = (tx.weight().to_wu(), tx.vsize());
+    let tip = crate::chain::height(servers).unwrap_or(0);
+    // the server SAYS the transaction is in that block; the merkle path, hashed up to the header's root, shows it
+    let (mut block, mut time, mut position, mut proof) = (None, None, None, "unconfirmed".to_string());
+    if height > 0 {
+        proof = match (client.block_header(height as usize), client.transaction_get_merkle(&id, height as usize)) {
+            (Ok(h), Ok(m)) => { block = Some(h.block_hash().to_string()); time = Some(h.time); position = Some(m.pos);
+                if electrum_client::utils::validate_merkle_proof(&id, &h.merkle_root, &m) { "proved".into() } else { "the server's proof does NOT lead to that block's root".into() } }
+            (Ok(h), Err(e)) => { block = Some(h.block_hash().to_string()); time = Some(h.time); format!("the server gave no proof: {e}") }
+            (Err(e), _) => format!("the block header could not be fetched: {e}"),
+        };
+    }
+    Ok(Detail { txid: id.to_string(), wtxid: tx.compute_wtxid().to_string(), version: tx.version.0, locktime: tx.lock_time.to_consensus_u32(), size: tx.total_size(), vsize, weight,
+        rbf: tx.input.iter().any(|i| i.sequence.is_rbf()), net, fee, fee_rate: fee.map(|f| f as f64 / vsize.max(1) as f64), height, tip, block, time, proof, position, inputs, outputs, hex: serialize_hex(&tx) })
+}
+
 /// What the operating system says about where this person is: the Region setting, which does not move when they
 /// travel and does not depend on the language they read. macOS: AppleLocale ("en_AU", "en_US@rg=auzzzz",
 /// "en_AU@currency=USD"); elsewhere the POSIX locale ("en_AU.UTF-8").
@@ -150,6 +227,22 @@ mod tests {
 #[cfg(test)]
 mod live {
     /// Reads the real store and talks to the real servers: `cargo test live_activity -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_detail() {
+        let s = crate::wallet::load();
+        for v in s.vaults.iter() {
+            let servers = crate::wallet::servers_for(&s, &v.network);
+            let sc = crate::wallet::scan(v, &servers, s.settings.gap).unwrap();
+            let mut hist: Vec<(String, i32)> = sc.history.iter().map(|(t, h, _)| (t.clone(), *h)).collect(); hist.sort(); hist.dedup();
+            for (txid, h) in hist {
+                let d = super::detail(v, &servers, &txid, h).unwrap();
+                println!("== {} {} net={} fee={:?} rate={:?} vsize={} rbf={} proof={} pos={:?} block={:?}", v.name, &d.txid[..12], d.net, d.fee, d.fee_rate.map(|r| (r * 100.0).round() / 100.0), d.vsize, d.rbf, d.proof, d.position, d.block.as_deref().map(|b| &b[..16]));
+                for i in &d.inputs { println!("   in  {} ours={:?} sats={:?} signers={:?}", &i.outpoint[..12], i.ours, i.sats, i.signers); }
+                for o in &d.outputs { println!("   out #{} {} {} ours={:?}", o.n, o.kind, o.sats, o.ours); }
+            }
+        }
+    }
     #[test]
     #[ignore]
     fn live_activity() {

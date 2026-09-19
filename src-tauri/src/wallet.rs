@@ -441,6 +441,9 @@ fn signer_at(v: &Vault, base: &str, index: u32) -> Result<bitcoin::PublicKey, St
     Ok(bitcoin::PublicKey::new(match cc_of(v) { Some(cc) => crate::hd::child_pubkey(&cc, &q, index), None => q }))
 }
 
+/// The secp256k1 key that vault key `base` uses at address `index` (the key itself in a fixed vault).
+pub fn child_key(v: &Vault, base: &str, index: u32) -> Result<PublicKey, String> { signer_at(v, base, index).map(|k| k.inner) }
+
 pub fn ceremony(v: &Vault, psbt_b64: &str) -> Result<Ceremony, String> {
     let psbt = Psbt::from_str(psbt_b64.trim()).map_err(|e| format!("psbt: {e}"))?;
     let mut keys: Vec<KeySig> = v.keys.iter().map(|k| KeySig { name: k.name.clone(), pubkey: k.pubkey.clone(), signed: 0 }).collect();
