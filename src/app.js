@@ -67,6 +67,7 @@ function show(name) {
   if (checkNode.net !== (vault ? vault.network : store.settings.network)) checkNode();
   if (name !== 'restore') stopCam();
   if (name !== 'sign') stopQr();
+  if (name !== 'keys') hideDesc();
   if (name === 'home') sync();
   if (name === 'receive') { drawAddress(); renderAddresses(); }
   if (name === 'send') { closeBook(); paintTo(); loadFees(); if (vault && !vault._coins) sync().then(renderCoins); else renderCoins(); }
@@ -656,6 +657,19 @@ $('#bsms-export').onclick = async () => { try { toast('Saved ' + await invoke('b
 $('#bsms-open').onclick = async () => { try { const r = await invoke('bsms_import'); $('#desc-in').value = r.descriptor; readDescriptor(r.descriptor); if (r.first_address) toast('BSMS read. First address in the file: ' + r.first_address.slice(0, 12) + '…', 6000); } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
 
 // ---------- keys ----------
+// The recovery line says what the vault holds. Until Reveal is pressed the page carries a scrambled stand-in of the same
+// shape, blurred — so a screenshot, a screen share or a screen reader gets nothing. Copy and Save as PDF work without revealing.
+const standIn = (line) => { let x = line.length * 2654435761 >>> 0; return line.replace(/[a-z0-9]/gi, () => { x = (x * 1664525 + 1013904223) >>> 0; return '0123456789abcdef'[x >>> 28]; }); };
+function paintDesc() {
+  const line = (vault && vault._recovery) || '', shown = !!hideDesc.shown;
+  $('#keys-desc').textContent = shown ? line : standIn(line); $('#keys-desc').setAttribute('aria-hidden', String(!shown));
+  $('#desc-wrap').dataset.hidden = shown ? '0' : '1'; $('#desc-hide').hidden = !shown;
+}
+function hideDesc() { clearTimeout(hideDesc.t); hideDesc.shown = false; paintDesc(); }
+$('#desc-reveal').onclick = () => { hideDesc.shown = true; paintDesc(); clearTimeout(hideDesc.t); hideDesc.t = setTimeout(hideDesc, 120000); };   // two minutes, then it goes away again
+$('#desc-hide').onclick = hideDesc;
+window.addEventListener('blur', hideDesc);   // switching to another app is when a screen gets shared
+
 // Keys is ONE list. Each row is one key and says everything about it: what it is, whether it is plugged in, whether it
 // carries its share — and offers to seal it right there. (It used to be three cards listing the same three keys.)
 const keysBusy = () => $$('#keys-list input').some(i => i.value || i === document.activeElement);   // a poll must not wipe a half-typed PIN or name
@@ -671,7 +685,7 @@ function vaultKeyRow(k, i) {
 function renderKeys(force) {
   if (!vault) return;
   if (force || !keysBusy()) { $('#keys-list').innerHTML = vault.keys.map(vaultKeyRow).join(''); paintSealSlots(); }
-  invoke('vault_recovery', { name: vault.name }).then(l => { $('#keys-desc').textContent = l; vault._recovery = l; }); $('#keys-k').textContent = vault.threshold; $$('.keys-k2').forEach(e => e.textContent = vault.threshold);
+  invoke('vault_recovery', { name: vault.name }).then(l => { if (vault._recovery !== l) hideDesc.shown = false; vault._recovery = l; paintDesc(); }); $('#keys-k').textContent = vault.threshold; $$('.keys-k2').forEach(e => e.textContent = vault.threshold);
   renderKeysNow(); renderSeal();
 }
 function keyRow(name, sub, pub, state, idx) { const pen = idx === undefined ? '' : `<button class="pencil" data-edit-idx="${idx}" title="Rename this key"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>`; const pf = packedForm(pub); return `<div class="keyrow"><span class="keyart">${pf ? keyArt(pf, !!(pf & 0x80), 44) : '<svg width="22" height="22"><use href="#ring"/></svg>'}</span><div class="who"><div class="name"><span class="name-text">${name}</span>${pen}</div><div class="muted" style="font-size:13px">${pf ? modelName(pf, !!(pf & 0x80), !!(pf & 0x40)) + ' · ' : ''}${sub} · <span class="mono">${pub.slice(0, 12)}…</span></div></div><div class="state ${state}"><i></i>${{ ok: 'enrolled', off: 'not plugged in', here: 'plugged in' }[state]}</div></div>`; }

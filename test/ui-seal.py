@@ -15,7 +15,7 @@ const store = () => ({ vaults: [%(vault)s], settings: { network: 'signet', custo
 window.__forgot = 0;
 const H = { vault_rename: (a) => { window.__renamed = a.keyNames[1]; const st = store(); st.vaults[0].keys[1].name = a.keyNames[1]; return st; }, vault_forget: () => { __forgot++; return { vaults: [], settings: { network: 'signet', custom: false, electrum: '', explorer: '', gap: 20 }, seen: {} }; },
   store_get: store, cards_list: () => { if (!__state.cards.length) throw 'no YubiKey found'; return __state.cards; },
-  vault_recovery: () => 'wsh(sortedmulti(2,…))#abcdefgh cc=abab', vault_sync: () => { throw 'offline in the harness'; },
+  vault_recovery: () => 'wsh(sortedmulti(2,03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2,032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe,038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47))#5va274yx cc=' + 'ab'.repeat(32), vault_sync: () => { throw 'offline in the harness'; },
   seal_status: () => ({ id: 'deadbeef', threshold: 2, earlier: false, sealed: __state.sealed.length,
     keys: store().vaults[0].keys.map(k => ({ name: k.name, pubkey: k.pubkey, here: __state.cards.some(c => c.pubkey === k.pubkey), state: __state.sealed.includes(k.pubkey) ? 'sealed' : 'unsealed' })) }),
   seal_write: (a) => { if (a.adminPin !== '12345678') throw 'wrong PIN, 2 tries left'; const c = __state.cards.find(c => c.reader === a.reader); __state.sealed.push(c.pubkey); return 'sealed, 172 bytes on the key'; },
@@ -67,6 +67,17 @@ with sync_playwright() as p:
     pg.evaluate("__state.cards = __state.cards.concat([{ reader: 'z', serial: 999, version: 'OpenPGP 3.4', pubkey: '02' + 'cd'.repeat(32), touch: 'FIXED', form: 1, nfc: true, firmware: '5.7.1' }])"); pg.wait_for_timeout(2600)
     check("a key that is not this vault's is named once, under the list", "Also plugged in: YubiKey 5 NFC · serial 999" in pg.inner_text("#keys-now") and pg.locator("#s-keys .keyrow").count() == 3, pg.inner_text("#keys-now"))
     pg.locator("#s-keys .card").first.screenshot(path=str(out / "keys-one-list.png"))
+    # ---- the recovery line is not on screen, nor in the page, until asked for ----
+    real = pg.evaluate("vault._recovery"); shown = pg.inner_text("#keys-desc") if pg.locator("#keys-desc").count() else ""
+    dom = pg.evaluate("document.querySelector('#keys-desc').textContent")
+    check("at rest: blurred, and what is in the page is a stand-in of the same shape, not the line", pg.get_attribute("#desc-wrap", "data-hidden") == "1" and dom != real and len(dom) == len(real) and real not in pg.content() and "blur" in pg.evaluate("getComputedStyle(document.querySelector('#keys-desc')).filter"), dom[:40])
+    pg.locator("#desc-wrap").scroll_into_view_if_needed(); pg.locator("#desc-wrap").screenshot(path=str(out / "desc-hidden.png"))
+    pg.click("#desc-reveal"); pg.wait_for_timeout(300)
+    check("Reveal shows the real line, selectable, with a way to hide it", pg.evaluate("document.querySelector('#keys-desc').textContent") == real and pg.evaluate("getComputedStyle(document.querySelector('#keys-desc')).filter") == "none" and pg.locator("#desc-hide").is_visible() and not pg.locator("#desc-reveal").is_visible())
+    pg.click("#desc-hide"); check("Hide it again: gone from the page", pg.evaluate("document.querySelector('#keys-desc').textContent") != real)
+    pg.click("#desc-reveal"); pg.evaluate("show('home')"); pg.evaluate("show('keys')"); pg.wait_for_timeout(400)
+    check("leaving the screen hides it", pg.get_attribute("#desc-wrap", "data-hidden") == "1" and pg.evaluate("document.querySelector('#keys-desc').textContent") != real)
+    pg.click("#desc-reveal"); pg.evaluate("window.dispatchEvent(new Event('blur'))"); check("so does switching to another app", pg.get_attribute("#desc-wrap", "data-hidden") == "1")
     # ---- a destructive button at the very bottom of the page, in a short window: the question must not sit on top of it ----
     pg.set_viewport_size(dict(width=1180, height=620)); pg.evaluate("window.confirm = () => false")
     pg.locator("#forget-vault").scroll_into_view_if_needed(); pg.click("#forget-vault"); pg.wait_for_timeout(700)

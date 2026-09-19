@@ -109,7 +109,7 @@ body.resizing{cursor:col-resize;-webkit-user-select:none;user-select:none}
 #vault-tabs .nav span:last-child{white-space:nowrap;flex:0 0 auto}
 .nav{min-width:0}
 .keyrow .name{display:flex;align-items:center;gap:6px;min-height:24px}
-.keyrow .pencil{padding:3px;color:var(--line)}   /* always faintly there: it is the only way to rename a key now */
+.keyrow .pencil{padding:3px;color:var(--muted)}   /* always faintly there: it is the only way to rename a key now */
 .keyrow:hover .pencil,.keyrow .pencil:focus-visible{color:var(--muted)}
 .keyrow .pencil:hover{color:var(--gold)}
 .key-input{font-family:var(--display);font-weight:600;font-size:14px;border:0;border-bottom:2px solid var(--gold);background:transparent;color:var(--ink);padding:0 2px;min-width:100px;max-width:240px;outline:none}
@@ -340,3 +340,12 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .kseal input{width:130px;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font:inherit;font-size:14px}
 .kseal .btn{min-height:36px;padding:6px 14px;font-size:13px;white-space:nowrap}
 .pencil:hover,.pencil:focus-visible,.top:hover .pencil,.keyrow:hover .pencil{opacity:1}
+
+/* the recovery line shows what the vault holds: blurred, and not even in the page, until asked for */
+.secret{position:relative;border-radius:6px;min-height:60px;display:flex;align-items:center}
+.secret #keys-desc{overflow-wrap:anywhere;-webkit-user-select:text;user-select:text;transition:filter .2s}
+.secret[data-hidden="1"] #keys-desc{filter:blur(7px);opacity:.75;-webkit-user-select:none !important;user-select:none !important;pointer-events:none}
+.reveal{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);display:inline-flex;align-items:center;gap:9px;padding:10px 18px;border-radius:999px;border:1.5px solid var(--ink);background:var(--panel);color:var(--ink);font-family:var(--display);font-weight:600;font-size:14px;cursor:pointer;box-shadow:0 4px 14px rgba(30,27,23,.12)}
+.reveal:hover{border-color:var(--gold)}
+.secret[data-hidden="0"] .reveal{display:none}
+@media (prefers-reduced-motion: reduce){.secret #keys-desc{transition:none}}
