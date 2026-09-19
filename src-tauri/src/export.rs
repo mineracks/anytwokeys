@@ -221,7 +221,7 @@ mod tests {
         let keys = ["03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2", "032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe", "038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47"];
         let descriptor = crate::wallet::descriptor_for(2, &keys.iter().map(|k| k.to_string()).collect::<Vec<_>>()).unwrap();
         crate::wallet::Vault { name: "f\u{e4}mily vault".into(), network: "signet".into(), threshold: 2, keys: keys.iter().zip(["laptop", "keyring", "off-site"]).enumerate().map(|(i, (k, n))| crate::wallet::KeyRef { name: n.to_string(), serial: 27446043 + i as u32, pubkey: k.to_string() }).collect(),
-            descriptor, address: String::new(), created: 1_789_700_000, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), seal: Default::default() }
+            descriptor, address: String::new(), created: 1_789_700_000, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), labels_synced: 0, seal: Default::default() }
     }
     #[test]
     fn the_recovery_sheet_carries_the_line_the_restore_screen_reads() {

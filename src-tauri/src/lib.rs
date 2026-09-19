@@ -3,6 +3,7 @@ mod cards;
 mod chain;
 mod export;
 mod hd;
+mod labels;
 mod message;
 mod seal;
 mod wallet;
@@ -145,7 +146,7 @@ fn vault_create(name: String, threshold: usize, keys: Vec<NewKey>, rotating: Opt
     let mut v = Vault { name, network: s.settings.network.clone(), threshold,
         keys: keys.into_iter().map(|k| wallet::KeyRef { name: k.name, serial: k.serial, pubkey: k.pubkey.to_lowercase() }).collect(),
         descriptor, address: String::new(), created: now(),
-        chain_code: if rotating.unwrap_or(true) { Some(fresh_chain_code()) } else { None }, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), seal: Default::default() };
+        chain_code: if rotating.unwrap_or(true) { Some(fresh_chain_code()) } else { None }, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), labels_synced: 0, seal: Default::default() };
     v.address = wallet::address_at(&v, 0)?;
     let _ = network;
     s.vaults.push(v.clone());
@@ -163,7 +164,7 @@ fn descriptor_parse(text: String) -> R<Parsed> {
     let (threshold, keys) = wallet::keys_of(&desc_text)?;
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
     let tmp = Vault { name: String::new(), network: s.settings.network.clone(), threshold, keys: keys.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.clone() }).collect(),
-        descriptor: descriptor.clone(), address: String::new(), created: 0, chain_code: cc.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), seal: Default::default() };
+        descriptor: descriptor.clone(), address: String::new(), created: 0, chain_code: cc.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), labels_synced: 0, seal: Default::default() };
     let address = wallet::address_at(&tmp, 0)?;
     Ok(Parsed { threshold, keys, descriptor: wallet::recovery_line(&tmp), address, rotating: cc.is_some() })
 }
@@ -177,7 +178,7 @@ fn vault_restore(name: String, text: String, names: Vec<String>) -> R<Vault> {
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
     let mut v = Vault { name, network: s.settings.network.clone(), threshold,
         keys: keys.iter().enumerate().map(|(i, k)| wallet::KeyRef { name: names.get(i).cloned().unwrap_or_else(|| format!("key {}", i + 1)), serial: 0, pubkey: k.clone() }).collect(),
-        descriptor, address: String::new(), created: now(), chain_code: cc, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), seal: Default::default() };
+        descriptor, address: String::new(), created: now(), chain_code: cc, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), labels_synced: 0, seal: Default::default() };
     v.address = wallet::address_at(&v, 0)?;
     s.vaults.push(v.clone());
     wallet::save(&s)?;
@@ -217,7 +218,7 @@ fn vault_forget(name: String) -> R<Store> {
 }
 
 #[tauri::command]
-fn settings_set(network: String, custom: bool, electrum: String, explorer: String, gap: Option<u32>, fiat: Option<String>, prices: Option<String>) -> R<Store> {
+fn settings_set(network: String, custom: bool, electrum: String, explorer: String, gap: Option<u32>, fiat: Option<String>, prices: Option<String>, vss: Option<String>) -> R<Store> {
     let mut s = wallet::load();
     if network != "mainnet" && network != "signet" { return Err("network must be mainnet or signet".into()); }
     let gap = gap.unwrap_or(s.settings.gap);
@@ -226,7 +227,9 @@ fn settings_set(network: String, custom: bool, electrum: String, explorer: Strin
     if !(fiat.is_empty() || fiat == "auto" || (fiat.len() == 3 && fiat.chars().all(|c| c.is_ascii_uppercase()))) { return Err("the currency is a three-letter code, or empty for none".into()); }
     let prices = prices.map(|p| p.trim().to_string()).unwrap_or_else(|| s.settings.prices.clone());
     if !(prices.is_empty() || prices.starts_with("https://") || prices.starts_with("http://")) { return Err("the price server is a web address".into()); }
-    s.settings = wallet::Settings { network, custom, electrum: electrum.trim().to_string(), explorer: explorer.trim().to_string(), gap, fiat, prices };
+    let vss = vss.map(|v| v.trim().trim_end_matches('/').to_string()).unwrap_or_else(|| s.settings.vss.clone());
+    if !(vss.is_empty() || vss.starts_with("https://") || vss.starts_with("http://")) { return Err("the label host is a web address, or empty to keep labels on this computer only".into()); }
+    s.settings = wallet::Settings { network, custom, electrum: electrum.trim().to_string(), explorer: explorer.trim().to_string(), gap, fiat, prices, vss };
     wallet::save(&s)?;
     Ok(s)
 }
@@ -725,7 +728,7 @@ fn seal_vault(rec: &seal::Record, name: String, shares: Vec<String>, sealed: Vec
     let descriptor = wallet::descriptor_for(rec.threshold, &rec.pubkeys)?;
     let mut v = Vault { name, network: rec.network.clone(), threshold: rec.threshold,
         keys: rec.pubkeys.iter().zip(&rec.key_names).map(|(p, n)| wallet::KeyRef { name: n.clone(), serial: 0, pubkey: p.clone() }).collect(),
-        descriptor, address: String::new(), created: now(), chain_code: rec.chain_code.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(),
+        descriptor, address: String::new(), created: now(), chain_code: rec.chain_code.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), labels_synced: 0,
         seal: wallet::Seal { shares, sealed } };
     v.address = wallet::address_at(&v, 0)?;
     Ok(v)
@@ -805,12 +808,47 @@ fn seal_restore(id: String, name: String, found: Vec<Found>) -> R<Vault> {
 
 // ---------- labels (BIP 329) ----------
 #[tauri::command]
-fn label_set(name: String, key: String, label: String) -> R<Store> {
+async fn label_set(name: String, key: String, label: String) -> R<Store> {
     if !(key.starts_with("addr:") || key.starts_with("tx:") || key.starts_with("out:")) { return Err("label key must be addr:, tx: or out:".into()); }
-    wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == name) {
+    let nm = name.clone();
+    wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) {
         let label = label.trim().to_string();
+        v.label_meta.insert(key.clone(), now());
         if label.is_empty() { v.labels.remove(&key); } else { v.labels.insert(key, label); }
-    })
+    })?;
+    let _ = labels_sync(name).await;   // best effort; the status line on Home reports a host that could not be reached
+    Ok(wallet::load())
+}
+
+#[derive(Serialize, Clone)]
+struct LabelsStatus { backed_up: bool, host: String, count: usize, synced: u64, note: String }
+
+/// Pull, merge and push this vault's labels with the label host (labels.rs). Cheap when nothing changed.
+#[tauri::command]
+async fn labels_sync(name: String) -> R<LabelsStatus> {
+    let s = wallet::load();
+    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+    let host = s.settings.vss.clone();
+    let count = v.labels.len();
+    if host.is_empty() { return Ok(LabelsStatus { backed_up: false, host, count, synced: v.labels_synced, note: "Labels stay on this computer: no label host is set (App settings).".into() }); }
+    let root = match labels::root_from_shares(&v.seal.shares) { Some(r) => r, None => return Ok(LabelsStatus { backed_up: false, host, count, synced: 0, note: "Seal this vault's keys to back its labels up: they are encrypted so that any two keys bring them back with the vault.".into() }) };
+    let keys = labels::keys(&root);
+    let local = labels::Envelope::from_vault(&v.labels, &v.label_meta);
+    match labels::sync(&host, &keys, &local).await {
+        Ok((merged, _wrote)) => {
+            let t = now();
+            wallet::update(|s| if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == name) {
+                for (k, r) in &merged.records {
+                    let mine_t = *vm.label_meta.get(k).unwrap_or(&0);
+                    if r.t >= mine_t { vm.label_meta.insert(k.clone(), r.t); if r.label.is_empty() { vm.labels.remove(k); } else { vm.labels.insert(k.clone(), r.label.clone()); } }
+                }
+                vm.labels_synced = t;
+            })?;
+            let n = merged.records.values().filter(|r| !r.label.is_empty()).count();
+            Ok(LabelsStatus { backed_up: true, host, count: n, synced: t, note: String::new() })
+        }
+        Err(e) => Ok(LabelsStatus { backed_up: false, host, count, synced: v.labels_synced, note: e }),
+    }
 }
 
 #[tauri::command]
@@ -831,7 +869,7 @@ fn labels_export(name: String) -> R<String> {
 }
 
 #[tauri::command]
-fn labels_import(name: String) -> R<usize> {
+async fn labels_import(name: String) -> R<usize> {
     let path = rfd::FileDialog::new().set_title("Open a labels file (BIP 329)").add_filter("BIP 329 labels", &["jsonl", "json", "txt"]).pick_file().ok_or("cancelled")?;
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let mut got: Vec<(String, String)> = Vec::new();
@@ -843,7 +881,9 @@ fn labels_import(name: String) -> R<usize> {
     }
     let n = got.len();
     if n == 0 { return Err("no addr, tx or output labels in that file".into()); }
-    wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == name) { for (k, l) in got { v.labels.insert(k, l); } })?;
+    let nm = name.clone();
+    wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) { let t = now(); for (k, l) in got { v.label_meta.insert(k.clone(), t); v.labels.insert(k, l); } })?;
+    let _ = labels_sync(name).await;
     Ok(n)
 }
 
@@ -987,7 +1027,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| { watch::start(app.handle().clone()); Ok(()) })
-        .invoke_handler(tauri::generate_handler![open_url, vault_activity, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![open_url, vault_activity, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])

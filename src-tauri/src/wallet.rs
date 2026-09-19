@@ -31,6 +31,10 @@ pub struct Vault {
     #[serde(default)] pub scan_max_change: u32,
     /// BIP 329 style labels: "addr:<address>", "tx:<txid>", "out:<txid:vout>"
     #[serde(default)] pub labels: std::collections::HashMap<String, String>,
+    /// when each label last changed (unix seconds), including deletions, so two computers merge newest-wins (labels.rs)
+    #[serde(default)] pub label_meta: std::collections::HashMap<String, u64>,
+    /// last time the labels were confirmed in step with the label host; 0 = never
+    #[serde(default)] pub labels_synced: u64,
     #[serde(default)] pub seal: Seal,
 }
 
@@ -53,7 +57,10 @@ pub struct Settings {
     #[serde(default = "default_fiat")] pub fiat: String,
     /// price service when the person runs their own servers; empty there = no fiat
     #[serde(default)] pub prices: String,
+    /// the VSS host the vaults' labels are backed up to, encrypted; empty = off
+    #[serde(default = "default_vss")] pub vss: String,
 }
+pub fn default_vss() -> String { crate::labels::DEFAULT_VSS.into() }
 pub fn default_fiat() -> String { "auto".into() }   // "auto" = from the device's region; "" = none; else an ISO code
 pub fn default_gap() -> u32 { GAP }
 
@@ -498,7 +505,7 @@ mod tests {
         let keys = ["03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2", "032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe", "038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47"];
         let descriptor = descriptor_for(2, &keys.iter().map(|k| k.to_string()).collect::<Vec<_>>()).unwrap();
         Vault { name: "t".into(), network: "signet".into(), threshold: 2, keys: keys.iter().enumerate().map(|(i, k)| KeyRef { name: format!("k{i}"), serial: 0, pubkey: k.to_string() }).collect(),
-            descriptor, address: String::new(), created: 0, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), seal: Default::default() }
+            descriptor, address: String::new(), created: 0, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), labels_synced: 0, seal: Default::default() }
     }
     #[test]
     fn a_part_signed_psbt_from_elsewhere_is_checked_before_it_is_taken_in() {

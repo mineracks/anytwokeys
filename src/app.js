@@ -22,7 +22,7 @@ document.addEventListener('click', (e) => {
   const finish = async (save) => {
     if (done) return; done = true;
     const v = inp.value.trim();
-    if (save && v !== cur) { try { store = await invoke('label_set', { name: vault.name, key, label: v }); vault = store.vaults.find(x => x.name === vault.name) || vault; } catch (err) { fail(err); } }
+    if (save && v !== cur) { try { store = await invoke('label_set', { name: vault.name, key, label: v }); labelsSync(); vault = store.vaults.find(x => x.name === vault.name) || vault; } catch (err) { fail(err); } }
     box.innerHTML = `<span class="text">${esc(labelOf(key))}</span><button class="pencil" title="Label">${PEN}</button>`;
   };
   inp.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); finish(true); } if (ev.key === 'Escape') finish(false); });
@@ -68,7 +68,7 @@ function show(name) {
   if (name !== 'restore') stopCam();
   if (name !== 'sign') stopQr();
   if (name !== 'keys') hideDesc();
-  if (name === 'home') sync();
+  if (name === 'home') { sync(); labelsSync(); }
   if (name === 'receive') { drawAddress(); renderAddresses(); }
   if (name === 'send') { closeBook(); paintTo(); loadFees(); if (vault && !vault._coins) sync().then(renderCoins); else renderCoins(); }
   if (name === 'messages') renderMessages();
@@ -651,8 +651,26 @@ $('#gap-save').onclick = async () => {
   try { store = await invoke('settings_set', { network: netName(), custom: store.settings.custom, electrum: store.settings.electrum, explorer: store.settings.explorer, gap }); renderSettings(); toast(`Gap limit ${gap}`); if (vault) vault._coins = undefined; } catch (e) { fail(e); }
 };
 $('#notify-test').onclick = async () => { notice({ vault: vault ? vault.name : '', kind: 'in', title: (vault ? vault.name : 'vault') + ': 9,171 sats arrived', body: 'a sample · this is how the window itself tells you' }); try { $('#notify-out').textContent = await invoke('notify_test'); } catch (e) { $('#notify-out').textContent = String(e); } };
+// Labels backup: the status line under Activity says whether this vault's labels are on the label host (encrypted,
+// recoverable with any k keys) and why not otherwise. Cheap: one signed GET when nothing changed.
+async function labelsSync() {
+  if (!vault) return;
+  const me = vault.name;
+  try {
+    const st = await invoke('labels_sync', { name: me });
+    if (!vault || vault.name !== me) return;
+    store = await invoke('store_get'); vault = store.vaults.find(x => x.name === me) || vault;
+    const host = st.host.replace(/^https?:\/\//, '').replace(/\/vss$/, '');
+    $('#labels-out').textContent = st.backed_up
+      ? `${st.count} label${st.count === 1 ? '' : 's'} · backed up encrypted at ${host} · any ${vault.threshold} keys bring them back · in step ${new Date(st.synced * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+      : (st.note || 'Labels are this vault’s own notes on its addresses, coins and transactions (BIP 329, as Sparrow uses).');
+    if (st.backed_up) renderActivityLabels();
+  } catch (e) { $('#labels-out').textContent = 'Label backup: ' + String(e); }
+}
+function renderActivityLabels() { $$('#activity .lbl').forEach(box => { const key = box.dataset.lkey; const t = box.querySelector('.text'); if (t && t.textContent !== labelOf(key)) t.textContent = labelOf(key); }); }
+$('#labels-sync').onclick = () => { $('#labels-out').textContent = 'syncing labels…'; labelsSync(); };
 $('#labels-export').onclick = async () => { try { $('#labels-out').textContent = 'Saved ' + await invoke('labels_export', { name: vault.name }); } catch (e) { if (!/cancelled/.test(String(e))) $('#labels-out').textContent = String(e); } };
-$('#labels-import').onclick = async () => { try { const n = await invoke('labels_import', { name: vault.name }); store = await invoke('store_get'); vault = store.vaults.find(x => x.name === vault.name) || vault; $('#labels-out').textContent = `${n} label${n === 1 ? '' : 's'} imported into ${vault.name}.`; } catch (e) { if (!/cancelled/.test(String(e))) $('#labels-out').textContent = String(e); } };
+$('#labels-import').onclick = async () => { try { const n = await invoke('labels_import', { name: vault.name }); labelsSync(); store = await invoke('store_get'); vault = store.vaults.find(x => x.name === vault.name) || vault; $('#labels-out').textContent = `${n} label${n === 1 ? '' : 's'} imported into ${vault.name}.`; } catch (e) { if (!/cancelled/.test(String(e))) $('#labels-out').textContent = String(e); } };
 $('#bsms-export').onclick = async () => { try { toast('Saved ' + await invoke('bsms_export', { name: vault.name }), 6000); } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
 $('#bsms-open').onclick = async () => { try { const r = await invoke('bsms_import'); $('#desc-in').value = r.descriptor; readDescriptor(r.descriptor); if (r.first_address) toast('BSMS read. First address in the file: ' + r.first_address.slice(0, 12) + '…', 6000); } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
 
@@ -929,6 +947,7 @@ function renderSettings() {
   $('#custom-card').style.opacity = store.settings.custom ? 1 : .6;
   $('#gap-in').value = store.settings.gap || 20;
   $('#c-prices').value = store.settings.prices || '';
+  $('#c-vss').value = store.settings.vss ?? '';
   const dev = deviceCurrency(), cur = store.settings.fiat ?? 'auto';
   $('#fiat-pick').innerHTML = `<option value="auto">Automatic: ${dev.ccy} · ${CCYS[dev.ccy] || ''}</option><option value="">None: show sats only</option>` + Object.entries(CCYS).map(([c, n]) => `<option value="${c}">${c} · ${n}</option>`).join('');
   $('#fiat-pick').value = cur;
@@ -937,7 +956,7 @@ function renderSettings() {
 }
 $('#net-pick').addEventListener('click', async (e) => { const o = e.target.closest('.opt'); if (!o) return; store = await invoke('settings_set', { network: o.dataset.net, custom: store.settings.custom, electrum: store.settings.electrum, explorer: store.settings.explorer }); toast('New vaults will use ' + o.dataset.net); renderSettings(); $('#welcome-net').textContent = store.settings.network; });
 $('#own-servers').onclick = async () => { store = await invoke('settings_set', { network: netName(), custom: !store.settings.custom, electrum: $('#c-electrum').value, explorer: $('#c-explorer').value }); renderSettings(); };
-$('#save-settings').onclick = async () => { try { store = await invoke('settings_set', { network: netName(), custom: true, electrum: $('#c-electrum').value, explorer: $('#c-explorer').value, prices: $('#c-prices').value }); renderSettings(); toast('Using your servers'); } catch (e) { fail(e); } };
+$('#save-settings').onclick = async () => { try { store = await invoke('settings_set', { network: netName(), custom: true, electrum: $('#c-electrum').value, explorer: $('#c-explorer').value, prices: $('#c-prices').value, vss: $('#c-vss').value }); renderSettings(); toast('Using your servers'); } catch (e) { fail(e); } };
 $('#fiat-pick').onchange = async () => { try { store = await invoke('settings_set', { network: netName(), custom: store.settings.custom, electrum: store.settings.electrum, explorer: store.settings.explorer, fiat: $('#fiat-pick').value }); renderSettings(); toast($('#fiat-pick').value ? 'Values shown in ' + fiatCcy() : 'Values hidden'); } catch (e) { fail(e); } };
 $('#test-servers').onclick = async () => { $('#test-out').textContent = 'testing…'; try { $('#test-out').textContent = await invoke('servers_test', { electrum: $('#c-electrum').value, explorer: $('#c-explorer').value }); } catch (e) { $('#test-out').textContent = String(e); } };
 

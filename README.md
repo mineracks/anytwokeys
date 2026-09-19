@@ -8,6 +8,7 @@ Each YubiKey 5 (firmware 5.2.3+) generates a secp256k1 key in its OpenPGP signat
 - `src-tauri/src/cards.rs` — the OpenPGP APDUs over PC/SC (select, verify, generate, touch policy, sign a digest)
 - `src-tauri/src/wallet.rs` — descriptors, the vault store, building/signing/finalising spends (`bitcoin`, `miniscript`)
 - `src-tauri/src/chain.rs` — Electrum (coins, history, broadcast) and an esplora-style explorer (fees)
+- `src-tauri/src/labels.rs` — labels backed up encrypted on a VSS host (LDK Versioned Storage Service, default `vss.mineracks.com`). The key is HKDF over the vault's seal shares, so any k keys with their PINs bring the labels back with the vault and the host holds ciphertext it cannot open or tie to an address. Newest-wins merge between computers; deletions travel. Profile: mineracks-infrastructure `applications/vss/labels-profile.md`
 - `src/` — the UI
 
 ```

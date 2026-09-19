@@ -32,6 +32,14 @@ num-traits = "0.2"
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 ur = "0.5"
 qrcode = { version = "0.14", default-features = false }
+# labels backed up on a VSS host (labels.rs)
+vss-client-ng = { version = "0.6", default-features = false, features = ["sigs-auth"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 # macOS 26+/27 dyld refuses proc-macro dylibs that Cargo's release profile strips with rustc's own
 # Mach-O writer ("mis-aligned LINKEDIT string pool"). Leave build scripts and proc macros unstripped.

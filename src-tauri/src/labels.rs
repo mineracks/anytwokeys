@@ -1,0 +1,222 @@
+//! Labels, backed up encrypted on a VSS host (LDK Versioned Storage Service) so that any k of the vault's
+//! keys bring them back with the vault.
+//!
+//! The key is not a new secret. A sealed vault's shares (seal.rs) fix a random polynomial that only k cards
+//! with their PINs can rebuild, and every share of it is known to whoever holds k of them. HKDF over the
+//! full set of shares therefore gives a 32-byte root that is (a) the same on every computer that has
+//! restored the vault from its keys, (b) unknown to anyone with fewer than k keys, and (c) stored nowhere
+//! but the cards and this app's own store. From the root: an XChaCha20-Poly1305 content key, a secp256k1
+//! key that signs the VSS requests (the host sees only its public key, unrelated to the vault's), and the
+//! store id. The host holds ciphertext it cannot open and cannot link to any address or transaction.
+//!
+//! One object per vault, key "labels": magic ‖ 24-byte nonce ‖ ciphertext of the JSON envelope, with the
+//! store id as associated data. VSS versions give optimistic concurrency; a clash merges newest-wins per
+//! label and retries. Deleting a label leaves a dated tombstone so the deletion also wins on another machine.
+//! A vault that is not sealed has no shares and is not backed up; the UI says so.
+use bitcoin::secp256k1::SecretKey;
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use hkdf::Hkdf;
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+use std::time::Duration;
+use vss_client_ng::client::VssClient;
+use vss_client_ng::error::VssError;
+use vss_client_ng::headers::sigs_auth::SigsAuthProvider;
+use vss_client_ng::types::{GetObjectRequest, KeyValue, PutObjectRequest};
+use vss_client_ng::util::retry::{ExponentialBackoffRetryPolicy, RetryPolicy};
+
+pub const DEFAULT_VSS: &str = "https://vss.mineracks.com/vss";
+const MAGIC: &[u8; 5] = b"A2KL\x01";
+const OBJECT: &str = "labels";
+
+pub struct Keys { pub content: [u8; 32], pub auth: SecretKey, pub store: String }
+
+/// The root from a vault's shares (hex, one per key, in key order). None when the vault is not sealed.
+pub fn root_from_shares(shares: &[String]) -> Option<[u8; 32]> {
+    if shares.is_empty() { return None; }
+    let mut ikm = Vec::new();
+    for s in shares { ikm.extend(hex::decode(s).ok()?); }
+    let hk = Hkdf::<Sha256>::new(Some(b"a2k-labels-v1"), &ikm);
+    let mut root = [0u8; 32];
+    hk.expand(b"root", &mut root).ok()?;
+    Some(root)
+}
+
+pub fn keys(root: &[u8; 32]) -> Keys {
+    let hk = Hkdf::<Sha256>::from_prk(root).expect("32-byte prk");
+    let mut content = [0u8; 32]; hk.expand(b"content", &mut content).unwrap();
+    let mut store = [0u8; 16]; hk.expand(b"store", &mut store).unwrap();
+    // a 32-byte HKDF output is a valid secp256k1 secret with overwhelming probability; walk a counter for the rest
+    let mut i = 0u8;
+    let auth = loop {
+        let mut a = [0u8; 32]; hk.expand(&[b"auth".as_slice(), &[i]].concat(), &mut a).unwrap();
+        if let Ok(k) = SecretKey::from_slice(&a) { break k; }
+        i += 1;
+    };
+    Keys { content, auth, store: hex::encode(store) }
+}
+
+/// One label's state. `label` empty = deleted (a tombstone), `t` = when it last changed (unix seconds).
+/// `note` and `files` are reserved for longer text and attachments (kept as-is by older builds).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct Rec {
+    pub label: String,
+    pub t: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")] pub note: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub files: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct Envelope { pub v: u32, pub records: BTreeMap<String, Rec> }
+
+impl Envelope {
+    pub fn from_vault(labels: &HashMap<String, String>, meta: &HashMap<String, u64>) -> Envelope {
+        let mut records = BTreeMap::new();
+        for (k, l) in labels { records.insert(k.clone(), Rec { label: l.clone(), t: *meta.get(k).unwrap_or(&0), ..Default::default() }); }
+        for (k, t) in meta { if !labels.contains_key(k) { records.insert(k.clone(), Rec { label: String::new(), t: *t, ..Default::default() }); } }
+        Envelope { v: 1, records }
+    }
+    /// Newest wins per key; equal times prefer the non-empty (a label over its own tombstone).
+    pub fn merge(&self, other: &Envelope) -> Envelope {
+        let mut out = self.clone();
+        for (k, r) in &other.records {
+            match out.records.get(k) {
+                Some(mine) if mine.t > r.t || (mine.t == r.t && (!mine.label.is_empty() || r.label.is_empty())) => {}
+                _ => { out.records.insert(k.clone(), r.clone()); }
+            }
+        }
+        out.v = 1;
+        out
+    }
+    pub fn seal(&self, keys: &Keys, nonce: [u8; 24]) -> Result<Vec<u8>, String> {
+        let plain = serde_json::to_vec(self).map_err(|e| e.to_string())?;
+        let ct = XChaCha20Poly1305::new((&keys.content).into()).encrypt(XNonce::from_slice(&nonce), Payload { msg: &plain, aad: keys.store.as_bytes() }).map_err(|_| "could not encrypt the labels".to_string())?;
+        Ok([MAGIC.as_slice(), &nonce, &ct].concat())
+    }
+    pub fn open(keys: &Keys, wire: &[u8]) -> Result<Envelope, String> {
+        if wire.len() < MAGIC.len() + 24 + 16 || &wire[..MAGIC.len()] != MAGIC { return Err("the stored labels are not in a form this build knows".into()); }
+        let (nonce, ct) = wire[MAGIC.len()..].split_at(24);
+        let plain = XChaCha20Poly1305::new((&keys.content).into()).decrypt(XNonce::from_slice(nonce), Payload { msg: ct, aad: keys.store.as_bytes() }).map_err(|_| "the stored labels did not open with this vault's keys".to_string())?;
+        serde_json::from_slice(&plain).map_err(|e| e.to_string())
+    }
+}
+
+macro_rules! client { ($url:expr, $keys:expr) => {{
+    let headers = Arc::new(SigsAuthProvider::new($keys.auth, HashMap::new()));
+    // the default policy has NO attempt cap: a stale put retried forever until .with_max_attempts (found on the VSS probe)
+    let retry = ExponentialBackoffRetryPolicy::new(Duration::from_millis(200)).with_max_attempts(3);
+    VssClient::new_with_headers($url.to_string(), retry, headers)
+}} }
+
+/// Fetch the vault's object: (envelope, version) or None when nothing is stored yet.
+pub async fn fetch(url: &str, keys: &Keys) -> Result<Option<(Envelope, i64)>, String> {
+    let c = client!(url, keys);
+    match c.get_object(&GetObjectRequest { store_id: keys.store.clone(), key: OBJECT.into() }).await {
+        Ok(r) => { let kv = r.value.ok_or("empty answer from the label host")?; Ok(Some((Envelope::open(keys, &kv.value)?, kv.version))) }
+        Err(VssError::NoSuchKeyError(_)) => Ok(None),
+        Err(e) => Err(format!("label host: {e}")),
+    }
+}
+
+/// Put `env` as version `version` (0 = create). Err on a version clash, so the caller merges and retries.
+pub async fn store(url: &str, keys: &Keys, env: &Envelope, version: i64) -> Result<(), String> {
+    use bitcoin::secp256k1::rand::RngCore;
+    let mut nonce = [0u8; 24];
+    bitcoin::secp256k1::rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let wire = env.seal(keys, nonce)?;
+    let c = client!(url, keys);
+    c.put_object(&PutObjectRequest { store_id: keys.store.clone(), global_version: None, transaction_items: vec![KeyValue { key: OBJECT.into(), version, value: wire }], delete_items: vec![] })
+        .await.map(|_| ()).map_err(|e| match e { VssError::ConflictError(_) => "conflict".to_string(), e => format!("label host: {e}") })
+}
+
+/// Pull, merge, push if needed. Returns the merged envelope and whether the host was written.
+pub async fn sync(url: &str, keys: &Keys, local: &Envelope) -> Result<(Envelope, bool), String> {
+    for _ in 0..3 {
+        let (remote, version) = match fetch(url, keys).await? { Some((e, v)) => (Some(e), v), None => (None, 0) };
+        let merged = match &remote { Some(r) => r.merge(local), None => local.clone() };
+        if remote.as_ref() == Some(&merged) { return Ok((merged, false)); }
+        match store(url, keys, &merged, version).await {
+            Ok(()) => return Ok((merged, true)),
+            Err(e) if e == "conflict" => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err("the label host kept changing under us; try again".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::secp256k1::Secp256k1;
+    fn shares() -> Vec<String> { vec!["aa".repeat(40), "bb".repeat(40), "cc".repeat(40)] }
+    #[test]
+    fn the_root_is_a_function_of_the_shares_only() {
+        let a = root_from_shares(&shares()).unwrap();
+        assert_eq!(a, root_from_shares(&shares()).unwrap());
+        assert_ne!(a, root_from_shares(&vec!["aa".repeat(40), "bb".repeat(40), "cd".repeat(40)]).unwrap());
+        assert!(root_from_shares(&[]).is_none());
+        let k = keys(&a);
+        assert_eq!(k.store.len(), 32);
+        assert_ne!(k.content.to_vec(), k.auth.secret_bytes().to_vec());
+        let _ = k.auth.public_key(&Secp256k1::new());
+    }
+    #[test]
+    fn an_envelope_survives_seal_and_open_and_refuses_the_wrong_key() {
+        let k = keys(&root_from_shares(&shares()).unwrap());
+        let mut labels = HashMap::new(); labels.insert("tx:ab".to_string(), "rent".to_string());
+        let mut meta = HashMap::new(); meta.insert("tx:ab".to_string(), 5u64); meta.insert("addr:gone".to_string(), 7u64);
+        let e = Envelope::from_vault(&labels, &meta);
+        assert_eq!(e.records.len(), 2);
+        assert_eq!(e.records["addr:gone"].label, "");
+        let wire = e.seal(&k, [7u8; 24]).unwrap();
+        assert_eq!(Envelope::open(&k, &wire).unwrap(), e);
+        let other = keys(&root_from_shares(&vec!["aa".repeat(40), "bb".repeat(40), "cd".repeat(40)]).unwrap());
+        assert!(Envelope::open(&other, &wire).is_err());
+        assert!(Envelope::open(&k, &wire[..30]).is_err());
+    }
+    #[test]
+    fn merge_is_newest_wins_and_a_tombstone_beats_an_older_label() {
+        let r = |l: &str, t: u64| Rec { label: l.into(), t, ..Default::default() };
+        let mut a = Envelope { v: 1, records: BTreeMap::new() }; a.records.insert("x".into(), r("old", 1)); a.records.insert("y".into(), r("", 9)); a.records.insert("z".into(), r("keep", 3));
+        let mut b = Envelope { v: 1, records: BTreeMap::new() }; b.records.insert("x".into(), r("new", 2)); b.records.insert("y".into(), r("revived?", 4)); b.records.insert("w".into(), r("only b", 1));
+        let m = a.merge(&b);
+        assert_eq!(m.records["x"].label, "new"); assert_eq!(m.records["y"].label, ""); assert_eq!(m.records["z"].label, "keep"); assert_eq!(m.records["w"].label, "only b");
+        assert_eq!(a.merge(&b), b.merge(&a));
+    }
+}
+
+#[cfg(test)]
+mod live {
+    //! `A2K_VSS=https://vss.mineracks.com/vss cargo test live_round_trip -- --ignored`: two "computers" that share
+    //! nothing but the shares converge through the host, a deletion travels, and a stale write is merged, not lost.
+    use super::*;
+    #[test]
+    #[ignore]
+    fn live_round_trip() {
+        let url = std::env::var("A2K_VSS").expect("set A2K_VSS");
+        use bitcoin::secp256k1::rand::RngCore;
+        let mut r = [0u8; 40]; bitcoin::secp256k1::rand::rngs::OsRng.fill_bytes(&mut r);   // a fresh vault each run: no leftovers on the host
+        let shares = vec![hex::encode(&r[..20]), hex::encode(&r[20..])];
+        let k = keys(&root_from_shares(&shares).unwrap());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rec = |l: &str, t: u64| Rec { label: l.into(), t, ..Default::default() };
+        // computer A labels two things
+        let mut a = Envelope { v: 1, records: BTreeMap::new() }; a.records.insert("tx:1".into(), rec("rent", 10)); a.records.insert("addr:2".into(), rec("savings", 11));
+        let (m, wrote) = rt.block_on(sync(&url, &k, &a)).unwrap(); assert!(wrote); assert_eq!(m, a);
+        // computer B, empty, pulls everything
+        let (m, wrote) = rt.block_on(sync(&url, &k, &Envelope::default())).unwrap(); assert!(!wrote); assert_eq!(m, a);
+        // B deletes one and adds one; A meanwhile renamed the other: both survive
+        let mut b = m.clone(); b.records.insert("tx:1".into(), rec("", 20)); b.records.insert("out:3:0".into(), rec("coffee", 21));
+        let (_, wrote) = rt.block_on(sync(&url, &k, &b)).unwrap(); assert!(wrote);
+        a.records.insert("addr:2".into(), rec("savings (main)", 22));
+        let (m, wrote) = rt.block_on(sync(&url, &k, &a)).unwrap(); assert!(wrote);
+        assert_eq!(m.records["tx:1"].label, ""); assert_eq!(m.records["addr:2"].label, "savings (main)"); assert_eq!(m.records["out:3:0"].label, "coffee");
+        // the wrong key sees ciphertext it cannot open, and a fresh key sees nothing at all
+        let other = keys(&root_from_shares(&vec![hex::encode(&r[..20]), hex::encode(&r[..20])]).unwrap());
+        assert!(rt.block_on(fetch(&url, &other)).unwrap().is_none());
+        println!("store {} on {url}: 3 records, host wrote 3 times, converged", k.store);
+    }
+}
