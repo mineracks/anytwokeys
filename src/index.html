@@ -153,14 +153,12 @@
     </section>
 
     <section id="s-keys" class="screen">
-      <div class="card"><div class="row" style="justify-content:space-between"><div class="label">This vault's keys</div><button class="btn" id="edit-names" style="min-height:36px;padding:6px 14px;font-size:13px">Edit names</button></div><div id="keys-list" style="display:flex;flex-direction:column;gap:10px"></div>
+      <div class="card"><div class="row" style="justify-content:space-between"><div class="label">This vault’s keys</div><button class="btn" id="edit-names" style="min-height:36px;padding:6px 14px;font-size:13px">Edit names</button></div><div class="muted" style="font-size:14px" id="seal-note"></div><div id="keys-list" style="display:flex;flex-direction:column;gap:10px"></div><div class="muted" style="font-size:13px" id="keys-now" hidden></div>
         <div id="edit-panel" hidden style="display:flex;flex-direction:column;gap:12px;border-top:1px solid var(--line);padding-top:14px">
           <div class="field"><div class="label">Vault name</div><input id="edit-vault-name" style="max-width:320px"></div>
           <div id="edit-key-names" style="display:flex;flex-direction:column;gap:8px"></div>
           <div class="row"><button class="btn primary" id="save-names">Save</button><button class="btn" id="cancel-names">Cancel</button></div>
         </div></div>
-      <div class="card"><div class="label">Plugged in now</div><div id="keys-now">looking…</div></div>
-      <div class="card" id="seal-card"><div class="label">Sealed on the keys</div><div class="muted" style="font-size:13px" id="seal-note">looking…</div><div id="seal-list" style="display:flex;flex-direction:column;gap:10px"></div></div>
       <div class="card"><div class="label">Recovery line</div><div class="mono" id="keys-desc" style="-webkit-user-select:text;user-select:text"></div><div class="muted" style="font-size:13px">Once the keys are sealed, any <span id="keys-k"></span> of them rebuild the vault with nothing else. This line is the second way in, for a sheet or a safe: with it, any <span class="keys-k2"></span> keys rebuild the vault even if they were never sealed; the part before <span class="mono">cc=</span> is a standard descriptor Bitcoin Core imports for the first address. Keep it away from the PINs.</div><div class="row"><button class="btn" id="copy-desc">Copy descriptor</button><button class="btn" id="vault-pdf" title="A printable recovery sheet: the code the Restore screen scans, the keys, and the line as text">Save as PDF</button><button class="btn" id="bsms-export" title="Bitcoin Secure Multisig Setup descriptor record (BIP 129)">Save as BSMS</button><button class="btn" id="forget-vault" style="border-color:var(--no);color:var(--no)">Forget this vault on this computer</button></div></div>
     </section>
 

@@ -329,3 +329,13 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .node[data-state="offline"] i{background:var(--no)} .node[data-state="offline"]{color:var(--no)}
 .actfoot{border-top:1px solid var(--line);padding-top:12px;gap:10px}
 @media (prefers-reduced-motion: reduce){.node[data-state="checking"] i{animation:none}}
+
+/* Keys: one row per key, carrying everything about it — what it is, whether it is plugged in, whether it is sealed */
+.keyrow.vk{align-items:center;flex-wrap:wrap;row-gap:10px}
+.keyrow.vk .keyart{flex:0 0 40px;width:40px;min-height:52px}
+.keyrow.vk .who{flex:1 1 300px;min-width:0}
+.kright{display:flex;align-items:center;gap:18px;flex-wrap:wrap;justify-content:flex-end;margin-left:auto}
+.kright .state{white-space:nowrap}
+.kseal{display:flex;align-items:center;gap:8px;min-height:36px}
+.kseal input{width:130px;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font:inherit;font-size:14px}
+.kseal .btn{min-height:36px;padding:6px 14px;font-size:13px;white-space:nowrap}

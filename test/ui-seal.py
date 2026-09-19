@@ -13,7 +13,7 @@ window.__calls = [];
 window.__state = { cards: %(cards)s, sealed: [], found: [] };
 const store = () => ({ vaults: [%(vault)s], settings: { network: 'signet', custom: false, electrum: '', explorer: '', gap: 20 }, seen: {} });
 window.__forgot = 0;
-const H = { vault_forget: () => { __forgot++; return { vaults: [], settings: { network: 'signet', custom: false, electrum: '', explorer: '', gap: 20 }, seen: {} }; },
+const H = { vault_rename: (a) => { window.__renamed = a.keyNames[1]; const st = store(); st.vaults[0].keys[1].name = a.keyNames[1]; return st; }, vault_forget: () => { __forgot++; return { vaults: [], settings: { network: 'signet', custom: false, electrum: '', explorer: '', gap: 20 }, seen: {} }; },
   store_get: store, cards_list: () => { if (!__state.cards.length) throw 'no YubiKey found'; return __state.cards; },
   vault_recovery: () => 'wsh(sortedmulti(2,…))#abcdefgh cc=abab', vault_sync: () => { throw 'offline in the harness'; },
   seal_status: () => ({ id: 'deadbeef', threshold: 2, earlier: false, sealed: __state.sealed.length,
@@ -40,25 +40,32 @@ with sync_playwright() as p:
     pg.add_init_script(MOCK % dict(cards=json.dumps([card(0)]), vault=json.dumps(vault), keys=json.dumps(K)))
     pg.goto((src / "index.html").as_uri()); pg.wait_for_timeout(600)
     pg.evaluate("show('keys')"); pg.wait_for_timeout(500)
-    rows = pg.locator("#seal-list .keyrow")
+    rows = pg.locator("#keys-list .keyrow")
     check("three seal rows", rows.count() == 3, str(rows.count()))
-    check("plugged-in key offers a PIN field, absent keys do not", pg.locator("#seal-list input").count() == 1)
-    check("note explains sealing", "admin PIN" in pg.locator("#seal-note").inner_text())
-    pg.fill("#seal-list input", "1234"); pg.wait_for_timeout(2600)   # a card poll happens meanwhile
-    check("a poll does not wipe a half-typed PIN", pg.input_value("#seal-list input") == "1234")
+    check("plugged-in key offers a PIN field, absent keys do not", pg.locator("#keys-list [data-seal-pin]").count() == 1)
+    check("note explains sealing", "admin PIN" in pg.inner_text("#seal-note"))
+    pg.fill("#keys-list [data-seal-pin]", "1234"); pg.wait_for_timeout(2600)   # a card poll happens meanwhile
+    check("a poll does not wipe a half-typed PIN", pg.input_value("#keys-list [data-seal-pin]") == "1234")
     pg.click("[data-seal-go]"); pg.wait_for_timeout(400)
     check("wrong PIN is reported", "wrong PIN" in pg.locator("#toast").inner_text(), pg.locator("#toast").inner_text())
-    pg.fill("#seal-list input", "12345678"); pg.click("[data-seal-go]"); pg.wait_for_timeout(500)
-    check("row turns to sealed", "sealed" in rows.nth(0).locator(".state").inner_text())
-    check("note counts 1 of 3", "1 of 3" in pg.locator("#seal-note").inner_text(), pg.locator("#seal-note").inner_text())
+    pg.fill("#keys-list [data-seal-pin]", "12345678"); pg.click("[data-seal-go]"); pg.wait_for_timeout(500)
+    check("the row's seal slot turns to sealed, its PIN field gone", "sealed" in rows.nth(0).locator(".kseal").inner_text() and rows.nth(0).locator("[data-seal-pin]").count() == 0)
+    check("note counts 1 of 3", "1 of 3" in pg.inner_text("#seal-note"), pg.inner_text("#seal-note"))
     # nothing overflows or collapses: each row is one line high-ish and inside the card
-    boxes = [rows.nth(i).bounding_box() for i in range(3)]; cardbox = pg.locator("#seal-card").bounding_box()
-    check("rows sit inside the card at sane heights", all(40 <= bx["height"] <= 90 and bx["x"] >= cardbox["x"] and bx["x"] + bx["width"] <= cardbox["x"] + cardbox["width"] + 1 for bx in boxes), str(boxes))
+    boxes = [rows.nth(i).bounding_box() for i in range(3)]; cardbox = pg.locator("#keys-list").bounding_box()
+    check("rows sit inside the card at sane heights", all(40 <= bx["height"] <= 110 and bx["x"] >= cardbox["x"] and bx["x"] + bx["width"] <= cardbox["x"] + cardbox["width"] + 1 for bx in boxes), str(boxes))
     pg.screenshot(path=str(out / "keys-seal.png"), full_page=True)
-    nb, cb = pg.locator("#keys-now .nowname").bounding_box(), pg.locator("#keys-now").bounding_box()
-    hit = pg.evaluate("() => { const r = document.querySelector('#keys-now .nowname').getBoundingClientRect(); const e = document.elementFromPoint(r.x + 8, r.y + r.height / 2); return !!e && !!e.closest('#keys-now'); }")
-    check("Plugged in now: the key's name is inside its card and is what a click there would hit", nb and cb["x"] <= nb["x"] and nb["x"] + nb["width"] <= cb["x"] + cb["width"] + 1 and hit and "YubiKey" in pg.inner_text("#keys-now"), f"name={nb} card={cb} hit={hit}")
-    ab = pg.locator("#keys-now svg").bounding_box(); check("and so is its drawing", ab and ab["x"] >= cb["x"] and ab["width"] > 10, str(ab))
+    check("ONE list: a row per key, no second or third card repeating them", pg.locator("#s-keys .keyrow").count() == 3 and pg.locator("#seal-list").count() == 0 and "Plugged in now" not in pg.inner_text("#s-keys"))
+    r0 = rows.nth(0).inner_text()
+    check("the plugged-in key's row says what it is, that it is in, and that it is sealed", "YubiKey" in r0 and "plugged in" in r0 and "sealed" in r0 and "firmware" not in rows.nth(1).inner_text(), r0)
+    ab, cb = rows.nth(0).locator(".keyart svg").bounding_box(), pg.locator("#keys-list").bounding_box()
+    check("its drawing is inside the list and on top", ab and ab["x"] >= cb["x"] and ab["width"] > 10 and pg.evaluate("() => { const r = document.querySelector('#keys-list .keyart svg').getBoundingClientRect(); const e = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2); return !!e && !!e.closest('.keyart'); }"), str(ab))
+    check("a key that is away and unconfirmed says so without claiming it is unsealed", "seal not confirmed" in rows.nth(1).inner_text())
+    pg.click("#keys-list [data-edit-idx='1']"); pg.keyboard.type("spare"); pg.keyboard.press("Enter"); pg.wait_for_timeout(300)
+    check("renaming from the pencil still works with PIN fields in the list", pg.evaluate("window.__renamed") == "spare" or "spare" in pg.inner_text("#keys-list"), pg.inner_text("#keys-list")[:120])
+    pg.evaluate("__state.cards = __state.cards.concat([{ reader: 'z', serial: 999, version: 'OpenPGP 3.4', pubkey: '02' + 'cd'.repeat(32), touch: 'FIXED', form: 1, nfc: true, firmware: '5.7.1' }])"); pg.wait_for_timeout(2600)
+    check("a key that is not this vault's is named once, under the list", "Also plugged in: YubiKey 5 NFC · serial 999" in pg.inner_text("#keys-now") and pg.locator("#s-keys .keyrow").count() == 3, pg.inner_text("#keys-now"))
+    pg.locator("#s-keys .card").first.screenshot(path=str(out / "keys-one-list.png"))
     # ---- a destructive button at the very bottom of the page, in a short window: the question must not sit on top of it ----
     pg.set_viewport_size(dict(width=1180, height=620)); pg.evaluate("window.confirm = () => false")
     pg.locator("#forget-vault").scroll_into_view_if_needed(); pg.click("#forget-vault"); pg.wait_for_timeout(700)
