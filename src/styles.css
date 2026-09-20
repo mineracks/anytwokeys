@@ -442,3 +442,11 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .ctx-facts{flex:1 1 320px;min-width:0;display:flex;flex-direction:column;gap:14px}
 #tx-place-form{flex:1 1 300px} #tx-place{flex:1 1 200px;min-width:0;padding:8px 12px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font-family:var(--serif);font-size:14px;min-height:38px}
 #tx-place:focus{outline:3px solid var(--gold-soft);border-color:var(--gold)}
+
+/* search-as-you-type for a place */
+.combo{position:relative;flex:1 1 200px;min-width:0;display:flex} .combo input{flex:1}
+#tx-place-list{position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:20;margin:0;padding:4px;list-style:none;background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.14);max-height:300px;overflow:auto}
+#tx-place-list li{padding:8px 10px;border-radius:6px;cursor:pointer} #tx-place-list li[aria-selected="true"],#tx-place-list li:hover{background:var(--gold-soft)}
+#tx-place-list b{display:block;font-family:var(--display);font-weight:600;font-size:14px} #tx-place-list small{display:block;color:var(--muted);font-size:12.5px}
+#tx-place-list .foot{padding:6px 10px 4px;font-family:var(--display);font-size:11px;color:var(--muted);cursor:default;background:none}
+#tx-place-list.up{top:auto;bottom:calc(100% + 4px);box-shadow:0 -10px 30px rgba(0,0,0,.14)}

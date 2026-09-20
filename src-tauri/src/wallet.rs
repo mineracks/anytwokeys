@@ -71,7 +71,10 @@ pub struct Settings {
     #[serde(default)] pub location_exact: bool,
     /// the one .pmtiles file the little maps are drawn from; empty = no maps
     #[serde(default = "default_tiles")] pub tiles: String,
+    /// the place-search host (Photon); empty = the place is plain text
+    #[serde(default = "default_geocode")] pub geocode: String,
 }
+pub fn default_geocode() -> String { "https://geocode.mineracks.com".into() }
 pub fn default_tiles() -> String { "https://tiles.mineracks.com/planet.pmtiles".into() }
 pub fn default_vss() -> String { crate::labels::DEFAULT_VSS.into() }
 pub fn default_fiat() -> String { "auto".into() }   // "auto" = from the device's region; "" = none; else an ISO code

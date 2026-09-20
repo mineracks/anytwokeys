@@ -367,7 +367,7 @@ function renderCtx() {
   const rows = [];
   if (gone) rows.push(['Place', ctx && ctx.removed ? 'Removed from this record.' : 'Nothing was recorded: this transaction was already here before the app began keeping this.']);
   else {
-    rows.push(['Place', ctx.place ? esc(ctx.place) + (ctx.named ? '<small>as you named it</small>' : ctx.geo ? `<small>${ctx.geo.lat.toFixed(3)}, ${ctx.geo.lon.toFixed(3)} · to about ${sats(Math.round(ctx.geo.acc))} m</small>` : '') : (ctx.geo ? `${ctx.geo.lat.toFixed(3)}, ${ctx.geo.lon.toFixed(3)}` : `not kept<small>${store.settings.location ? 'this computer did not know where it was at that moment' : 'places are off in App settings'}</small>`)]);
+    rows.push(['Place', ctx.place ? esc(ctx.place) + (ctx.picked ? '<small>as you chose it from the search</small>' : ctx.named ? '<small>as you named it</small>' : ctx.geo ? `<small>${ctx.geo.lat.toFixed(3)}, ${ctx.geo.lon.toFixed(3)} · to about ${sats(Math.round(ctx.geo.acc))} m</small>` : '') : (ctx.geo ? `${ctx.geo.lat.toFixed(3)}, ${ctx.geo.lon.toFixed(3)}` : `not kept<small>${store.settings.location ? 'this computer did not know where it was at that moment' : 'places are off in App settings'}</small>`)]);
     if (dev) rows.push([how + ' on', `${esc(dev.name || 'this computer')}<small>${[dev.model, dev.os, dev.app ? 'Any Two Keys ' + dev.app : ''].filter(Boolean).map(esc).join(' · ')}</small>`]);
     if (ctx.how === 'seen') rows.push(['', '<small>A deposit happens wherever the sender was. This is only where this computer was when it noticed.</small>']);
   }
@@ -387,8 +387,32 @@ async function paintMap(ctx) {
   box.innerHTML = `<img alt="Map of the area around ${esc(ctx.place || 'the place this was recorded')}" src="${pic.png}"><span class="zone" style="width:${ring}px;height:${ring}px"></span><span class="pin"></span><small>© OpenStreetMap</small>`;
   box.hidden = false;
 }
-const ctxSave = async (args) => { const name = vault.name; try { store = await invoke('ctx_set', { name, txid: txView.txid, remove: false, place: null, ...args }); vault = store.vaults.find(v => v.name === name) || vault; renderCtx(); } catch (e) { fail(e); } };
-$('#tx-place-form').onsubmit = (e) => { e.preventDefault(); const p = $('#tx-place').value.trim(); if (p) ctxSave({ place: p }); };
+const ctxSave = async (args) => { const name = vault.name; try { store = await invoke('ctx_set', { name, txid: txView.txid, remove: false, place: null, lat: null, lon: null, ...args }); vault = store.vaults.find(v => v.name === name) || vault; renderCtx(); } catch (e) { fail(e); } };
+// Search as you type — but not as you TYPE: the question goes (from Rust, to our own server only) once the typing has
+// stopped for a moment and there are four characters to ask about. Choosing an answer keeps its position too, so the
+// record gets a map; pressing Save keeps exactly the words in the box and no position.
+const placeUI = { seq: 0, hits: [], at: -1, t: null };
+function placeList(hits, note) {
+  const ul = $('#tx-place-list'); placeUI.hits = hits; placeUI.at = -1;
+  ul.innerHTML = hits.map((h, i) => `<li role="option" id="tx-place-opt-${i}" data-i="${i}" aria-selected="false"><b>${esc(h.label)}</b><small>${esc(h.detail)}</small></li>`).join('') + (hits.length || note ? `<li class="foot" aria-hidden="true">${esc(note || 'Asked of our own server only · © OpenStreetMap')}</li>` : '');
+  ul.hidden = !(hits.length || note); $('#tx-place').setAttribute('aria-expanded', ul.hidden ? 'false' : 'true');
+  // it opens where there is room to read it: below the field, or above it near the bottom of the window
+  if (!ul.hidden) { ul.classList.remove('up'); const r = $('#tx-place').getBoundingClientRect(); if (innerHeight - r.bottom < Math.min(300, ul.scrollHeight) + 12 && r.top > innerHeight - r.bottom) ul.classList.add('up'); }
+}
+const placeMark = (i) => { placeUI.at = i; $$('#tx-place-list li[role=option]').forEach((li, k) => { li.setAttribute('aria-selected', k === i ? 'true' : 'false'); if (k === i) li.scrollIntoView({ block: 'nearest' }); }); $('#tx-place').setAttribute('aria-activedescendant', i >= 0 ? 'tx-place-opt-' + i : ''); };
+const placeChoose = (h) => { clearTimeout(placeUI.t); placeUI.seq++; placeList([]); $('#tx-place').value = h.label; ctxSave({ place: [h.label, h.detail.replace(/ · /g, ', ')].filter(Boolean).join(', ').slice(0, 120), lat: h.lat, lon: h.lon }); };
+$('#tx-place').addEventListener('input', () => {
+  clearTimeout(placeUI.t); const q = $('#tx-place').value.trim(), mine = ++placeUI.seq;
+  if (q.length < 4) return placeList([]);
+  placeUI.t = setTimeout(async () => { let hits = [], note = ''; try { hits = await invoke('place_search', { q }); if (!hits.length) note = 'Nothing found by that. Save keeps your own words.'; } catch (e) { note = String(e) + '. Save keeps your own words.'; }
+    if (mine === placeUI.seq && document.activeElement === $('#tx-place')) placeList(hits, note); }, 350);
+});
+$('#tx-place').addEventListener('keydown', (e) => { const n = placeUI.hits.length; if ($('#tx-place-list').hidden) return;
+  if (e.key === 'ArrowDown' && n) { e.preventDefault(); placeMark((placeUI.at + 1) % n); } else if (e.key === 'ArrowUp' && n) { e.preventDefault(); placeMark((placeUI.at - 1 + n) % n); }
+  else if (e.key === 'Enter' && placeUI.at >= 0) { e.preventDefault(); placeChoose(placeUI.hits[placeUI.at]); } else if (e.key === 'Escape') { e.stopPropagation(); placeList([]); } });
+$('#tx-place-list').addEventListener('mousedown', (e) => { const li = e.target.closest('li[role=option]'); if (li) { e.preventDefault(); placeChoose(placeUI.hits[+li.dataset.i]); } });
+$('#tx-place').addEventListener('blur', () => setTimeout(() => placeList([]), 120));
+$('#tx-place-form').onsubmit = (e) => { e.preventDefault(); clearTimeout(placeUI.t); placeUI.seq++; placeList([]); const p = $('#tx-place').value.trim(); if (p) ctxSave({ place: p }); };
 askTwice($('#tx-ctx-remove'), 'The place comes off this record, here and in your backup. It cannot be worked out again later.', 'Remove it', () => ctxSave({ remove: true }));
 
 // ---------- App settings › Places ----------

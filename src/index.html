@@ -221,7 +221,7 @@
         <div class="rec-head"><h3 id="tx-ctx-h">Where and on what</h3><span class="rec-saved" id="tx-ctx-when"></span></div>
         <div class="ctx-grid"><div class="ctx-map" id="tx-map" hidden></div>
           <div class="ctx-facts"><dl class="tx-dl" id="tx-ctx-dl"></dl>
-            <div class="row" id="tx-ctx-acts"><form class="row" id="tx-place-form" style="gap:8px"><input id="tx-place" maxlength="80" placeholder="Name the place yourself: Home, the office in Geneva…" aria-label="Name the place"><button class="btn small" type="submit">Save</button></form><button class="btn small" type="button" id="tx-ctx-remove">Remove the place</button></div></div></div>
+            <div class="row" id="tx-ctx-acts"><form class="row" id="tx-place-form" style="gap:8px"><div class="combo"><input id="tx-place" maxlength="120" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="tx-place-list" aria-autocomplete="list" placeholder="An address or a place, or your own word for it: Home" aria-label="The place"><ul id="tx-place-list" role="listbox" hidden></ul></div><button class="btn small" type="submit">Save</button></form><button class="btn small" type="button" id="tx-ctx-remove">Remove the place</button></div></div></div>
       </div>
       <details class="card quiet" id="tx-chain"><summary><span class="label">Blockchain data</span><span class="muted sumhint" id="tx-proof"></span></summary><div id="tx-chain-body"></div></details>
     </section>

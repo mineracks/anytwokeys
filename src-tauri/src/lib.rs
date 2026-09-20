@@ -10,6 +10,7 @@ mod location;
 mod lockbox;
 mod map;
 mod message;
+mod places;
 mod seal;
 mod wallet;
 
@@ -234,7 +235,7 @@ fn vault_forget(name: String) -> R<Store> {
 }
 
 #[tauri::command]
-fn settings_set(app: tauri::AppHandle, network: String, custom: bool, electrum: String, explorer: String, gap: Option<u32>, fiat: Option<String>, prices: Option<String>, vss: Option<String>, tiles: Option<String>, location: Option<bool>, location_exact: Option<bool>) -> R<Store> {
+fn settings_set(app: tauri::AppHandle, network: String, custom: bool, electrum: String, explorer: String, gap: Option<u32>, fiat: Option<String>, prices: Option<String>, vss: Option<String>, tiles: Option<String>, geocode: Option<String>, location: Option<bool>, location_exact: Option<bool>) -> R<Store> {
     let mut s = wallet::load()?;
     if network != "mainnet" && network != "signet" { return Err("network must be mainnet or signet".into()); }
     let gap = gap.unwrap_or(s.settings.gap);
@@ -248,7 +249,7 @@ fn settings_set(app: tauri::AppHandle, network: String, custom: bool, electrum: 
     let (location, location_exact) = (location.unwrap_or(s.settings.location), location_exact.unwrap_or(s.settings.location_exact));
     let tiles = tiles.map(|v| v.trim().to_string()).unwrap_or_else(|| s.settings.tiles.clone());
     if !(tiles.is_empty() || tiles.starts_with("https://")) { return Err("the map host is an https address of a .pmtiles file, or empty for no maps".into()); }
-    s.settings = wallet::Settings { network, custom, electrum: electrum.trim().to_string(), explorer: explorer.trim().to_string(), gap, fiat, prices, vss, location, location_exact, tiles };
+    s.settings = wallet::Settings { network, custom, electrum: electrum.trim().to_string(), explorer: explorer.trim().to_string(), gap, fiat, prices, vss, location, location_exact, tiles, geocode: geocode.map(|v| v.trim().trim_end_matches('/').to_string()).filter(|v| v.is_empty() || v.starts_with("https://")).unwrap_or_else(|| s.settings.geocode.clone()) };
     wallet::save(&s)?;
     location_follow(&app, location);
     Ok(s)
@@ -837,9 +838,21 @@ async fn tx_map(lat: f64, lon: f64, dark: bool) -> R<Option<MapPicture>> {
     }).await
 }
 
-/// The person's own say over a transaction's place: take it off, or name it themselves.
+/// Search-as-you-type for a place, on OUR server only (places.rs). Ranked near this computer when Places is on —
+/// by a position rounded to about 11 km.
 #[tauri::command]
-fn ctx_set(name: String, txid: String, remove: bool, place: Option<String>) -> R<Store> {
+async fn place_search(q: String) -> R<Vec<places::Hit>> {
+    block(move || {
+        let s = wallet::load()?;
+        let near = if s.settings.location { location::fresh(now(), 3600).map(|f| (f.lat, f.lon)) } else { None };
+        places::search(&s.settings.geocode, &q, near)
+    }).await
+}
+
+/// The person's own say over a transaction's place: take it off, name it themselves, or choose it from the search
+/// (which brings its position with it, so the record gets a map).
+#[tauri::command]
+fn ctx_set(name: String, txid: String, remove: bool, place: Option<String>, lat: Option<f64>, lon: Option<f64>) -> R<Store> {
     let t = now();
     wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == name) {
         let key = format!("tx:{txid}");
@@ -848,7 +861,10 @@ fn ctx_set(name: String, txid: String, remove: bool, place: Option<String>) -> R
         else if let Some(p) = place.as_ref().map(|p| p.trim().chars().take(80).collect::<String>()).filter(|p| !p.is_empty()) {
             let mut ctx = rec.get("ctx").cloned().filter(|c| c.get("removed").is_none()).unwrap_or_else(|| context::build("noted", None, false, t));
             ctx["place"] = p.into(); ctx["named"] = true.into();
-            if let Some(o) = ctx.as_object_mut() { o.remove("geo"); }   // the person's word for the place replaces the coordinates
+            match (lat, lon) {
+                (Some(la), Some(lo)) if (-90.0..=90.0).contains(&la) && (-180.0..=180.0).contains(&lo) => { let r = |v: f64| if s.settings.location_exact { (v * 1e6).round() / 1e6 } else { (v * 1e3).round() / 1e3 }; ctx["geo"] = serde_json::json!({ "lat": r(la), "lon": r(lo), "acc": 0 }); ctx["picked"] = true.into(); }
+                _ => { if let Some(o) = ctx.as_object_mut() { o.remove("geo"); o.remove("picked"); } }   // the person's own word for the place replaces any coordinates
+            }
             rec.insert("ctx".into(), ctx);
         }
         v.label_meta.insert(key, t);   // an edit: it has to win over the copy on the host
@@ -1394,7 +1410,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![location_status, location_preview, ctx_set, tx_map, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![location_status, location_preview, place_search, ctx_set, tx_map, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
