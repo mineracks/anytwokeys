@@ -67,11 +67,14 @@ pub struct Rec {
     pub t: u64,
     #[serde(default, skip_serializing_if = "String::is_empty")] pub note: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")] pub files: Vec<serde_json::Value>,
+    /// Everything else in the record, known to this build or not (`ctx`: where, on what and with which keys). A build
+    /// that drops what it does not understand erases it for every computer on its next write, so nothing is dropped.
+    #[serde(flatten)] pub more: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Rec {
     /// A record with a label, a note or a file is alive; one with none of them is a deletion that travels.
-    pub fn live(&self) -> bool { !self.label.is_empty() || !self.note.is_empty() || !self.files.is_empty() }
+    pub fn live(&self) -> bool { !self.label.is_empty() || !self.note.is_empty() || !self.files.is_empty() || !self.more.is_empty() }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -79,22 +82,27 @@ pub struct Envelope { pub v: u32, pub records: BTreeMap<String, Rec> }
 
 impl Envelope {
     /// Everything this computer holds for each key. A key that only appears in `meta` is a tombstone.
-    pub fn from_vault(labels: &HashMap<String, String>, meta: &HashMap<String, u64>, notes: &HashMap<String, String>, files: &HashMap<String, Vec<serde_json::Value>>) -> Envelope {
+    pub fn from_vault(labels: &HashMap<String, String>, meta: &HashMap<String, u64>, notes: &HashMap<String, String>, files: &HashMap<String, Vec<serde_json::Value>>, more: &HashMap<String, serde_json::Map<String, serde_json::Value>>) -> Envelope {
         let mut records = BTreeMap::new();
-        for k in labels.keys().chain(notes.keys()).chain(files.keys()).chain(meta.keys()) {
+        for k in labels.keys().chain(notes.keys()).chain(files.keys()).chain(more.keys()).chain(meta.keys()) {
             records.entry(k.clone()).or_insert_with(|| Rec { label: labels.get(k).cloned().unwrap_or_default(), t: *meta.get(k).unwrap_or(&0),
-                note: notes.get(k).cloned().unwrap_or_default(), files: files.get(k).cloned().unwrap_or_default() });
+                note: notes.get(k).cloned().unwrap_or_default(), files: files.get(k).cloned().unwrap_or_default(), more: more.get(k).cloned().unwrap_or_default() });
         }
         Envelope { v: 1, records }
     }
-    /// Newest wins per key; equal times prefer the non-empty (a label over its own tombstone).
+    /// Newest wins per key; equal times prefer the non-empty (a label over its own tombstone). The extra fields are
+    /// written once and never edited (a removal is itself a value), so the winner also keeps any the loser had and it
+    /// lacks: where a payment was made must not vanish because a label was typed on another computer first.
     pub fn merge(&self, other: &Envelope) -> Envelope {
         let mut out = self.clone();
         for (k, r) in &other.records {
-            match out.records.get(k) {
-                Some(mine) if mine.t > r.t || (mine.t == r.t && (mine.live() || !r.live())) => {}
-                _ => { out.records.insert(k.clone(), r.clone()); }
-            }
+            let (mut win, lose) = match out.records.get(k) {
+                Some(mine) if mine.t > r.t || (mine.t == r.t && (mine.live() || !r.live())) => (mine.clone(), r),
+                Some(mine) => (r.clone(), &mine.clone()),
+                None => { out.records.insert(k.clone(), r.clone()); continue }
+            };
+            for (f, val) in &lose.more { if !win.more.contains_key(f) { win.more.insert(f.clone(), val.clone()); } }
+            out.records.insert(k.clone(), win);
         }
         out.v = 1;
         out
@@ -176,7 +184,7 @@ mod tests {
         let k = keys(&root_from_shares(&shares()).unwrap());
         let mut labels = HashMap::new(); labels.insert("tx:ab".to_string(), "rent".to_string());
         let mut meta = HashMap::new(); meta.insert("tx:ab".to_string(), 5u64); meta.insert("addr:gone".to_string(), 7u64);
-        let e = Envelope::from_vault(&labels, &meta, &HashMap::new(), &HashMap::new());
+        let e = Envelope::from_vault(&labels, &meta, &HashMap::new(), &HashMap::new(), &HashMap::new());
         assert_eq!(e.records.len(), 2);
         assert_eq!(e.records["addr:gone"].label, "");
         let wire = e.seal(&k, [7u8; 24]).unwrap();
@@ -191,7 +199,7 @@ mod tests {
         let mut notes = HashMap::new(); notes.insert("tx:cd".to_string(), "paid the plumber; invoice attached".to_string());
         let mut files = HashMap::new(); files.insert("tx:cd".to_string(), vec![serde_json::json!({"name": "invoice.pdf", "sha256": "ab", "size": 9})]);
         let mut meta = HashMap::new(); meta.insert("tx:cd".to_string(), 5u64);
-        let mine = Envelope::from_vault(&HashMap::new(), &meta, &notes, &files);
+        let mine = Envelope::from_vault(&HashMap::new(), &meta, &notes, &files, &HashMap::new());
         assert!(mine.records["tx:cd"].live() && mine.records["tx:cd"].label.is_empty());
         // same second, the other computer deleted its (empty) label: the live record wins the tie, both ways round
         let mut theirs = Envelope { v: 1, records: BTreeMap::new() }; theirs.records.insert("tx:cd".into(), Rec { t: 5, ..Default::default() });
@@ -199,10 +207,31 @@ mod tests {
         assert_eq!(theirs.merge(&mine).records["tx:cd"].files.len(), 1);
         // an older build's label edit here must not wipe what another computer attached: from_vault carries all of it
         let mut labels = HashMap::new(); labels.insert("tx:cd".to_string(), "plumber".to_string()); meta.insert("tx:cd".to_string(), 9);
-        let newer = Envelope::from_vault(&labels, &meta, &notes, &files);
+        let newer = Envelope::from_vault(&labels, &meta, &notes, &files, &HashMap::new());
         let out = theirs.merge(&mine).merge(&newer);
         assert_eq!((out.records["tx:cd"].label.as_str(), out.records["tx:cd"].note.len() > 0, out.records["tx:cd"].files.len()), ("plumber", true, 1));
     }
+    #[test]
+    fn what_this_build_does_not_know_rides_through_and_where_survives_a_later_label() {
+        // a record written by a NEWER build, with a field this one has never heard of
+        let wire = r#"{"v":1,"records":{"tx:ab":{"label":"rent","t":5,"ctx":{"place":"near Brisbane"},"from_the_future":[1,2]}}}"#;
+        let theirs: Envelope = serde_json::from_str(wire).unwrap();
+        assert_eq!(theirs.records["tx:ab"].more["from_the_future"], serde_json::json!([1, 2]));
+        // it comes into the vault's maps and goes out again whole
+        let more: HashMap<String, serde_json::Map<String, serde_json::Value>> = theirs.records.iter().map(|(k, r)| (k.clone(), r.more.clone())).collect();
+        let (mut labels, mut meta) = (HashMap::new(), HashMap::new()); labels.insert("tx:ab".to_string(), "rent".to_string()); meta.insert("tx:ab".to_string(), 5u64);
+        let again = serde_json::to_value(Envelope::from_vault(&labels, &meta, &HashMap::new(), &HashMap::new(), &more)).unwrap();
+        assert_eq!(again, serde_json::from_str::<serde_json::Value>(wire).unwrap());
+        // a label typed LATER on a computer that never saw the place wins the record and keeps the place
+        let mut later = Envelope { v: 1, records: BTreeMap::new() }; later.records.insert("tx:ab".into(), Rec { label: "rent, March".into(), t: 9, ..Default::default() });
+        for m in [later.merge(&theirs), theirs.merge(&later)] { assert_eq!(m.records["tx:ab"].label, "rent, March"); assert_eq!(m.records["tx:ab"].more["ctx"]["place"], "near Brisbane"); }
+        // a removal is a value, so it is not undone by the copy that still has the place
+        let mut removed = later.clone(); removed.records.get_mut("tx:ab").unwrap().more.insert("ctx".into(), serde_json::json!({ "removed": true }));
+        assert_eq!(removed.merge(&theirs).records["tx:ab"].more["ctx"], serde_json::json!({ "removed": true }));
+        // a record that is only a place is alive
+        assert!(Rec { more: theirs.records["tx:ab"].more.clone(), ..Default::default() }.live());
+    }
+
     #[test]
     fn merge_is_newest_wins_and_a_tombstone_beats_an_older_label() {
         let r = |l: &str, t: u64| Rec { label: l.into(), t, ..Default::default() };

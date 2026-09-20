@@ -66,7 +66,10 @@ fn hold(k: [u8; 32]) { if let Ok(mut g) = KEY.write() { *g = Some(k); } }
 // ------------------------------------------------------------------ files --
 
 pub fn dir() -> PathBuf {
-    let dir = match std::env::var_os("A2K_DATA_DIR") { Some(d) => PathBuf::from(d), None => dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("Any Two Keys") };
+    // a test never looks at this computer's real folder: what is or is not sealed there is none of its business
+    #[cfg(test)] let home = std::env::temp_dir().join("a2k-tests-empty");
+    #[cfg(not(test))] let home = dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("Any Two Keys");
+    let dir = match std::env::var_os("A2K_DATA_DIR") { Some(d) => PathBuf::from(d), None => home };
     std::fs::create_dir_all(&dir).ok();
     dir
 }
