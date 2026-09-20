@@ -64,6 +64,7 @@ dependencies = [
  "bitcoin",
  "block2",
  "chacha20poly1305",
+ "core-foundation",
  "dirs",
  "electrum-client",
  "flate2",

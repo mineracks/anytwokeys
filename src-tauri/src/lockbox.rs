@@ -127,6 +127,8 @@ pub struct Slots {
     #[serde(default = "yes")] pub touch: bool,
     /// lock again after this many idle minutes; 0 = stay open until the app quits
     #[serde(default)] pub idle_minutes: u32,
+    /// lock when the Mac's screen locks (which is also what a sleeping Mac wakes to)
+    #[serde(default = "yes")] pub with_screen: bool,
     #[serde(default)] pub cards: Vec<CardSlot>,
     /// every readable file has been sealed and removed
     #[serde(default)] pub migrated: bool,
@@ -223,7 +225,7 @@ pub fn migrate() -> Result<Migration, String> {
             proves(&k)?;
             hold(k);
         }
-        let s = Slots { v: 1, id: hex::encode(random::<8>()), touch: true, idle_minutes: 0, cards: vec![], migrated: false };
+        let s = Slots { v: 1, id: hex::encode(random::<8>()), touch: true, idle_minutes: 0, with_screen: true, cards: vec![], migrated: false };
         save_slots(&s)?; s
     } };
     let mut m = Migration::default();
@@ -290,6 +292,19 @@ pub mod mac {
         security_framework::passwords::set_generic_password(SERVICE, ACCOUNT, k).map_err(|e| format!("the Keychain would not store the key: {e}"))
     }
 
+    /// Is the Mac's screen locked right now? From the window server's description of this login session.
+    pub fn screen_locked() -> bool {
+        use core_foundation::base::{CFType, TCFType};
+        use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
+        use core_foundation::string::CFString;
+        #[link(name = "CoreGraphics", kind = "framework")]
+        extern "C" { fn CGSessionCopyCurrentDictionary() -> CFDictionaryRef; }
+        let d = unsafe { CGSessionCopyCurrentDictionary() };
+        if d.is_null() { return false; }
+        let d: CFDictionary<CFString, CFType> = unsafe { CFDictionary::wrap_under_create_rule(d) };
+        d.find(CFString::from_static_string("CGSSessionScreenIsLocked")).and_then(|v| v.downcast::<core_foundation::boolean::CFBoolean>()).map(bool::from).unwrap_or(false)
+    }
+
     /// Ask the system to confirm someone entitled is here: Touch ID, an unlocked Apple Watch, or the Mac's password.
     /// This is a gate the app puts in front of its own Keychain read, not something the Keychain enforces: that needs
     /// the data-protection keychain, which a Developer ID build without a provisioning profile cannot use.
@@ -314,6 +329,7 @@ pub mod mac {
 
 #[cfg(not(target_os = "macos"))]
 pub mod mac {
+    pub fn screen_locked() -> bool { false }
     pub fn get() -> Result<Option<[u8; 32]>, String> { Ok(None) }
     pub fn set(_: &[u8; 32]) -> Result<(), String> { Err("no system keychain on this platform yet: add one of your keys instead".into()) }
     pub fn presence(_: &str) -> Result<(), String> { Ok(()) }
@@ -386,14 +402,14 @@ mod tests {
         // a crash between sealing and removing: both files there, same content → the second run finishes the job
         let d2 = d.join("crash"); std::fs::create_dir_all(&d2).unwrap(); std::env::set_var("A2K_DATA_DIR", &d2);
         std::fs::write(d2.join("store.json"), store).unwrap();
-        save_slots(&Slots { v: 1, id: "0011223344556677".into(), touch: true, idle_minutes: 0, cards: vec![], migrated: false }).unwrap();
+        save_slots(&Slots { v: 1, id: "0011223344556677".into(), touch: true, idle_minutes: 0, with_screen: true, cards: vec![], migrated: false }).unwrap();
         write_sealed(&d2.join("store.enc"), "store", store.as_bytes()).unwrap();
         assert!(crate::wallet::save(&crate::wallet::load().unwrap()).is_err(), "nothing is saved while the move is half done");
         assert!(migrate().unwrap().store && !d2.join("store.json").exists());
         // …and if the two DIFFER, neither is touched
         let d3 = d.join("differ"); std::fs::create_dir_all(&d3).unwrap(); std::env::set_var("A2K_DATA_DIR", &d3);
         std::fs::write(d3.join("store.json"), store).unwrap();
-        save_slots(&Slots { v: 1, id: "0011223344556677".into(), touch: true, idle_minutes: 0, cards: vec![], migrated: false }).unwrap();
+        save_slots(&Slots { v: 1, id: "0011223344556677".into(), touch: true, idle_minutes: 0, with_screen: true, cards: vec![], migrated: false }).unwrap();
         write_sealed(&d3.join("store.enc"), "store", br#"{"vaults":[]}"#).unwrap();
         assert!(migrate().is_err() && d3.join("store.json").exists() && d3.join("store.enc").exists());
         std::env::remove_var("A2K_DATA_DIR"); std::env::remove_var("A2K_STORE_KEY");
@@ -415,6 +431,11 @@ mod tests {
         assert!(!d.join("store.json").exists() && d.join("store.enc").exists());
         println!("{m:?}: {} vaults, {} labels, {} notes read back the same", after.vaults.len(), after.vaults.iter().map(|v| v.labels.len()).sum::<usize>(), after.vaults.iter().map(|v| v.notes.len()).sum::<usize>());
     }
+
+    /// `cargo test screen_state -- --ignored --nocapture`, once with the screen open and once from a `sleep 10 &&` with it locked.
+    #[test]
+    #[ignore]
+    fn screen_state() { println!("screen locked: {}", mac::screen_locked()); }
 
     #[test]
     fn a_sealed_file_opens_only_with_its_key_its_role_and_unchanged() {

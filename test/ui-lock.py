@@ -8,7 +8,7 @@ out = pathlib.Path(sys.argv[1]); out.mkdir(parents=True, exist_ok=True)
 K = ["03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2", "032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe"]
 MOCK = """
 window.__calls = []; window.__args = {};
-const S = Object.assign({ sealed: true, unlocked: false, finished: true, touch: true, idle_minutes: 0, cards: [{ pubkey: '%(k0)s', name: 'laptop', added: 1789000000 }], moved: null }, %(status)s);
+const S = Object.assign({ sealed: true, unlocked: false, finished: true, touch: true, idle_minutes: 0, with_screen: true, cards: [{ pubkey: '%(k0)s', name: 'laptop', added: 1789000000 }], moved: null }, %(status)s);
 window.S = S; window.__cards = %(cards)s; window.__macFails = %(macfails)s;
 const V = { name: 'SECRET VAULT NAME', network: 'mainnet', threshold: 2, keys: [{ name: 'laptop', serial: 1, pubkey: '%(k0)s' }, { name: 'off-site', serial: 2, pubkey: '%(k1)s' }], descriptor: 'wsh(…)', address: 'bc1qexample', labels: {}, seal: { shares: [], sealed: [] } };
 const store = () => ({ forms: {}, contacts: [], vaults: [V], settings: { network: 'mainnet', custom: false, electrum: '', explorer: '', gap: 20, fiat: 'AUD', prices: '' }, seen: {}, last_psbt: null, last_message: null });
@@ -19,7 +19,7 @@ const H = {
   lock_open_mac: () => { if (__macFails) throw 'Authentication was cancelled by the user.'; S.unlocked = true; return { ...S }; },
   lock_open_card: (a) => { if (a.pin !== '123456') throw 'wrong PIN: 2 tries left'; S.unlocked = true; return { ...S }; },
   lock_now: () => { S.unlocked = false; try { sessionStorage.setItem('locked-now', '1'); } catch {} return { ...S }; },
-  lock_settings: (a) => { if (a.touch !== undefined && a.touch !== null) S.touch = a.touch; if (a.idleMinutes !== undefined) S.idle_minutes = a.idleMinutes; return { ...S }; },
+  lock_settings: (a) => { if (a.touch !== undefined && a.touch !== null) S.touch = a.touch; if (a.idleMinutes !== undefined) S.idle_minutes = a.idleMinutes; if (a.withScreen !== undefined) S.with_screen = a.withScreen; return { ...S }; },
   lock_add_card: (a) => { S.cards.push({ pubkey: '%(k1)s', name: 'off-site', added: 1789900000 }); return { ...S }; },
   lock_remove_card: (a) => { S.cards = S.cards.filter(c => c.pubkey !== a.pubkey); return { ...S }; },
   cards_list: () => __cards, store_get: () => { locked(); return store(); }, device_locale: () => ({ locale: 'en_AU', currency: 'AUD' }),
@@ -62,6 +62,7 @@ with sync_playwright() as p:
     check("the other plugged-in key is offered, with its vault name", "off-site" in pg.inner_text("#lock-slots form") and pg.locator("#lock-slots form input").count() == 1)
     pg.locator("#lock-card").screenshot(path=str(out / "lock-settings.png"))
     pg.click("#lock-touch"); pg.wait_for_timeout(200); check("the Touch ID switch turns off", pg.evaluate("__args.lock_settings.touch") is False and pg.get_attribute("#lock-touch", "aria-checked") == "false")
+    pg.click("#lock-screen"); pg.wait_for_timeout(200); check("locking with the Mac's screen is on by default and can be turned off", pg.evaluate("S.with_screen") is False and pg.get_attribute("#lock-screen", "aria-checked") == "false")
     pg.select_option("#lock-idle", "15"); pg.wait_for_timeout(200); check("and the idle lock is set", pg.evaluate("S.idle_minutes") == 15)
     pg.fill("#lock-slots form input", "123456"); pg.keyboard.press("Enter"); pg.wait_for_timeout(400)
     check("a second key is added with its PIN", pg.locator("#lock-slots .slot:not(.add)").count() == 2 and "2 of your keys" in pg.inner_text("#lock-state"))

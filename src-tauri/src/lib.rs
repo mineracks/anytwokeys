@@ -858,12 +858,12 @@ fn ctx_set(name: String, txid: String, remove: bool, place: Option<String>) -> R
 #[derive(serde::Serialize)]
 struct LockCard { pubkey: String, name: String, added: u64 }
 #[derive(serde::Serialize)]
-struct LockStatus { sealed: bool, unlocked: bool, finished: bool, touch: bool, idle_minutes: u32, cards: Vec<LockCard>, moved: Option<lockbox::Migration> }
+struct LockStatus { sealed: bool, unlocked: bool, finished: bool, touch: bool, idle_minutes: u32, with_screen: bool, cards: Vec<LockCard>, moved: Option<lockbox::Migration> }
 
 fn lock_state(moved: Option<lockbox::Migration>) -> R<LockStatus> {
     let s = lockbox::slots()?;
     Ok(LockStatus { sealed: lockbox::sealed_mode(), unlocked: lockbox::unlocked(), finished: s.as_ref().map(|s| s.migrated).unwrap_or(false), touch: s.as_ref().map(|s| s.touch).unwrap_or(true),
-        idle_minutes: s.as_ref().map(|s| s.idle_minutes).unwrap_or(0), cards: s.map(|s| s.cards.into_iter().map(|c| LockCard { pubkey: c.pubkey, name: c.name, added: c.added }).collect()).unwrap_or_default(), moved })
+        idle_minutes: s.as_ref().map(|s| s.idle_minutes).unwrap_or(0), with_screen: s.as_ref().map(|s| s.with_screen).unwrap_or(true), cards: s.map(|s| s.cards.into_iter().map(|c| LockCard { pubkey: c.pubkey, name: c.name, added: c.added }).collect()).unwrap_or_default(), moved })
 }
 
 #[tauri::command]
@@ -924,12 +924,13 @@ fn lock_remove_card(pubkey: String) -> R<LockStatus> {
 
 /// Touch ID on or off, and the idle lock. Turning the prompt OFF is itself something only the person at the Mac may do.
 #[tauri::command]
-async fn lock_settings(touch: Option<bool>, idle_minutes: Option<u32>) -> R<LockStatus> {
+async fn lock_settings(touch: Option<bool>, idle_minutes: Option<u32>, with_screen: Option<bool>) -> R<LockStatus> {
     block(move || {
         lockbox::key()?;
         let mut s = lockbox::slots()?.ok_or("nothing is sealed yet")?;
         if let Some(t) = touch { if s.touch && !t { lockbox::mac::presence("stop asking for Touch ID when Any Two Keys opens")?; } s.touch = t; }
         if let Some(m) = idle_minutes { s.idle_minutes = m.min(24 * 60); }
+        if let Some(w) = with_screen { s.with_screen = w; }
         lockbox::save_slots(&s)?;
         lock_state(None)
     }).await
@@ -1328,7 +1329,18 @@ mod watch {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
-        .setup(|app| { attach::clear_opened(); watch::start(app.handle().clone()); Ok(()) })
+        .setup(|app| {
+            attach::clear_opened(); watch::start(app.handle().clone());
+            // when the Mac's screen locks, so does this: the key leaves memory and the window is told to forget what it knew
+            let h = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                if lockbox::mac::screen_locked() && lockbox::sealed_mode() && std::env::var_os("A2K_STORE_KEY").is_none() && lockbox::unlocked() && lockbox::slots().ok().flatten().map(|s| s.with_screen).unwrap_or(true) {
+                    lockbox::lock(); use tauri::Emitter; let _ = h.emit("app-locked", ());
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![location_status, location_preview, ctx_set, tx_map, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard

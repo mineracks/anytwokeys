@@ -120,7 +120,7 @@ function renderTabs() {
   for (const v of store.vaults) {
     const d = document.createElement('div'); d.className = 'nav' + (vault && v.name === vault.name ? ' on' : ''); d.style.fontWeight = '600'; d.dataset.vault = v.name;
     d.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${v.network === 'mainnet' ? 'var(--gold)' : 'var(--signal)'};display:inline-block;flex:0 0 8px"></span><span style="flex-grow:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v.name)}">${esc(v.name)}</span><span class="muted" style="font-size:11px;font-weight:400">${v.keys.length === 1 ? '1 key' : v.threshold + ' of ' + v.keys.length}</span>`;
-    d.onclick = () => { vault = v; try { localStorage.setItem('a2k-vault', v.name); } catch {} paintNet(); show('home'); };
+    d.onclick = () => { vault = v; rememberVault(v); paintNet(); show('home'); };
     tabs.appendChild(d);
   }
 }
@@ -165,6 +165,7 @@ function renderLock() {
   const card = $('#lock-card'); if (!lockInfo || !lockInfo.sealed) { card.hidden = true; return; } card.hidden = false;
   $('#lock-state').textContent = 'Vaults, labels, notes, contacts and attachments are encrypted on this computer. The key is in this Mac\'s Keychain' + (lockInfo.cards.length ? `, and ${lockInfo.cards.length === 1 ? 'one of your keys' : lockInfo.cards.length + ' of your keys'} can open the app without it.` : '. No key of yours can open the app yet: add one, so a lost Keychain is not a lost address book.');
   $('#lock-state').classList.toggle('warn', !lockInfo.cards.length);
+  $('#lock-screen').classList.toggle('on', lockInfo.with_screen !== false); $('#lock-screen').setAttribute('aria-checked', lockInfo.with_screen !== false ? 'true' : 'false');
   $('#lock-touch').classList.toggle('on', lockInfo.touch); $('#lock-touch').setAttribute('aria-checked', lockInfo.touch ? 'true' : 'false'); $('#lock-idle').value = String(lockInfo.idle_minutes);
   const plugged = (cards || []).filter(c => c.pubkey && !lockInfo.cards.some(k => k.pubkey === c.pubkey));
   const nameOf = (c) => { for (const v of store.vaults) { const k = v.keys.find(k => k.pubkey === c.pubkey); if (k) return k.name; } return 'key ' + (c.serial || ''); };
@@ -181,8 +182,11 @@ function renderLock() {
 const lockSet = async (args) => { try { lockInfo = await invoke('lock_settings', args); idleLock(); } catch (e) { fail(e); } renderLock(); };
 $('#lock-touch').onclick = () => lockSet({ touch: !lockInfo.touch }); $('#lock-touch').onkeydown = (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); lockSet({ touch: !lockInfo.touch }); } };
 $('#lock-idle').onchange = () => lockSet({ idleMinutes: +$('#lock-idle').value });
+$('#lock-screen').onclick = () => lockSet({ withScreen: !lockInfo.with_screen }); $('#lock-screen').onkeydown = (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); lockSet({ withScreen: !lockInfo.with_screen }); } };
+window.__TAURI__.event.listen('app-locked', () => location.reload());   // the key has already left memory; the window forgets too
 $('#lock-now').onclick = lockNow;
 
+function rememberVault(v) { try { const i = store.vaults.findIndex(x => x.name === v.name); if (i >= 0) localStorage.setItem('a2k-vault-n', String(i)); } catch {} }
 async function boot() {
   try { lockInfo = await invoke('lock_status'); } catch { lockInfo = null; }
   if (lockInfo && lockInfo.sealed && !lockInfo.unlocked) await lockScreen();
@@ -190,8 +194,9 @@ async function boot() {
   store = await invoke('store_get');
   try { osLocale = await invoke('device_locale'); } catch {}   // without it the language list and the clock still answer
   paintNet();
-  let want = null; try { want = localStorage.getItem('a2k-vault'); } catch {}
-  vault = store.vaults.find(v => v.name === want) || store.vaults[0] || null;
+  // which vault was open last is remembered by its POSITION: the window's own storage is not sealed, and a vault's name says things
+  let want = -1; try { want = +localStorage.getItem('a2k-vault-n'); localStorage.removeItem('a2k-vault'); } catch {}
+  vault = store.vaults[want] || store.vaults[0] || null;
   paintNet();
   if (vault) show('home'); else showWelcome();
   pollCards(); idleLock(); invoke('location_status').catch(() => {});   // the setting lives in the sealed store, so listening can only start now
@@ -1022,7 +1027,7 @@ async function commitTitle() {
   if (!newName || newName === vault.name) return;
   try {
     store = await invoke('vault_rename', { name: vault.name, newName, keyNames: vault.keys.map(k => k.name) });
-    vault = store.vaults.find(v => v.name === newName); try { localStorage.setItem('a2k-vault', vault.name); } catch {}
+    vault = store.vaults.find(v => v.name === newName); rememberVault(vault);
     $('#title').textContent = vault.name; paintNet(); toast('Renamed');
   } catch (e) { fail(e); }
 }
@@ -1080,7 +1085,7 @@ $('#n-less').onclick = () => { if (setup.n > Math.max(2, setup.keys.length)) { s
 $('#n-more').onclick = () => { if (setup.n < 15) { setup.n++; renderSetup(); } };
 $('#setup-net-pick').addEventListener('click', (e) => { const o = e.target.closest('.opt'); if (o) { setup.network = o.dataset.net; renderSetup(); } });
 $('#setup-finish').onclick = async () => {
-  try { vault = await invoke('vault_create', { name: $('#setup-name').value.trim() || 'vault', threshold: setup.k, keys: setup.keys, rotating: true, network: setup.network }); store = await invoke('store_get'); try { localStorage.setItem('a2k-vault', vault.name); } catch {} toast('Vault created'); paintNet(); show('keys'); }
+  try { vault = await invoke('vault_create', { name: $('#setup-name').value.trim() || 'vault', threshold: setup.k, keys: setup.keys, rotating: true, network: setup.network }); store = await invoke('store_get'); rememberVault(vault); toast('Vault created'); paintNet(); show('keys'); }
   catch (e) { fail(e); }
 };
 
@@ -1170,7 +1175,7 @@ async function readSeals(force) {
     : `<div class="muted"${ci ? ' style="border-top:1px solid var(--line);padding-top:14px"' : ''}>A vault that needs ${c.need} keys: ${c.have} open${c.locked ? `, ${c.locked} still locked (enter ${c.locked === 1 ? 'its' : 'their'} PIN on the left)` : ''}. ${c.have + c.locked < c.need ? 'Unplug this key and plug in another of the same vault; what was opened is remembered.' : ''}</div>`).join('') || '<div class="muted">Nothing read yet.</div>';
   $$('[data-seal-restore]').forEach(b => b.onclick = async () => {
     const id = b.dataset.sealRestore;
-    try { vault = await invoke('seal_restore', { id, name: $(`[data-seal-name="${id}"]`).value, found: sealFound }); store = await invoke('store_get'); try { localStorage.setItem('a2k-vault', vault.name); } catch {} sealFound = []; readSeals.sig = null; toast('Vault restored from its keys'); paintNet(); renderTabs(); show('home'); }
+    try { vault = await invoke('seal_restore', { id, name: $(`[data-seal-name="${id}"]`).value, found: sealFound }); store = await invoke('store_get'); rememberVault(vault); sealFound = []; readSeals.sig = null; toast('Vault restored from its keys'); paintNet(); renderTabs(); show('home'); }
     catch (e) { fail(e); }
   });
   $$('[data-seal-adopt]').forEach(b => b.onclick = async () => { try { store = await invoke('seal_adopt', { name: b.dataset.sealAdopt, found: sealFound }); toast('Shares learnt. That vault’s Keys screen now knows its seal.'); } catch (e) { fail(e); } });
@@ -1199,7 +1204,7 @@ async function readDescriptor(text) {
       <div class="field"><div class="label">Vault name</div><input id="restore-name" value="vault"></div>
       <button class="btn primary" id="restore-go">Restore this vault</button>`;
     $('#restore-go').onclick = async () => {
-      try { vault = await invoke('vault_restore', { name: $('#restore-name').value.trim() || 'vault', text: parsed.descriptor, names: $$('[data-kname]').map(i => i.value.trim()) }); store = await invoke('store_get'); try { localStorage.setItem('a2k-vault', vault.name); } catch {} stopCam(); toast('Vault restored'); paintNet(); show('home'); }
+      try { vault = await invoke('vault_restore', { name: $('#restore-name').value.trim() || 'vault', text: parsed.descriptor, names: $$('[data-kname]').map(i => i.value.trim()) }); store = await invoke('store_get'); rememberVault(vault); stopCam(); toast('Vault restored'); paintNet(); show('home'); }
       catch (e) { fail(e); }
     };
   } catch (e) { $('#restore-card').innerHTML = `<div class="warn">${e}</div>`; }
@@ -1252,7 +1257,7 @@ function notice(ev, stay) {
   el.innerHTML = `<div><div class="nt">${esc(ev.title)}</div><div class="nb">${esc(ev.body)}</div></div><button type="button" class="nx" aria-label="Dismiss">×</button>`;
   const close = () => el.remove();
   el.querySelector('.nx').onclick = (e) => { e.stopPropagation(); close(); };
-  el.onclick = () => { const v = store.vaults.find(v => v.name === ev.vault); if (v) { vault = v; try { localStorage.setItem('a2k-vault', v.name); } catch {} paintNet(); renderTabs(); show('home'); } close(); };
+  el.onclick = () => { const v = store.vaults.find(v => v.name === ev.vault); if (v) { vault = v; rememberVault(v); paintNet(); renderTabs(); show('home'); } close(); };
   $('#notices').appendChild(el); while ($('#notices').children.length > 4) $('#notices').firstChild.remove();
   setTimeout(close, stay || 10000);
 }
