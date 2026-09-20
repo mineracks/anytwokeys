@@ -430,3 +430,15 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .slot{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 12px;border:1px solid var(--line);border-radius:8px;flex-wrap:wrap} .slot b{font-family:var(--display);font-weight:600;font-size:14px} .slot small{color:var(--muted);font-size:12.5px;margin-left:8px}
 .slot.add{border-style:dashed} .slot.add input{padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);width:120px;min-height:38px}
 .slot .asknote{flex-basis:100%}
+
+/* where and on what */
+#tx-ctx{max-width:1240px}
+.ctx-grid{display:flex;gap:22px;flex-wrap:wrap;align-items:flex-start}
+.ctx-map{flex:0 0 320px;max-width:100%;aspect-ratio:8/5;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--ground);position:relative}
+.ctx-map img{width:100%;height:100%;display:block;object-fit:cover}
+.ctx-map .pin{position:absolute;left:50%;top:50%;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;background:var(--gold);border:2.5px solid var(--panel);box-shadow:0 0 0 1.5px var(--gold)}
+.ctx-map .zone{position:absolute;left:50%;top:50%;border-radius:50%;background:color-mix(in srgb,var(--gold) 18%,transparent);border:1px solid color-mix(in srgb,var(--gold) 55%,transparent);transform:translate(-50%,-50%)}
+.ctx-map small{position:absolute;right:6px;bottom:4px;font-family:var(--display);font-size:10px;color:var(--muted);background:color-mix(in srgb,var(--panel) 80%,transparent);padding:1px 5px;border-radius:4px}
+.ctx-facts{flex:1 1 320px;min-width:0;display:flex;flex-direction:column;gap:14px}
+#tx-place-form{flex:1 1 300px} #tx-place{flex:1 1 200px;min-width:0;padding:8px 12px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font-family:var(--serif);font-size:14px;min-height:38px}
+#tx-place:focus{outline:3px solid var(--gold-soft);border-color:var(--gold)}

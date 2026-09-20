@@ -65,6 +65,10 @@ pub struct Settings {
     #[serde(default)] pub prices: String,
     /// the VSS host the vaults' labels are backed up to, encrypted; empty = off
     #[serde(default = "default_vss")] pub vss: String,
+    /// keep where each transaction was made (system Location Services); off until the person turns it on
+    #[serde(default)] pub location: bool,
+    /// keep the place exactly rather than to about 110 m
+    #[serde(default)] pub location_exact: bool,
 }
 pub fn default_vss() -> String { crate::labels::DEFAULT_VSS.into() }
 pub fn default_fiat() -> String { "auto".into() }   // "auto" = from the device's region; "" = none; else an ISO code

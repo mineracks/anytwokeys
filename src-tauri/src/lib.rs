@@ -2,9 +2,11 @@ mod activity;
 mod attach;
 mod cards;
 mod chain;
+mod context;
 mod export;
 mod hd;
 mod labels;
+mod location;
 mod lockbox;
 mod message;
 mod seal;
@@ -231,7 +233,7 @@ fn vault_forget(name: String) -> R<Store> {
 }
 
 #[tauri::command]
-fn settings_set(network: String, custom: bool, electrum: String, explorer: String, gap: Option<u32>, fiat: Option<String>, prices: Option<String>, vss: Option<String>) -> R<Store> {
+fn settings_set(app: tauri::AppHandle, network: String, custom: bool, electrum: String, explorer: String, gap: Option<u32>, fiat: Option<String>, prices: Option<String>, vss: Option<String>, location: Option<bool>, location_exact: Option<bool>) -> R<Store> {
     let mut s = wallet::load()?;
     if network != "mainnet" && network != "signet" { return Err("network must be mainnet or signet".into()); }
     let gap = gap.unwrap_or(s.settings.gap);
@@ -242,8 +244,10 @@ fn settings_set(network: String, custom: bool, electrum: String, explorer: Strin
     if !(prices.is_empty() || prices.starts_with("https://") || prices.starts_with("http://")) { return Err("the price server is a web address".into()); }
     let vss = vss.map(|v| v.trim().trim_end_matches('/').to_string()).unwrap_or_else(|| s.settings.vss.clone());
     if !(vss.is_empty() || vss.starts_with("https://") || vss.starts_with("http://")) { return Err("the label host is a web address, or empty to keep labels on this computer only".into()); }
-    s.settings = wallet::Settings { network, custom, electrum: electrum.trim().to_string(), explorer: explorer.trim().to_string(), gap, fiat, prices, vss };
+    let (location, location_exact) = (location.unwrap_or(s.settings.location), location_exact.unwrap_or(s.settings.location_exact));
+    s.settings = wallet::Settings { network, custom, electrum: electrum.trim().to_string(), explorer: explorer.trim().to_string(), gap, fiat, prices, vss, location, location_exact };
     wallet::save(&s)?;
+    location_follow(&app, location);
     Ok(s)
 }
 
@@ -356,6 +360,10 @@ async fn spend_broadcast(name: String) -> R<Sent> {
         let servers = wallet::servers_for(&s, &_v.network);
         let txid = chain::broadcast(&servers, &tx)?;
         s.last_psbt = None;
+        // where and on what this payment was made: written once, now, into its own record
+        let (t, fix) = (now(), if s.settings.location { location::fresh(now(), 1800) } else { None });
+        let ctx = context::build("made", fix, s.settings.location_exact, t);
+        if let Some(vm) = s.vaults.iter_mut().find(|v| v.name == name) { context::stamp(vm, &txid.to_string(), ctx, t); }
         wallet::save(&s)?;
         Ok(Sent { txid: txid.to_string(), link: chain::tx_link(&servers, &txid.to_string()) })
     }).await
@@ -776,6 +784,39 @@ fn seal_preview(found: Vec<Found>) -> R<Vec<Candidate>> {
 
 // ------------------------------------------------------------------- lock --
 // What this computer keeps is sealed (lockbox.rs). These are the ways in, and the settings for them.
+
+/// Location Services are listened to only while the setting is on. The manager lives on the main thread.
+fn location_follow(app: &tauri::AppHandle, on: bool) { let _ = app.run_on_main_thread(move || if on { location::start() } else { location::stop() }); }
+
+/// After the app opens (the setting is inside the sealed store, so not before): start listening if the person asked for it.
+#[tauri::command]
+fn location_status(app: tauri::AppHandle) -> R<String> {
+    let on = wallet::load()?.settings.location;
+    if on && location::state() == "off" { location_follow(&app, true); return Ok("asking".into()); }
+    Ok(if on { location::state() } else { "off".into() })
+}
+
+/// What this computer would record now, for the screen that asks whether to keep places: the NAME only.
+#[tauri::command]
+fn location_preview() -> R<Option<String>> { Ok(location::fresh(now(), 1800).and_then(|f| context::place(f.lat, f.lon))) }
+
+/// The person's own say over a transaction's place: take it off, or name it themselves.
+#[tauri::command]
+fn ctx_set(name: String, txid: String, remove: bool, place: Option<String>) -> R<Store> {
+    let t = now();
+    wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == name) {
+        let key = format!("tx:{txid}");
+        let rec = v.more.entry(key.clone()).or_default();
+        if remove { rec.insert("ctx".into(), serde_json::json!({ "removed": true, "t": t })); }
+        else if let Some(p) = place.as_ref().map(|p| p.trim().chars().take(80).collect::<String>()).filter(|p| !p.is_empty()) {
+            let mut ctx = rec.get("ctx").cloned().filter(|c| c.get("removed").is_none()).unwrap_or_else(|| context::build("noted", None, false, t));
+            ctx["place"] = p.into(); ctx["named"] = true.into();
+            if let Some(o) = ctx.as_object_mut() { o.remove("geo"); }   // the person's word for the place replaces the coordinates
+            rec.insert("ctx".into(), ctx);
+        }
+        v.label_meta.insert(key, t);   // an edit: it has to win over the copy on the host
+    })
+}
 
 #[derive(serde::Serialize)]
 struct LockCard { pubkey: String, name: String, added: u64 }
@@ -1212,7 +1253,11 @@ mod watch {
             let seen_now = wallet::Seen { txs: now_txs, coins: now_coins, primed: true };
             let (n, sm, nc, smc) = (sc.next, sc.scan_max, sc.next_change, sc.scan_max_change);
             let name = v.name.clone();
-            let r = wallet::update(move |s| { s.seen.insert(name.clone(), seen_now); if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == name) { vm.next = n; vm.scan_max = sm; vm.next_change = nc; vm.scan_max_change = smc; } });
+            let fresh: Vec<String> = out[before..].iter().filter(|e| e.kind != "confirmed").map(|e| e.txid.clone()).collect();
+            let r = wallet::update(move |s| { s.seen.insert(name.clone(), seen_now);
+                // a transaction first noticed from here: say so, and where "here" was, unless it was made here (then it already says)
+                let (t, fix, exact) = (super::now(), if s.settings.location { crate::location::fresh(super::now(), 1800) } else { None }, s.settings.location_exact);
+                if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == name) { for txid in &fresh { crate::context::stamp(vm, txid, crate::context::build("seen", fix, exact, t), t); } } if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == name) { vm.next = n; vm.scan_max = sm; vm.next_change = nc; vm.scan_max_change = smc; } });
             log(&format!("{tag}: {} coins, {} txs, primed_before={primed_before}, events={}, save={}", sc.coins.len(), sc.history.len(), out.len() - before, r.as_ref().map(|_| "ok").unwrap_or("FAILED")));
         }
         out
@@ -1247,7 +1292,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| { attach::clear_opened(); watch::start(app.handle().clone()); Ok(()) })
-        .invoke_handler(tauri::generate_handler![lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![location_status, location_preview, ctx_set, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])

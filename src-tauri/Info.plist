@@ -3,4 +3,8 @@
 <plist version="1.0"><dict>
   <key>NSCameraUsageDescription</key>
   <string>Any Two Keys uses the camera only to read the QR code on a recovery sheet.</string>
+  <key>NSLocationUsageDescription</key>
+  <string>Any Two Keys can keep where each of your transactions was made, on this computer and in your encrypted backup only. It is off until you turn it on.</string>
+  <key>NSLocationWhenInUseUsageDescription</key>
+  <string>Any Two Keys can keep where each of your transactions was made, on this computer and in your encrypted backup only. It is off until you turn it on.</string>
 </dict></plist>

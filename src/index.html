@@ -217,6 +217,12 @@
           </div>
         </div>
       </div>
+      <div class="card" id="tx-ctx">
+        <div class="rec-head"><h3 id="tx-ctx-h">Where and on what</h3><span class="rec-saved" id="tx-ctx-when"></span></div>
+        <div class="ctx-grid"><div class="ctx-map" id="tx-map" hidden></div>
+          <div class="ctx-facts"><dl class="tx-dl" id="tx-ctx-dl"></dl>
+            <div class="row" id="tx-ctx-acts"><form class="row" id="tx-place-form" style="gap:8px"><input id="tx-place" maxlength="80" placeholder="Name the place yourself: Home, the office in Geneva…" aria-label="Name the place"><button class="btn small" type="submit">Save</button></form><button class="btn small" type="button" id="tx-ctx-remove">Remove the place</button></div></div></div>
+      </div>
       <details class="card quiet" id="tx-chain"><summary><span class="label">Blockchain data</span><span class="muted sumhint" id="tx-proof"></span></summary><div id="tx-chain-body"></div></details>
     </section>
 
@@ -271,6 +277,11 @@
           <div class="card"><div class="label">Addresses</div>
             <div class="field"><div class="label">Gap limit</div><div class="row" style="gap:10px;align-items:center"><input id="gap-in" inputmode="numeric" style="max-width:110px"><button class="btn" id="gap-save">Save</button></div></div>
             <div class="muted" style="font-size:13px">How many unused addresses past the last used one a scan looks at, on the receive chain and the change chain each. 20 is the usual. Raise it if you hand out many addresses before any is paid; every scan costs one server query per address.</div></div>
+          <div class="card" id="places-card"><div class="label">Places</div>
+            <div class="row" style="justify-content:space-between;flex-wrap:nowrap;gap:16px"><div style="font-family:var(--display);font-weight:600;font-size:14px;min-width:0">Keep where each transaction was made<small class="muted" style="display:block;font-weight:400;font-family:var(--serif);font-size:13px">From this computer's Location Services, kept with the transaction's label: encrypted here and in your backup, sent nowhere else. Which computer it was made on is always kept.</small></div><div class="toggle" id="loc-on" role="switch" tabindex="0" aria-label="Keep where each transaction was made"><i></i></div></div>
+            <div class="row" style="justify-content:space-between;flex-wrap:nowrap;gap:16px" id="loc-exact-row"><div style="font-family:var(--display);font-weight:600;font-size:14px;min-width:0">Keep the exact spot<small class="muted" style="display:block;font-weight:400;font-family:var(--serif);font-size:13px">Off: rounded to about 110 metres, which is enough to say which street.</small></div><div class="toggle" id="loc-exact" role="switch" tabindex="0" aria-label="Keep the exact spot"><i></i></div></div>
+            <div class="muted" style="font-size:13px" id="loc-state"></div>
+          </div>
           <div class="card" id="lock-card"><div class="label">Lock</div>
             <div class="muted" style="font-size:13px" id="lock-state"></div>
             <div class="row" style="justify-content:space-between;flex-wrap:nowrap;gap:16px"><div style="font-family:var(--display);font-weight:600;font-size:14px;min-width:0">Ask for Touch ID when the app opens<small class="muted" style="display:block;font-weight:400;font-family:var(--serif);font-size:13px">Off: the app opens without asking. Its files stay encrypted either way.</small></div><div class="toggle on" id="lock-touch" role="switch" tabindex="0" aria-label="Ask for Touch ID when the app opens"><i></i></div></div>

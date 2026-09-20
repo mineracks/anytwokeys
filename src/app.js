@@ -194,7 +194,7 @@ async function boot() {
   vault = store.vaults.find(v => v.name === want) || store.vaults[0] || null;
   paintNet();
   if (vault) show('home'); else showWelcome();
-  pollCards(); idleLock();
+  pollCards(); idleLock(); invoke('location_status').catch(() => {});   // the setting lives in the sealed store, so listening can only start now
   const moved = lockInfo && lockInfo.moved;
   if (boot.sealFailed) notice({ kind: 'warn', title: 'This app\'s files are not encrypted yet', body: boot.sealFailed });
   else if (moved && (moved.store || moved.attachments)) notice({ kind: 'confirmed', title: 'This app\'s files are now encrypted', body: `Vaults, labels, notes and contacts${moved.attachments ? `, and ${moved.attachments} attachment${moved.attachments === 1 ? '' : 's'}` : ''}. Add one of your keys in App settings › Lock, so the app can be opened without this Mac's Keychain.` }, 30000);
@@ -287,7 +287,7 @@ async function renderTx() {
   if (document.activeElement !== $('#tx-label')) $('#tx-label').value = labelOf(key);
   if (document.activeElement !== $('#tx-note')) $('#tx-note').value = (vault.notes || {})[key] || '';
   fitNote(); if (renderTx.last !== name + txid) { renderTx.last = name + txid; recSaid(''); }
-  renderFiles();
+  renderFiles(); renderCtx();
   $('#tx-chain').open = (() => { try { return localStorage.getItem('a2k-chain-open') === '1'; } catch { return false; } })();
   let d; try { d = await invoke('tx_detail', { name, txid, height: txView.height }); } catch (e) { if (mine === txView.seq) { $('#tx-dl').innerHTML = `<dt>Details</dt><dd class="warn">${esc(e)}</dd>`; $('#tx-proof').textContent = ''; } return; }
   if (mine !== txView.seq || !vault || vault.name !== name) return;   // the person has moved on; this answer is for another screen
@@ -346,6 +346,44 @@ async function renderFiles() {
       if (!b.classList.contains('armed')) { b.classList.add('armed'); b.textContent = 'Remove?'; setTimeout(() => { if (b.isConnected) { b.classList.remove('armed'); b.textContent = '×'; } }, 5000); return; }
       try { store = await invoke('attach_remove', { name, key, sha256: e.sha256 }); vault = store.vaults.find(v => v.name === name) || vault; renderFiles(); } catch (err) { fail(err); } }; });
 }
+// ---------- where and on what: written once when this computer makes or first sees the transaction ----------
+function renderCtx() {
+  if (!vault || !txView.txid) return;
+  const ctx = (((vault.more || {})['tx:' + txView.txid]) || {}).ctx, gone = !ctx || ctx.removed, dev = (ctx && ctx.device) || null;
+  const how = { made: 'Made', seen: 'First seen', noted: 'Noted' }[ctx && ctx.how] || 'Recorded';
+  $('#tx-ctx-h').textContent = gone ? 'Where and on what' : ctx.how === 'made' ? 'Where it was made, and on what' : ctx.how === 'seen' ? 'Where this computer first saw it' : 'Where and on what';
+  $('#tx-ctx-when').textContent = !gone && ctx.t ? new Date(ctx.t * 1000).toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+  const rows = [];
+  if (gone) rows.push(['Place', ctx && ctx.removed ? 'Removed from this record.' : 'Nothing was recorded: this transaction was already here before the app began keeping this.']);
+  else {
+    rows.push(['Place', ctx.place ? esc(ctx.place) + (ctx.named ? '<small>as you named it</small>' : ctx.geo ? `<small>${ctx.geo.lat.toFixed(3)}, ${ctx.geo.lon.toFixed(3)} · to about ${sats(Math.round(ctx.geo.acc))} m</small>` : '') : (ctx.geo ? `${ctx.geo.lat.toFixed(3)}, ${ctx.geo.lon.toFixed(3)}` : `not kept<small>${store.settings.location ? 'this computer did not know where it was at that moment' : 'places are off in App settings'}</small>`)]);
+    if (dev) rows.push([how + ' on', `${esc(dev.name || 'this computer')}<small>${[dev.model, dev.os, dev.app ? 'Any Two Keys ' + dev.app : ''].filter(Boolean).map(esc).join(' · ')}</small>`]);
+    if (ctx.how === 'seen') rows.push(['', '<small>A deposit happens wherever the sender was. This is only where this computer was when it noticed.</small>']);
+  }
+  $('#tx-ctx-dl').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+  $('#tx-ctx-remove').hidden = gone || !(ctx.place || ctx.geo);
+  if (document.activeElement !== $('#tx-place')) $('#tx-place').value = ctx && ctx.named ? ctx.place : '';
+  paintMap(gone ? null : ctx);
+}
+function paintMap(ctx) { $('#tx-map').hidden = true; }   // replaced below once the map is drawn in Rust
+const ctxSave = async (args) => { const name = vault.name; try { store = await invoke('ctx_set', { name, txid: txView.txid, remove: false, place: null, ...args }); vault = store.vaults.find(v => v.name === name) || vault; renderCtx(); } catch (e) { fail(e); } };
+$('#tx-place-form').onsubmit = (e) => { e.preventDefault(); const p = $('#tx-place').value.trim(); if (p) ctxSave({ place: p }); };
+askTwice($('#tx-ctx-remove'), 'The place comes off this record, here and in your backup. It cannot be worked out again later.', 'Remove it', () => ctxSave({ remove: true }));
+
+// ---------- App settings › Places ----------
+async function renderPlaces() {
+  const on = !!store.settings.location;
+  $('#loc-on').classList.toggle('on', on); $('#loc-on').setAttribute('aria-checked', on ? 'true' : 'false');
+  $('#loc-exact').classList.toggle('on', !!store.settings.location_exact); $('#loc-exact-row').style.opacity = on ? 1 : .5;
+  let st = 'off'; try { st = await invoke('location_status'); } catch {}
+  let near = null; if (st === 'allowed') { try { near = await invoke('location_preview'); } catch {} }
+  $('#loc-state').textContent = !on ? '' : st === 'allowed' ? (near ? `Working: this computer is ${near.startsWith('near ') ? near : 'in ' + near}.` : 'Allowed. Waiting for this computer to work out where it is.') : st === 'asking' ? 'macOS is asking whether Any Two Keys may use your location. Answer it, then come back here.' : st === 'denied' ? 'macOS is refusing: allow Any Two Keys in System Settings › Privacy & Security › Location Services.' : st;
+  $('#loc-state').classList.toggle('warn', on && st === 'denied');
+  if (on && st !== 'allowed' && st !== 'denied' && $('#s-settings').classList.contains('on')) { clearTimeout(renderPlaces.t); renderPlaces.t = setTimeout(renderPlaces, 3000); }
+}
+const placeSet = async (args) => { try { store = await invoke('settings_set', { network: netName(), custom: store.settings.custom, electrum: store.settings.electrum, explorer: store.settings.explorer, ...args }); } catch (e) { fail(e); } renderPlaces(); };
+for (const [id, key] of [['#loc-on', 'location'], ['#loc-exact', 'locationExact']]) { const flip = () => placeSet({ [key]: !$(id).classList.contains('on') }); $(id).onclick = flip; $(id).onkeydown = (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); flip(); } }; }
+
 // a file name keeps its ending when it has to be shortened: "a very long invoi….pdf"
 const nameParts = (n) => { const i = n.lastIndexOf('.'); return i > 0 && n.length - i <= 8 ? `<span class="stem">${esc(n.slice(0, i))}</span><span class="ext">${esc(n.slice(i))}</span>` : `<span class="stem">${esc(n)}</span>`; };
 const stripOn = () => $('#tx-strip').classList.contains('on');
@@ -1159,7 +1197,7 @@ async function readDescriptor(text) {
 
 // ---------- settings ----------
 function renderSettings() {
-  renderLock();
+  renderLock(); renderPlaces();
   $$('#net-pick .opt').forEach(o => o.classList.toggle('on', o.dataset.net === store.settings.network));
   const def = store.settings.network === 'mainnet' ? ['ssl://electrum.mineracks.com:50002', 'https://mempool.mineracks.com'] : ['tcp://100.94.4.10:50001', 'https://signet.mineracks.com'];
   $('#def-electrum').textContent = def[0]; $('#def-explorer').textContent = def[1];
