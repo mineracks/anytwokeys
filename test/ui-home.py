@@ -25,6 +25,7 @@ const H = {
     return { store: store(), added: a.paths.length - errors.length, notes: [], errors }; },
   attach_bytes: (a) => { window.__pasted = a; V.files = V.files || {}; (V.files[a.key] = V.files[a.key] || []).push({ name: a.filename, mime: 'image/png', size: 20000, sha256: 'c'.repeat(64), t: 1, meta: 'stripped', thumb: 'd'.repeat(64) }); return { store: store(), added: 1, notes: [], errors: [] }; },
   location_status: () => 'off', location_preview: () => null,
+  tx_map: (a) => { window.__mapAsked = a; return window.__noMap ? null : { png: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', metres_per_px: 4.0625, width: 640 }; },
   ctx_set: (a) => { window.__ctxSet = a; V.more = V.more || {}; const r = V.more['tx:' + a.txid] = V.more['tx:' + a.txid] || {}; if (a.remove) r.ctx = { removed: true, t: 9 }; else { r.ctx = Object.assign({ t: 9, how: 'noted', device: { name: 'Test Mac' } }, r.ctx || {}, { place: a.place, named: true }); delete r.ctx.geo; } return store(); },
   label_set: (a) => { V.labels = V.labels || {}; if (a.label) V.labels[a.key] = a.label; else delete V.labels[a.key]; return store(); },
   note_set: (a) => { window.__noteCalls = (window.__noteCalls || 0) + 1; V.notes = V.notes || {}; if (a.note.trim()) V.notes[a.key] = a.note; else delete V.notes[a.key]; return store(); },
@@ -138,9 +139,11 @@ with sync_playwright() as p:
     pg.evaluate("V.more = { ['tx:' + %s]: { ctx: { t: 1789648528, how: 'made', device: { name: 'Piers’s MacBook Pro', model: 'Mac16,5', os: 'macOS 27.0', app: '0.1.0' }, geo: { lat: -27.469, lon: 153.023, acc: 110 }, place: 'Brisbane, AU' } } }; vault = V; renderCtx()" % json.dumps(T[1])); pg.wait_for_timeout(200)
     ctxt = pg.inner_text("#tx-ctx")
     check("a spend made here says where, to what precision, and on which computer", "Where it was made" in ctxt and "Brisbane, AU" in ctxt and "-27.469, 153.023" in ctxt and "about 110 m" in ctxt and "MacBook Pro" in ctxt and "macOS 27.0" in ctxt, ctxt)
+    check("the map is asked for by coordinates only, and carries a dot, a precision ring and the attribution", pg.evaluate("__mapAsked.lat") == -27.469 and pg.locator("#tx-map").is_visible() and pg.locator("#tx-map .pin").count() == 1 and "OpenStreetMap" in pg.inner_text("#tx-map") and 25 < pg.locator("#tx-map .zone").bounding_box()["width"] < 30, pg.locator("#tx-map .zone").bounding_box() if pg.locator("#tx-map .zone").count() else "no ring")
     pg.locator("#tx-ctx").screenshot(path=str(out / "tx-ctx.png"))
     pg.fill("#tx-place", "the office in Geneva"); pg.keyboard.press("Enter"); pg.wait_for_timeout(300)
     check("naming the place yourself replaces the coordinates", pg.evaluate("__ctxSet.place") == "the office in Geneva" and "as you named it" in pg.inner_text("#tx-ctx-dl") and "153.023" not in pg.inner_text("#tx-ctx-dl"))
+    check("a place named by hand has no coordinates, so no map is fetched for it", not pg.locator("#tx-map").is_visible())
     pg.click("#tx-ctx-remove"); pg.wait_for_timeout(150); check("removing the place asks first", pg.evaluate("__ctxSet.remove") is False and "cannot be worked out again" in pg.inner_text("#tx-ctx"))
     pg.click("#tx-ctx-remove"); pg.wait_for_timeout(300); check("and then it is gone from the record, and says so", pg.evaluate("__ctxSet.remove") is True and "Removed from this record" in pg.inner_text("#tx-ctx-dl") and not pg.locator("#tx-ctx-remove").is_visible())
     pg.evaluate("V.more = { ['tx:' + %s]: { ctx: { t: 1789648528, how: 'seen', device: { name: 'Test Mac' } } } }; vault = V; renderCtx()" % json.dumps(T[1])); pg.wait_for_timeout(200)

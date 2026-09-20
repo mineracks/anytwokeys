@@ -37,6 +37,9 @@ vss-client-ng = { version = "0.6", default-features = false, features = ["sigs-a
 chacha20poly1305 = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
+# the little map on a transaction (map.rs): tiles are gzip, drawing is done here so the window never touches tile data
+flate2 = "1"
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "png-format", "simd"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 
 # the store key's slot on this Mac: a Keychain item, behind a Touch ID / password prompt (lockbox.rs)

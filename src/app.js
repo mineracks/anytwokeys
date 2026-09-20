@@ -365,7 +365,17 @@ function renderCtx() {
   if (document.activeElement !== $('#tx-place')) $('#tx-place').value = ctx && ctx.named ? ctx.place : '';
   paintMap(gone ? null : ctx);
 }
-function paintMap(ctx) { $('#tx-map').hidden = true; }   // replaced below once the map is drawn in Rust
+// the picture is drawn in Rust from tiles on our own host; the window only adds the dot and how sure it is
+async function paintMap(ctx) {
+  const box = $('#tx-map'), want = ctx && ctx.geo ? `${ctx.geo.lat},${ctx.geo.lon},${matchMedia('(prefers-color-scheme: dark)').matches}` : '';
+  if (!want) { box.hidden = true; box.dataset.for = ''; return; }
+  if (box.dataset.for === want) return; box.dataset.for = want; box.hidden = true;
+  let pic = null; try { pic = await invoke('tx_map', { lat: ctx.geo.lat, lon: ctx.geo.lon, dark: want.endsWith('true') }); } catch {}
+  if (box.dataset.for !== want || !pic) return;
+  const ring = Math.max(14, 2 * (ctx.geo.acc || 0) / pic.metres_per_px * (320 / pic.width));   // diameter, in the 320-px-wide box
+  box.innerHTML = `<img alt="Map of the area around ${esc(ctx.place || 'the place this was recorded')}" src="${pic.png}"><span class="zone" style="width:${ring}px;height:${ring}px"></span><span class="pin"></span><small>© OpenStreetMap</small>`;
+  box.hidden = false;
+}
 const ctxSave = async (args) => { const name = vault.name; try { store = await invoke('ctx_set', { name, txid: txView.txid, remove: false, place: null, ...args }); vault = store.vaults.find(v => v.name === name) || vault; renderCtx(); } catch (e) { fail(e); } };
 $('#tx-place-form').onsubmit = (e) => { e.preventDefault(); const p = $('#tx-place').value.trim(); if (p) ctxSave({ place: p }); };
 askTwice($('#tx-ctx-remove'), 'The place comes off this record, here and in your backup. It cannot be worked out again later.', 'Remove it', () => ctxSave({ remove: true }));

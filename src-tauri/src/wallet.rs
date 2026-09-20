@@ -69,7 +69,10 @@ pub struct Settings {
     #[serde(default)] pub location: bool,
     /// keep the place exactly rather than to about 110 m
     #[serde(default)] pub location_exact: bool,
+    /// the one .pmtiles file the little maps are drawn from; empty = no maps
+    #[serde(default = "default_tiles")] pub tiles: String,
 }
+pub fn default_tiles() -> String { "https://tiles.mineracks.com/planet.pmtiles".into() }
 pub fn default_vss() -> String { crate::labels::DEFAULT_VSS.into() }
 pub fn default_fiat() -> String { "auto".into() }   // "auto" = from the device's region; "" = none; else an ISO code
 pub fn default_gap() -> u32 { GAP }

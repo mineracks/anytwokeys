@@ -8,6 +8,7 @@ mod hd;
 mod labels;
 mod location;
 mod lockbox;
+mod map;
 mod message;
 mod seal;
 mod wallet;
@@ -233,7 +234,7 @@ fn vault_forget(name: String) -> R<Store> {
 }
 
 #[tauri::command]
-fn settings_set(app: tauri::AppHandle, network: String, custom: bool, electrum: String, explorer: String, gap: Option<u32>, fiat: Option<String>, prices: Option<String>, vss: Option<String>, location: Option<bool>, location_exact: Option<bool>) -> R<Store> {
+fn settings_set(app: tauri::AppHandle, network: String, custom: bool, electrum: String, explorer: String, gap: Option<u32>, fiat: Option<String>, prices: Option<String>, vss: Option<String>, tiles: Option<String>, location: Option<bool>, location_exact: Option<bool>) -> R<Store> {
     let mut s = wallet::load()?;
     if network != "mainnet" && network != "signet" { return Err("network must be mainnet or signet".into()); }
     let gap = gap.unwrap_or(s.settings.gap);
@@ -245,7 +246,9 @@ fn settings_set(app: tauri::AppHandle, network: String, custom: bool, electrum: 
     let vss = vss.map(|v| v.trim().trim_end_matches('/').to_string()).unwrap_or_else(|| s.settings.vss.clone());
     if !(vss.is_empty() || vss.starts_with("https://") || vss.starts_with("http://")) { return Err("the label host is a web address, or empty to keep labels on this computer only".into()); }
     let (location, location_exact) = (location.unwrap_or(s.settings.location), location_exact.unwrap_or(s.settings.location_exact));
-    s.settings = wallet::Settings { network, custom, electrum: electrum.trim().to_string(), explorer: explorer.trim().to_string(), gap, fiat, prices, vss, location, location_exact };
+    let tiles = tiles.map(|v| v.trim().to_string()).unwrap_or_else(|| s.settings.tiles.clone());
+    if !(tiles.is_empty() || tiles.starts_with("https://")) { return Err("the map host is an https address of a .pmtiles file, or empty for no maps".into()); }
+    s.settings = wallet::Settings { network, custom, electrum: electrum.trim().to_string(), explorer: explorer.trim().to_string(), gap, fiat, prices, vss, location, location_exact, tiles };
     wallet::save(&s)?;
     location_follow(&app, location);
     Ok(s)
@@ -800,6 +803,40 @@ fn location_status(app: tauri::AppHandle) -> R<String> {
 #[tauri::command]
 fn location_preview() -> R<Option<String>> { Ok(location::fresh(now(), 1800).and_then(|f| context::place(f.lat, f.lon))) }
 
+/// The picture for a place: tiles from OUR host, fetched here (never by the window), each kept sealed once fetched so a
+/// place is asked for once; drawn here, handed over as a PNG. `Ok(None)`: no map to be had just now — the screen simply
+/// shows none, because a map is a nicety and its absence is not an error worth a message.
+#[derive(serde::Serialize)]
+struct MapPicture { png: String, metres_per_px: f64, width: u32 }
+
+#[tauri::command]
+async fn tx_map(lat: f64, lon: f64, dark: bool) -> R<Option<MapPicture>> {
+    block(move || {
+        use bitcoin::base64::{self, Engine};
+        if !(-85.0..=85.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) { return Ok(None); }
+        let url = std::env::var("A2K_TILES").ok().unwrap_or_else(|| wallet::load().map(|s| s.settings.tiles).unwrap_or_default());
+        if url.is_empty() || !lockbox::sealed_mode() { return Ok(None); }
+        let (x, y, fx, fy) = map::locate(lat, lon, map::ZOOM);
+        let src = map::Http { url: url.clone() };
+        static HEAD: std::sync::Mutex<Option<(String, Vec<u8>)>> = std::sync::Mutex::new(None);
+        let mut head: Option<Vec<u8>> = HEAD.lock().ok().and_then(|g| g.clone()).filter(|(u, _)| *u == url).map(|(_, h)| h);
+        let dir = lockbox::dir().join("tiles"); std::fs::create_dir_all(&dir).ok();
+        let mut tiles = Vec::new();
+        for (dx, dy) in map::needed(lat, fx, fy) {
+            let (tx, ty) = (x as i64 + dx as i64, y as i64 + dy as i64);
+            if tx < 0 || ty < 0 || tx >= (1i64 << map::ZOOM) || ty >= (1i64 << map::ZOOM) { continue; }
+            let path = dir.join(lockbox::blob_name(&format!("tile:{}/{tx}/{ty}", map::ZOOM))?);
+            let bytes = match lockbox::read_sealed(&path, "tile") { Ok(Some(b)) => Some(b), _ => {
+                if head.is_none() { use map::Source; match src.range(0, 16384) { Ok(h) => { if let Ok(mut g) = HEAD.lock() { *g = Some((url.clone(), h.clone())); } head = Some(h); } Err(_) => return Ok(None) } }
+                match map::tile(&src, head.as_ref().unwrap(), map::ZOOM, tx as u32, ty as u32) { Ok(Some(b)) => { let _ = lockbox::write_sealed(&path, "tile", &b); Some(b) } Ok(None) => None, Err(_) => return Ok(None) } } };
+            if let Some(b) = bytes { tiles.push((dx, dy, b)); }
+        }
+        if tiles.is_empty() { return Ok(None); }
+        let png = map::draw(lat, &tiles, fx, fy, dark)?;
+        Ok(Some(MapPicture { png: format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)), metres_per_px: map::metres_per_px(), width: map::W }))
+    }).await
+}
+
 /// The person's own say over a transaction's place: take it off, or name it themselves.
 #[tauri::command]
 fn ctx_set(name: String, txid: String, remove: bool, place: Option<String>) -> R<Store> {
@@ -1292,7 +1329,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| { attach::clear_opened(); watch::start(app.handle().clone()); Ok(()) })
-        .invoke_handler(tauri::generate_handler![location_status, location_preview, ctx_set, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![location_status, location_preview, ctx_set, tx_map, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
