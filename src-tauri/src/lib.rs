@@ -814,6 +814,14 @@ struct MapPicture { png: String, metres_per_px: f64, width: u32 }
 async fn tx_map(lat: f64, lon: f64, dark: bool) -> R<Option<MapPicture>> {
     block(move || {
         use bitcoin::base64::{self, Engine};
+        let Some(png) = map_png(lat, lon, dark)? else { return Ok(None) };
+        Ok(Some(MapPicture { png: format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)), metres_per_px: map::metres_per_px(), width: map::W }))
+    }).await
+}
+
+/// The picture for a place, drawn here from tiles kept sealed. `Ok(None)`: no map to be had just now.
+fn map_png(lat: f64, lon: f64, dark: bool) -> R<Option<Vec<u8>>> {
+    {
         if !(-85.0..=85.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) { return Ok(None); }
         let url = std::env::var("A2K_TILES").ok().unwrap_or_else(|| wallet::load().map(|s| s.settings.tiles).unwrap_or_default());
         if url.is_empty() || !lockbox::sealed_mode() { return Ok(None); }
@@ -833,9 +841,147 @@ async fn tx_map(lat: f64, lon: f64, dark: bool) -> R<Option<MapPicture>> {
             if let Some(b) = bytes { tiles.push((dx, dy, b)); }
         }
         if tiles.is_empty() { return Ok(None); }
-        let png = map::draw(lat, &tiles, fx, fy, dark)?;
-        Ok(Some(MapPicture { png: format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)), metres_per_px: map::metres_per_px(), width: map::W }))
-    }).await
+        Ok(Some(map::draw(lat, &tiles, fx, fy, dark)?))
+    }
+}
+
+/// A printable record of ONE transaction: what it was, what it was worth, your label, note, place and pictures, and
+/// the chain's own facts under them. Everything on it is already on the screen; nothing is fetched that the screen
+/// would not fetch. The pictures are embedded, so the file stands on its own.
+#[tauri::command]
+async fn tx_pdf(name: String, txid: String, height: i32, ccy: String) -> R<String> {
+    if !(ccy.is_empty() || (ccy.len() == 3 && ccy.chars().all(|c| c.is_ascii_uppercase()))) { return Err("the currency is a three-letter code".into()); }
+    let bytes = block({ let (name, txid, ccy) = (name.clone(), txid.clone(), ccy.clone()); move || tx_sheet(&name, &txid, height, &ccy) }).await?;
+    let short: String = txid.chars().take(8).collect();
+    let safe: String = name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+    let path = rfd::FileDialog::new().set_title("Save this transaction").set_file_name(format!("anytwokeys-{safe}-{short}.pdf")).add_filter("PDF", &["pdf"]).save_file().ok_or("cancelled")?;
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
+}
+
+pub(crate) fn tx_sheet(name: &str, txid: &str, height: i32, ccy: &str) -> R<Vec<u8>> {
+    let s = wallet::load()?;
+    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+    let servers = wallet::servers_for(&s, &v.network);
+    let d = activity::detail(&v, &servers, txid, height)?;
+    let prices = if s.settings.custom { s.settings.prices.clone() } else { activity::PRICES.to_string() };
+    let fiat_ok = v.network == "mainnet" && !ccy.is_empty() && !prices.is_empty();
+    let (q_then, q_now) = if fiat_ok { (activity::quote_at(&prices, ccy, d.time), activity::quote_at(&prices, ccy, None)) } else { (None, None) };
+    let (title, subtitle, blocks) = tx_blocks(&v, &d, &s.contacts, ccy, &q_then, &q_now, true);
+    export::doc(&title, &subtitle, &blocks)
+}
+
+/// Everything that goes on the sheet, worked out from what this computer already knows: no network, no clock beyond
+/// the printing date, so it can be tested as it will be printed. `with_pictures`: read and embed the files.
+pub(crate) fn tx_blocks(v: &wallet::Vault, d: &activity::Detail, contacts: &[wallet::Contact], ccy: &str,
+    q_then: &Option<activity::Quote>, q_now: &Option<activity::Quote>, with_pictures: bool) -> (String, String, Vec<export::Block>) {
+    use export::Block;
+    let txid = &d.txid;
+    let key = format!("tx:{txid}");
+    let (label, note) = (v.labels.get(&key).cloned().unwrap_or_default(), v.notes.get(&key).cloned().unwrap_or_default());
+    let ctx = v.more.get(&key).and_then(|m| m.get("ctx")).filter(|c| c.get("removed").is_none()).cloned();
+
+    let sats = |n: u64| { let t = n.to_string(); let mut o = String::new(); for (i, c) in t.chars().enumerate() { if i > 0 && (t.len() - i) % 3 == 0 { o.push(','); } o.push(c); } o };
+    let money = |q: &Option<activity::Quote>| q.as_ref().map(|q| format!("{}{:.2} {ccy}", if d.net < 0 { "−" } else { "" }, (d.net.unsigned_abs() as f64) / 1e8 * q.price));
+
+    let when = d.time.map(|t| format!("{} UTC", chrono_ish(t as u64))).unwrap_or_else(|| "not in a block yet".into());
+    let conf = if d.height > 0 { format!("confirmed · {} block{} deep", sats((d.tip as i64 - d.height as i64 + 1).max(1) as u64), if d.tip as i64 - d.height as i64 + 1 == 1 { "" } else { "s" }) } else { "in the mempool".into() };
+    let mut facts = vec![
+        ("Amount".to_string(), format!("{}{} sats", if d.net > 0 { "+" } else if d.net < 0 { "−" } else { "" }, sats(d.net.unsigned_abs()))),
+    ];
+    if let Some(m) = money(&q_then) { facts.push(("Worth then".into(), format!("{m}  ({})", q_then.as_ref().unwrap().basis))); }
+    if let Some(m) = money(&q_now) { facts.push(("Worth now".into(), format!("{m}  ({})", q_now.as_ref().unwrap().basis))); }
+    facts.push(("When".into(), when));
+    facts.push(("Status".into(), conf));
+    facts.push(("Vault".into(), format!("{} · {} · {} of {} keys", v.name, v.network, v.threshold, v.keys.len())));
+
+    let book: Vec<&wallet::Contact> = contacts.iter().filter(|c| c.network == v.network).collect();
+    let who = |a: &Option<String>| a.as_ref().and_then(|a| book.iter().find(|c| c.address.eq_ignore_ascii_case(a)).map(|c| format!("  ({})", c.name))).unwrap_or_default();
+    let place_of = |i: u32| if i >= wallet::CHANGE { format!("  ({} · change #{})", v.name, i - wallet::CHANGE) } else { format!("  ({} · receive #{})", v.name, i) };
+    let line = |a: &Option<String>, ours: Option<u32>, n: u64| format!("{}{}  {} sats", a.clone().unwrap_or_else(|| "no address".into()), ours.map(place_of).unwrap_or_else(|| who(a)), sats(n));
+    let ours_in: Vec<&activity::TxInput> = d.inputs.iter().filter(|i| i.ours.is_some()).collect();
+    let (foreign_out, ours_out): (Vec<_>, Vec<_>) = d.outputs.iter().partition(|o| o.ours.is_none());
+    if ours_in.is_empty() {
+        facts.push(("From".into(), format!("outside this vault · {} input{}", d.inputs.len(), if d.inputs.len() == 1 { "" } else { "s" })));
+        facts.push(("To".into(), ours_out.iter().map(|o| line(&o.address, o.ours, o.sats)).collect::<Vec<_>>().join("; ")));
+        facts.push(("Fee".into(), d.fee.map(|f| format!("{} sats, paid by the sender", sats(f))).unwrap_or_else(|| "paid by the sender".into())));
+    } else {
+        facts.push(("To".into(), if foreign_out.is_empty() { "nowhere outside this vault: the coins moved between its own addresses".into() } else { foreign_out.iter().map(|o| line(&o.address, o.ours, o.sats)).collect::<Vec<_>>().join("; ") }));
+        if !ours_out.is_empty() { facts.push(("Change".into(), ours_out.iter().map(|o| line(&o.address, o.ours, o.sats)).collect::<Vec<_>>().join("; "))); }
+        facts.push(("Fee".into(), match (d.fee, d.fee_rate) { (Some(f), Some(r)) => format!("{} sats · {r:.2} sat/vB", sats(f)), (Some(f), None) => format!("{} sats", sats(f)), _ => "not known".into() }));
+        let signers: Vec<String> = { let mut v: Vec<String> = ours_in.iter().flat_map(|i| i.signers.clone()).collect(); v.dedup(); v.dedup(); v };
+        facts.push(("Signed by".into(), if signers.is_empty() { "could not be read from the signatures".into() } else { format!("{}  (read from the signatures on the transaction)", signers.join(" and ")) }));
+    }
+
+    let title = if label.is_empty() { format!("{} · {}{} sats", d.time.map(|t| chrono_ish(t as u64)).unwrap_or_else(|| "Unconfirmed".into()), if d.net > 0 { "+" } else if d.net < 0 { "−" } else { "" }, sats(d.net.unsigned_abs())) } else { label.clone() };
+    let mut blocks = vec![Block::Facts(facts)];
+    // the label is the title already; printing it twice is noise
+    if !note.trim().is_empty() { blocks.push(Block::Heading("Your note".into())); blocks.push(Block::Para(note)); }
+
+    // where and on what, with the map as it is drawn on screen
+    if let Some(c) = &ctx {
+        let str_of = |k: &str| c.get(k).and_then(|x| x.as_str()).map(str::to_string);
+        let mut kv = Vec::new();
+        let how = match c.get("how").and_then(|h| h.as_str()) { Some("made") => "Made on", Some("seen") => "First seen on", _ => "Noted on" };
+        if let Some(p) = str_of("place") { kv.push(("Place".to_string(), p)); }
+        if let Some(g) = c.get("geo") { if let (Some(la), Some(lo)) = (g.get("lat").and_then(|x| x.as_f64()), g.get("lon").and_then(|x| x.as_f64())) {
+            kv.push(("Position".into(), format!("{la:.3}, {lo:.3}{}", g.get("acc").and_then(|a| a.as_f64()).filter(|a| *a > 0.0).map(|a| format!("  (to about {a:.0} m)")).unwrap_or_default())));
+        } }
+        if let Some(dev) = c.get("device") {
+            let d2 = |k: &str| dev.get(k).and_then(|x| x.as_str()).unwrap_or("");
+            kv.push((how.to_string(), format!("{}  ({})", d2("name"), [d2("model"), d2("os"), &format!("Any Two Keys {}", d2("app"))].iter().filter(|x| !x.is_empty()).cloned().collect::<Vec<_>>().join(" · "))));
+        }
+        if c.get("how").and_then(|h| h.as_str()) == Some("seen") { kv.push((String::new(), "A deposit happens wherever the sender was; this is only where this computer was when it noticed.".into())); }
+        if !kv.is_empty() { blocks.push(Block::Heading("Where and on what".into())); blocks.push(Block::Facts(kv)); }
+        if let Some(g) = c.get("geo").filter(|_| with_pictures) { if let (Some(la), Some(lo)) = (g.get("lat").and_then(|x| x.as_f64()), g.get("lon").and_then(|x| x.as_f64())) {
+            if let Ok(Some(png)) = map_png(la, lo, false) { if let Ok((j, w, h)) = export::jpeg_for_print(&png, 1200) {
+                blocks.push(Block::Jpeg { data: j, w, h, caption: "Map data © OpenStreetMap contributors. The place is marked at the centre.".into(), wide: false });
+            } }
+        } }
+    }
+
+    // the pictures themselves, and a line for anything that is not one
+    let files = v.files.get(&key).cloned().unwrap_or_default();
+    let (mut shown, mut listed) = (false, Vec::new());
+    for e in &files {
+        let (nm, mime, hash) = (e.get("name").and_then(|x| x.as_str()).unwrap_or("file").to_string(), e.get("mime").and_then(|x| x.as_str()).unwrap_or("").to_string(), e.get("sha256").and_then(|x| x.as_str()).unwrap_or("").to_string());
+        let size = e.get("size").and_then(|x| x.as_u64()).unwrap_or(0);
+        let here = with_pictures && attach::have(&hash);
+        if mime.starts_with("image/") && here {
+            if let Ok(bytes) = attach::read(&hash) { if let Ok((j, w, h)) = export::jpeg_for_print(&bytes, 1400) {
+                if !shown { blocks.push(Block::Heading("Pictures".into())); shown = true; }
+                blocks.push(Block::Jpeg { data: j, w, h, caption: nm.clone(), wide: true });
+                continue;
+            } }
+        }
+        listed.push(format!("{nm} · {} KB{}", size / 1024, if here || !with_pictures { "" } else { " · not on this computer" }));
+    }
+    if !listed.is_empty() { blocks.push(Block::Heading("Other files kept with this".into())); blocks.push(Block::Para(listed.join("\n"))); }
+
+    blocks.push(Block::Rule);
+    blocks.push(Block::Heading("The chain's own facts".into()));
+    blocks.push(Block::Facts(vec![
+        ("Transaction".into(), d.txid.clone()),
+        ("Witness id".into(), d.wtxid.clone()),
+        ("Block".into(), match (&d.block, d.position) { (Some(b), Some(p)) => format!("{} · {}  (position {})", sats(d.height as u64), b, sats(p as u64)), (Some(b), None) => format!("{} · {}", sats(d.height as u64), b), _ => "not in a block yet".into() }),
+        ("Inclusion".into(), if d.proof == "proved" { format!("proved: this computer's node gave a merkle path that hashes to the root in block {}'s header", sats(d.height as u64)) } else { d.proof.clone() }),
+        ("Size".into(), format!("{} B · {} vB · {} WU", sats(d.size as u64), sats(d.vsize as u64), sats(d.weight))),
+        ("Replaceable".into(), if d.rbf { "signalled (RBF)".into() } else { "not signalled".to_string() }),
+    ]));
+    blocks.push(Block::Heading("The transaction itself".into()));
+    blocks.push(Block::Mono(d.hex.clone()));
+    blocks.push(Block::Para("Anyone can check this record: the transaction above is the one the chain holds, and its id is printed with it.".into()));
+
+    (title, format!("{} · printed {}", v.name, export::ymd(now())), blocks)
+}
+
+/// "Thu 18 Sep 2026, 18:26" for a Unix time, UTC. Enough for a printed record; no date crate for one line.
+fn chrono_ish(t: u64) -> String {
+    const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MON: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let ymd = export::ymd(t);
+    let (y, m, d) = (&ymd[..4], ymd[5..7].parse::<usize>().unwrap_or(1), &ymd[8..10]);
+    format!("{} {} {} {}, {:02}:{:02}", DAYS[((t / 86_400) % 7) as usize], d.trim_start_matches('0'), MON[m - 1], y, (t / 3600) % 24, (t / 60) % 60)
 }
 
 /// Search-as-you-type for a place, on OUR server only (places.rs). Ranked near this computer when Places is on —
@@ -1410,11 +1556,105 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![location_status, location_preview, place_search, ctx_set, tx_map, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![location_status, location_preview, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
         .build(tauri::generate_context!())
         .expect("error while running Any Two Keys")
         .run(|_, event| { if let tauri::RunEvent::Exit = event { lockbox::lock(); } });   // readable copies handed to a viewer go when the app does
+}
+
+#[cfg(test)]
+mod sheet_tests {
+    use super::*;
+
+    const KEY: &str = concat!("tx:", "abababababababababababababababababababababababababababababababab");
+
+    fn vault() -> wallet::Vault {
+        let mut v: wallet::Vault = serde_json::from_value(serde_json::json!({
+            "name": "mineracks vault", "network": "mainnet", "threshold": 2, "descriptor": "wsh(multi(2,…))", "address": "bc1q…", "created": 1_789_000_000,
+            "keys": [{ "name": "laptop", "serial": 1, "pubkey": "02aa" }, { "name": "keyring", "serial": 2, "pubkey": "02bb" }, { "name": "off-site", "serial": 3, "pubkey": "02cc" }],
+        })).unwrap();
+        v.labels.insert(KEY.into(), "Lets check if labelling still works".into());
+        v.notes.insert(KEY.into(), "Ordered 17 Sep, invoice 4471.\nAsk Sam about the warranty.".into());
+        v.files.insert(KEY.into(), vec![
+            serde_json::json!({ "name": "invoice-4471.pdf", "mime": "application/pdf", "size": 217_344, "sha256": "ab".repeat(32), "t": 1 }),
+        ]);
+        v.more.insert(KEY.into(), serde_json::from_value(serde_json::json!({ "ctx": {
+            "t": 1_789_600_000u64, "how": "made", "place": "445 Upper Edward Street, Spring Hill, Brisbane, Queensland 4000, Australia",
+            "geo": { "lat": -27.462, "lon": 153.025, "acc": 110 },
+            "device": { "name": "Piers’s MacBook PRO", "model": "MacBookPro17,1", "os": "macOS 27.0", "app": "0.1.0" } } })).unwrap());
+        v
+    }
+
+    fn spend() -> activity::Detail {
+        serde_json::from_value(serde_json::json!({
+            "txid": "ab".repeat(32), "wtxid": "cd".repeat(32), "version": 2, "locktime": 0, "size": 380, "vsize": 189, "weight": 756, "rbf": true,
+            "net": -5_190i64, "fee": 190u64, "fee_rate": 1.0053, "height": 967_531, "tip": 967_600, "block": "0000000000000000000112ab", "time": 1_789_600_120u32,
+            "proof": "proved", "position": 1_757,
+            "inputs": [{ "outpoint": "ee:1", "address": "bc1qvault", "sats": 20_000u64, "ours": 0, "sequence": 4_294_967_293u32, "witness": 4, "signers": ["laptop", "off-site"] }],
+            "outputs": [{ "n": 0, "address": "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", "sats": 5_000u64, "kind": "P2WPKH", "ours": null },
+                        { "n": 1, "address": "bc1qvaultchange", "sats": 14_810u64, "kind": "P2WSH", "ours": 2_147_483_648u32 }],
+            "hex": "0200000000010".repeat(60)
+        })).unwrap()
+    }
+
+    /// The date on a printed sheet, against what Python's own UTC formatting gives for the same instants.
+    #[test]
+    fn the_date_on_a_sheet_is_the_right_one() {
+        for (t, want) in [(1_789_600_120u64, "Wed 16 Sep 2026, 23:08"), (1_758_286_000, "Fri 19 Sep 2025, 12:46"), (0, "Thu 1 Jan 1970, 00:00"), (951_782_400, "Tue 29 Feb 2000, 00:00")] {
+            assert_eq!(chrono_ish(t), want);
+        }
+    }
+
+    /// The sheet a person will actually print, built without a network and read back by pypdf in `test/pdf-check.py`.
+    #[test]
+    fn a_transaction_sheet_says_what_the_screen_says() {
+        let (v, d) = (vault(), spend());
+        let contacts = vec![wallet::Contact { name: "hardware shop".into(), address: "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4".into(), network: "mainnet".into(), added: 1, used: 2, last_used: 1 }];
+        let q = Some(activity::Quote { price: 164_500.0, basis: "hourly 2026-09-18 08:00 UTC".into() });
+        let (title, subtitle, blocks) = tx_blocks(&v, &d, &contacts, "AUD", &q, &q, false);
+        assert_eq!(title, "Lets check if labelling still works");
+        assert!(subtitle.starts_with("mineracks vault · printed 20"));
+        let flat = format!("{:?}", blocks.iter().map(|b| match b {
+            export::Block::Facts(kv) => kv.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("|"),
+            export::Block::Heading(h) => format!("#{h}"), export::Block::Para(p) => p.clone(), export::Block::Mono(m) => format!("hex:{}", m.len()),
+            export::Block::Jpeg { caption, .. } => format!("img:{caption}"), export::Block::Rule => "---".into() }).collect::<Vec<_>>());
+        for want in [
+            "Amount=−5,190 sats", "Worth then=−8.54 AUD  (hourly 2026-09-18 08:00 UTC)",   // 5,190 sats at 164,500/BTC
+            "To=bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4  (hardware shop)",        // the address book names it
+            "Change=bc1qvaultchange  (mineracks vault · change #0)",
+            "Fee=190 sats · 1.01 sat/vB", "Signed by=laptop and off-site",
+            "Status=confirmed · 70 blocks deep", "When=Wed 16 Sep 2026, 23:08 UTC",
+            "#Where and on what", "445 Upper Edward Street", "Position=-27.462, 153.025  (to about 110 m)", "Made on=Piers’s MacBook PRO",
+            "#Your note", "Ask Sam about the warranty.", "invoice-4471.pdf · 212 KB",
+            "Inclusion=proved", "position 1,757", "hex:780",
+        ] { assert!(flat.contains(want), "the sheet does not say {want:?}\n{flat}"); }
+        assert!(!flat.contains("#Label"), "the label is the title; it is not printed twice");
+
+        // a deposit reads the other way round, and says where the money did NOT happen
+        let mut dep = spend();
+        dep.net = 9_171; dep.fee = Some(188); dep.fee_rate = None;
+        dep.inputs[0].ours = None; dep.inputs[0].signers.clear();
+        dep.outputs[0].ours = Some(0); dep.outputs[1].ours = Some(0);
+        let mut v2 = vault();
+        v2.more.get_mut(KEY).unwrap().get_mut("ctx").unwrap()["how"] = "seen".into();
+        let (_, _, b2) = tx_blocks(&v2, &dep, &[], "AUD", &q, &q, false);
+        let f2 = format!("{:?}", b2.iter().map(|b| match b { export::Block::Facts(kv) => kv.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("|"), export::Block::Para(p) => p.clone(), _ => String::new() }).collect::<Vec<_>>());
+        assert!(f2.contains("Amount=+9,171 sats") && f2.contains("From=outside this vault · 1 input") && f2.contains("Fee=188 sats, paid by the sender"), "{f2}");
+        assert!(f2.contains("First seen on=") && f2.contains("wherever the sender was"), "a deposit must not claim it was made here: {f2}");
+        assert!(!f2.contains("Signed by"), "a deposit was not signed by our keys");
+
+        // no label, no note, no place, no money: still a sheet, and its title says which transaction
+        let bare: wallet::Vault = serde_json::from_value(serde_json::json!({ "name": "signet test vault", "network": "signet", "threshold": 2, "keys": [], "descriptor": "", "address": "", "created": 0 })).unwrap();
+        let (t3, _, b3) = tx_blocks(&bare, &spend(), &[], "", &None, &None, false);
+        assert_eq!(t3, "Wed 16 Sep 2026, 23:08 · −5,190 sats");
+        let f3 = format!("{b3:?}").replace("Jpeg { data: [", "Jpeg { data: [… ");
+        assert!(!f3.contains("Worth") && !f3.contains("Where and on what") && !f3.contains("Your note"), "nothing is invented for an empty record: {f3}");
+
+        let pdf = export::doc(&title, &subtitle, &blocks).unwrap();
+        let dir = std::env::temp_dir().join("a2k-pdf"); std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sheet.pdf"), &pdf).unwrap();
+    }
 }

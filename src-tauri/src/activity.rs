@@ -100,12 +100,28 @@ pub fn build(v: &wallet::Vault, servers: &Servers, history: &[(String, i32)], cc
     Ok(Activity { ccy: ccy.to_string(), rows, now, note })
 }
 
+/// The price at one moment, from the cache when it is there. Used by a sheet that prints one transaction long after
+/// the screen worked the same number out; `None` when there is no price to be had, never a guess.
+pub fn quote_at(prices_url: &str, ccy: &str, t: Option<u32>) -> Option<Quote> {
+    if ccy.is_empty() || prices_url.is_empty() { return None; }
+    let t = t.or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs() as u32))?;
+    let (day, hour) = day_hour(t);
+    let key = format!("{ccy}:{day}T{hour:02}");
+    let mut cache = load_cache();
+    if let Some(q) = cache.prices.get(&key) { return Some(q.clone()); }
+    let http = reqwest::blocking::Client::builder().user_agent("anytwokeys/0.1").timeout(std::time::Duration::from_secs(12)).build().ok()?;
+    let q = fetch(&http, prices_url, ccy, &day, Some(hour))?;
+    cache.prices.insert(key, q.clone());
+    save_cache(&cache);
+    Some(q)
+}
+
 // ---------- one transaction, in full ----------
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct TxInput { pub outpoint: String, pub address: Option<String>, pub sats: Option<u64>, pub ours: Option<u32>, pub sequence: u32, pub witness: usize, pub signers: Vec<String> }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct TxOutput { pub n: usize, pub address: Option<String>, pub sats: u64, pub kind: String, pub ours: Option<u32> }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct Detail { pub txid: String, pub wtxid: String, pub version: i32, pub locktime: u32, pub size: usize, pub vsize: usize, pub weight: u64, pub rbf: bool,
     pub net: i64, pub fee: Option<u64>, pub fee_rate: Option<f64>, pub height: i32, pub tip: u32, pub block: Option<String>, pub time: Option<u32>,
     /// "proved" — the server's merkle path hashes up to the root in the block header; "unconfirmed"; or why it could not be shown

@@ -500,6 +500,14 @@ document.addEventListener('paste', async (e) => {
 $('#tx-chain').addEventListener('toggle', () => { try { localStorage.setItem('a2k-chain-open', $('#tx-chain').open ? '1' : '0'); } catch {} });
 $('#tx-explorer').onclick = () => { const a = document.createElement('a'); a.dataset.tx = txView.txid; document.body.appendChild(a); a.click(); a.remove(); };
 $('#tx-copyid').onclick = () => navigator.clipboard.writeText(txView.txid).then(() => toast('Transaction id copied'));
+// everything on this screen, printable: the facts, your record, the place with its map, the pictures themselves
+$('#tx-pdf').onclick = async () => {
+  const b = $('#tx-pdf'), name = vault.name, was = b.textContent;
+  b.disabled = true; b.textContent = 'Building…';
+  try { toast('Saved ' + await invoke('tx_pdf', { name, txid: txView.txid, height: txView.height, ccy: vault.network === 'mainnet' ? fiatCcy() : '' }), 7000); }
+  catch (e) { if (!/cancelled/.test(String(e))) fail(e); }
+  finally { b.disabled = false; b.textContent = was; }
+};
 // the record saves itself: the label when you leave the field or press Enter, the note a moment after you stop typing
 async function saveTxField(which) {
   if (!vault || !txView.txid) return;

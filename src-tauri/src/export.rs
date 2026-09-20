@@ -192,11 +192,142 @@ pub fn pdf(s: &Sheet) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+// ------------------------------------------------------------ documents --
+// A printable record of one transaction: facts, where and on what (with the map), the note, and the pictures.
+
+#[derive(Debug)]
+pub enum Block { Heading(String), Facts(Vec<(String, String)>), Para(String), Mono(String), Jpeg { data: Vec<u8>, w: u32, h: u32, caption: String, wide: bool }, Rule }
+
+/// Any picture the `image` crate reads → a JPEG no wider than `max_w` pixels, with its size. Metadata does not survive.
+pub fn jpeg_for_print(bytes: &[u8], max_w: u32) -> Result<(Vec<u8>, u32, u32), String> {
+    let img = image::load_from_memory(bytes).map_err(|e| format!("picture: {e}"))?;
+    let img = if img.width() > max_w { img.resize(max_w, u32::MAX, image::imageops::FilterType::Triangle) } else { img };
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 86).encode_image(&img.to_rgb8()).map_err(|e| e.to_string())?;
+    Ok((out, img.width(), img.height()))
+}
+
+pub fn doc(title: &str, subtitle: &str, blocks: &[Block]) -> Result<Vec<u8>, String> {
+    let mut pages = vec![Page(Vec::new())];
+    let mut images: Vec<(Vec<u8>, u32, u32)> = Vec::new();
+    let mut used: Vec<Vec<usize>> = vec![Vec::new()];   // which pictures each page actually draws
+    let mut y = H - M - 8.0;
+    macro_rules! page { () => { pages.last_mut().unwrap() } }
+    macro_rules! need { ($h:expr) => { if y - $h < M { pages.push(Page(Vec::new())); used.push(Vec::new()); y = H - M; } } }
+    page!().text(2, 20.0, M, y, "Any Two Keys"); y -= 22.0;
+    for l in wrap(title, 60) { page!().text(2, 13.0, M, y, &l); y -= 16.0; }
+    if !subtitle.is_empty() { page!().text(1, 10.0, M, y, subtitle); y -= 14.0; }
+    page!().rule(y); y -= 18.0;
+    for b in blocks {
+        match b {
+            Block::Rule => { need!(16.0); y -= 4.0; page!().rule(y); y -= 16.0; }
+            Block::Heading(h) => { need!(30.0); y -= 4.0; page!().text(2, 9.0, M, y, &h.to_uppercase()); y -= 15.0; }
+            Block::Facts(kv) => for (k, v) in kv {
+                let lines = wrap(v, 78); need!(14.0 * lines.len() as f32 + 3.0);
+                page!().text(2, 8.5, M, y, &k.to_uppercase());
+                for (i, l) in lines.iter().enumerate() { page!().text(1, 10.5, M + 110.0, y, l); if i + 1 < lines.len() { y -= 13.0; } }
+                y -= 16.0;
+            },
+            Block::Para(t) => { for para in t.split('\n') { let lines = wrap(para, 96); if lines.len() == 1 && lines[0].is_empty() { y -= 6.0; continue; } for l in lines { need!(13.0); page!().text(1, 10.0, M, y, &l); y -= 13.0; } } y -= 4.0; }
+            Block::Mono(t) => { for l in t.as_bytes().chunks(104).map(|c| std::str::from_utf8(c).unwrap_or("")) { need!(10.0); page!().text(3, 7.5, M, y, l); y -= 10.0; } y -= 6.0; }
+            Block::Jpeg { data, w, h, caption, wide } => {
+                let maxw = if *wide { W - 2.0 * M } else { 260.0 };
+                let (pw, ph) = { let sc = (maxw / *w as f32).min(320.0 / *h as f32).min(1.0); (*w as f32 * sc, *h as f32 * sc) };
+                need!(ph + 22.0);
+                images.push((data.clone(), *w, *h));
+                let n = images.len();
+                used.last_mut().unwrap().push(n);
+                page!().0.extend(format!("q {pw:.1} 0 0 {ph:.1} {M} {:.1} cm /Im{n} Do Q\n", y - ph).bytes());
+                y -= ph + 3.0;
+                if !caption.is_empty() { page!().text(1, 8.5, M, y - 6.0, caption); y -= 12.0; }
+                y -= 8.0;
+            }
+        }
+    }
+    // assemble: catalog, pages, three fonts, the images, then a page object and a content stream per page
+    let mut out: Vec<u8> = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
+    let mut offsets = Vec::new();
+    let mut obj = |out: &mut Vec<u8>, body: &[u8]| { offsets.push(out.len()); let id = offsets.len(); out.extend(format!("{id} 0 obj\n").bytes()); out.extend(body); out.extend(b"\nendobj\n"); };
+    let first_page = 6 + images.len();
+    let kids: Vec<String> = (0..pages.len()).map(|i| format!("{} 0 R", first_page + i * 2)).collect();
+    obj(&mut out, b"<< /Type /Catalog /Pages 2 0 R >>");
+    obj(&mut out, format!("<< /Type /Pages /Count {} /Kids [{}] >>", pages.len(), kids.join(" ")).as_bytes());
+    for f in ["Helvetica", "Helvetica-Bold", "Courier"] { obj(&mut out, format!("<< /Type /Font /Subtype /Type1 /BaseFont /{f} /Encoding /WinAnsiEncoding >>").as_bytes()); }
+    for (data, w, h) in &images {
+        let mut body = format!("<< /Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n", data.len()).into_bytes();
+        body.extend(data); body.extend(b"\nendstream"); obj(&mut out, &body);
+    }
+    for (i, p) in pages.iter().enumerate() {
+        // a page names only the pictures it draws, so a long document does not make every page carry all of them
+        let xobjects: Vec<String> = used[i].iter().map(|n| format!("/Im{n} {} 0 R", 5 + n)).collect();
+        let res = if xobjects.is_empty() { String::new() } else { format!(" /XObject << {} >>", xobjects.join(" ")) };
+        obj(&mut out, format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W} {H}] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >>{res} >> /Contents {} 0 R >>", first_page + 1 + i * 2).as_bytes());
+        let mut body = format!("<< /Length {} >>\nstream\n", p.0.len()).into_bytes(); body.extend(&p.0); body.extend(b"endstream");
+        obj(&mut out, &body);
+    }
+    let xref = out.len();
+    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).bytes());
+    for o in &offsets { out.extend(format!("{o:010} 00000 n \n").bytes()); }
+    out.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", offsets.len() + 1).bytes());
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     // a real 2-of-3 spend from the signet vault with ONE YubiKey signature on it (mornay's 2026-09-17 proof); public data
     fn sample() -> Vec<u8> { include_bytes!("../../test/fixtures/sample.psbt").to_vec() }
+
+    /// A document with everything in it, written to $TMPDIR/a2k-pdf for `test/pdf-check.py` to open with a library
+    /// that is not ours. Always runs: a PDF this app cannot write is a PDF nobody can read.
+    #[test]
+    fn a_document_carries_its_pictures_and_points_at_its_own_objects() {
+        let mut px = image::RgbImage::new(400, 300);
+        for (x, y, p) in px.enumerate_pixels_mut() { *p = image::Rgb([(x / 2) as u8, (y / 2) as u8, 140]); }
+        let mut png = Vec::new(); image::DynamicImage::ImageRgb8(px).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let (jpeg, w, h) = jpeg_for_print(&png, 1400).unwrap();
+        assert!(jpeg.starts_with(&[0xFF, 0xD8, 0xFF]) && (w, h) == (400, 300), "a picture for print is a JPEG at its own size");
+        let blocks = vec![
+            Block::Facts(vec![("Amount".into(), "+9,171 sats".into()), ("Worth then".into(), "A$10.07 AUD  (hourly 2026-09-18 08:00 UTC)".into())]),
+            Block::Heading("Your note".into()), Block::Para("Ordered 17 Sep, invoice 4471.\nAsk Sam about the warranty.".into()),
+            Block::Jpeg { data: jpeg.clone(), w, h, caption: "IMG_0412.jpg".into(), wide: true },
+            Block::Rule, Block::Heading("The transaction itself".into()), Block::Mono("0200000000010".repeat(90)),
+            Block::Jpeg { data: jpeg, w, h, caption: "receipt.jpg".into(), wide: false },
+        ];
+        let out = doc("Lets check if labelling still works", "mineracks vault · printed 2026-09-20", &blocks).unwrap();
+        assert!(out.starts_with(b"%PDF-1.4"));
+        assert_eq!(out.windows(9).filter(|w| *w == b"DCTDecode").count(), 2, "both pictures are embedded");
+        // every offset in the table must land on that object's own header: the classic way a hand-written PDF breaks
+        let whole = String::from_utf8_lossy(&out).to_string();
+        let xref = &whole[whole.rfind("xref\n0 ").expect("an xref table")..];
+        let offsets: Vec<usize> = xref.lines().skip(2).skip(1).take_while(|l| l.ends_with(" 00000 n ")).map(|l| l[..10].parse().unwrap()).collect();
+        assert!(offsets.len() > 8, "{} objects", offsets.len());
+        for (i, o) in offsets.iter().enumerate() { assert!(out[*o..].starts_with(format!("{} 0 obj", i + 1).as_bytes()), "offset {i} does not point at object {}", i + 1); }
+        let dir = std::env::temp_dir().join("a2k-pdf"); std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("doc.pdf"), &out).unwrap();
+        println!("{}", dir.join("doc.pdf").display());
+    }
+
+    /// The real thing: `A2K_STORE_KEY=… cargo test live_tx_pdf -- --ignored --nocapture` — every transaction of every
+    /// vault, written to $TMPDIR/a2k-pdf.
+    #[test]
+    #[ignore]
+    fn live_tx_pdf() {
+        let s = crate::wallet::load().unwrap();
+        let dir = std::env::temp_dir().join("a2k-pdf"); std::fs::create_dir_all(&dir).unwrap();
+        for v in &s.vaults {
+            let servers = crate::wallet::servers_for(&s, &v.network);
+            let sc = crate::wallet::scan(v, &servers, s.settings.gap).unwrap();
+            let mut hist: Vec<(String, i32)> = sc.history.iter().map(|(t, h, _)| (t.clone(), *h)).collect();
+            hist.sort(); hist.dedup();
+            for (txid, h) in hist {
+                let bytes = crate::tx_sheet(&v.name, &txid, h, "AUD").unwrap();
+                let p = dir.join(format!("{}-{}.pdf", v.name.replace(' ', "-"), &txid[..8]));
+                std::fs::write(&p, &bytes).unwrap();
+                println!("{} ({} KB)", p.display(), bytes.len() / 1024);
+            }
+        }
+    }
 
     #[test]
     fn a_psbt_survives_every_way_out_and_back_in() {

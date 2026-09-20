@@ -27,6 +27,7 @@ const H = {
   attach_bytes: (a) => { window.__pasted = a; V.files = V.files || {}; (V.files[a.key] = V.files[a.key] || []).push({ name: a.filename, mime: 'image/png', size: 20000, sha256: 'c'.repeat(64), t: 1, meta: 'stripped', thumb: 'd'.repeat(64) }); return { store: store(), added: 1, notes: [], errors: [] }; },
   location_status: () => 'off', location_preview: () => null,
   place_search: (a) => { (window.__asked = window.__asked || []).push(a.q); if (/zzzz/.test(a.q)) return []; return [{ label: '445 Upper Edward Street', detail: 'Spring Hill, Brisbane · Queensland 4000 · Australia', lat: -27.4615, lon: 153.0245 }, { label: '445 Upper Roma Street', detail: 'Brisbane City, Brisbane · Queensland 4000 · Australia', lat: -27.4655, lon: 153.0125 }]; },
+  tx_pdf: (a) => { window.__pdf = a; if (window.__pdfCancel) throw 'cancelled'; return '/Users/p/Desktop/anytwokeys-demo-vault-758adfd2.pdf'; },
   tx_map: (a) => { window.__mapAsked = a; return window.__noMap ? null : { png: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', metres_per_px: 4.0625, width: 640 }; },
   ctx_set: (a) => { window.__ctxSet = a; V.more = V.more || {}; const r = V.more['tx:' + a.txid] = V.more['tx:' + a.txid] || {}; if (a.remove) r.ctx = { removed: true, t: 9 }; else { r.ctx = Object.assign({ t: 9, how: 'noted', device: { name: 'Test Mac' } }, r.ctx || {}, { place: a.place, named: true }); delete r.ctx.geo; delete r.ctx.picked; if (a.lat !== null && a.lat !== undefined) { r.ctx.geo = { lat: a.lat, lon: a.lon, acc: 0 }; r.ctx.picked = true; } } return store(); },
   label_set: (a) => { V.labels = V.labels || {}; if (a.label) V.labels[a.key] = a.label; else delete V.labels[a.key]; return store(); },
@@ -164,6 +165,15 @@ with sync_playwright() as p:
     pg.fill("#tx-place", "the office in Geneva"); pg.keyboard.press("Enter"); pg.wait_for_timeout(300)
     check("naming the place yourself replaces the coordinates", pg.evaluate("__ctxSet.place") == "the office in Geneva" and "as you named it" in pg.inner_text("#tx-ctx-dl") and "153.023" not in pg.inner_text("#tx-ctx-dl"))
     check("a place named by hand has no coordinates, so no map is fetched for it", not pg.locator("#tx-map").is_visible())
+    # ---- save as PDF ----
+    pg.click("#tx-pdf"); pg.wait_for_timeout(400)
+    check("Save as PDF asks for THIS transaction, at the height the screen knows and in the screen's currency, and says where it went",
+          pg.evaluate("__pdf.txid") == T[1] and pg.evaluate("__pdf.height") == 967410 and pg.evaluate("__pdf.ccy") == "AUD" and "anytwokeys-demo-vault-758adfd2.pdf" in pg.inner_text("#toast") and pg.inner_text("#tx-pdf") == "Save as PDF" and not pg.is_disabled("#tx-pdf"),
+          pg.evaluate("JSON.stringify(__pdf)"))
+    pg.evaluate("window.__pdfCancel = true"); pg.click("#tx-pdf"); pg.wait_for_timeout(300)
+    check("changing your mind about where to save it says nothing and leaves the button usable", "cancel" not in pg.inner_text("#toast").lower() and not pg.is_disabled("#tx-pdf"))
+    pg.evaluate("window.__pdfCancel = false")
+
     # ---- search as you type ----
     pg.evaluate("window.__asked = []"); pg.click("#tx-place"); pg.fill("#tx-place", ""); pg.keyboard.type("445", delay=30); pg.wait_for_timeout(600)
     check("three characters are never asked about", pg.evaluate("__asked.length") == 0 and not pg.locator("#tx-place-list").is_visible())
