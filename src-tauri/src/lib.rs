@@ -1043,7 +1043,8 @@ async fn attach_into(name: String, key: String, items: Vec<(String, Vec<u8>)>, k
             for e in entries { if !list.iter().any(|x| x.get("sha256") == e.get("sha256")) { list.push(e); } }   // the same file twice is one file
             v.label_meta.insert(key, now());
         })?;
-        let _ = labels_sync(name).await;   // the RECORD travels now; the bytes stay on this computer until attachments sync is built
+        // the record and then the bytes travel in the background: a 25 MB receipt must not hold the screen while it goes up
+        tauri::async_runtime::spawn(async move { let _ = labels_sync(name).await; });
     }
     Ok(Attached { store: wallet::load()?, added, notes, errors })
 }
@@ -1094,6 +1095,14 @@ async fn attach_remove(name: String, key: String, sha256: String) -> R<Store> {
     // bytes go only when no record of ANY vault on this computer still names them
     let in_use: std::collections::HashSet<String> = st.vaults.iter().flat_map(|v| v.files.values().flatten()).flat_map(|e| ["sha256", "thumb"].into_iter().filter_map(|f| e.get(f).and_then(|x| x.as_str()).map(String::from)).collect::<Vec<_>>()).collect();
     attach::sweep(&gone, &in_use);
+    // off the host too, once no record of THIS vault names them (the record itself travels with the sync below)
+    if let Some(v) = st.vaults.iter().find(|v| v.name == name) {
+        let mine: std::collections::HashSet<&str> = v.files.values().flatten().flat_map(|e| ["sha256", "thumb"].into_iter().filter_map(|f| e.get(f).and_then(|x| x.as_str()))).collect();
+        if let (false, Some(root)) = (st.settings.vss.is_empty(), labels::root_from_shares(&v.seal.shares)) {
+            let keys = labels::keys(&root);
+            for h in gone.iter().filter(|h| !mine.contains(h.as_str())) { let _ = labels::att_delete(&st.settings.vss, &keys, h).await; }
+        }
+    }
     let _ = labels_sync(name).await;
     Ok(wallet::load()?)
 }
@@ -1142,10 +1151,54 @@ async fn labels_sync(name: String) -> R<LabelsStatus> {
                 vm.labels_synced = t;
             })?;
             let n = merged.records.values().filter(|r| !r.label.is_empty()).count();
-            Ok(LabelsStatus { backed_up: true, host, count: n, synced: t, note: String::new() })
+            // the files the records name: whatever this computer holds and the host lacks goes up, within the vault's allowance
+            let note = match attachments_up(&host, &keys, &merged).await { Ok(n) => n, Err(e) => format!("Labels are backed up; attachments are not yet: {e}") };
+            Ok(LabelsStatus { backed_up: true, host, count: n, synced: t, note })
         }
         Err(e) => Ok(LabelsStatus { backed_up: false, host, count, synced: v.labels_synced, note: e }),
     }
+}
+
+/// How much of a vault's attachments the label host will be asked to hold.
+const ATT_QUOTA: u64 = 250 * 1024 * 1024;
+
+fn att_entries(env: &labels::Envelope) -> Vec<(String, u64)> {
+    let mut seen = std::collections::HashSet::new(); let mut out = Vec::new();
+    for e in env.records.values().flat_map(|r| r.files.iter()) {
+        let size = e.get("size").and_then(|x| x.as_u64()).unwrap_or(0);
+        for (f, sz) in [("sha256", size), ("thumb", 1)] { if let Some(h) = e.get(f).and_then(|x| x.as_str()) { if seen.insert(h.to_string()) { out.push((h.to_string(), sz)); } } }
+    }
+    out
+}
+
+async fn attachments_up(host: &str, keys: &labels::Keys, env: &labels::Envelope) -> Result<String, String> {
+    let entries = att_entries(env);
+    if entries.is_empty() { return Ok(String::new()); }
+    let present = labels::att_present(host, keys).await?;
+    let (mut total, mut skipped) = (0u64, 0usize);
+    for (hash, size) in &entries {
+        total += size;
+        if total > ATT_QUOTA { skipped += 1; continue; }
+        let h = hash.clone();
+        let Ok(bytes) = block(move || attach::read(&h)).await else { continue };   // added on another computer and not fetched here: not ours to send
+        labels::att_upload(host, keys, hash, &bytes, &present).await?;
+    }
+    Ok(if skipped > 0 { format!("{skipped} attachment{} stayed on this computer only: this vault's backup allowance is 250 MB.", if skipped == 1 { "" } else { "s" }) } else { String::new() })
+}
+
+/// Bring a file that was added on another computer here: fetched from the label host, opened with the vault's keys,
+/// and kept only if it hashes to what the record names.
+#[tauri::command]
+async fn attach_fetch(name: String, sha256: String, size: u64) -> R<bool> {
+    let s = wallet::load()?;
+    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
+    if !v.files.values().flatten().any(|e| ["sha256", "thumb"].iter().any(|f| e.get(*f).and_then(|x| x.as_str()) == Some(sha256.as_str()))) { return Err("no record of this vault names that file".into()); }
+    if attach::have(&sha256) { return Ok(true); }
+    if s.settings.vss.is_empty() { return Err("no label host is set, so there is nowhere to fetch it from".into()); }
+    let root = labels::root_from_shares(&v.seal.shares).ok_or("this vault is not sealed, so it has no backup to fetch from")?;
+    let bytes = labels::att_download(&s.settings.vss, &labels::keys(&root), &sha256, size.clamp(1, attach::MAX_FILE) as usize).await?;
+    block(move || attach::keep(&sha256, &bytes)).await?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -1341,7 +1394,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![location_status, location_preview, ctx_set, tx_map, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![location_status, location_preview, ctx_set, tx_map, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])

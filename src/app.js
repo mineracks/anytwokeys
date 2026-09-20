@@ -336,14 +336,20 @@ async function renderFiles() {
   let here = []; try { here = await invoke('attach_have', { hashes: list.map(e => e.sha256) }); } catch {}
   if (!vault || vault.name !== name || key !== 'tx:' + txView.txid) return;
   const kind = (e) => (e.mime || '').startsWith('image/') ? 'IMG' : e.mime === 'application/pdf' ? 'PDF' : e.mime === 'text/plain' ? 'TXT' : 'FILE';
-  $('#tx-files').innerHTML = list.map((e, i) => `<div class="att${here[i] ? '' : ' away'}" role="button" tabindex="0" data-att="${i}" title="${esc(e.name)}${here[i] ? '' : ' — not on this computer yet'}"><div class="pic" data-thumb="${esc(e.thumb || '')}"><span class="doc">${kind(e)}</span></div><div class="nm">${nameParts(e.name)}</div><div class="sz">${here[i] ? sizeWords(e.size) + (e.meta === 'original' && kind(e) === 'IMG' ? ' · as taken' : '') : 'not on this computer yet'}</div><button type="button" class="att-x" data-att-x="${i}" aria-label="Remove ${esc(e.name)}">×</button></div>`).join('');
+  $('#tx-files').innerHTML = list.map((e, i) => `<div class="att${here[i] ? '' : ' away'}" role="button" tabindex="0" data-att="${i}" title="${esc(e.name)}${here[i] ? '' : ' — on another computer; click to fetch it from your backup'}"><div class="pic" data-thumb="${esc(e.thumb || '')}"><span class="doc">${kind(e)}</span></div><div class="nm">${nameParts(e.name)}</div><div class="sz">${here[i] ? sizeWords(e.size) + (e.meta === 'original' && kind(e) === 'IMG' ? ' · as taken' : '') : 'click to fetch'}</div><button type="button" class="att-x" data-att-x="${i}" aria-label="Remove ${esc(e.name)}">×</button></div>`).join('');
   const total = list.reduce((n, e) => n + (e.size || 0), 0);
   $('#tx-files-sum').textContent = list.length ? `${list.length} file${list.length === 1 ? '' : 's'} · ${sizeWords(total)}` : '';
   paintZone(false);
   $$('#tx-files [data-thumb]').forEach(async (pic) => { const h = pic.dataset.thumb; if (!h) return;
     try { if (!thumbCache.has(h)) thumbCache.set(h, await invoke('attach_thumb', { sha256: h })); const img = new Image(); img.alt = ''; img.src = thumbCache.get(h); pic.replaceChildren(img); } catch {} });
   $$('#tx-files [data-att]').forEach(t => { const e = list[+t.dataset.att];
-    const openIt = async () => { if (t.classList.contains('away')) return toast('That file was added on another computer; fetching it from there is not built yet'); try { toast(`${e.name}: ${await invoke('attach_open', { sha256: e.sha256, name: e.name, mime: e.mime })}`); } catch (err) { fail(err); } };
+    const openIt = async () => {
+      if (t.classList.contains('away')) {   // added on another computer: bring it here from the encrypted backup, prove it, then open it
+        if (t.dataset.fetching) return; t.dataset.fetching = '1'; t.querySelector('.sz').textContent = 'fetching from your backup…';
+        try { await invoke('attach_fetch', { name, sha256: e.sha256, size: e.size || 1 }); if (e.thumb) { try { await invoke('attach_fetch', { name, sha256: e.thumb, size: 1 }); } catch {} } await renderFiles(); toast(`${e.name} is on this computer now`); }
+        catch (err) { delete t.dataset.fetching; t.querySelector('.sz').textContent = 'not on this computer yet'; fail(err); }
+        return; }
+      try { toast(`${e.name}: ${await invoke('attach_open', { sha256: e.sha256, name: e.name, mime: e.mime })}`); } catch (err) { fail(err); } };
     t.onclick = (ev) => { if (ev.target.closest('.att-x')) return; openIt(); };
     t.onkeydown = (ev) => { if (ev.key === 'Enter' && !ev.target.closest('.att-x')) openIt(); }; });
   $$('#tx-files [data-att-x]').forEach(b => { const e = list[+b.dataset.attX];

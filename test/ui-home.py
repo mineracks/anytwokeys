@@ -15,6 +15,7 @@ const V = %(vault)s; window.V = V;
 window.__contacts = []; window.__extra = [];
 const store = () => ({ forms: {}, contacts: __contacts, vaults: [V].concat(__extra), settings: { network: V.network, custom: false, electrum: '', explorer: '', gap: 20, fiat: __state.fiat, prices: '' }, seen: {}, last_psbt: null, last_message: null });
 const H = {
+  attach_fetch: (a) => { (window.__fetched = window.__fetched || []).push(a); if (window.__fetchFails) throw 'the computer that added this file has not finished backing it up yet'; window.__away = (window.__away || []).filter(h => h !== a.sha256); return true; },
   attach_have: (a) => a.hashes.map(h => !(window.__away || []).includes(h)),
   attach_thumb: () => 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7',
   attach_open: (a) => { window.__opened = a; return a.mime === 'application/octet-stream' ? 'shown in its folder: this kind of file is not opened from here' : 'opened'; },
@@ -125,7 +126,11 @@ with sync_playwright() as p:
     tiles_.nth(1).click(); pg.wait_for_timeout(200); check("a click opens it with the system viewer", pg.evaluate("__opened.mime") == "application/pdf" and "opened" in pg.inner_text("#toast"))
     tiles_.nth(2).click(); pg.wait_for_timeout(200); check("a file of no viewable kind is shown in its folder, not opened", "not opened from here" in pg.inner_text("#toast"))
     pg.evaluate("window.__away = ['a'.repeat(63) + '1'.padStart(1, 'a')]; window.__away = [V.files['tx:' + %s][0].sha256]; renderFiles()" % json.dumps(T[1])); pg.wait_for_timeout(300)
-    check("a file whose bytes are on another computer says so and does not pretend to open", "away" in tiles_.nth(0).get_attribute("class") and "not on this computer yet" in tiles_.nth(0).inner_text())
+    check("a file whose bytes are on another computer says so and offers to fetch it", "away" in tiles_.nth(0).get_attribute("class") and "click to fetch" in tiles_.nth(0).inner_text())
+    pg.evaluate("window.__fetchFails = true; window.__opened = null"); tiles_.nth(0).click(); pg.wait_for_timeout(300)
+    check("if the other computer has not finished backing it up, it says that and opens nothing", "not finished backing it up" in pg.inner_text("#toast") and pg.evaluate("__opened") is None and "away" in tiles_.nth(0).get_attribute("class"))
+    pg.evaluate("window.__fetchFails = false"); tiles_.nth(0).click(); pg.wait_for_timeout(500)
+    check("a click fetches it (and its thumbnail) from the backup, and it is here", pg.evaluate("__fetched.length") >= 2 and "away" not in tiles_.nth(0).get_attribute("class") and "on this computer now" in pg.inner_text("#toast"), pg.evaluate("JSON.stringify(__fetched)"))
     pg.evaluate("window.__away = []; renderFiles()"); pg.wait_for_timeout(300)
     tiles_.nth(2).hover(); pg.click("#tx-files [data-att-x='2']"); check("remove asks first", tiles_.count() == 3 and pg.inner_text("#tx-files [data-att-x='2']") == "Remove?")
     pg.click("#tx-files [data-att-x='2']"); pg.wait_for_timeout(300); check("and then removes", tiles_.count() == 2)

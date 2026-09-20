@@ -32,7 +32,8 @@ pub const DEFAULT_VSS: &str = "https://vss.mineracks.com/vss";
 const MAGIC: &[u8; 5] = b"A2KL\x01";
 const OBJECT: &str = "labels";
 
-pub struct Keys { pub content: [u8; 32], pub auth: SecretKey, pub store: String }
+pub struct Keys { pub content: [u8; 32], pub auth: SecretKey, pub store: String, /// names attachments on the host, so the host cannot test for a file it knows
+    pub att: [u8; 32] }
 
 /// The root from a vault's shares (hex, one per key, in key order). None when the vault is not sealed.
 pub fn root_from_shares(shares: &[String]) -> Option<[u8; 32]> {
@@ -56,7 +57,8 @@ pub fn keys(root: &[u8; 32]) -> Keys {
         if let Ok(k) = SecretKey::from_slice(&a) { break k; }
         i += 1;
     };
-    Keys { content, auth, store: hex::encode(store) }
+    let mut att = [0u8; 32]; hk.expand(b"att-name", &mut att).unwrap();
+    Keys { content, auth, store: hex::encode(store), att }
 }
 
 /// One label's state. `label` empty = deleted (a tombstone), `t` = when it last changed (unix seconds).
@@ -240,6 +242,151 @@ mod tests {
         let m = a.merge(&b);
         assert_eq!(m.records["x"].label, "new"); assert_eq!(m.records["y"].label, ""); assert_eq!(m.records["z"].label, "keep"); assert_eq!(m.records["w"].label, "only b");
         assert_eq!(a.merge(&b), b.merge(&a));
+    }
+}
+
+// ------------------------------------------------------------ attachments --
+// A file's bytes are their own objects on the host: `att/<keyed name>/<n>`, one CHUNK of plaintext each (a VSS host caps
+// request bodies; ours at 4 MiB), each sealed under the content key with its own nonce and its object name as
+// associated data — so chunks cannot be swapped between files or positions. The name is HMAC(att key, sha256), not the
+// hash itself: a host that knew the hash could test whether you hold a file it already has.
+
+// 256 KiB, not the 1 MiB first planned: the VSS client gives every request a fixed 10 seconds, and a 1 MiB piece did not
+// make it through a busy home link in that time (2026-09-20). A piece this size needs about 0.2 Mbit/s.
+pub const CHUNK: usize = 256 * 1024;
+const ATT_MAGIC: &[u8; 5] = b"A2KA\x01";
+
+pub fn att_name(keys: &Keys, sha256: &str) -> String {
+    use bitcoin::hashes::{sha256, Hash, HashEngine, Hmac, HmacEngine};
+    let mut e = HmacEngine::<sha256::Hash>::new(&keys.att); e.input(sha256.as_bytes());
+    format!("att/{}", hex::encode(&Hmac::<sha256::Hash>::from_engine(e).to_byte_array()[..16]))
+}
+pub fn chunks_of(size: usize) -> usize { size.div_ceil(CHUNK).max(1) }
+
+pub fn seal_chunk(keys: &Keys, object: &str, plain: &[u8], nonce: [u8; 24]) -> Vec<u8> {
+    let ct = XChaCha20Poly1305::new((&keys.content).into()).encrypt(XNonce::from_slice(&nonce), Payload { msg: plain, aad: object.as_bytes() }).expect("encryption has no failing input");
+    [ATT_MAGIC.as_slice(), &nonce, &ct].concat()
+}
+pub fn open_chunk(keys: &Keys, object: &str, wire: &[u8]) -> Result<Vec<u8>, String> {
+    if wire.len() < ATT_MAGIC.len() + 24 + 16 || &wire[..ATT_MAGIC.len()] != ATT_MAGIC { return Err("the host returned something that is not one of our attachments".into()); }
+    let (nonce, ct) = wire[ATT_MAGIC.len()..].split_at(24);
+    XChaCha20Poly1305::new((&keys.content).into()).decrypt(XNonce::from_slice(nonce), Payload { msg: ct, aad: object.as_bytes() }).map_err(|_| "a piece of the attachment did not open with this vault's keys, or is not the piece it claims to be".to_string())
+}
+
+/// One VSS call over our own HTTP client. The library's client gives every request a fixed 10 seconds and, with bodies
+/// of a few hundred kilobytes, stalled before the request reached the host at all (2026-09-20: the host's log showed
+/// nothing arriving; `curl` put a megabyte through the same path in three seconds). Same protocol, same signed headers.
+async fn call<Req: prost::Message, Resp: prost::Message + Default>(url: &str, keys: &Keys, method: &str, req: &Req) -> Result<Resp, VssError> {
+    use vss_client_ng::headers::VssHeaderProvider;
+    let body = req.encode_to_vec();
+    let headers = SigsAuthProvider::new(keys.auth, HashMap::new()).get_headers(&body).await.map_err(|e| VssError::AuthError(e.to_string()))?;
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(90)).build().map_err(|e| VssError::InternalError(e.to_string()))?;
+    let mut r = client.post(format!("{}/{method}", url.trim_end_matches('/'))).header("content-type", "application/octet-stream").body(body);
+    for (k, v) in headers { r = r.header(k, v); }
+    let resp = r.send().await.map_err(|e| VssError::InternalError(if e.is_timeout() { "the label host did not answer in time".into() } else { "the label host could not be reached".into() }))?;
+    let status = resp.status();
+    let bytes = resp.bytes().await.map_err(|e| VssError::InternalError(e.to_string()))?;
+    if !status.is_success() { return Err(VssError::new(status.as_u16() as i32, bytes.to_vec())); }
+    Resp::decode(&bytes[..]).map_err(|e| VssError::InternalError(format!("the label host's answer could not be read: {e}")))
+}
+
+/// Every attachment object the host holds for this vault (names only; one cheap call per thousand).
+pub async fn att_present(url: &str, keys: &Keys) -> Result<std::collections::HashSet<String>, String> {
+    use vss_client_ng::types::ListKeyVersionsRequest;
+    let c = client!(url, keys);
+    let (mut out, mut token) = (std::collections::HashSet::new(), None);
+    for _ in 0..200 {
+        let r = c.list_key_versions(&ListKeyVersionsRequest { store_id: keys.store.clone(), key_prefix: Some("att/".into()), page_size: Some(1000), page_token: token.clone() }).await.map_err(|e| format!("label host: {e}"))?;
+        out.extend(r.key_versions.into_iter().map(|k| k.key));
+        match r.next_page_token { Some(t) if !t.is_empty() => token = Some(t), _ => break }
+    }
+    Ok(out)
+}
+
+/// Put whatever pieces of this file the host lacks. Returns how many pieces were sent.
+pub async fn att_upload(url: &str, keys: &Keys, sha256: &str, bytes: &[u8], present: &std::collections::HashSet<String>) -> Result<usize, String> {
+    use bitcoin::secp256k1::rand::RngCore;
+    let (base, mut sent) = (att_name(keys, sha256), 0);
+    for (n, plain) in bytes.chunks(CHUNK).enumerate() {
+        let object = format!("{base}/{n}");
+        if present.contains(&object) { continue; }
+        let mut nonce = [0u8; 24]; bitcoin::secp256k1::rand::rngs::OsRng.fill_bytes(&mut nonce);
+        let kv = KeyValue { key: object.clone(), version: 0, value: seal_chunk(keys, &object, plain, nonce) };
+        match call::<_, vss_client_ng::types::PutObjectResponse>(url, keys, "putObjects", &PutObjectRequest { store_id: keys.store.clone(), global_version: None, transaction_items: vec![kv], delete_items: vec![] }).await {
+            Ok(_) => sent += 1,
+            Err(VssError::ConflictError(_)) => {}     // another computer put the same piece first: same content, nothing to do
+            Err(e) => return Err(format!("label host: {e}")),
+        }
+    }
+    Ok(sent)
+}
+
+/// Fetch a file and PROVE it: the pieces must open under their own names and the whole must hash to what the record says.
+pub async fn att_download(url: &str, keys: &Keys, sha256: &str, size: usize) -> Result<Vec<u8>, String> {
+    use bitcoin::hashes::Hash;
+    let (base, mut out) = (att_name(keys, sha256), Vec::with_capacity(size));
+    for n in 0..chunks_of(size) {
+        let object = format!("{base}/{n}");
+        let kv = match call::<_, vss_client_ng::types::GetObjectResponse>(url, keys, "getObject", &GetObjectRequest { store_id: keys.store.clone(), key: object.clone() }).await {
+            Ok(r) => r.value.ok_or("empty answer from the label host")?,
+            Err(VssError::NoSuchKeyError(_)) => return Err("the computer that added this file has not finished backing it up yet".into()),
+            Err(e) => return Err(format!("label host: {e}")),
+        };
+        out.extend(open_chunk(keys, &object, &kv.value)?);
+    }
+    if hex::encode(bitcoin::hashes::sha256::Hash::hash(&out)) != sha256 { return Err("what came back is not the file the record names; it was thrown away".into()); }
+    Ok(out)
+}
+
+/// Remove a file's pieces from the host: whichever of them the host actually lists, and no others.
+pub async fn att_delete(url: &str, keys: &Keys, sha256: &str) -> Result<usize, String> {
+    use vss_client_ng::types::DeleteObjectRequest;
+    let (c, base) = (client!(url, keys), format!("{}/", att_name(keys, sha256)));
+    let mine: Vec<String> = att_present(url, keys).await?.into_iter().filter(|k| k.starts_with(&base)).collect();
+    for key in &mine {
+        c.delete_object(&DeleteObjectRequest { store_id: keys.store.clone(), key_value: Some(KeyValue { key: key.clone(), version: -1, value: vec![] }) }).await.map_err(|e| format!("label host: {e}"))?;
+    }
+    Ok(mine.len())
+}
+
+#[cfg(test)]
+mod att_tests {
+    use super::*;
+    #[test]
+    fn a_piece_opens_only_as_itself_and_the_host_never_sees_the_file_hash() {
+        let k = keys(&root_from_shares(&vec!["aa".repeat(40), "bb".repeat(40)]).unwrap());
+        let sha = "ab".repeat(32);
+        let base = att_name(&k, &sha);
+        assert!(base.starts_with("att/") && base.len() == 4 + 32 && !base.contains(&sha[..16]), "{base}");
+        assert_ne!(base, att_name(&keys(&root_from_shares(&vec!["aa".repeat(40), "cc".repeat(40)]).unwrap()), &sha), "another vault names the same file differently");
+        let wire = seal_chunk(&k, &format!("{base}/0"), b"receipt", [7u8; 24]);
+        assert_eq!(open_chunk(&k, &format!("{base}/0"), &wire).unwrap(), b"receipt");
+        assert!(open_chunk(&k, &format!("{base}/1"), &wire).is_err(), "a piece must not pass as another position");
+        assert!(open_chunk(&k, "att/ffffffffffffffffffffffffffffffff/0", &wire).is_err(), "or as a piece of another file");
+        assert_eq!((chunks_of(0), chunks_of(1), chunks_of(CHUNK), chunks_of(CHUNK + 1)), (1, 1, 1, 2));
+    }
+    /// `A2K_VSS=https://vss.mineracks.com/vss cargo test live_attachment -- --ignored --nocapture`: a throwaway vault, two and a half pieces up, down, proved, deleted.
+    #[test]
+    #[ignore]
+    fn live_attachment() {
+        use bitcoin::hashes::Hash; use bitcoin::secp256k1::rand::RngCore;
+        let url = std::env::var("A2K_VSS").expect("set A2K_VSS");
+        let mut r = [0u8; 40]; bitcoin::secp256k1::rand::rngs::OsRng.fill_bytes(&mut r);
+        let k = keys(&root_from_shares(&vec![hex::encode(&r[..20]), hex::encode(&r[20..])]).unwrap());
+        let mut file = vec![0u8; CHUNK * 2 + CHUNK / 2]; bitcoin::secp256k1::rand::rngs::OsRng.fill_bytes(&mut file);
+        let sha = hex::encode(bitcoin::hashes::sha256::Hash::hash(&file));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        assert!(rt.block_on(att_present(&url, &k)).unwrap().is_empty());
+        assert_eq!(rt.block_on(att_upload(&url, &k, &sha, &file, &Default::default())).unwrap(), 3);
+        let there = rt.block_on(att_present(&url, &k)).unwrap(); assert_eq!(there.len(), 3);
+        assert_eq!(rt.block_on(att_upload(&url, &k, &sha, &file, &there)).unwrap(), 0, "nothing is sent twice");
+        assert_eq!(rt.block_on(att_upload(&url, &k, &sha, &file, &Default::default())).unwrap(), 0, "and a clash with a piece already there is not an error");
+        assert_eq!(rt.block_on(att_download(&url, &k, &sha, file.len())).unwrap(), file);
+        assert!(rt.block_on(att_download(&url, &k, &"00".repeat(32), 10)).unwrap_err().contains("not finished backing it up"));
+        assert_eq!(rt.block_on(att_delete(&url, &k, &sha)).unwrap(), 3);
+        assert_eq!(rt.block_on(att_delete(&url, &k, &sha)).unwrap(), 0, "deleting what is not there asks the host for nothing more");
+        assert!(rt.block_on(att_present(&url, &k)).unwrap().is_empty(), "deleted pieces are gone");
+        println!("store {}: 3 pieces up, proved down, deleted", k.store);
     }
 }
 

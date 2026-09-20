@@ -136,6 +136,10 @@ pub fn add(name: &str, bytes: &[u8], keep_original: bool, now: u64) -> Result<Ad
     Ok(Added { entry, note })
 }
 
+/// The stored bytes of an attachment, for backing it up.
+pub fn read(hash: &str) -> Result<Vec<u8>, String> { read_blob(hash) }
+/// Keep bytes that came from the backup. They are only kept if they are what the record says they are.
+pub fn keep(hash: &str, bytes: &[u8]) -> Result<(), String> { if hex::encode(sha256::Hash::hash(bytes)) != hash.to_lowercase() { return Err("those bytes are not that attachment".into()); } put(bytes).map(|_| ()) }
 pub fn have(hash: &str) -> bool { blob(hash).map(|p| p.exists()).unwrap_or(false) }
 
 /// A thumbnail's bytes, for the window to draw. Only small things come back this way.

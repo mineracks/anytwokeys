@@ -80,6 +80,7 @@ dependencies = [
  "objc2-local-authentication",
  "open",
  "pcsc",
+ "prost",
  "qrcode",
  "reqwest 0.12.28",
  "rfd",
