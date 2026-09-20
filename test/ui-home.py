@@ -140,6 +140,20 @@ with sync_playwright() as p:
     pg.evaluate("__listeners['tauri://drag-drop']({ payload: { paths: ['/Users/p/as-taken.jpg'] } })"); pg.wait_for_timeout(400)
     check("and the next photo is kept as taken", pg.evaluate("__dropped.keepOriginal") is True and pg.evaluate("__dropped.paths.length") == 1)
     pg.click("#tx-strip"); pg.hover("#tx-files .att >> nth=2"); pg.click("#tx-files [data-att-x='2']"); pg.click("#tx-files [data-att-x='2']"); pg.wait_for_timeout(300)
+    # ---- a picture from a camera (WebKit here has none: the devices are stood in for, the rest is the real code) ----
+    pg.evaluate("""() => { const fake = () => { const c = document.createElement('canvas'); c.width = 640; c.height = 480; const x = c.getContext('2d'); x.fillStyle = '#b08420'; x.fillRect(0, 0, 640, 480); return c; };
+      window.__camAsked = []; navigator.mediaDevices.getUserMedia = async (q) => { __camAsked.push(q.video.deviceId ? q.video.deviceId.exact : ''); const s = new MediaStream(); s.getVideoTracks = () => [{ getSettings: () => ({ deviceId: q.video.deviceId ? q.video.deviceId.exact : 'builtin' }), stop() {} }]; s.getTracks = () => s.getVideoTracks(); return s; };
+      navigator.mediaDevices.enumerateDevices = async () => [{ kind: 'videoinput', deviceId: 'builtin', label: 'MacBook Pro Camera' }, { kind: 'audioinput', deviceId: 'mic', label: 'Microphone' }, { kind: 'videoinput', deviceId: 'phone', label: 'Piers’s iPhone Camera' }];
+      const v = document.querySelector('#shot-video'); Object.defineProperty(v, 'videoWidth', { get: () => 640 }); Object.defineProperty(v, 'videoHeight', { get: () => 480 }); Object.defineProperty(v, 'srcObject', { set() {}, get() { return null; } });
+      const draw = CanvasRenderingContext2D.prototype.drawImage; CanvasRenderingContext2D.prototype.drawImage = function (src, ...r) { return draw.call(this, src === v ? fake() : src, ...r); }; }""")
+    before = tiles_.count(); pg.click("#tx-camera"); pg.wait_for_timeout(400)
+    check("Take a picture lists every camera the computer can see, and only cameras", pg.locator("#shot-modal").is_visible() and pg.locator("#shot-pick option").count() == 2 and "iPhone" in pg.inner_text("#shot-pick"))
+    pg.select_option("#shot-pick", "phone"); pg.wait_for_timeout(300); check("choosing another camera switches to it", pg.evaluate("__camAsked[__camAsked.length - 1]") == "phone")
+    pg.click("#shot-take"); pg.wait_for_timeout(200)
+    check("the first press holds the frame to be looked at; nothing is kept yet", pg.locator("#shot-still").is_visible() and "Keep it" in pg.inner_text("#shot-take") and pg.locator("#shot-again").is_visible() and tiles_.count() == before)
+    pg.locator("#shot-modal .box").screenshot(path=str(out / "shot.png"))
+    pg.evaluate("window.__pasted = null"); pg.click("#shot-take"); pg.wait_for_timeout(600)
+    check("the second press keeps it with THIS transaction as a JPEG, cleaned like any photo", pg.evaluate("__pasted && __pasted.key") == "tx:" + T[1] and pg.evaluate("__pasted.filename").endswith(".jpg") and pg.evaluate("__pasted.keepOriginal") is False and pg.evaluate("atob(__pasted.base64).charCodeAt(0)") == 0xFF and not pg.locator("#shot-modal").is_visible() and tiles_.count() == before + 1)
     # ---- where and on what ----
     check("a transaction from before this was kept says so, and offers no removal", "Nothing was recorded" in pg.inner_text("#tx-ctx-dl") and not pg.locator("#tx-ctx-remove").is_visible())
     pg.evaluate("V.more = { ['tx:' + %s]: { ctx: { t: 1789648528, how: 'made', device: { name: 'Piers’s MacBook Pro', model: 'Mac16,5', os: 'macOS 27.0', app: '0.1.0' }, geo: { lat: -27.469, lon: 153.023, acc: 110 }, place: 'Brisbane, AU' } } }; vault = V; renderCtx()" % json.dumps(T[1])); pg.wait_for_timeout(200)
@@ -158,7 +172,10 @@ with sync_playwright() as p:
     pg.screenshot(path=str(out / "tx-place-search.png"))
     lb = pg.locator("#tx-place-list li[role=option]").nth(1).bounding_box(); check("the list is on top of what is below it, not cut off by the card", pg.evaluate("(p) => { const el = document.elementFromPoint(p.x, p.y); return !!(el && el.closest('#tx-place-list')); }", dict(x=lb["x"] + 20, y=lb["y"] + lb["height"] / 2)))
     pg.keyboard.press("ArrowDown"); pg.keyboard.press("ArrowDown"); pg.keyboard.press("ArrowUp"); pg.keyboard.press("Enter"); pg.wait_for_timeout(400)
-    check("arrow keys and Enter choose an answer, which keeps its position so the record gets a map", pg.evaluate("__ctxSet.lat") == -27.4615 and "445 Upper Edward Street, Spring Hill, Brisbane, Queensland 4000, Australia" == pg.evaluate("__ctxSet.place") and "chose it from the search" in pg.inner_text("#tx-ctx-dl") and pg.locator("#tx-map").is_visible() and not pg.locator("#tx-place-list").is_visible(), pg.evaluate("JSON.stringify(__ctxSet)"))
+    check("arrow keys and Enter choose an answer, which keeps its position so the record gets a map", pg.evaluate("__ctxSet.lat") == -27.4615 and "445 Upper Edward Street, Spring Hill, Brisbane, Queensland 4000, Australia" == pg.evaluate("__ctxSet.place") and "chose it from the search" in pg.inner_text("#tx-ctx-dl") and "· -27.46" in pg.inner_text("#tx-ctx-dl") and pg.input_value("#tx-place").endswith("Queensland 4000, Australia") and pg.locator("#tx-map").is_visible() and not pg.locator("#tx-place-list").is_visible(), pg.evaluate("JSON.stringify(__ctxSet)"))
+    pg.evaluate("window.__noMap = true; document.querySelector('#tx-map').dataset.for = ''; renderCtx()"); pg.wait_for_timeout(300)
+    check("a place with a position but no map to be had says so, with the position, instead of showing nothing", pg.locator("#tx-map").is_visible() and "No map" in pg.inner_text("#tx-map") and "-27.46" in pg.inner_text("#tx-map"), pg.inner_text("#tx-map"))
+    pg.evaluate("window.__noMap = false")
     pg.click("#tx-place"); pg.fill("#tx-place", ""); pg.keyboard.type("zzzz nowhere", delay=20); pg.wait_for_timeout(700)
     check("nothing found says so, and that Save still keeps your words", "Nothing found" in pg.inner_text("#tx-place-list"))
     pg.keyboard.press("Escape"); check("Escape closes the list and stays on the transaction", not pg.locator("#tx-place-list").is_visible() and pg.locator("#s-tx").is_visible())
@@ -171,7 +188,7 @@ with sync_playwright() as p:
     pg.evaluate("show('home')"); pg.wait_for_timeout(300); pg.evaluate("__listeners['tauri://drag-drop']({ payload: { paths: ['/x/y.pdf'] } })"); pg.wait_for_timeout(200)
     check("a drop with no transaction open attaches nothing and says why", "Open a transaction first" in pg.inner_text("#toast") and pg.evaluate("__dropped.paths.length") == 1)
     pg.locator("#activity tr").nth(2).click(); pg.wait_for_timeout(600)
-    check("coming back, the attachments are still on that transaction", pg.locator("#tx-files .att").count() == 2)
+    check("coming back, the attachments are still on that transaction (two files and the photo from the camera)", pg.locator("#tx-files .att").count() == 3)
     pg.evaluate("window.__badProof = true"); pg.click("#crumbs [data-crumb=home]"); pg.wait_for_timeout(500)
     check("the breadcrumb walks back to Home, where the row now shows its label", pg.locator("#s-home.on").count() == 1 and "laptop stand" in pg.inner_text("#activity"))
     pg.locator("#activity tr").nth(3).click(); pg.wait_for_timeout(600)

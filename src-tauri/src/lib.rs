@@ -858,7 +858,7 @@ fn ctx_set(name: String, txid: String, remove: bool, place: Option<String>, lat:
         let key = format!("tx:{txid}");
         let rec = v.more.entry(key.clone()).or_default();
         if remove { rec.insert("ctx".into(), serde_json::json!({ "removed": true, "t": t })); }
-        else if let Some(p) = place.as_ref().map(|p| p.trim().chars().take(80).collect::<String>()).filter(|p| !p.is_empty()) {
+        else if let Some(p) = place.as_ref().map(|p| p.trim().chars().take(160).collect::<String>()).filter(|p| !p.is_empty()) {
             let mut ctx = rec.get("ctx").cloned().filter(|c| c.get("removed").is_none()).unwrap_or_else(|| context::build("noted", None, false, t));
             ctx["place"] = p.into(); ctx["named"] = true.into();
             match (lat, lon) {

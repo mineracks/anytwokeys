@@ -367,13 +367,13 @@ function renderCtx() {
   const rows = [];
   if (gone) rows.push(['Place', ctx && ctx.removed ? 'Removed from this record.' : 'Nothing was recorded: this transaction was already here before the app began keeping this.']);
   else {
-    rows.push(['Place', ctx.place ? esc(ctx.place) + (ctx.picked ? '<small>as you chose it from the search</small>' : ctx.named ? '<small>as you named it</small>' : ctx.geo ? `<small>${ctx.geo.lat.toFixed(3)}, ${ctx.geo.lon.toFixed(3)} · to about ${sats(Math.round(ctx.geo.acc))} m</small>` : '') : (ctx.geo ? `${ctx.geo.lat.toFixed(3)}, ${ctx.geo.lon.toFixed(3)}` : `not kept<small>${store.settings.location ? 'this computer did not know where it was at that moment' : 'places are off in App settings'}</small>`)]);
+    rows.push(['Place', ctx.place ? esc(ctx.place) + (ctx.picked ? `<small>as you chose it from the search${ctx.geo ? ` · ${ctx.geo.lat.toFixed(3)}, ${ctx.geo.lon.toFixed(3)}` : ''}</small>` : ctx.named ? '<small>as you named it</small>' : ctx.geo ? `<small>${ctx.geo.lat.toFixed(3)}, ${ctx.geo.lon.toFixed(3)} · to about ${sats(Math.round(ctx.geo.acc))} m</small>` : '') : (ctx.geo ? `${ctx.geo.lat.toFixed(3)}, ${ctx.geo.lon.toFixed(3)}` : `not kept<small>${store.settings.location ? 'this computer did not know where it was at that moment' : 'places are off in App settings'}</small>`)]);
     if (dev) rows.push([how + ' on', `${esc(dev.name || 'this computer')}<small>${[dev.model, dev.os, dev.app ? 'Any Two Keys ' + dev.app : ''].filter(Boolean).map(esc).join(' · ')}</small>`]);
     if (ctx.how === 'seen') rows.push(['', '<small>A deposit happens wherever the sender was. This is only where this computer was when it noticed.</small>']);
   }
   $('#tx-ctx-dl').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
   $('#tx-ctx-remove').hidden = gone || !(ctx.place || ctx.geo);
-  if (document.activeElement !== $('#tx-place')) $('#tx-place').value = ctx && ctx.named ? ctx.place : '';
+  if (document.activeElement !== $('#tx-place') || (ctx && ctx.picked)) $('#tx-place').value = ctx && ctx.named ? ctx.place : '';
   paintMap(gone ? null : ctx);
 }
 // the picture is drawn in Rust from tiles on our own host; the window only adds the dot and how sure it is
@@ -382,7 +382,9 @@ async function paintMap(ctx) {
   if (!want) { box.hidden = true; box.dataset.for = ''; return; }
   if (box.dataset.for === want) return; box.dataset.for = want; box.hidden = true;
   let pic = null; try { pic = await invoke('tx_map', { lat: ctx.geo.lat, lon: ctx.geo.lon, dark: want.endsWith('true') }); } catch {}
-  if (box.dataset.for !== want || !pic) return;
+  if (box.dataset.for !== want) return;
+  // a position with no picture still shows that it HAS a position: an empty corner reads as 'the address was not understood'
+  if (!pic) { box.innerHTML = `<div class="nomap"><b>No map just now</b><span>${ctx.geo.lat.toFixed(3)}, ${ctx.geo.lon.toFixed(3)}</span><span>The position is kept. The map host did not answer.</span></div>`; box.hidden = false; box.dataset.for = ''; return; }
   const ring = Math.max(14, 2 * (ctx.geo.acc || 0) / pic.metres_per_px * (320 / pic.width));   // diameter, in the 320-px-wide box
   box.innerHTML = `<img alt="Map of the area around ${esc(ctx.place || 'the place this was recorded')}" src="${pic.png}"><span class="zone" style="width:${ring}px;height:${ring}px"></span><span class="pin"></span><small>© OpenStreetMap</small>`;
   box.hidden = false;
@@ -400,7 +402,7 @@ function placeList(hits, note) {
   if (!ul.hidden) { ul.classList.remove('up'); const r = $('#tx-place').getBoundingClientRect(); if (innerHeight - r.bottom < Math.min(300, ul.scrollHeight) + 12 && r.top > innerHeight - r.bottom) ul.classList.add('up'); }
 }
 const placeMark = (i) => { placeUI.at = i; $$('#tx-place-list li[role=option]').forEach((li, k) => { li.setAttribute('aria-selected', k === i ? 'true' : 'false'); if (k === i) li.scrollIntoView({ block: 'nearest' }); }); $('#tx-place').setAttribute('aria-activedescendant', i >= 0 ? 'tx-place-opt-' + i : ''); };
-const placeChoose = (h) => { clearTimeout(placeUI.t); placeUI.seq++; placeList([]); $('#tx-place').value = h.label; ctxSave({ place: [h.label, h.detail.replace(/ · /g, ', ')].filter(Boolean).join(', ').slice(0, 120), lat: h.lat, lon: h.lon }); };
+const placeChoose = (h) => { clearTimeout(placeUI.t); placeUI.seq++; placeList([]); const full = [h.label, h.detail.replace(/ · /g, ', ')].filter(Boolean).join(', ').slice(0, 160); $('#tx-place').value = full; ctxSave({ place: full, lat: h.lat, lon: h.lon }); };   // the whole address goes in the box and the record, not just its first line
 $('#tx-place').addEventListener('input', () => {
   clearTimeout(placeUI.t); const q = $('#tx-place').value.trim(), mine = ++placeUI.seq;
   if (q.length < 4) return placeList([]);
@@ -428,6 +430,37 @@ async function renderPlaces() {
 }
 const placeSet = async (args) => { try { store = await invoke('settings_set', { network: netName(), custom: store.settings.custom, electrum: store.settings.electrum, explorer: store.settings.explorer, ...args }); } catch (e) { fail(e); } renderPlaces(); };
 for (const [id, key] of [['#loc-on', 'location'], ['#loc-exact', 'locationExact']]) { const flip = () => placeSet({ [key]: !$(id).classList.contains('on') }); $(id).onclick = flip; $(id).onkeydown = (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); flip(); } }; }
+
+// ---------- a picture from any camera the computer can see (built in, plugged in, or a phone nearby) ----------
+const shot = { stream: null, taken: false };
+const shotStop = () => { if (shot.stream) { shot.stream.getTracks().forEach(t => t.stop()); shot.stream = null; } };
+function shotClose() { shotStop(); $('#shot-modal').classList.remove('on'); }
+async function shotStart(deviceId) {
+  shotStop(); shot.taken = false; $('#shot-still').hidden = true; $('#shot-video').hidden = false; $('#shot-again').hidden = true; $('#shot-take').textContent = 'Take the picture'; $('#shot-take').disabled = true;
+  try {
+    shot.stream = await navigator.mediaDevices.getUserMedia({ video: Object.assign({ width: { ideal: 3840 }, height: { ideal: 2160 } }, deviceId ? { deviceId: { exact: deviceId } } : {}) });
+    $('#shot-video').srcObject = shot.stream; $('#shot-take').disabled = false;
+    // names are only given once the person has allowed a camera, so the list is read after the first stream starts
+    const cams = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput'), live = shot.stream.getVideoTracks()[0], using = live && live.getSettings ? live.getSettings().deviceId : '';
+    $('#shot-pick').innerHTML = cams.map((d, i) => `<option value="${esc(d.deviceId)}"${d.deviceId === using ? ' selected' : ''}>${esc(d.label || 'Camera ' + (i + 1))}</option>`).join(''); $('#shot-pick-row').hidden = cams.length < 2;
+    $('#shot-note').classList.remove('warn'); $('#shot-note').textContent = 'A receipt, a label on a parcel, the thing you bought. It is kept with this transaction, encrypted like everything else.';
+  } catch (e) { $('#shot-note').classList.add('warn'); $('#shot-note').textContent = /NotAllowed|denied/i.test(String(e)) ? 'macOS is not letting Any Two Keys use the camera: allow it in System Settings › Privacy & Security › Camera.' : /NotFound|Overconstrained/i.test(String(e)) ? 'No camera was found.' : 'The camera could not be started: ' + String(e.message || e); }
+}
+$('#tx-camera').onclick = () => { if (!onTx()) return; $('#shot-modal').classList.add('on'); let last = ''; try { last = localStorage.getItem('a2k-camera') || ''; } catch {} shotStart(last).then(() => { if (!shot.stream && last) shotStart(''); }); };
+$('#shot-pick').onchange = () => { try { localStorage.setItem('a2k-camera', $('#shot-pick').value); } catch {} shotStart($('#shot-pick').value); };
+$('#shot-close').onclick = shotClose; $('#shot-again').onclick = () => shotStart($('#shot-pick').value);
+$('#shot-take').onclick = async () => {
+  const v = $('#shot-video'), cv = $('#shot-still');
+  if (!shot.taken) {   // first press: hold the frame so it can be looked at before it is kept
+    if (!v.videoWidth) { $('#shot-note').textContent = 'The camera has not produced a picture yet. Give it a moment.'; return; }
+    cv.width = v.videoWidth; cv.height = v.videoHeight; cv.getContext('2d').drawImage(v, 0, 0); shotStop();
+    v.hidden = true; cv.hidden = false; shot.taken = true; $('#shot-again').hidden = false; $('#shot-take').textContent = 'Keep it with this transaction'; return; }
+  const name = vault.name, key = 'tx:' + txView.txid; $('#shot-take').disabled = true;
+  try { const blob = await new Promise(res => cv.toBlob(res, 'image/jpeg', 0.92)); const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = rej; r.readAsDataURL(blob); });
+    const r = await invoke('attach_bytes', { name, key, filename: 'photo ' + new Date().toISOString().slice(0, 16).replace('T', ' ').replace(':', '.') + '.jpg', base64: b64, keepOriginal: false }); shotClose(); attachDone(r, name); }
+  catch (e) { $('#shot-take').disabled = false; fail(e); }
+};
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('#shot-modal').classList.contains('on')) { e.stopPropagation(); shotClose(); } }, true);
 
 // a file name keeps its ending when it has to be shortened: "a very long invoi….pdf"
 const nameParts = (n) => { const i = n.lastIndexOf('.'); return i > 0 && n.length - i <= 8 ? `<span class="stem">${esc(n.slice(0, i))}</span><span class="ext">${esc(n.slice(i))}</span>` : `<span class="stem">${esc(n)}</span>`; };

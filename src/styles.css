@@ -450,3 +450,5 @@ details.card.quiet > *:not(summary){margin-top:12px}
 #tx-place-list b{display:block;font-family:var(--display);font-weight:600;font-size:14px} #tx-place-list small{display:block;color:var(--muted);font-size:12.5px}
 #tx-place-list .foot{padding:6px 10px 4px;font-family:var(--display);font-size:11px;color:var(--muted);cursor:default;background:none}
 #tx-place-list.up{top:auto;bottom:calc(100% + 4px);box-shadow:0 -10px 30px rgba(0,0,0,.14)}
+.cam.shot{height:auto;aspect-ratio:4/3;max-height:56vh} .cam.shot video,.cam.shot canvas{width:100%;height:100%;object-fit:contain;display:block}
+.nomap{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;text-align:center;padding:14px;color:var(--muted);font-size:13px} .nomap b{font-family:var(--display);font-weight:600;color:var(--ink);font-size:14px} .nomap span:first-of-type{font-family:var(--mono);font-size:12.5px}

@@ -213,6 +213,7 @@
               <span class="dz-main" id="tx-dz-main">Drop files here</span>
               <span class="dz-sub" id="tx-dz-sub">or <u>choose files</u> · paste a picture with ⌘V</span>
             </button>
+            <div class="row"><button type="button" class="btn small" id="tx-camera"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-3px;margin-right:6px"><path d="M4 8h3l1.5-2h7L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.5"/></svg>Take a picture…</button></div>
             <div class="keeprow"><div><b>Clean photos as they come in</b><small id="tx-strip-note"></small></div><div class="toggle on" id="tx-strip" role="switch" aria-checked="true" aria-label="Clean photos as they come in" tabindex="0"><i></i></div></div>
           </div>
         </div>
@@ -221,7 +222,7 @@
         <div class="rec-head"><h3 id="tx-ctx-h">Where and on what</h3><span class="rec-saved" id="tx-ctx-when"></span></div>
         <div class="ctx-grid"><div class="ctx-map" id="tx-map" hidden></div>
           <div class="ctx-facts"><dl class="tx-dl" id="tx-ctx-dl"></dl>
-            <div class="row" id="tx-ctx-acts"><form class="row" id="tx-place-form" style="gap:8px"><div class="combo"><input id="tx-place" maxlength="120" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="tx-place-list" aria-autocomplete="list" placeholder="An address or a place, or your own word for it: Home" aria-label="The place"><ul id="tx-place-list" role="listbox" hidden></ul></div><button class="btn small" type="submit">Save</button></form><button class="btn small" type="button" id="tx-ctx-remove">Remove the place</button></div></div></div>
+            <div class="row" id="tx-ctx-acts"><form class="row" id="tx-place-form" style="gap:8px"><div class="combo"><input id="tx-place" maxlength="160" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="tx-place-list" aria-autocomplete="list" placeholder="An address or a place, or your own word for it: Home" aria-label="The place"><ul id="tx-place-list" role="listbox" hidden></ul></div><button class="btn small" type="submit">Save</button></form><button class="btn small" type="button" id="tx-ctx-remove">Remove the place</button></div></div></div>
       </div>
       <details class="card quiet" id="tx-chain"><summary><span class="label">Blockchain data</span><span class="muted sumhint" id="tx-proof"></span></summary><div id="tx-chain-body"></div></details>
     </section>
@@ -314,6 +315,14 @@
   <div class="cam"><video id="cam2" autoplay playsinline muted></video><div class="frame"></div></div>
   <div class="muted" style="font-size:13px" id="cam2-note">An address, or a bitcoin: link with an amount.</div>
   <div class="row" style="justify-content:flex-end"><button class="btn" id="scan-close">Cancel</button></div>
+</div></div>
+
+<div class="modal" id="shot-modal"><div class="box" style="width:640px">
+  <h2>Take a picture</h2>
+  <div class="field" id="shot-pick-row"><label class="cap" for="shot-pick">Camera</label><select id="shot-pick"></select></div>
+  <div class="cam shot"><video id="shot-video" autoplay playsinline muted></video><canvas id="shot-still" hidden></canvas></div>
+  <div class="muted" style="font-size:13px" id="shot-note">A receipt, a label on a parcel, the thing you bought. It is kept with this transaction, encrypted like everything else.</div>
+  <div class="row" style="justify-content:flex-end"><button class="btn" id="shot-close" type="button">Cancel</button><button class="btn" id="shot-again" type="button" hidden>Take another</button><button class="btn primary" id="shot-take" type="button">Take the picture</button></div>
 </div></div>
 
 <div id="lock" hidden>
