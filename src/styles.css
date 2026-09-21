@@ -354,12 +354,13 @@ details.card.quiet > *:not(summary){margin-top:12px}
 
 /* the recovery line shows what the vault holds: blurred, and not even in the page, until asked for */
 .secret{position:relative;border-radius:6px;min-height:60px;display:flex;align-items:center}
-.secret #keys-desc{overflow-wrap:anywhere;-webkit-user-select:text;user-select:text;transition:filter .2s}
-.secret[data-hidden="1"] #keys-desc{filter:blur(7px);opacity:.75;-webkit-user-select:none !important;user-select:none !important;pointer-events:none}
+/* any line held in a .secret, not only the one on Keys — naming #keys-desc left Vault settings' copy unblurred */
+.secret > .mono{overflow-wrap:anywhere;-webkit-user-select:text;user-select:text;transition:filter .2s}
+.secret[data-hidden="1"] > .mono{filter:blur(7px);opacity:.75;-webkit-user-select:none !important;user-select:none !important;pointer-events:none}
 .reveal{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);display:inline-flex;align-items:center;gap:9px;padding:10px 18px;border-radius:999px;border:1.5px solid var(--ink);background:var(--panel);color:var(--ink);font-family:var(--display);font-weight:600;font-size:14px;cursor:pointer;box-shadow:0 4px 14px rgba(30,27,23,.12)}
 .reveal:hover{border-color:var(--gold)}
 .secret[data-hidden="0"] .reveal{display:none}
-@media (prefers-reduced-motion: reduce){.secret #keys-desc{transition:none}}
+@media (prefers-reduced-motion: reduce){.secret > .mono{transition:none}}
 .btn.small-icon{width:32px;flex:0 0 32px;min-height:32px;height:32px;border-color:var(--line)}
 .btn.small-icon.done{border-color:var(--signal);color:var(--signal)}
 .keyrow.vk .who .mono{white-space:nowrap}

@@ -520,6 +520,8 @@ with sync_playwright() as p:
           pg.inner_text("#keys-list")[:200])
     check("the seal note says how THIS vault comes back: seed words plus the descriptor", "seed words" in pg.inner_text("#seal-note") and "descriptor" in pg.inner_text("#seal-note"))
     check("and the YubiKey firmware / end-of-life card is not shown for keys that are not YubiKeys", not pg.locator("#key-life").is_visible())
+    check("and on Keys the line is still blurred until revealed — the rule that now serves both",
+          "blur" in pg.evaluate("getComputedStyle(document.querySelector('#keys-desc')).filter"))
     kd = pg.inner_text("#keys-desc-ext") if pg.locator("#keys-desc-ext").is_visible() else ""
     check("the recovery line on Keys is described as what it is — a standard wallet descriptor — with no word of seals, cc= or PINs",
           "wallet descriptor" in kd and "seed words" in kd and not pg.locator("#keys-desc-cards").is_visible(), kd[:160])
@@ -528,10 +530,12 @@ with sync_playwright() as p:
           pg.locator("#ext-send").is_visible() and "not built yet" in pg.inner_text("#ext-send") and pg.locator("#build-btn").is_disabled())
     pg.evaluate("renderVaultSettings.shown = null; show('vault')"); pg.wait_for_timeout(400)
     real = pg.evaluate("vault.ext")
-    check("Vault settings keeps the recovery line HIDDEN until asked, as Keys does — it shows every address the vault will use",
-          pg.inner_text("#vs-desc") != real and pg.locator("#vs-desc-reveal").is_visible(), pg.inner_text("#vs-desc")[:60])
-    pg.click("#vs-desc-reveal"); pg.wait_for_timeout(200)
-    check("and shows it when asked", pg.inner_text("#vs-desc") == real)
+    # what the person SEES, not what the text is: the first version scrambled it but left it unblurred (Piers, 21:27)
+    blur = lambda sel: pg.evaluate("(s) => getComputedStyle(document.querySelector(s)).filter", sel)
+    check("Vault settings keeps the recovery line HIDDEN until asked, as Keys does — scrambled AND blurred, the same look",
+          pg.inner_text("#vs-desc") != real and "blur" in blur("#vs-desc") and pg.locator("#vs-desc-reveal").is_visible(), blur("#vs-desc"))
+    pg.click("#vs-desc-reveal"); pg.wait_for_timeout(300)
+    check("and shows it plainly when asked", pg.inner_text("#vs-desc") == real and "blur" not in blur("#vs-desc"), blur("#vs-desc"))
     check("an xpub vault is offered a way to take its other wallet's wording", pg.locator("#vs-rewrite").is_visible())
     pg.fill("#vs-rewrite-in", real); pg.click("#vs-rewrite-go"); pg.wait_for_timeout(400)
     check("which goes to the app to be checked as the same wallet before it replaces anything", pg.evaluate("__rewrite.text") == real and pg.evaluate("__rewrite.name") == "seedsigner demo")
