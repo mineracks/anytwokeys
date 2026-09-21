@@ -30,6 +30,13 @@ const H = {
   tx_pdf: (a) => { window.__pdf = a; if (window.__pdfCancel) throw 'cancelled'; return '/Users/p/Desktop/anytwokeys-demo-vault-758adfd2.pdf'; },
   tx_map: (a) => { window.__mapAsked = a; return window.__noMap ? null : { png: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', metres_per_px: 4.0625, width: 640 }; },
   net_offline: (a) => { window.__offline = a.on; return store(); },
+  vault_recovery: (a) => { const v = store().vaults.find(v => v.name === a.name) || {}; return v.ext || v.descriptor || ''; },
+  descriptor_parse: (a) => { window.__parsedText = a.text; if (!/xpub/.test(a.text)) throw 'only fixed keys in this mock';
+    const ks = [...a.text.matchAll(/\[([0-9a-f]{8})\/([^\]]+)\](xpub\w+)/g)].map(m => ({ fingerprint: m[1], path: 'm/' + m[2], xpub: m[3] }));
+    return { threshold: 2, keys: ks.map(k => '[' + k.fingerprint + '/' + k.path.slice(2) + ']' + k.xpub), descriptor: a.text, address: 'bc1q3wtn9xskmmkp4m0zpagq6rngjujj0tfhvzt9xemlaanzgjul7rqq90hsk4', rotating: true, ext: ks, kind: 'sortedmulti' }; },
+  vault_restore: (a) => { window.__restored = a; const v = { name: a.name, network: 'mainnet', threshold: 2, keys: a.names.map((n, i) => ({ name: n, serial: 0, pubkey: ['[dc567276/48h/0h/0h/2h]xpub6DiYrf', '[81ce8a63/48h/0h/0h/2h]xpub6E6Ckr', '[88725028/48h/0h/0h/2h]xpub6Dtep'][i] + 'AAAA' })),
+    descriptor: a.text, ext: a.text, address: 'bc1q3wtn9xskmmkp4m0zpagq6rngjujj0tfhvzt9xemlaanzgjul7rqq90hsk4', created: 1789600000, labels: {}, notes: {}, files: {}, more: {}, seal: { shares: [], sealed: [] } };
+    __extra.push(v); return v; },
   drill_every: (a) => { window.__drillDays = a.days; return store(); },
   ctx_set: (a) => { window.__ctxSet = a; V.more = V.more || {}; const r = V.more['tx:' + a.txid] = V.more['tx:' + a.txid] || {}; if (a.remove) r.ctx = { removed: true, t: 9 }; else { r.ctx = Object.assign({ t: 9, how: 'noted', device: { name: 'Test Mac' } }, r.ctx || {}, { place: a.place, named: true }); delete r.ctx.geo; delete r.ctx.picked; if (a.lat !== null && a.lat !== undefined) { r.ctx.geo = { lat: a.lat, lon: a.lon, acc: 0 }; r.ctx.picked = true; } } return store(); },
   label_set: (a) => { V.labels = V.labels || {}; if (a.label) V.labels[a.key] = a.label; else delete V.labels[a.key]; return store(); },
@@ -436,6 +443,38 @@ with sync_playwright() as p:
     pg.locator("#s-overview").screenshot(path=str(out / "overview-dark.png"))
     pg.emulate_media(color_scheme="light"); pg.wait_for_timeout(200)
     pg.evaluate("show('home')"); pg.wait_for_timeout(400)
+
+    # ---- a wallet of extended keys, pasted in: Piers's SeedSigner multisig ----
+    DESC = 'wsh(sortedmulti(2,[dc567276/48h/0h/0h/2h]xpub6DiYrfRwNnjeX4vHsWMajJVFKrbEEnu8gAW9vDuQzgTWEsEHE16sGWeXXUV1LBWQE1yCTmeprSNcqZ3W74hqVdgDbtYHUv3eM4W2TEUhpan/<0;1>/*,[81ce8a63/48h/0h/0h/2h]xpub6E6CkrYs9KrKvmMYoZuY8r5a3MrhhXKw2XXbWsLpiA3pk8iPTrdpvBhrj47vQrCMnpUgyFTY9JXMfg2vXXSZRrVapmwy6qDdcEgnKMBWi3E/<0;1>/*,[88725028/48h/0h/0h/2h]xpub6DtepHbchFhqJJJyy8KTAKqxBadf1xqwqc7e9WS3nvwnQ3HSzHkTiaoTZoB1JDYKCZid3RaLoNoQ9F6TH287YcketYJRmK3NSKs39DhEBys/<0;1>/*))#ewpd0dfe'
+    pg.evaluate("show('restore'); restoreTab('paste')"); pg.wait_for_timeout(300)
+    pg.fill("#desc-in", DESC); pg.click("#desc-read"); pg.wait_for_timeout(500)
+    card = pg.inner_text("#restore-card")
+    check("an xpub multisig pasted in is READ — the failure Piers hit — as extended keys held by other signers",
+          "over extended keys held by other signers" in card and "checksum ok" in card and "not a public key" not in card, card[:200])
+    check("each key is shown by the fingerprint and path its device recognises, not as a card",
+          all(fp in card for fp in ("dc567276", "81ce8a63", "88725028")) and card.count("signs on another device") == 3 and "plugged in" not in card)
+    check("it is offered as something to WATCH, and says spending is the next step rather than pretending it works",
+          pg.inner_text("#restore-go") == "Watch this vault" and "not built yet" in card)
+    check("the names offered are the keys' own fingerprints, not a card vault's laptop / keyring / off-site",
+          pg.input_value('[data-kname="0"]') == "key 1 · dc567276")
+    pg.fill("#restore-name", "seedsigner demo"); pg.click("#restore-go"); pg.wait_for_timeout(800)
+    check("what reaches the restore is the descriptor AS WRITTEN — capitals kept, since base58 is case-sensitive",
+          "xpub6DiYrfRwNnjeX4vHsWMajJVFKrbEEnu8gAW9vDuQzgTWEsEHE16sGWeXXUV1LBWQE1yCTmeprSNcqZ3W74hqVdgDbtYHUv3eM4W2TEUhpan" in pg.evaluate("__restored.text"), pg.evaluate("__restored.text")[:80])
+    pg.evaluate("vault = store.vaults.find(v => v.name === 'seedsigner demo'); show('keys')"); pg.wait_for_timeout(600)
+    check("on Keys, each is a key on another device — fingerprint and path — with no card, no seal slot and no plug-in state",
+          pg.locator("#keys-list .keyrow").count() == 3 and pg.inner_text("#keys-list").count("signs on another device") == 3 and "plugged in" not in pg.inner_text("#keys-list") and "dc567276" in pg.inner_text("#keys-list"),
+          pg.inner_text("#keys-list")[:200])
+    check("the seal note says how THIS vault comes back: seed words plus the descriptor", "seed words" in pg.inner_text("#seal-note") and "descriptor" in pg.inner_text("#seal-note"))
+    check("and the YubiKey firmware / end-of-life card is not shown for keys that are not YubiKeys", not pg.locator("#key-life").is_visible())
+    pg.evaluate("show('send')"); pg.wait_for_timeout(500)
+    check("Send says plainly that spending is not built yet for this vault, and the build button cannot be pressed",
+          pg.locator("#ext-send").is_visible() and "not built yet" in pg.inner_text("#ext-send") and pg.locator("#build-btn").is_disabled())
+    pg.evaluate("show('vault')"); pg.wait_for_timeout(400)
+    check("Vault settings does not offer a card drill for a vault with no cards, and says how to check it instead",
+          not pg.locator("#vs-drill").is_visible() and "load its seed words and confirm it shows the fingerprint" in pg.inner_text("#vs-drill-what"))
+    pg.evaluate("vault = store.vaults[0]; show('home')"); pg.wait_for_timeout(400)
+    check("and a card vault is untouched by all of this: its Send still builds", (pg.evaluate("show('send')") or True) and not pg.locator("#build-btn").is_disabled() and not pg.locator("#ext-send").is_visible())
+    pg.evaluate("show('home')"); pg.wait_for_timeout(300)
 
     # ---- Activity: the whole history, with room ----
     pg.evaluate("show('activity')"); pg.wait_for_timeout(500)

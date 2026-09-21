@@ -63,7 +63,10 @@ pub fn parse(input: &[u8]) -> Result<Psbt, String> {
 /// The vault's recovery sheet: descriptor (and chain code) as one sturdy code the Restore screen scans, the keys, the line as text.
 pub fn recovery_sheet(v: &crate::wallet::Vault) -> Result<Sheet, String> {
     let line = crate::wallet::recovery_line(v);
-    let rotating = v.chain_code.is_some();
+    let rotating = crate::wallet::rotates(v);
+    // A sheet is read in an emergency, so for a vault of extended keys it must say what is true of THAT vault: no
+    // chain code, no seal on any card, and signing done on the keys' own devices from their seed words.
+    if v.ext.is_some() { return ext_sheet(v, line); }
     let sealed = v.keys.iter().filter(|k| v.seal.sealed.contains(&k.pubkey)).count();
     Ok(Sheet {
         title: "Vault recovery sheet (output descriptor)".into(),
@@ -78,6 +81,22 @@ pub fn recovery_sheet(v: &crate::wallet::Vault) -> Result<Sheet, String> {
         note: format!("Public keys only: this sheet cannot spend. It does show whoever reads it what the vault holds and has done, so keep it private, and keep it away from the PINs. {}",
             if rotating { "The part before cc= is a standard output descriptor for the first address (Bitcoin Core: importdescriptors); the chain code after it derives every other address." }
             else { "The line is a standard output descriptor: Bitcoin Core imports it with importdescriptors as a watch-only wallet." }) })
+}
+
+/// The recovery sheet of a vault whose keys are extended keys held by other signers.
+fn ext_sheet(v: &crate::wallet::Vault, line: String) -> Result<Sheet, String> {
+    let fp = |k: &crate::wallet::KeyRef| k.pubkey.strip_prefix('[').and_then(|r| r.split('/').next()).unwrap_or("").to_string();
+    Ok(Sheet {
+        title: "Vault recovery sheet (wallet descriptor)".into(),
+        facts: vec![("Vault".into(), format!("{} \u{b7} {} of {} \u{b7} {}", v.name, v.threshold, v.keys.len(), v.network)),
+            ("Addresses".into(), "a fresh one for every deposit, derived by BIP32 from the extended keys below".into()),
+            ("First address".into(), crate::wallet::address_at(v, 0)?), ("Created".into(), ymd(v.created)),
+            ("Signers".into(), format!("other devices, each from its own seed words \u{2014} any {} of them sign", v.threshold))],
+        rows: v.keys.iter().enumerate().map(|(i, k)| (format!("Key {}", i + 1), k.pubkey.clone(), format!("{} \u{b7} fingerprint {}", k.name, fp(k)))).collect(),
+        codes: vec![line.clone()], sturdy: true,
+        code_hint: format!("To restore: paste or scan this line into Any Two Keys, Sparrow or any wallet that reads descriptors. To spend, any {} of the keys sign on their own devices, from their seed words.", v.threshold),
+        text_heading: "The wallet descriptor (the same as the code)".into(), text: line,
+        note: "Extended public keys only: this sheet cannot spend. It is a complete, standard wallet descriptor \u{2014} Sparrow, Bitcoin Core (importdescriptors) and most wallets import it whole as a watch-only wallet \u{2014} so it shows whoever reads it everything this vault holds and has done. Keep it private, and keep it apart from the seed words: the seed words alone can spend if enough of them are found together, and this line tells a finder what they are for.".into() })
 }
 
 // ---------- a small PDF writer: three built-in fonts, text and filled squares ----------
@@ -352,7 +371,7 @@ mod tests {
         let keys = ["03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2", "032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe", "038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47"];
         let descriptor = crate::wallet::descriptor_for(2, &keys.iter().map(|k| k.to_string()).collect::<Vec<_>>()).unwrap();
         crate::wallet::Vault { name: "f\u{e4}mily vault".into(), network: "signet".into(), threshold: 2, keys: keys.iter().zip(["laptop", "keyring", "off-site"]).enumerate().map(|(i, (k, n))| crate::wallet::KeyRef { name: n.to_string(), serial: 27446043 + i as u32, pubkey: k.to_string() }).collect(),
-            descriptor, address: String::new(), created: 1_789_700_000, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default() }
+            descriptor, address: String::new(), created: 1_789_700_000, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None }
     }
     #[test]
     fn the_recovery_sheet_carries_the_line_the_restore_screen_reads() {

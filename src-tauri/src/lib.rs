@@ -136,7 +136,7 @@ fn contact_used(address: String, network: String) -> R<Store> {
 fn vault_receive_address(name: String) -> R<String> {
     let s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
-    wallet::address_at(v, if v.chain_code.is_some() { v.next } else { 0 })
+    wallet::address_at(v, if wallet::rotates(v) { v.next } else { 0 })
 }
 
 #[derive(Serialize)]
@@ -215,7 +215,7 @@ fn vault_create(name: String, threshold: usize, keys: Vec<NewKey>, rotating: Opt
     let mut v = Vault { name, network: s.settings.network.clone(), threshold,
         keys: keys.into_iter().map(|k| wallet::KeyRef { name: k.name, serial: k.serial, pubkey: k.pubkey.to_lowercase() }).collect(),
         descriptor, address: String::new(), created: now(),
-        chain_code: if rotating.unwrap_or(true) { Some(fresh_chain_code()) } else { None }, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default() };
+        chain_code: if rotating.unwrap_or(true) { Some(fresh_chain_code()) } else { None }, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None };
     v.address = wallet::address_at(&v, 0)?;
     let _ = network;
     s.vaults.push(v.clone());
@@ -224,34 +224,78 @@ fn vault_create(name: String, threshold: usize, keys: Vec<NewKey>, rotating: Opt
 }
 
 #[derive(Serialize)]
-struct Parsed { threshold: usize, keys: Vec<String>, descriptor: String, address: String, rotating: bool }
+struct Parsed { threshold: usize, keys: Vec<String>, descriptor: String, address: String, rotating: bool,
+    /// extended keys held by other signers: each with the fingerprint and path a hardware signer matches on
+    #[serde(default)] ext: Option<Vec<wallet::ExtKey>>, #[serde(default)] kind: String }
+
+/// Text that names extended keys goes the faithful way (miniscript, as written); anything else is a card vault's own
+/// line. Decided by what is IN the text, because a card vault's recovery line ends in ` cc=…`, which is not
+/// descriptor syntax and must not be sent where it would be refused.
+fn names_extended_keys(text: &str) -> bool {
+    let t = text.split(" cc=").next().unwrap_or(text);
+    ["xpub", "tpub", "ypub", "zpub", "Ypub", "Zpub", "vpub", "upub"].iter().any(|p| t.contains(p)) || t.contains('[')
+}
+fn ext_for_this_network(text: &str, network: &str) -> R<wallet::ExtInfo> {
+    let info = wallet::ext_parse(text)?.ok_or("that descriptor names no extended keys")?;
+    if info.network != network {
+        return Err(format!("this is a {} descriptor and the app is on {} just now: each network keeps its own vaults. Switch networks in App settings, then paste it again", info.network, network));
+    }
+    Ok(info)
+}
 
 #[tauri::command]
 fn descriptor_parse(text: String) -> R<Parsed> {
     let s = wallet::load()?;
+    if names_extended_keys(&text) {
+        let info = ext_for_this_network(&text, &s.settings.network)?;
+        let mut v = ext_vault(String::new(), &info, &[]);
+        v.address = wallet::address_at(&v, 0)?;
+        return Ok(Parsed { threshold: info.threshold, keys: info.keys.iter().map(|k| format!("[{}/{}]{}", k.fingerprint, k.path.trim_start_matches("m/"), k.xpub)).collect(),
+            descriptor: info.descriptor.clone(), address: v.address, rotating: true, ext: Some(info.keys.clone()), kind: info.kind.clone() });
+    }
     let (desc_text, cc) = wallet::split_recovery(&text);
     let (threshold, keys) = wallet::keys_of(&desc_text)?;
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
     let tmp = Vault { name: String::new(), network: s.settings.network.clone(), threshold, keys: keys.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.clone() }).collect(),
-        descriptor: descriptor.clone(), address: String::new(), created: 0, chain_code: cc.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default() };
+        descriptor: descriptor.clone(), address: String::new(), created: 0, chain_code: cc.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None };
     let address = wallet::address_at(&tmp, 0)?;
-    Ok(Parsed { threshold, keys, descriptor: wallet::recovery_line(&tmp), address, rotating: cc.is_some() })
+    Ok(Parsed { threshold, keys, descriptor: wallet::recovery_line(&tmp), address, rotating: cc.is_some(), ext: None, kind: "cards".into() })
 }
 
 #[tauri::command]
 fn vault_restore(name: String, text: String, names: Vec<String>) -> R<Vault> {
     let mut s = wallet::load()?;
     if s.vaults.iter().any(|v| v.name == name) { return Err(format!("a vault called '{name}' already exists")); }
+    if names_extended_keys(&text) {
+        let info = ext_for_this_network(&text, &s.settings.network)?;
+        if s.vaults.iter().any(|v| v.ext.as_deref() == Some(info.descriptor.as_str())) { return Err("this wallet is already here, under another name".into()); }
+        let mut v = ext_vault(name, &info, &names);
+        v.address = wallet::address_at(&v, 0)?;
+        s.vaults.push(v.clone());
+        wallet::save(&s)?;
+        return Ok(v);
+    }
     let (desc_text, cc) = wallet::split_recovery(&text);
     let (threshold, keys) = wallet::keys_of(&desc_text)?;
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
     let mut v = Vault { name, network: s.settings.network.clone(), threshold,
         keys: keys.iter().enumerate().map(|(i, k)| wallet::KeyRef { name: names.get(i).cloned().unwrap_or_else(|| format!("key {}", i + 1)), serial: 0, pubkey: k.clone() }).collect(),
-        descriptor, address: String::new(), created: now(), chain_code: cc, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default() };
+        descriptor, address: String::new(), created: now(), chain_code: cc, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None };
     v.address = wallet::address_at(&v, 0)?;
     s.vaults.push(v.clone());
     wallet::save(&s)?;
     Ok(v)
+}
+
+/// A vault of extended keys held by other signers. Each key is named for the person, and keeps its origin — the
+/// fingerprint and path a hardware signer matches on — as the "pubkey" shown for it; it is never a card's key.
+fn ext_vault(name: String, info: &wallet::ExtInfo, names: &[String]) -> Vault {
+    Vault { name, network: info.network.clone(), threshold: info.threshold,
+        keys: info.keys.iter().enumerate().map(|(i, k)| wallet::KeyRef { name: names.get(i).cloned().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| format!("key {} · {}", i + 1, k.fingerprint)),
+            serial: 0, pubkey: format!("[{}/{}]{}", k.fingerprint, k.path.trim_start_matches("m/"), k.xpub) }).collect(),
+        descriptor: info.descriptor.clone(), address: String::new(), created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
+        labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0,
+        seal: Default::default(), ext: Some(info.descriptor.clone()) }
 }
 
 #[tauri::command]
@@ -323,12 +367,12 @@ async fn vault_sync(name: String) -> R<Snapshot> {
         let height = chain::height(&servers).unwrap_or(0);
         let (n, sm, nc, smc) = (sc.next, sc.scan_max, sc.next_change, sc.scan_max_change);
         wallet::update(|s| if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == v.name) { vm.next = n; vm.scan_max = sm; vm.next_change = nc; vm.scan_max_change = smc; })?;
-        let receive_index = if v.chain_code.is_some() { sc.next } else { 0 };
+        let receive_index = if wallet::rotates(&v) { sc.next } else { 0 };
         let receive = wallet::address_at(&v, receive_index)?;
         let mut history: Vec<HistoryRow> = sc.history.into_iter().map(|(txid, height, index)| HistoryRow { txid, height, index }).collect();
         history.sort_by_key(|h| if h.height <= 0 { i32::MAX } else { h.height });
         history.dedup_by(|a, b| a.txid == b.txid);
-        Ok(Snapshot { coins: sc.coins, balance, height, history, servers, receive, receive_index, rotating: v.chain_code.is_some(), next_change: sc.next_change, gap: s.settings.gap })
+        Ok(Snapshot { coins: sc.coins, balance, height, history, servers, receive, receive_index, rotating: wallet::rotates(&v), next_change: sc.next_change, gap: s.settings.gap })
     }).await
 }
 
@@ -347,14 +391,21 @@ async fn servers_test(electrum: String, explorer: String) -> R<String> {
     }).await
 }
 
+/// What a vault of extended keys cannot do yet, said before anything card-shaped is attempted rather than failing
+/// deep inside the card arithmetic with a message about public keys.
+fn cards_only(v: &Vault, what: &str) -> R<()> {
+    if v.ext.is_some() { return Err(format!("{what} works with YubiKeys, and this vault's keys sign on other devices. Spending from a vault like this — built here, signed on the SeedSigner by QR, sent from here — is the next step and is not built yet.")); }
+    Ok(())
+}
+
 #[tauri::command]
 async fn spend_build(name: String, to: String, amount: u64, rate: f64, send_all: bool, coins: Option<Vec<String>>) -> R<wallet::Built> {
     block(move || {
         let s = wallet::load()?;
-        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone(); cards_only(&v, "Building a spend")?;
         let servers = wallet::servers_for(&s, &v.network);
         let sc = wallet::scan(&v, &servers, s.settings.gap)?;
-        let change_index = if v.chain_code.is_some() { wallet::CHANGE | sc.next_change } else { 0 };
+        let change_index = if wallet::rotates(&v) { wallet::CHANGE | sc.next_change } else { 0 };
         let pick = coins.filter(|c| !c.is_empty());
         let b = wallet::build(&v, &sc.coins, change_index, &to, amount, rate, send_all, pick.as_deref())?;
         let (n, sm, nc, smc, psbt) = (sc.next, sc.scan_max.max(sc.next), sc.next_change, sc.scan_max_change.max(sc.next_change), b.psbt.clone());
@@ -455,7 +506,7 @@ fn spend_export(name: String, what: String) -> R<String> {
 #[tauri::command]
 fn spend_ceremony(name: String) -> R<wallet::Ceremony> {
     let s = wallet::load()?;
-    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
+    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?; cards_only(&v, "The signing screen")?;
     wallet::ceremony(v, s.last_psbt.as_deref().ok_or("no spend in progress")?)
 }
 
@@ -548,7 +599,7 @@ struct AddrRow { index: u32, position: u32, chain: &'static str, address: String
 fn vault_addresses(name: String, ahead: Option<u32>) -> R<Vec<AddrRow>> {
     let s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
-    if v.chain_code.is_none() { return Ok(vec![AddrRow { index: 0, position: 0, chain: "receive", address: wallet::address_at(v, 0)?, current: true, future: false }]); }
+    if !wallet::rotates(v) { return Ok(vec![AddrRow { index: 0, position: 0, chain: "receive", address: wallet::address_at(v, 0)?, current: true, future: false }]); }
     let ahead = ahead.unwrap_or(0).min(200);
     let mut out = Vec::new();
     for (base, chain, next) in [(0u32, "receive", v.next), (wallet::CHANGE, "change", v.next_change)] {
@@ -576,7 +627,7 @@ async fn message_sign_key(reader: String, pin: String, message: String) -> R<mes
 #[tauri::command]
 fn message_stage(name: String, index: u32, message: String) -> R<wallet::StagedMessage> {
     let mut s = wallet::load()?;
-    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone(); cards_only(&v, "Signing a message")?;
     if message.trim().is_empty() { return Err("write the message first".into()); }
     let d = wallet::parse(&wallet::descriptor_at(&v, index)?)?.at_derivation_index(0).map_err(|e| e.to_string())?;
     let spk = d.script_pubkey();
@@ -701,7 +752,7 @@ struct SealStatus { id: String, threshold: usize, keys: Vec<SealKey>, sealed: us
 async fn seal_status(name: String) -> R<SealStatus> {
     block(move || {
         let s = wallet::load()?;
-        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone(); cards_only(&v, "Sealing")?;
         let cards = seal_cards()?;
         let shares = seal_shares(&v, &cards)?;
         let id = seal_id(&v);
@@ -741,7 +792,7 @@ async fn seal_status(name: String) -> R<SealStatus> {
 async fn seal_write(name: String, reader: String, admin_pin: String, pin: String, replace: bool) -> R<String> {
     block(move || {
         let s = wallet::load()?;
-        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone(); cards_only(&v, "Sealing")?;
         let cards = seal_cards()?;
         let card = cards.iter().find(|c| c.reader == reader).ok_or("that key is no longer plugged in")?;
         let i = v.keys.iter().position(|k| Some(k.pubkey.as_str()) == card.pubkey.as_deref()).ok_or("that key is not one of this vault's")?;
@@ -807,7 +858,7 @@ fn seal_vault(rec: &seal::Record, name: String, shares: Vec<String>, sealed: Vec
     let mut v = Vault { name, network: rec.network.clone(), threshold: rec.threshold,
         keys: rec.pubkeys.iter().zip(&rec.key_names).map(|(p, n)| wallet::KeyRef { name: n.clone(), serial: 0, pubkey: p.clone() }).collect(),
         descriptor, address: String::new(), created: now(), chain_code: rec.chain_code.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0,
-        seal: wallet::Seal { shares, sealed } };
+        seal: wallet::Seal { shares, sealed }, ext: None };
     v.address = wallet::address_at(&v, 0)?;
     Ok(v)
 }

@@ -6,7 +6,7 @@ use bitcoin::sighash::{EcdsaSighashType, SighashCache};
 use bitcoin::{absolute, transaction, Address, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 use miniscript::descriptor::Descriptor;
 use miniscript::psbt::PsbtExt;
-use miniscript::DescriptorPublicKey;
+use miniscript::{DescriptorPublicKey, ForEachKey};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
@@ -42,6 +42,10 @@ pub struct Vault {
     /// last time the labels were confirmed in step with the label host; 0 = never
     #[serde(default)] pub labels_synced: u64,
     #[serde(default)] pub seal: Seal,
+    /// A vault whose keys are EXTENDED keys held by other signers (a SeedSigner, a Coldcard, Sparrow): the standard
+    /// wallet descriptor exactly as it came, multipath `<0;1>/*` for receive and change. Present = every address comes
+    /// from here by ordinary BIP32, and none of the card machinery (chain code, seal, card signing) applies.
+    #[serde(default)] pub ext: Option<String>,
 }
 
 /// The recovery record split across the cards (seal.rs). Shares are made once so cards sealed on different days agree.
@@ -227,7 +231,13 @@ pub fn script_of(desc: &str) -> Result<ScriptBuf, String> {
 pub fn keys_of(desc: &str) -> Result<(usize, Vec<String>), String> {
     let s = desc.trim();
     let inner = s.split('#').next().unwrap_or(s);
-    if let Some(rest) = inner.strip_prefix("wsh(sortedmulti(").or_else(|| inner.strip_prefix("wsh(multi(")) {
+    // multi() is NOT sortedmulti(): its key order is part of the script. Rebuilding one as sortedmulti would give
+    // different addresses and watch the wrong ones, silently. Any Two Keys' own vaults are sortedmulti; a multi() over
+    // extended keys goes the faithful way (ext_parse), and one over fixed keys is refused rather than changed.
+    if inner.starts_with("wsh(multi(") {
+        return Err("this descriptor is multi(), where the order of the keys is part of every address; this app only rebuilds sortedmulti() from fixed keys, and changing one into the other would watch the wrong addresses".into());
+    }
+    if let Some(rest) = inner.strip_prefix("wsh(sortedmulti(") {
         let rest = rest.trim_end_matches(')');
         let mut parts = rest.split(',');
         let k: usize = parts.next().unwrap_or("0").trim().parse().map_err(|_| "threshold".to_string())?;
@@ -246,6 +256,12 @@ pub const CHANGE: u32 = 0x8000_0000;
 pub fn is_change(index: u32) -> bool { index & CHANGE != 0 }
 pub fn position(index: u32) -> u32 { index & !CHANGE }
 
+/// Does this vault give a FRESH address for every deposit? A card vault does when it has a chain code; an
+/// extended-key vault always does, by BIP32. Ask this for "rotating" — and ask `cc_of` only when the chain code's
+/// VALUE is needed for the card arithmetic. Using the one for the other made an extended-key vault scan a single
+/// address, skip its change chain, hand out the same receive address every time, and not recognise its own change.
+pub fn rotates(v: &Vault) -> bool { v.ext.is_some() || v.chain_code.is_some() }
+
 pub fn cc_of(v: &Vault) -> Option<[u8; 32]> {
     let h = v.chain_code.as_ref()?;
     let b = hex::decode(h).ok()?;
@@ -254,6 +270,7 @@ pub fn cc_of(v: &Vault) -> Option<[u8; 32]> {
 
 /// The cosigner keys for address `index`: the card keys, or their multiplicative children.
 pub fn keys_at(v: &Vault, index: u32) -> Result<Vec<String>, String> {
+    if let Some(ext) = &v.ext { return ext_keys_at(ext, index); }
     match cc_of(v) {
         None => Ok(v.keys.iter().map(|k| k.pubkey.clone()).collect()),
         Some(cc) => v.keys.iter().map(|k| {
@@ -264,7 +281,84 @@ pub fn keys_at(v: &Vault, index: u32) -> Result<Vec<String>, String> {
 }
 
 pub fn descriptor_at(v: &Vault, index: u32) -> Result<String, String> {
+    // an extended-key vault is read AS WRITTEN — never rebuilt through descriptor_for, which only makes sortedmulti
+    if let Some(ext) = &v.ext { return ext_definite(ext, index).map(|d| d.to_string()); }
     descriptor_for(v.threshold, &keys_at(v, index)?)
+}
+
+// ---------- vaults of extended keys held by other signers ----------
+
+/// One key of an extended-key descriptor, for showing and for building a PSBT a hardware signer will recognise:
+/// the signer matches BOTH the master fingerprint and the full path from master, or refuses it as "not my key".
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtKey { pub fingerprint: String, pub path: String, pub xpub: String }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtInfo { pub descriptor: String, pub threshold: usize, pub keys: Vec<ExtKey>, pub network: String, pub kind: String }
+
+fn ext_desc(text: &str) -> Result<Descriptor<DescriptorPublicKey>, String> {
+    // parsed whole, checksum and all, and case left alone: base58 is case-sensitive
+    Descriptor::<DescriptorPublicKey>::from_str(text.trim()).map_err(|e| format!("that is not a descriptor this app can read: {e}"))
+}
+
+/// Is this the wallet descriptor of a vault of extended keys — and if so, what is in it. Refuses, with the reason,
+/// anything it could watch but not stand behind: a mixture of extended and fixed keys (their signers differ), a
+/// receive-only descriptor (a wallet needs its change too), and a key without the origin a signer needs to know it.
+pub fn ext_parse(text: &str) -> Result<Option<ExtInfo>, String> {
+    let d = ext_desc(text)?;
+    let mut keys = Vec::new(); let mut fixed = 0usize; let mut net: Option<bitcoin::NetworkKind> = None;
+    let mut all: Vec<DescriptorPublicKey> = Vec::new(); d.for_each_key(|k| { all.push(k.clone()); true });
+    for k in all {
+        match &k {
+            DescriptorPublicKey::Single(_) => fixed += 1,
+            DescriptorPublicKey::XPub(x) => {
+                if x.origin.is_none() { return Err("each key needs its origin, like [dc567276/48h/0h/0h/2h]xpub…: without the fingerprint and path a hardware signer cannot tell it is one of its own keys".into()); }
+                net = Some(x.xkey.network);
+                keys.push(ExtKey { fingerprint: k.master_fingerprint().to_string(), path: format!("m/{}", x.origin.as_ref().unwrap().1), xpub: x.xkey.to_string() });
+            }
+            DescriptorPublicKey::MultiXPub(x) => {
+                if x.origin.is_none() { return Err("each key needs its origin, like [dc567276/48h/0h/0h/2h]xpub…: without the fingerprint and path a hardware signer cannot tell it is one of its own keys".into()); }
+                net = Some(x.xkey.network);
+                keys.push(ExtKey { fingerprint: k.master_fingerprint().to_string(), path: format!("m/{}", x.origin.as_ref().unwrap().1), xpub: x.xkey.to_string() });
+            }
+        }
+    }
+    if keys.is_empty() { return Ok(None); }   // fixed keys only: the card path reads it
+    if fixed > 0 { return Err("this descriptor mixes extended keys with fixed ones. Vaults that mix a YubiKey with other signers are not supported yet — see roadmap/anytwokeys/XPUB-VAULTS.md".into()); }
+    if !d.is_multipath() { return Err("this descriptor names one chain only. Paste the whole wallet descriptor, with <0;1>/* on each key, so both receive and change addresses are watched".into()); }
+    let singles = d.clone().into_single_descriptors().map_err(|e| e.to_string())?;
+    if singles.len() != 2 { return Err("a wallet descriptor has exactly two chains, <0;1> — receive and change".into()); }
+    let (kind, threshold) = match d.desc_type() {
+        miniscript::descriptor::DescriptorType::WshSortedMulti => ("sortedmulti", sorted_threshold(&d)?),
+        // wsh(multi(...)) is reported as a general wsh; it is accepted only when the text says exactly that
+        miniscript::descriptor::DescriptorType::Wsh if d.to_string().starts_with("wsh(multi(") => ("multi", sorted_threshold(&d)?),
+        miniscript::descriptor::DescriptorType::Wpkh => ("single", 1),
+        other => return Err(format!("{other:?} descriptors are not supported yet: this app watches wsh(sortedmulti), wsh(multi) and wpkh wallets")),
+    };
+    let network = match net { Some(bitcoin::NetworkKind::Main) => "mainnet", _ => "signet" }.to_string();
+    Ok(Some(ExtInfo { descriptor: d.to_string(), threshold, keys, network, kind: kind.into() }))
+}
+
+fn sorted_threshold(d: &Descriptor<DescriptorPublicKey>) -> Result<usize, String> {
+    // the k of k-of-n, read from the canonical text rather than from miniscript's internals
+    let s = d.to_string(); let inner = s.split_once("multi(").map(|x| x.1).ok_or("no multi")?;
+    inner.split(',').next().and_then(|k| k.trim().parse().ok()).ok_or_else(|| "threshold".into())
+}
+
+/// The concrete descriptor at an address index: receive `pos`, or change `CHANGE | pos`.
+fn ext_definite(ext: &str, index: u32) -> Result<Descriptor<miniscript::DefiniteDescriptorKey>, String> {
+    let singles = ext_desc(ext)?.into_single_descriptors().map_err(|e| e.to_string())?;
+    let chain = singles.get(if is_change(index) { 1 } else { 0 }).ok_or("the descriptor has no change chain")?;
+    chain.at_derivation_index(position(index)).map_err(|e| e.to_string())
+}
+
+/// The cosigner keys at an index, in the descriptor's own order, as compressed hex.
+fn ext_keys_at(ext: &str, index: u32) -> Result<Vec<String>, String> {
+    let d = ext_definite(ext, index)?;
+    let secp = Secp256k1::verification_only();
+    let mut out = Vec::new(); let mut bad = None;
+    d.for_each_key(|k| { match k.derive_public_key(&secp) { Ok(p) => out.push(hex::encode(p.inner.serialize())), Err(e) => bad = Some(e.to_string()) } true });
+    match bad { Some(e) => Err(e), None => Ok(out) }
 }
 
 pub fn address_at(v: &Vault, index: u32) -> Result<String, String> {
@@ -273,6 +367,7 @@ pub fn address_at(v: &Vault, index: u32) -> Result<String, String> {
 
 /// The recovery line: the base descriptor, plus the chain code when addresses rotate.
 pub fn recovery_line(v: &Vault) -> String {
+    if let Some(ext) = &v.ext { return ext.clone(); }   // the wallet descriptor IS its recovery line, with the seeds
     match &v.chain_code {
         Some(cc) => format!("{} cc={cc}", v.descriptor),
         None => v.descriptor.clone(),
@@ -301,7 +396,7 @@ pub struct Scanned { pub coins: Vec<CoinAt>, pub history: Vec<(String, i32, u32)
 /// vault, the change chain too. A fixed vault has index 0 only.
 pub fn scan(v: &Vault, servers: &Servers, gap: u32) -> Result<Scanned, String> {
     let gap = gap.max(1);
-    let rotating = cc_of(v).is_some();
+    let rotating = rotates(v);
     let mut coins = Vec::new();
     let mut history = Vec::new();
     let mut chain = |base: u32| -> Result<(u32, u32), String> {
@@ -332,7 +427,7 @@ pub fn scan(v: &Vault, servers: &Servers, gap: u32) -> Result<Scanned, String> {
 
 /// Which index a PSBT input pays to, by matching its script against the vault's.
 pub fn index_of_input(v: &Vault, spk: &ScriptBuf) -> Result<Option<u32>, String> {
-    if cc_of(v).is_none() { return Ok(if &script_of(&descriptor_at(v, 0)?)? == spk { Some(0) } else { None }); }
+    if !rotates(v) { return Ok(if &script_of(&descriptor_at(v, 0)?)? == spk { Some(0) } else { None }); }
     for i in 0..=v.scan_max.max(v.next) + GAP {
         if &script_of(&descriptor_at(v, i)?)? == spk { return Ok(Some(i)); }
     }
@@ -562,7 +657,7 @@ mod tests {
         let keys = ["03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2", "032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe", "038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47"];
         let descriptor = descriptor_for(2, &keys.iter().map(|k| k.to_string()).collect::<Vec<_>>()).unwrap();
         Vault { name: "t".into(), network: "signet".into(), threshold: 2, keys: keys.iter().enumerate().map(|(i, k)| KeyRef { name: format!("k{i}"), serial: 0, pubkey: k.to_string() }).collect(),
-            descriptor, address: String::new(), created: 0, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default() }
+            descriptor, address: String::new(), created: 0, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None }
     }
     #[test]
     fn a_part_signed_psbt_from_elsewhere_is_checked_before_it_is_taken_in() {
@@ -625,3 +720,99 @@ mod tests {
         assert_eq!(cc.as_deref(), Some("ab".repeat(32).as_str()));
     }
 }
+
+#[cfg(test)]
+mod ext_tests {
+    use super::*;
+    fn vault_of(desc: &str) -> Vault {
+        let info = ext_parse(desc).unwrap().unwrap();
+        Vault { name: "ext".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
+            chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(),
+            files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: Some(info.descriptor) }
+    }
+    fn fixtures() -> serde_json::Value { serde_json::from_str(&std::fs::read_to_string(format!("{}/tests/fixtures/ext-descriptors.json", env!("CARGO_MANIFEST_DIR"))).unwrap()).unwrap() }
+    fn check_against_embit(case: &str) {
+        let f = &fixtures()[case];
+        let v = vault_of(f["descriptor"].as_str().unwrap());
+        for (chain, base) in [("recv", 0u32), ("chg", CHANGE)] {
+            for (i, want) in f[chain].as_array().unwrap().iter().enumerate() {
+                assert_eq!(address_at(&v, base | i as u32).unwrap(), want.as_str().unwrap(), "{case} {chain} {i}");
+            }
+        }
+    }
+    // expected addresses computed by embit, the library SeedSigner uses — not by this app
+    #[test] fn a_sortedmulti_xpub_wallet_derives_what_embit_derives() { check_against_embit("sortedmulti"); }
+    #[test] fn a_multi_wallet_keeps_its_key_order_and_derives_what_embit_derives() { check_against_embit("multi"); }
+    #[test] fn a_single_key_xpub_wallet_derives_what_embit_derives() { check_against_embit("wpkh"); }
+    #[test]
+    fn multi_and_sortedmulti_are_never_confused() {
+        let f = fixtures();
+        let (m, sm) = (vault_of(f["multi"]["descriptor"].as_str().unwrap()), vault_of(f["sortedmulti"]["descriptor"].as_str().unwrap()));
+        assert_ne!(address_at(&m, 0).unwrap(), address_at(&sm, 0).unwrap(), "the same keys, two different wallets");
+    }
+    #[test]
+    fn what_it_will_not_stand_behind_is_refused_with_the_reason() {
+        let sm = fixtures()["sortedmulti"]["descriptor"].as_str().unwrap().split('#').next().unwrap().to_string();
+        let no_origin = sm.replacen("[c9ad277c/48h/0h/0h/2h]", "", 1);
+        assert!(ext_parse(&no_origin).unwrap_err().contains("origin"));
+        let one_chain = sm.replace("/<0;1>/*", "/0/*");
+        assert!(ext_parse(&one_chain).unwrap_err().contains("<0;1>"));
+        let fixed = "02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13";
+        let first_key_end = sm.find(",[").map(|i| &sm[i + 1..]).unwrap();
+        let mixed = format!("wsh(sortedmulti(2,{fixed},{first_key_end}");
+        assert!(ext_parse(&mixed).unwrap_err().contains("mixes extended keys with fixed ones"), "{:?}", ext_parse(&mixed));
+        assert!(keys_of("wsh(multi(2,02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13,03e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13))").unwrap_err().contains("order"),
+            "a fixed-key multi() is refused, never silently rebuilt as sortedmulti()");
+    }
+    #[test]
+    fn case_survives_and_the_checksum_is_checked() {
+        let good = fixtures()["sortedmulti"]["descriptor"].as_str().unwrap().to_string();
+        assert!(ext_parse(&good).unwrap().is_some());
+        assert!(ext_parse(&good.to_lowercase()).is_err(), "base58 is case-sensitive: a lowercased xpub is a different, invalid key");
+        let bad_sum = format!("{}#aaaaaaaa", good.split('#').next().unwrap());
+        assert!(ext_parse(&bad_sum).is_err(), "a wrong checksum is refused, not ignored");
+    }
+    #[test]
+    fn an_extended_key_vault_ROTATES_even_though_it_has_no_chain_code() {
+        // the trap: "rotating" had been read off the chain code, which only card vaults have
+        let v = vault_of(fixtures()["sortedmulti"]["descriptor"].as_str().unwrap());
+        assert!(v.chain_code.is_none() && rotates(&v));
+        assert_ne!(address_at(&v, 0).unwrap(), address_at(&v, 1).unwrap(), "a fresh address per deposit, never the same one");
+    }
+    #[test]
+    fn its_own_change_is_recognised_as_its_own() {
+        let mut v = vault_of(fixtures()["sortedmulti"]["descriptor"].as_str().unwrap());
+        v.scan_max = 3; v.scan_max_change = 3;
+        let chg2 = script_of(&descriptor_at(&v, CHANGE | 2).unwrap()).unwrap();
+        let recv3 = script_of(&descriptor_at(&v, 3).unwrap()).unwrap();
+        assert_eq!(index_of_input(&v, &chg2).unwrap(), Some(CHANGE | 2), "change output 2 is this vault's");
+        assert_eq!(index_of_input(&v, &recv3).unwrap(), Some(3));
+        let stranger = script_of(&descriptor_at(&vault_of(fixtures()["multi"]["descriptor"].as_str().unwrap()), 0).unwrap()).unwrap();
+        assert_eq!(index_of_input(&v, &stranger).unwrap(), None, "and a different wallet's address is not");
+    }
+    /// A real wallet scanned against the real server — the thing no mock can show: that the scan goes past the first
+    /// address and down the change chain. `EXT_DESC='…' cargo test ext_live_scan -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn ext_live_scan() {
+        let v = vault_of(&std::env::var("EXT_DESC").expect("EXT_DESC"));
+        let servers = Servers { electrum: "ssl://electrum.mineracks.com:50002".into(), explorer: "https://mempool.mineracks.com".into() };
+        let sc = scan(&v, &servers, 20).expect("the scan answered");
+        let bal: u64 = sc.coins.iter().map(|c| c.value).sum();
+        let recv_used = sc.history.iter().filter(|h| !is_change(h.2)).map(|h| h.2).collect::<std::collections::BTreeSet<_>>();
+        let chg_used = sc.history.iter().filter(|h| is_change(h.2)).map(|h| position(h.2)).collect::<std::collections::BTreeSet<_>>();
+        println!("SCAN history={} coins={} balance={} sats | receive indexes used {:?} (next {}, looked to {}) | change indexes used {:?} (next {}, looked to {})",
+            sc.history.len(), sc.coins.len(), bal, recv_used, sc.next, sc.scan_max, chg_used, sc.next_change, sc.scan_max_change);
+        assert!(sc.scan_max >= 19, "the receive chain was scanned past the gap, not stopped at index 0");
+        assert!(sc.scan_max_change >= 19, "and the change chain was scanned at all");
+    }
+    /// Prints this app's addresses for a descriptor given in EXT_DESC, to compare with another implementation.
+    /// A real wallet's descriptor is never committed: `EXT_DESC='…' cargo test ext_print -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn ext_print() {
+        let v = vault_of(&std::env::var("EXT_DESC").expect("EXT_DESC"));
+        for (name, base) in [("recv", 0u32), ("chg", CHANGE)] { for i in 0..5 { println!("{name} {i} {}", address_at(&v, base | i).unwrap()); } }
+    }
+}
+

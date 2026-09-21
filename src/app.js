@@ -77,7 +77,7 @@ function show(name) {
   if (name === 'coins') { $('#coins-detail').hidden = true; if (vault && !vault._coins) sync().then(() => Promise.resolve(renderAddresses()).then(renderCoins2)); else Promise.resolve(renderAddresses()).then(renderCoins2); }
   if (name === 'vault') renderVaultSettings();
   if (name === 'overview') renderOverview();
-  if (name === 'send') { closeBook(); paintTo(); loadFees(); if (vault && !vault._coins) sync().then(renderCoins); else renderCoins(); }
+  if (name === 'send') { closeBook(); paintTo(); loadFees(); if (vault && !vault._coins) sync().then(renderCoins); else renderCoins(); paintExtSend(); }
   if (name === 'messages') renderMessages();
   if (name === 'keys') renderKeys();
   if (name === 'tx') renderTx();
@@ -1649,7 +1649,13 @@ function firstSeenWords(pubkey) {
 }
 const keysBusy = () => $$('#keys-list input').some(i => i.value || i === document.activeElement);   // a poll must not wipe a half-typed PIN or name
 const PENCIL = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
+function extKeyRow(k, i) {
+  const m = /^\[([0-9a-f]{8})\/([^\]]+)\](\S+)$/i.exec(k.pubkey) || [];
+  return `<div class="keyrow vk"><span class="keyart"><svg width="24" height="24"><use href="#ring"/></svg></span><div class="who"><div class="name"><span class="name-text">${esc(k.name)}</span><button class="pencil" data-edit-idx="${i}" title="Rename this key">${PENCIL}</button></div><div class="muted" style="font-size:13px">fingerprint <span class="mono">${esc(m[1] || '?')}</span> \u00b7 m/${esc(m[2] || '?')} \u00b7 <span class="mono">${esc((m[3] || '').slice(0, 14))}\u2026</span></div></div>`
+    + `<div class="kright"><div class="state"><i></i>signs on another device</div></div></div>`;
+}
 function vaultKeyRow(k, i) {
+  if (vault && vault.ext) return extKeyRow(k, i);
   const card = cards.find(c => c.pubkey === k.pubkey), pf = packedForm(k.pubkey);
   const art = card ? keyArt(card.form || 3, !!card.nfc, 52) : pf ? keyArt(pf, !!(pf & 0x80), 52) : '<svg width="24" height="24"><use href="#ring"/></svg>';
   const model = card ? modelName(card.form, card.nfc) : pf ? modelName(pf, !!(pf & 0x80), !!(pf & 0x40)) : 'YubiKey';
@@ -1672,6 +1678,8 @@ function renderKeys(force) {
 function keyRow(name, sub, pub, state, idx) { const pen = idx === undefined ? '' : `<button class="pencil" data-edit-idx="${idx}" title="Rename this key"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>`; const pf = packedForm(pub); return `<div class="keyrow"><span class="keyart">${pf ? keyArt(pf, !!(pf & 0x80), 44) : '<svg width="22" height="22"><use href="#ring"/></svg>'}</span><div class="who"><div class="name"><span class="name-text">${name}</span>${pen}</div><div class="muted" style="font-size:13px">${pf ? modelName(pf, !!(pf & 0x80), !!(pf & 0x40)) + ' · ' : ''}${sub} · <span class="mono">${pub.slice(0, 12)}…</span></div></div><div class="state ${state}"><i></i>${{ ok: 'enrolled', off: 'not plugged in', here: 'plugged in' }[state]}</div></div>`; }
 // Said once, plainly, rather than left as a gap the person has to wonder about.
 function paintKeyLife() {
+  if (vault && vault.ext) { $('#key-life').hidden = true; return; }
+  $('#key-life').hidden = false;
   const plugged = cards.length, keys = vault ? vault.keys : [];
   const fwOf = (pk) => { const c = cards.find(c => c.pubkey === pk); return (c && c.firmware) || ((store && store.key_fw) || {})[pk] || ''; };
   const known = keys.filter(k => fwOf(k.pubkey)), hit = known.filter(k => keyAdvisories({ firmware: fwOf(k.pubkey) }).length);
@@ -1793,6 +1801,7 @@ $('#single-go').onclick = () => { $('#single-modal').classList.remove('on'); set
 
 // ---------- the seal: recovery shares on the keys ----------
 function paintSealSlots() {
+  if (vault && vault.ext) return;
   const st = renderSeal.st; if (!st || !vault || st.forVault !== vault.name) return;
   const n = st.keys.length;
   st.keys.forEach((key, i) => {
@@ -1822,6 +1831,7 @@ function paintSealSlots() {
 }
 async function renderSeal(force) {
   if (!vault) return;
+  if (vault.ext) { $('#seal-note').textContent = `Any ${vault.threshold} of these ${vault.keys.length} keys sign, each on its own device from its own seed words. Nothing is sealed on a card: the seed words, plus the wallet descriptor below, are how this vault comes back.`; return; }
   const name = vault.name;
   let st; try { st = await invoke('seal_status', { name }); } catch (e) { $('#seal-note').textContent = String(e); return; }
   if (!vault || vault.name !== name) return;
@@ -1894,6 +1904,7 @@ let parsed = null;
 async function readDescriptor(text) {
   try {
     parsed = await invoke('descriptor_parse', { text });
+    if (parsed.ext) return readExtended(parsed);
     const names = ['laptop', 'keyring', 'off-site'];
     $('#restore-card').innerHTML = `<div class="ok">Read: ${parsed.threshold} of ${parsed.keys.length} over card keys, checksum ok${parsed.rotating ? ', with a chain code (rotating addresses)' : ' (one fixed address)'}</div>
       <div class="mono muted" style="background:var(--ground);padding:12px;border-radius:6px;border:1px solid var(--line)">${parsed.descriptor}</div>
@@ -1906,6 +1917,28 @@ async function readDescriptor(text) {
       catch (e) { fail(e); }
     };
   } catch (e) { $('#restore-card').innerHTML = `<div class="warn">${e}</div>`; }
+}
+
+// A wallet of extended keys — a SeedSigner multisig, Sparrow, Coldcard — read AS WRITTEN. Its keys are other
+// devices' keys, named by the fingerprint and path those devices recognise, never mistaken for cards.
+function readExtended(p) {
+  const kind = { sortedmulti: 'sortedmulti', multi: 'multi — the order of the keys is part of every address, and is kept', single: 'a single key' }[p.kind] || p.kind;
+  $('#restore-card').innerHTML = `<div class="ok">Read: ${p.threshold} of ${p.keys.length}, ${esc(kind)}, over extended keys held by other signers \u2014 checksum ok, a fresh address for every deposit.</div>
+    <div class="mono muted" style="background:var(--ground);padding:12px;border-radius:6px;border:1px solid var(--line);word-break:break-all;font-size:12px">${esc(p.descriptor)}</div>
+    <div style="display:flex;flex-direction:column;gap:8px">${p.ext.map((k, i) => `<div class="row" style="justify-content:space-between;gap:10px;flex-wrap:wrap"><span><span class="mono">${esc(k.fingerprint)}</span> <span class="muted" style="font-size:12.5px">${esc(k.path)}</span></span><input data-kname="${i}" value="${esc('key ' + (i + 1) + ' \u00b7 ' + k.fingerprint)}" style="max-width:190px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink)"><span class="muted" style="font-size:13px">signs on another device</span></div>`).join('')}</div>
+    <div class="muted" style="font-size:13px">First address on ${netName()}: <span class="mono">${esc(p.address)}</span>. This vault can be watched from now on \u2014 balance, activity, coins, addresses. Spending from it, built here and signed on the signing devices by QR, is the next step and is not built yet.</div>
+    <div class="field"><div class="label">Vault name</div><input id="restore-name" value="multisig"></div>
+    <button class="btn primary" id="restore-go">Watch this vault</button>`;
+  $('#restore-go').onclick = async () => {
+    try { vault = await invoke('vault_restore', { name: $('#restore-name').value.trim() || 'multisig', text: p.descriptor, names: $$('[data-kname]').map(i => i.value.trim()) }); store = await invoke('store_get'); rememberVault(vault); stopCam(); toast('Watching this vault'); paintNet(); show('home'); }
+    catch (e) { fail(e); }
+  };
+}
+
+function paintExtSend() {
+  const ext = !!(vault && vault.ext);
+  $('#ext-send').hidden = !ext;
+  $('#build-btn').disabled = ext;
 }
 
 // ---------- settings ----------
@@ -1959,8 +1992,9 @@ function renderVaultSettings() {
     ? '<b>This vault has never been drilled.</b> Until it has, "the keys can recover it" is something you believe rather than something you have seen.'
     : `Last drill: <b>${esc(drillWords(ds))}</b> \u2014 ${ds.days === 0 ? 'today' : sats(ds.days) + ' day' + (ds.days === 1 ? '' : 's') + ' ago'}. ${ds.every ? (ds.due ? 'That is past the ' + sats(ds.every) + ' days you asked for.' : 'The next is due in ' + sats(ds.every - ds.days) + ' day' + (ds.every - ds.days === 1 ? '' : 's') + '.') : 'You have asked not to be reminded.'}`;
   $('#vs-drill-when').classList.toggle('warn', ds.due);
-  $('#vs-drill').hidden = single;
-  $('#vs-drill-what').textContent = single
+  $('#vs-drill').hidden = single || !!vault.ext;
+  if (vault.ext) { $('#vs-drill-when').classList.remove('warn'); $('#vs-drill-when').textContent = ''; $('#vs-drill-what').textContent = `This vault's keys live on other devices, each from its own seed words, so there are no cards here to drill. To check it can be recovered: on each signing device, load its seed words and confirm it shows the fingerprint on this vault's Keys screen; then load the wallet descriptor below into it and confirm the first address matches this vault's.`; }
+  else $('#vs-drill-what').textContent = single
     ? 'This vault has one key and no shares to rebuild from: its recovery is the recovery sheet, which you can save below and should keep somewhere else.'
     : 'A drill rebuilds this vault from the cards themselves \u2014 each with its own PIN, exactly as a real recovery would \u2014 and checks that what comes back is this vault and derives the same first address. It reads the cards only. Nothing is spent, nothing is written to the chain, and the vault is not changed.';
 }
