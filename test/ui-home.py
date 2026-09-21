@@ -52,7 +52,9 @@ const H = {
   seal_preview: (a) => { window.__previewed = a.found.length; return window.__cands || []; },
   vault_sync: (a) => ({ coins: [{ txid: '%(t0)s', vout: 0, value: 9430, height: 967374, index: 0 }], balance: a.name === 'other vault' ? 111 : 9430, height: 967685, rotating: !!window.__rotating, receive: 'bc1qexample', receive_index: 0, next_change: 0, gap: 20, servers: { electrum: 'ssl://electrum.mineracks.com:50002', explorer: 'https://mempool.mineracks.com' },
     history: [{ txid: '%(t0)s', height: 967374, index: 0 }, { txid: '%(t1)s', height: 967410, index: 0 }, { txid: '%(t2)s', height: 967497, index: 0 }, { txid: '%(t3)s', height: 0, index: 0 }] }),
-  prices_on: (a) => { window.__pricesAsked = (window.__pricesAsked || 0) + a.days.length; window.__lastDays = a.days; return a.days.map(d => [d, { price: 110000, basis: 'daily ' + d }]); },
+  prices_series: (a) => { window.__seriesAsked = (window.__seriesAsked || []).concat([a.from + '..' + a.to]);
+    const out = []; for (let t = Date.parse(a.from + 'T00:00:00Z'); t <= Date.parse(a.to + 'T00:00:00Z'); t += 86400000) { const d = new Date(t).toISOString().slice(0, 10); out.push([d, window.__holeDay === d ? null : { price: 110000, basis: 'daily ' + d }]); }
+    return { every: 1, points: out }; },
   vault_activity: (a) => { __state.asked = a; if (__state.fail) throw 'electrum: connection refused'; const q = (p, b) => a.ccy ? { price: p, basis: b } : null; return { ccy: a.ccy, note: null, now: q(114209.6, 'daily 2026-09-19'), rows: [
     { txid: '%(t0)s', time: 1789627614, net: 20000, fee: null, quote: q(107389.64, 'hourly 2026-09-17 06:00 UTC') }, { txid: '%(t1)s', time: 1789648528, net: -5190, fee: 190, quote: q(107768.03, 'hourly 2026-09-17 12:00 UTC') },
     { txid: '%(t2)s', time: 1789699744, net: -5380, fee: 380, quote: null }, { txid: '%(t3)s', time: null, net: 1000, fee: null, quote: null }] }; } };
@@ -374,7 +376,6 @@ with sync_playwright() as p:
     L5 = pg.evaluate("""buildLedger([{ name: 'A', rows: [{ txid: 'd1', time: 1000, net: 5000, quote: null }] }])""")
     check("a deposit with no price is counted in the balance, and its cost is left OUT rather than guessed",
           L5["unpriced"] == 1 and L5["timeline"][-1]["basis"] == 0 and L5["timeline"][-1]["sats"] == 5000)
-    check("price days are bounded, even across years", pg.evaluate("sampleDays(0, 86400 * 3000).length") == 36 and pg.evaluate("sampleDays(86400*10, 86400*12).length") == 3)
 
     # ---- the summary on Home ----
     pg.evaluate("show('home')"); pg.wait_for_timeout(1200)
@@ -401,8 +402,8 @@ with sync_playwright() as p:
     pg.keyboard.press("Tab")
     pg.click("#home-summary .linkish"); pg.wait_for_timeout(200)
     check("and every figure is in a table too, so nothing is reachable only by hovering", pg.locator("#home-summary .sum-table table tr").count() >= 2)
-    check("the notes say what the figures rest on: sampled prices, and what 'cost' means here",
-          "daily closing prices" in pg.inner_text("#home-summary") and "true cost only if the deposit was a purchase" in pg.inner_text("#home-summary"))
+    check("the notes say what the figures rest on: which closing prices, and what 'cost' means here",
+          "closing price" in pg.inner_text("#home-summary") and "true cost only if the deposit was a purchase" in pg.inner_text("#home-summary"))
     bad = pg.evaluate("""() => { const rows = [...document.querySelectorAll('#home-summary .sum-table tr')].slice(1);
         const num = (s) => parseFloat(String(s).replace(/[^0-9.]/g, ''));
         return rows.map(r => [...r.cells].map(c => c.textContent)).filter(c => { const bal = num(c[1]), worth = num(c[2]);
@@ -410,11 +411,16 @@ with sync_playwright() as p:
     check("the chart agrees with ITSELF: at every moment in the table, worth is the balance at a real price — never the balance before a spend",
           bad == [], bad)
     pg.locator("#home-summary").screenshot(path=str(out / "summary.png"))
-    asked = pg.evaluate("window.__pricesAsked || 0")
+    check("the whole range is ONE request to the price service, not one per day", len(pg.evaluate("window.__seriesAsked || []")) == 1, pg.evaluate("window.__seriesAsked"))
+    check("and the note says worth is drawn from EVERY day's close", "every day\u2019s closing price" in pg.inner_text("#home-summary"))
+    asked = len(pg.evaluate("window.__seriesAsked || []"))
     pg.click('#home-summary .seg button[data-range="90"]'); pg.wait_for_timeout(900)
     check("the time range scopes everything below it, and is remembered", pg.get_attribute('#home-summary .seg button[data-range="90"]', "aria-checked") == "true" and pg.evaluate("localStorage.getItem('a2k-sum-range')") == "90")
     pg.click('#home-summary .seg button[data-range="all"]'); pg.wait_for_timeout(900)
-    check("a price already fetched this session is not asked for again", (pg.evaluate("window.__pricesAsked || 0") - asked) <= len(pg.evaluate("window.__lastDays || []")))
+    check("a range already fetched this session is not asked for again", len(pg.evaluate("window.__seriesAsked || []")) - asked <= 1, pg.evaluate("window.__seriesAsked"))
+    pg.evaluate("window.__holeDay = new Date(Date.now() - 2*86400000).toISOString().slice(0,10); for (const k in sumRuns) delete sumRuns[k]; renderHomeSummary()"); pg.wait_for_timeout(900)
+    check("a day the source has no price for is left out and SAID to be, never filled", "no price at the source" in pg.inner_text("#home-summary"), pg.inner_text("#home-summary")[-300:])
+    pg.evaluate("window.__holeDay = null; for (const k in sumRuns) delete sumRuns[k]")
 
     # ---- all vaults ----
     pg.evaluate("show('overview')"); pg.wait_for_timeout(1500)

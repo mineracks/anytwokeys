@@ -38,7 +38,9 @@ fn day_hour(t: u32) -> (String, u32) { (crate::export::ymd(t as u64), (t % 86_40
 
 /// Parse the price service's answer for one currency. `None` for anything that is not a positive finite price.
 pub fn read_quote(body: &serde_json::Value, ccy: &str, day: &str) -> Option<Quote> {
-    let price = body.get("prices")?.get(ccy)?.as_f64().filter(|p| p.is_finite() && *p > 0.0)?;
+    let price = body.get("prices").and_then(|p| p.get(ccy)).and_then(|v| v.as_f64())
+        .or_else(|| if ccy == "USD" { body.get("btc_usd").and_then(|v| v.as_f64()) } else { None })
+        .filter(|p| p.is_finite() && *p > 0.0)?;
     let basis = match body.get("candle").and_then(|c| c.get("ts")).and_then(|t| t.as_str()) {
         Some(ts) if ts.len() >= 16 => format!("hourly {} {} UTC", &ts[..10], &ts[11..16]),
         _ => format!("daily {}", body.get("day").and_then(|d| d.as_str()).unwrap_or(day)),
@@ -117,30 +119,53 @@ pub fn quote_at(prices_url: &str, ccy: &str, t: Option<u32>) -> Option<Quote> {
     Some(q)
 }
 
-/// The daily price on each of `days`, for drawing a value over time.
-///
-/// The public price service answers one day per request at 5 requests a second, so a daily line across a year would
-/// be 365 of them. The window asks for a handful of evenly spaced days instead, and this keeps each one in the sealed
-/// cache for good: a PAST day's close never changes, so it is asked for at most once, ever. Today's is not kept — the
-/// day has not closed. A day with no price comes back `None`, never a guess.
-pub fn daily_series(prices_url: &str, ccy: &str, days: &[String]) -> Vec<(String, Option<Quote>)> {
+/// The step between days for a span, so a chart never needs more than about a year of points: every day up to 365
+/// days, then every other day, and so on. The price service refuses a request of more than 400 points outright.
+pub fn series_every(from: &str, to: &str) -> u32 {
+    let day = |d: &str| -> Option<i64> { let (y, m, dd) = (d.get(0..4)?.parse::<i64>().ok()?, d.get(5..7)?.parse::<i64>().ok()?, d.get(8..10)?.parse::<i64>().ok()?);
+        // days from civil (Howard Hinnant), enough to count the days between two dates
+        let y = if m <= 2 { y - 1 } else { y }; let era = y.div_euclid(400); let yoe = y - era * 400;
+        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + dd - 1; let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        Some(era * 146097 + doe) };
+    let span = match (day(from), day(to)) { (Some(a), Some(b)) if b > a => (b - a) as u32, _ => 0 };
+    (span / 365 + 1).clamp(1, 31)
+}
+
+/// One run of daily closes from the price service's `series` question: ONE request where the chart used to make up
+/// to 36. Each day is exactly what the service says for that day asked alone. Past days go into the sealed cache
+/// for good — a closed day's price never changes — so a range already seen costs no request at all; today's is not
+/// kept, the day has not closed. A day with no price is a hole, `None`, never filled from its neighbour.
+pub fn price_series(prices_url: &str, ccy: &str, from: &str, to: &str, every: u32) -> Result<Vec<(String, Option<Quote>)>, String> {
     let today = crate::export::ymd(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
     let mut cache = load_cache();
-    let mut dirty = false;
-    let http = match reqwest::blocking::Client::builder().user_agent("anytwokeys/0.1").timeout(std::time::Duration::from_secs(12)).build() {
-        Ok(h) => h, Err(_) => return days.iter().map(|d| (d.clone(), None)).collect(),
-    };
-    let mut out = Vec::with_capacity(days.len());
-    for day in days {
-        let key = format!("{ccy}:{day}");
-        if let Some(q) = cache.prices.get(&key) { out.push((day.clone(), Some(q.clone()))); continue; }
-        let q = fetch(&http, prices_url, ccy, day, None);   // None: the day's close
-        if let (Some(q), true) = (&q, day.as_str() < today.as_str()) { cache.prices.insert(key, q.clone()); dirty = true; }
-        out.push((day.clone(), q));
-        std::thread::sleep(std::time::Duration::from_millis(230));   // under the service's 5 a second
+    // the cache answers when it holds every closed day the service would return
+    let cached = |c: &Cache, d: &str| c.prices.get(&format!("{ccy}:{d}")).cloned();
+    let url = format!("{}/v1/series?from={from}&to={to}&every={every}&ccy={ccy}", prices_url.trim_end_matches('/'));
+    let http = reqwest::blocking::Client::builder().user_agent("anytwokeys/0.1").timeout(std::time::Duration::from_secs(60)).build().map_err(|e| e.to_string())?;
+    let mut body = None;
+    for attempt in 0..2 {   // one request a second at the front: a second chart drawn a moment later waits, then asks
+        crate::net::out("prices")?;
+        let r = http.get(&url).send().map_err(|_| "the price service could not be reached".to_string())?;
+        if r.status().as_u16() == 429 && attempt == 0 { std::thread::sleep(std::time::Duration::from_millis(1100)); continue; }
+        if !r.status().is_success() { return Err(format!("the price service said {}", r.status())); }
+        body = Some(r.json::<serde_json::Value>().map_err(|_| "the price service's answer was not readable".to_string())?);
+        break;
     }
+    let body = body.ok_or("the price service is busy; try again in a moment")?;
+    let points = read_series(&body, ccy);
+    let mut dirty = false;
+    for (d, q) in &points { if let (Some(q), true) = (q, d.as_str() < today.as_str()) { if cached(&cache, d).is_none() { cache.prices.insert(format!("{ccy}:{d}"), q.clone()); dirty = true; } } }
     if dirty { save_cache(&cache); }
-    out
+    Ok(points)
+}
+
+/// The days out of a `series` answer. A point whose `prices` is null is a hole the service could not fill, and stays one.
+pub fn read_series(body: &serde_json::Value, ccy: &str) -> Vec<(String, Option<Quote>)> {
+    body.get("points").and_then(|p| p.as_array()).map(|pts| pts.iter().filter_map(|p| {
+        let day = p.get("day")?.as_str()?.to_string();
+        let q = if p.get("prices").map(|v| v.is_null()).unwrap_or(true) { None } else { read_quote(p, ccy, &day) };
+        Some((day, q))
+    }).collect()).unwrap_or_default()
 }
 
 // ---------- one transaction, in full ----------
@@ -307,3 +332,66 @@ mod live {
         }
     }
 }
+
+#[cfg(test)]
+mod series_tests {
+    use super::*;
+    fn fx(name: &str) -> serde_json::Value { serde_json::from_str(&std::fs::read_to_string(format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()).unwrap() }
+
+    #[test]
+    fn a_series_reads_every_day_including_the_mt_gox_crash() {
+        let p = read_series(&fx("series-aud-2013-04.json"), "AUD");
+        assert_eq!(p.len(), 5);
+        // fetched from prices.mineracks.com on 2026-09-21: A$219.45 on the 10th, A$151.25 on the 11th
+        let q = |d: &str| p.iter().find(|x| x.0 == d).unwrap().1.clone().unwrap().price;
+        assert!((q("2013-04-10") - 219.44982806052266).abs() < 1e-9 && (q("2013-04-11") - 151.2516716213126).abs() < 1e-9);
+        assert_eq!(p[0].1.as_ref().unwrap().basis, "daily 2013-04-08");
+    }
+    #[test]
+    fn a_day_with_no_price_is_a_hole_never_a_zero() {
+        let p = read_series(&fx("series-holes-2009.json"), "AUD");
+        assert_eq!(p.len(), 3);
+        assert!(p.iter().all(|x| x.1.is_none()), "{p:?}");
+    }
+    #[test]
+    fn usd_is_read_from_prices_and_from_btc_usd_for_an_older_service() {
+        let p = read_series(&fx("series-usd-2026-09.json"), "USD");
+        assert_eq!(p.iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["2026-09-01", "2026-09-03", "2026-09-05"]);
+        assert!((p[0].1.as_ref().unwrap().price - 78549.65).abs() < 1e-9);
+        // the shape the service answered with before the fix: prices empty, the number only in btc_usd
+        let old = serde_json::json!({ "day": "2026-09-01", "prices": {}, "btc_usd": 78549.65 });
+        assert!((read_quote(&old, "USD", "2026-09-01").unwrap().price - 78549.65).abs() < 1e-9);
+        assert!(read_quote(&old, "AUD", "2026-09-01").is_none(), "only USD may fall back to btc_usd");
+    }
+    #[test]
+    fn a_long_span_steps_so_it_never_asks_for_more_than_the_service_allows() {
+        assert_eq!(series_every("2026-01-01", "2026-09-21"), 1);
+        assert_eq!(series_every("2025-01-01", "2026-09-21"), 2);
+        assert_eq!(series_every("2011-08-18", "2026-09-21"), 16);
+        for (a, b) in [("2011-08-18", "2026-09-21"), ("2020-02-29", "2024-02-29"), ("2026-09-21", "2026-09-21")] {
+            let (e, span) = (series_every(a, b), { let d = |s: &str| chrono_days(s); d(b) - d(a) });
+            assert!(span / e as i64 + 2 <= 400, "{a}..{b} every {e} would be {} points", span / e as i64 + 2);
+        }
+    }
+    /// The real code path against the real service — URL, user agent, the series question, parsing — and each day
+    /// checked against the single-day question the service already answered. Not in the normal run: it needs the
+    /// network. `cargo test live_series -- --ignored`
+    #[test]
+    #[ignore]
+    fn live_series_agrees_with_the_single_day_question() {
+        let run = price_series(PRICES, "AUD", "2026-09-01", "2026-09-10", 3).expect("the series question answered");
+        assert_eq!(run.last().unwrap().0, "2026-09-10", "the last point is always `to`");
+        let http = reqwest::blocking::Client::builder().user_agent("anytwokeys/0.1").build().unwrap();
+        for (day, q) in &run {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let one = fetch(&http, PRICES, "AUD", day, None).expect("the single-day question answered");
+            assert!((one.price - q.as_ref().unwrap().price).abs() < 1e-9, "{day}: series {:?} vs single {}", q, one.price);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        let usd = price_series(PRICES, "USD", "2026-09-01", "2026-09-03", 1).unwrap();
+        assert!(usd.iter().all(|(_, q)| q.is_some()), "USD comes back priced now the service fills prices.USD: {usd:?}");
+    }
+    fn chrono_days(d: &str) -> i64 { let t = |s: &str, a, b| s[a..b].parse::<i64>().unwrap(); let (y, m, dd) = (t(d, 0, 4), t(d, 5, 7), t(d, 8, 10));
+        let y = if m <= 2 { y - 1 } else { y }; let era = y.div_euclid(400); let yoe = y - era * 400; let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + dd - 1; era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy }
+}
+

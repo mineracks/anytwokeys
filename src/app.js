@@ -904,15 +904,6 @@ function buildLedger(inputs) {
 }
 const ledgerAt = (L, t) => { let s = { sats: 0, basis: 0 }; for (const e of L.timeline) { if (e.t > t) break; s = e; } return s; };
 
-// Days to ask a price for: evenly spaced across the part of the range that held anything, never more than 36.
-// Before the first arrival the value is nothing whatever the price, so nothing is asked for those days.
-function sampleDays(from, to) {
-  const DAY = 86400, a = Math.floor(from / DAY), b = Math.floor(to / DAY), span = b - a;
-  const n = Math.max(2, Math.min(36, span + 1)), out = new Set();
-  for (let i = 0; i < n; i++) out.add(new Date(Math.round(a + span * i / (n - 1)) * DAY * 1000).toISOString().slice(0, 10));
-  return [...out];
-}
-
 // The three series for a range. Balance and basis only change at transactions, so they are steps; value moves with
 // the price, so it is sampled — and it steps at each transaction too, because holdings did.
 function sumSeries(L, from, to, prices, now) {
@@ -1027,11 +1018,17 @@ window.addEventListener('resize', () => { clearTimeout(window.__sumResize); wind
 const SUM_RANGES = [['30', '30 days', 30], ['90', '90 days', 90], ['365', '1 year', 365], ['all', 'All', 0]];
 const sumPref = (k, d) => { try { return localStorage.getItem('a2k-sum-' + k) || d; } catch { return d; } };
 const sumSave = (k, v) => { try { localStorage.setItem('a2k-sum-' + k, v); } catch {} };
-const sumPrices = {};   // "CCY:YYYY-MM-DD" → quote, for this session; the sealed cache in Rust keeps them for good
-async function pricesFor(ccy, days) {
-  const want = days.filter(d => !((ccy + ':' + d) in sumPrices));
-  if (want.length) { try { for (const [d, q] of await invoke('prices_on', { ccy, days: want })) sumPrices[ccy + ':' + d] = q; } catch {} }
-  return Object.fromEntries(days.map(d => [d, sumPrices[ccy + ':' + d] || null]));
+// One request for the whole range: the price service's series question answers every day (or every Nth, for a span
+// longer than a year) exactly as it answers each day on its own. Rust keeps closed days in the sealed cache for good.
+const sumRuns = {};   // "CCY:from:to" → { every, prices }, for this session
+const isoDay = (t) => new Date(t * 1000).toISOString().slice(0, 10);
+async function pricesRange(ccy, fromT, toT) {
+  const from = isoDay(fromT), to = isoDay(toT), key = `${ccy}:${from}:${to}`;
+  if (!sumRuns[key]) {
+    try { const r = await invoke('prices_series', { ccy, from, to }); sumRuns[key] = { every: r.every, prices: Object.fromEntries(r.points.map(([d, q]) => [d, q])), ok: true }; }
+    catch (e) { return { every: 1, prices: {}, ok: false, why: String(e) }; }   // not kept: a failure is asked again next time
+  }
+  return sumRuns[key];
 }
 // What the ledger needs for one vault: its transactions with dates, amounts and prices. The screen usually has it.
 async function sumInput(name) {
@@ -1058,7 +1055,8 @@ async function renderSummary(box, names, opts = {}) {
   const rangeKey = sumPref('range', 'all'), R = SUM_RANGES.find(r => r[0] === rangeKey) || SUM_RANGES[3];
   const to = Math.floor(Date.now() / 1000), first = L.timeline.length ? L.timeline[0].t : to;
   const from = R[2] ? Math.min(to - R[2] * 86400, to - 3600) : Math.max(0, first - Math.max(3600, (to - first) * 0.03));
-  const prices = priced && L.timeline.length ? await pricesFor(ccy, sampleDays(Math.max(from, first), to)) : {};
+  const run = priced && L.timeline.length ? await pricesRange(ccy, Math.max(from, first), to) : { every: 1, prices: {}, ok: true };
+  const prices = run.prices;
   if (me !== renderSummary.seq) return;
   const S = sumSeries(L, from, to, prices, now);
   const nowState = L.timeline.length ? L.timeline[L.timeline.length - 1] : { sats: 0, basis: 0 };
@@ -1098,7 +1096,10 @@ async function renderSummary(box, names, opts = {}) {
   // what the figures rest on, said once and plainly
   const notes = [];
   if (!priced) notes.push(inputs.some(i => i.network !== 'mainnet') ? 'Test coins have no price, so only the balance is drawn.' : 'No currency is chosen in App settings, so only the balance is drawn.');
-  if (priced) notes.push('Worth is drawn from daily closing prices on up to 36 days across the range, and at each transaction, so a sharp move between two of those days does not show.');
+  if (priced && run.ok) notes.push(run.every === 1 ? 'Worth is drawn from every day\u2019s closing price, and at each transaction.' : `Worth is drawn from the closing price on every ${run.every}th day across this range, and at each transaction, so a sharp move between two of those days does not show.`);
+  if (priced && !run.ok) notes.push(`Daily prices could not be fetched just now (${run.why}), so worth is drawn only at each transaction.`);
+  const holes = Object.values(prices).filter(q => q === null).length;
+  if (priced && holes) notes.push(`${holes} day${holes === 1 ? ' has' : 's have'} no price at the source and ${holes === 1 ? 'is' : 'are'} left out rather than filled from ${holes === 1 ? 'its' : 'their'} neighbours.`);
   if (priced) notes.push('Cost basis is what each deposit was worth when it arrived — a true cost only if the deposit was a purchase.');
   if (L.internal) notes.push(`${L.internal} transfer${L.internal === 1 ? '' : 's'} between these vaults ${L.internal === 1 ? 'was' : 'were'} recognised and counted as a move, not a sale and a purchase: the coins kept their cost.`);
   if (L.unpriced) notes.push(`${L.unpriced} deposit${L.unpriced === 1 ? ' has' : 's have'} no price, so ${L.unpriced === 1 ? 'its' : 'their'} cost is left out rather than guessed.`);
