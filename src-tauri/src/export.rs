@@ -36,14 +36,78 @@ pub fn ur_parts(psbt: &[u8], fragment: usize, mixtures: bool) -> Result<Vec<Stri
     (0..if mixtures { n * 2 } else { n }).map(|_| enc.next_part().map(|p| p.to_uppercase()).map_err(|e| e.to_string())).collect()
 }
 
+// ---------- BBQr (Coinkite's "Better Bitcoin QR"; the Coldcard Q reads and writes it) ----------
+// Spec: github.com/coinkite/BBQr/BBQr.md. Each part: "B$" + encoding (H hex · 2 base32 · Z raw-deflate wbits=10 then
+// base32) + file type (P psbt, T txn, J json, U text…) + total and index, two base-36 digits each; every part but the
+// last the same length, each decoding to whole bytes.
+const B32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+fn b32_encode(d: &[u8]) -> String {
+    let (mut out, mut acc, mut bits) = (String::new(), 0u32, 0u32);
+    for &b in d { acc = (acc << 8) | b as u32; bits += 8; while bits >= 5 { bits -= 5; out.push(B32[((acc >> bits) & 31) as usize] as char); } }
+    if bits > 0 { out.push(B32[((acc << (5 - bits)) & 31) as usize] as char); }
+    out
+}
+fn b32_decode(t: &str) -> Result<Vec<u8>, String> {
+    let (mut out, mut acc, mut bits) = (Vec::new(), 0u32, 0u32);
+    for c in t.bytes() {
+        let v = B32.iter().position(|&x| x == c).ok_or("a BBQr part holds a character that is not base32")? as u32;
+        acc = (acc << 5) | v; bits += 5;
+        if bits >= 8 { bits -= 8; out.push((acc >> bits) as u8); }
+        acc &= (1 << bits) - 1;
+    }
+    Ok(out)
+}
+fn b36(n: usize) -> String { let d = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"; format!("{}{}", d[n / 36] as char, d[n % 36] as char) }
+fn from_b36(t: &str) -> Option<usize> { usize::from_str_radix(t, 36).ok() }
+
+/// BBQr parts, base32 (no compression, which every reader must accept), `per` data characters to a part (a multiple of 8).
+pub fn bbqr_parts(data: &[u8], kind: char, per: usize) -> Vec<String> {
+    let per = (per / 8).max(1) * 8;
+    let all = b32_encode(data);
+    let chunks: Vec<&str> = all.as_bytes().chunks(per).map(|c| std::str::from_utf8(c).unwrap()).collect();
+    let n = chunks.len();
+    chunks.iter().enumerate().map(|(i, c)| format!("B$2{kind}{}{}{c}", b36(n), b36(i))).collect()
+}
+
+/// The file a set of BBQr parts carries: (file type, bytes). Parts may come in any order, repeated.
+pub fn bbqr_decode(text: &str) -> Result<(char, Vec<u8>), String> {
+    let mut parts: std::collections::BTreeMap<usize, &str> = Default::default();
+    let (mut enc, mut kind, mut total) = (None, None, None);
+    for p in text.split_whitespace() {
+        let h = p.get(..8).filter(|h| h.starts_with("B$")).ok_or("that is not a BBQr code")?;
+        let (e, k, n, i) = (h.as_bytes()[2] as char, h.as_bytes()[3] as char, from_b36(&h[4..6]).ok_or("bad BBQr header")?, from_b36(&h[6..8]).ok_or("bad BBQr header")?);
+        if enc.get_or_insert(e) != &e || kind.get_or_insert(k) != &k || total.get_or_insert(n) != &n { return Err("those BBQr parts are from different files".into()); }
+        if i >= n { return Err("bad BBQr header".into()); }
+        parts.insert(i, &p[8..]);
+    }
+    let (enc, kind, total) = (enc.ok_or("nothing to read")?, kind.unwrap(), total.unwrap());
+    if parts.len() < total { return Err(format!("some QR parts are missing ({} of {total}); scan until the code completes", parts.len())); }
+    let body: String = parts.values().copied().collect();
+    let bytes = match enc {
+        'H' => hex::decode(&body).map_err(|e| format!("BBQr hex: {e}"))?,
+        '2' => b32_decode(&body)?,
+        'Z' => { use std::io::Read; let raw = b32_decode(&body)?; let mut out = Vec::new(); flate2::read::DeflateDecoder::new(raw.as_slice()).read_to_end(&mut out).map_err(|e| format!("BBQr: could not decompress: {e}"))?; out }
+        e => return Err(format!("BBQr encoding '{e}' is not one this app reads")),
+    };
+    Ok((kind, bytes))
+}
+
 /// A PSBT from whatever the person has: the binary file, base64, hex, or UR text (one part, or every part on its own line).
 pub fn parse(input: &[u8]) -> Result<Psbt, String> {
     if input.starts_with(b"psbt\xff") { return Psbt::deserialize(input).map_err(|e| format!("not a valid PSBT: {e}")); }
     let text = std::str::from_utf8(input).map_err(|_| "that file is neither a PSBT nor text".to_string())?.trim();
     if text.is_empty() { return Err("nothing to read".into()); }
+    if text.starts_with("B$") {
+        return match bbqr_decode(text)? {
+            ('P', b) => Psbt::deserialize(&b).map_err(|e| format!("not a valid PSBT: {e}")),
+            ('T', _) => Err("that is a finished transaction, not a PSBT: the device completed it. Broadcast it from the device's own wallet, or scan the PSBT instead".into()),
+            (k, _) => Err(format!("that BBQr code carries a '{k}' file, not a PSBT")),
+        };
+    }
     if text.len() >= 3 && text[..3].eq_ignore_ascii_case("ur:") {
         let parts: Vec<String> = text.split_whitespace().map(|p| p.to_lowercase()).collect();
-        if parts.iter().any(|p| !p.starts_with("ur:crypto-psbt/")) { return Err("that UR is not a PSBT (crypto-psbt)".into()); }
+        // crypto-psbt (BCR-2020-006) and the newer registry's plain "psbt": the same CBOR byte string
+        if parts.iter().any(|p| !p.starts_with("ur:crypto-psbt/") && !p.starts_with("ur:psbt/")) { return Err("that UR is not a PSBT (crypto-psbt)".into()); }
         let cbor = if parts.len() == 1 && parts[0].matches('/').count() == 1 {
             ur::ur::decode(&parts[0]).map_err(|e| e.to_string())?.1
         } else {
@@ -86,6 +150,22 @@ pub fn recovery_sheet(v: &crate::wallet::Vault) -> Result<Sheet, String> {
 /// The recovery sheet of a vault whose keys are extended keys held by other signers.
 fn ext_sheet(v: &crate::wallet::Vault, line: String) -> Result<Sheet, String> {
     let fp = |k: &crate::wallet::KeyRef| k.pubkey.strip_prefix('[').and_then(|r| r.split('/').next()).unwrap_or("").to_string();
+    // a card in a mixed vault is a bare key: it has no seed words, and lives only on the card
+    let card = |k: &crate::wallet::KeyRef| !k.pubkey.starts_with('[');
+    let cards = v.keys.iter().filter(|k| card(k)).count();
+    if cards > 0 {
+        return Ok(Sheet {
+            title: "Vault recovery sheet (wallet descriptor)".into(),
+            facts: vec![("Vault".into(), format!("{} \u{b7} {} of {} \u{b7} {}", v.name, v.threshold, v.keys.len(), v.network)),
+                ("Addresses".into(), "a fresh one for every deposit, derived by BIP32 from the extended keys below".into()),
+                ("First address".into(), crate::wallet::address_at(v, 0)?), ("Created".into(), ymd(v.created)),
+                ("Signers".into(), format!("{} device{} from seed words, and {cards} card{} whose key exists only on the card \u{2014} any {} of them sign", v.keys.len() - cards, if v.keys.len() - cards == 1 { "" } else { "s" }, if cards == 1 { "" } else { "s" }, v.threshold))],
+            rows: v.keys.iter().enumerate().map(|(i, k)| (format!("Key {}", i + 1), k.pubkey.clone(), if card(k) { format!("{} \u{b7} a card's key, fixed in this vault; it cannot be copied off the card", k.name) } else { format!("{} \u{b7} fingerprint {}", k.name, fp(k)) })).collect(),
+            codes: vec![line.clone()], sturdy: true,
+            code_hint: format!("To restore: paste or scan this line into Any Two Keys, or Bitcoin Core (importdescriptors). To spend, any {} of the keys sign: the devices from their seed words, the cards themselves.", v.threshold),
+            text_heading: "The wallet descriptor (the same as the code)".into(), text: line,
+            note: "Public keys only: this sheet cannot spend, but it shows whoever reads it every address and balance of this vault. A lost card is a lost key \u{2014} that is what the other keys are for. Whether Sparrow imports a card's plain key beside extended keys has not been tested.".into() });
+    }
     Ok(Sheet {
         title: "Vault recovery sheet (wallet descriptor)".into(),
         facts: vec![("Vault".into(), format!("{} \u{b7} {} of {} \u{b7} {}", v.name, v.threshold, v.keys.len(), v.network)),
@@ -366,6 +446,24 @@ mod tests {
         assert_eq!(parse(late.join("\n").as_bytes()).unwrap(), psbt);
         assert!(parse(many[..1].join("\n").as_bytes()).is_err());
         assert!(parse(b"ur:crypto-seed/oeadgdaxbt").is_err());
+    }
+    /// Coinkite's own vectors: a real scan off a Coldcard (8 parts, compressed, out of order and repeated) and a PSBT.
+    #[test]
+    fn bbqr_reads_a_real_coldcard_scan_and_round_trips_a_psbt() {
+        let scan = std::fs::read_to_string(format!("{}/tests/fixtures/bbqr-real-scan.txt", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let (kind, bytes) = bbqr_decode(&scan).unwrap();
+        assert_eq!(kind, 'U');
+        let text = String::from_utf8(bytes).expect("the scan decompresses to text");
+        use bitcoin::hashes::{sha256, Hash};   // the digest python's zlib (raw deflate, wbits=10) gives for the same scan
+        assert_eq!(sha256::Hash::hash(text.as_bytes()).to_string(), include_str!("../tests/fixtures/bbqr-real-scan.sha256").trim());
+        // a missing part is said, not guessed
+        let short: Vec<&str> = scan.split_whitespace().filter(|p| !p.starts_with("B$ZU0803")).collect();
+        assert!(bbqr_decode(&short.join("\n")).unwrap_err().contains("missing"));
+        let raw = std::fs::read(format!("{}/tests/fixtures/bbqr-1in2out.psbt", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let parts = bbqr_parts(&raw, 'P', 400);
+        assert!(parts.len() > 1 && parts.iter().all(|p| p.starts_with("B$2P")));
+        let back: Vec<String> = parts.iter().rev().cloned().collect();
+        assert_eq!(parse(back.join("\n").as_bytes()).unwrap().serialize(), raw, "any order");
     }
     pub(super) fn vault(cc: Option<&str>) -> crate::wallet::Vault {
         let keys = ["03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2", "032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe", "038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47"];

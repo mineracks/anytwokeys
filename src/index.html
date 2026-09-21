@@ -211,6 +211,7 @@
                   <div class="muted" id="sign-text">Any of the vault's keys that has not signed yet.</div>
                   <div class="hold" id="sign-warn" hidden>Wait for the touch prompt before touching your key. <details class="why"><summary>Why?</summary>A key with Yubico OTP switched on types a one-time code into whatever has the focus when it is brushed. The app refuses such a code as a PIN, but it is tidier not to touch early.</details></div>
                   <div class="row act-row" id="act-row" style="align-items:flex-end"><div class="field" id="pin-field" hidden style="flex:0 1 200px"><div class="label">Key PIN</div><input type="password" id="pin" autocomplete="off"></div><button class="btn primary" id="sign-btn" disabled>Sign with this key</button></div><div class="waiting" id="sign-waiting" hidden><i></i>Waiting for your touch…</div>
+                  <div class="row" id="dev-sign-row" hidden><button class="btn primary" id="dev-sign-show" type="button">Show the code</button><button class="btn" id="dev-sign-scan" type="button">Scan its signed code</button><button class="btn" id="dev-sign-save" type="button">Save the PSBT…</button><button class="btn" id="dev-sign-file" type="button">Open a signed file…</button></div>
                   <div class="act-foot"><button class="linkish" id="guide-toggle" type="button"></button><button class="linkish" id="sign-cancel" type="button">Cancel this spend</button></div>
                 </div>
               </div>
@@ -221,7 +222,7 @@
           <div class="card" id="nospend" hidden><div class="cer-act-title" id="nospend-title">No spend in progress</div><div class="muted" id="nospend-text">Build one on the Send screen, or load a PSBT there.</div><div class="row"><button class="btn primary" data-go="send">Go to Send</button></div></div>
         </div>
         <div class="signside">
-          <details class="card quiet" id="export-card" hidden><summary><span class="label">Export transaction</span><span class="muted sumhint">PSBT file · QR · PDF</span></summary><div class="muted" style="font-size:14px">Finish signing on another computer or in another wallet, or keep a copy. Nothing is sent from here.</div><div class="btn-grid"><button class="btn" id="export-psbt" title="The binary BIP 174 file every PSBT wallet opens">Save as PSBT</button><button class="btn" id="export-qr">Show as QR</button><button class="btn" id="export-pdf">Save as PDF</button><button class="btn" id="export-tx" hidden>Save signed transaction</button><button class="btn" id="copy-psbt">Copy PSBT</button></div><div class="muted" style="font-size:13px" id="export-note"></div><div id="qr-panel" hidden><div class="qr-box"><canvas id="qr-canvas" width="720" height="720"></canvas></div><div class="qr-side"><div class="label" id="qr-title">Scan with the other wallet</div><div class="muted" style="font-size:13px" id="qr-note"></div><div class="row"><button class="btn small" id="qr-mode" hidden>Show one still code</button><button class="btn small" id="qr-close">Hide</button></div></div></div></details>
+          <details class="card quiet" id="export-card" hidden><summary><span class="label">Export transaction</span><span class="muted sumhint">PSBT file · QR · PDF</span></summary><div class="muted" style="font-size:14px">Finish signing on another computer or in another wallet, or keep a copy. Nothing is sent from here.</div><div class="btn-grid"><button class="btn" id="export-psbt" title="The binary BIP 174 file every PSBT wallet opens">Save as PSBT</button><button class="btn" id="export-qr">Show as QR</button><button class="btn" id="export-pdf">Save as PDF</button><button class="btn" id="export-tx" hidden>Save signed transaction</button><button class="btn" id="copy-psbt">Copy PSBT</button></div><div class="muted" style="font-size:13px" id="export-note"></div><div id="qr-panel" hidden><div class="qr-box"><canvas id="qr-canvas" width="720" height="720"></canvas></div><div class="qr-side"><div class="label" id="qr-title">Scan with the other wallet</div><div class="muted" style="font-size:13px" id="qr-note"></div><div class="row"><button class="btn small" id="qr-mode" hidden>Show one still code</button><button class="btn small" id="qr-format" type="button" title="UR is what most signers scan; the Coldcard Q reads BBQr">As BBQr (Coldcard Q)</button><button class="btn small" id="qr-close">Hide</button></div></div></div></details>
         </div>
       </div>
     </section>
@@ -403,6 +404,13 @@
   <div id="dev-pick"></div>
   <div id="dev-one" hidden></div>
   <div class="row" style="justify-content:flex-end"><button class="btn" id="dev-back" hidden>‹ All devices</button><button class="btn" id="dev-close">Cancel</button></div>
+</div></div>
+<div class="modal" id="pscan-modal"><div class="box" style="width:560px">
+  <h2>Scan the signed code</h2>
+  <div class="field" hidden><div class="cap">Camera</div><div class="camrow" id="pscan-pick" role="radiogroup" aria-label="Which camera"></div></div>
+  <div class="cam"><video id="cam4" autoplay playsinline muted></video><div class="frame"></div></div>
+  <div class="muted" style="font-size:13px" id="pscan-note">Hold the device’s signed code in the frame. An animated code can be caught in any order.</div>
+  <div class="row" style="justify-content:flex-end"><button class="btn" id="pscan-close" type="button">Cancel</button></div>
 </div></div>
 <div class="modal" id="scan-modal"><div class="box" style="width:520px">
   <h2>Scan a QR code</h2>

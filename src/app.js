@@ -1487,7 +1487,8 @@ async function renderSign() {
     const waiting = renderSign.signing === k.pubkey;
     const cls = full(k) ? 'signed' : waiting ? 'touch' : k.signed ? 'part' : canSign(k) ? 'here' : st.ready ? 'spare' : '';
     const label = full(k) ? '✓ signed' : waiting ? 'waiting for touch' : k.signed ? `${k.signed} of ${st.inputs} inputs` : canSign(k) ? 'plugged in · enter PIN' : st.ready ? 'not needed' : 'not yet';
-    return `<div class="ckey ${cls}${isNano(k.pubkey) ? ' nano' : ''}">${keyGlyph(k.pubkey)}<span class="kname" title="${esc(k.name)}">${esc(k.name)}</span><span class="kstate">${label}</span></div>`;
+    const vk = vault.keys.find(x => x.pubkey === k.pubkey), glyph = vk && vk.device && k.pubkey.startsWith('[') ? `<span class="devart">${deviceOf(vk.device).svg}</span>` : keyGlyph(k.pubkey);
+    return `<div class="ckey ${cls}${isNano(k.pubkey) ? ' nano' : ''}">${glyph}<span class="kname" title="${esc(k.name)}">${esc(k.name)}</span><span class="kstate">${label}</span></div>`;
   }).join('');
   if (renderSign.tiles !== tiles) { renderSign.tiles = tiles; $('#cer-keys').innerHTML = tiles; }   // unchanged tiles keep their pulse running
   const staged = (await invoke('store_get')).last_message;
@@ -1502,7 +1503,24 @@ async function renderSign() {
   if (renderSign.signing) return;
   const usable = cards.filter(c => c.pubkey && st.keys.some(k => k.pubkey === c.pubkey && !full(k)));
   const q = (n) => `‘${n}’`, list = (ks) => ks.map(k => q(k.name)).join(ks.length === 2 ? ' or ' : ', ');
-  $('#gsteps').hidden = false; $('#act-row').hidden = false; $('#sign-waiting').hidden = true; $('#sign-cancel').hidden = false;
+  $('#gsteps').hidden = false; $('#act-row').hidden = false; $('#sign-waiting').hidden = true; $('#sign-cancel').hidden = false; $('#dev-sign-row').hidden = true;
+  const openDev = vault.ext ? st.keys.filter(k => !full(k) && k.pubkey.startsWith('[')) : [];
+  if (!usable.length && openDev.length) {
+    // signing on a device: the PSBT goes out as a code or a file and comes back signed; nothing to plug in here
+    const devs = openDev.map(k => ({ k, d: deviceOf((vault.keys.find(x => x.pubkey === k.pubkey) || {}).device) }));
+    const { k, d } = devs[0], cardsOpen = st.keys.filter(x => !full(x) && !x.pubkey.startsWith('['));
+    const qr = d.offers.includes('qr') || d.id === 'other', sd = d.offers.includes('sd');
+    $('#sign-title').textContent = devs.length > 1 ? `Sign on ${list(devs.map(x => x.k))}` : `Sign on ${q(k.name)}`;
+    $('#sign-text').textContent = (qr ? `Show ${devs.length > 1 ? 'the device' : 'the ' + d.name} the code: scan it there, check what it pays \u2014 the change should show as change, back to this vault \u2014 and approve. Then scan the signed code it shows.`
+      : sd ? `Save the PSBT to its SD card, sign on the ${d.name}, and open the signed file it writes.`
+      : `It signs over USB, which this app does not do yet: save the PSBT, sign it in the ${d.name}\u2019s own app or in Sparrow, and open the signed file here.`)
+      + (cardsOpen.length ? ` Or plug in ${list(cardsOpen)}.` : '');
+    $('#act-row').hidden = true; $('#gsteps').hidden = true; $('#sign-warn').hidden = true; $('#dev-sign-row').hidden = false;
+    $('#dev-sign-show').hidden = !qr; $('#dev-sign-scan').hidden = !qr; $('#dev-sign-save').classList.toggle('primary', !qr);
+    renderSign.devFormat = d.id === 'coldcard-q' ? 'bbqr' : 'ur';
+    const g = $('#guide'), sig = 'dev:' + d.id; g.hidden = false; if (g._sig !== sig) { g._sig = sig; g.innerHTML = `<div class="devguide">${d.svg}</div>`; }
+    renderSign.focusedFor = null; return;
+  }
   if (!usable.length) {
     const open = st.keys.filter(k => !full(k)), done = st.keys.filter(full), next = open[0];
     const inNow = cards.map(c => st.keys.find(k => k.pubkey === c.pubkey)), signedIn = inNow.filter(k => k && full(k)), stranger = cards.length && inNow.some(k => !k);
@@ -1540,7 +1558,7 @@ try { $('#export-card').open = localStorage.getItem('a2k-export-open') === '1'; 
 $('#export-card').addEventListener('toggle', () => { try { localStorage.setItem('a2k-export-open', $('#export-card').open ? '1' : '0'); } catch {} if (!$('#export-card').open) stopQr(); });
 $('#export-pdf').onclick = async () => { try { $('#export-note').textContent = 'Saved ' + await invoke('spend_pdf', { name: vault.name }) + ' — the codes and the text on it are the same PSBT.'; } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
 // QR: UR crypto-psbt. A looping set of parts (plain ones, then fountain mixtures so a late camera still completes), or one still code when it fits.
-const qrShow = { timer: null, parts: [], single: null, still: false, i: 0 };
+const qrShow = { timer: null, parts: [], single: null, still: false, i: 0, bbqr: [], fmt: 'ur' };
 function drawQr(text) {
   const qr = qrcode(0, 'L'); qr.addData(text, 'Alphanumeric'); qr.make();
   const n = qr.getModuleCount(), cv = $('#qr-canvas'), ctx = cv.getContext('2d'), m = Math.floor(cv.width / (n + 8)), off = Math.floor((cv.width - m * n) / 2);
@@ -1550,6 +1568,14 @@ function drawQr(text) {
 function stopQr() { clearInterval(qrShow.timer); qrShow.timer = null; $('#qr-panel').hidden = true; }
 function playQr() {
   clearInterval(qrShow.timer); qrShow.timer = null;
+  $('#qr-format').textContent = qrShow.fmt === 'bbqr' ? 'As UR (most signers)' : 'As BBQr (Coldcard Q)'; $('#qr-format').hidden = !qrShow.bbqr.length;
+  if (qrShow.fmt === 'bbqr' && qrShow.bbqr.length) {
+    // BBQr parts are all needed, in any order: loop them
+    $('#qr-mode').hidden = true;
+    const tick = () => { const i = qrShow.i++ % qrShow.bbqr.length; drawQr(qrShow.bbqr[i]); $('#qr-title').textContent = qrShow.bbqr.length > 1 ? `Frame ${i + 1} of ${qrShow.bbqr.length}` : 'One code'; };
+    $('#qr-note').textContent = `BBQr, the format the Coldcard Q scans.${qrShow.bbqr.length > 1 ? ' It needs every frame, in any order; keep the camera on it until it completes.' : ''}`;
+    tick(); if (qrShow.bbqr.length > 1) qrShow.timer = setInterval(tick, 400); return;
+  }
   const still = qrShow.still && qrShow.single, plain = qrShow.parts.length / 2;
   $('#qr-mode').hidden = !qrShow.single || qrShow.parts.length < 2; $('#qr-mode').textContent = still ? 'Show the animated code' : 'Show one still code';
   if (still || qrShow.parts.length < 2) { drawQr(qrShow.single || qrShow.parts[0]); $('#qr-title').textContent = 'One code'; $('#qr-note').textContent = 'UR crypto-psbt, the format Sparrow, Keystone, Passport, Jade and SeedSigner scan. Dense: hold the camera steady, or use the animated code.'; return; }
@@ -1557,7 +1583,42 @@ function playQr() {
   $('#qr-note').textContent = `Point the other wallet's camera at it and wait. Frames 1 to ${plain} carry the transaction; the rest are spare frames, each a mix of several parts, so a camera that starts late or misses one still finishes. UR crypto-psbt, as Sparrow, Keystone, Passport, Jade and SeedSigner scan.`;
   tick(); qrShow.timer = setInterval(tick, 260);
 }
-$('#export-qr').onclick = async () => { if (!$('#qr-panel').hidden) return stopQr(); try { const r = await invoke('spend_qr'); qrShow.parts = r.parts; qrShow.single = r.single; qrShow.still = !!r.single && r.parts.length < 2; qrShow.i = 0; $('#qr-panel').hidden = false; playQr(); } catch (e) { fail(e); } };
+async function startQr(fmt) { try { const r = await invoke('spend_qr'); qrShow.fmt = fmt || 'ur'; qrShow.bbqr = r.bbqr || []; qrShow.parts = r.parts; qrShow.single = r.single; qrShow.still = !!r.single && r.parts.length < 2; qrShow.i = 0; $('#qr-panel').hidden = false; playQr(); } catch (e) { fail(e); } }
+$('#qr-format').onclick = () => { qrShow.fmt = qrShow.fmt === 'bbqr' ? 'ur' : 'bbqr'; qrShow.i = 0; playQr(); };
+$('#export-qr').onclick = async () => { if (!$('#qr-panel').hidden) return stopQr(); try { const r = await invoke('spend_qr'); qrShow.fmt = 'ur'; qrShow.bbqr = r.bbqr || []; qrShow.parts = r.parts; qrShow.single = r.single; qrShow.still = !!r.single && r.parts.length < 2; qrShow.i = 0; $('#qr-panel').hidden = false; playQr(); } catch (e) { fail(e); } };
+$('#dev-sign-show').onclick = () => { const c = $('#export-card'); c.hidden = false; c.open = true; startQr(renderSign.devFormat); c.scrollIntoView({ behavior: 'smooth', block: 'center' }); };
+$('#dev-sign-save').onclick = () => $('#export-psbt').click();
+$('#dev-sign-file').onclick = () => loadPsbt(null);
+const pscan = { stream: null, timer: null, parts: new Set() };
+function pscanStop() { if (pscan.timer) clearInterval(pscan.timer); pscan.timer = null; if (pscan.stream) pscan.stream.getTracks().forEach(t => t.stop()); pscan.stream = null; }
+function pscanClose() { pscanStop(); pscan.parts = new Set(); $('#pscan-modal').classList.remove('on'); }
+async function pscanOpen(deviceId) {
+  pscanStop(); stopQr(); $('#pscan-modal').classList.add('on');
+  const note = $('#pscan-note');
+  try { pscan.stream = await camOpen(deviceId); $('#cam4').srcObject = pscan.stream; camChooser($('#pscan-pick'), pscan.stream, pscanOpen); }
+  catch { note.textContent = 'No camera available on this computer. Save the PSBT and open the signed file instead.'; return; }
+  const cv = document.createElement('canvas'), ctx = cv.getContext('2d', { willReadFrequently: true });
+  let busy = false;
+  pscan.timer = setInterval(async () => {
+    const v = $('#cam4'); if (busy || !v || !v.videoWidth) return;
+    cv.width = v.videoWidth; cv.height = v.videoHeight; ctx.drawImage(v, 0, 0);
+    const code = jsQR(ctx.getImageData(0, 0, cv.width, cv.height).data, cv.width, cv.height); if (!code || !code.data) return;
+    const t = code.data.trim(), multi = /^ur:/i.test(t) || t.startsWith('B$');
+    if (multi) { const n = pscan.parts.size; pscan.parts.add(/^ur:/i.test(t) ? t.toLowerCase() : t); if (pscan.parts.size === n) return; }
+    busy = true;
+    try {
+      const c = await invoke('spend_import', { name: vault.name, text: multi ? [...pscan.parts].join('\n') : t });
+      pscanClose(); toast(`Signed code read: ${c.have} of ${c.need} signatures on it, every one checked`, 5000); renderSign.tiles = null; renderSign();
+    } catch (e) {
+      const m = /\/(\d+)-(\d+)\//.exec(t) || (t.startsWith('B$') ? [0, 0, parseInt(t.slice(4, 6), 36)] : null);
+      if (/missing/i.test(String(e)) && m) note.textContent = `Reading an animated code: ${pscan.parts.size} part${pscan.parts.size === 1 ? '' : 's'}${m[2] ? ' of ' + m[2] : ''} so far. Keep it in the frame.`;
+      else { note.textContent = String(e && e.message || e); pscan.parts = new Set(); }
+    }
+    busy = false;
+  }, 250);
+}
+$('#dev-sign-scan').onclick = () => pscanOpen();
+$('#pscan-close').onclick = pscanClose;
 $('#qr-mode').onclick = () => { qrShow.still = !qrShow.still; playQr(); };
 $('#qr-close').onclick = stopQr;
 // a PSBT made or part-signed elsewhere
@@ -1929,6 +1990,8 @@ function setupWarnings() {
     out.push(`<b>${ks.length} of these keys are ${esc(m)}’s, and ${setup.k} can spend.</b> ${esc(ks.map(k => k.name).join(' and '))} alone reach the quorum, so one flaw in ${esc(m)}’s design reaches it too, and the other signers are never needed. Mixing makers only adds independence when no one maker holds ${setup.k} keys — for example a SeedSigner, a YubiKey and a Nitrokey 3.`);
   if (cardsIn.length && devsIn.length)
     out.push(`<b>In a vault with other signers, a card’s key is fixed.</b> Addresses still change with every deposit, and any wallet can rebuild them from the recovery line; but ${cardsIn.length > 1 ? 'each card’s key is' : esc(cardsIn[0].name) + '’s key is'} the same in every spend it signs, so those spends can be linked to one another on the chain. A vault of cards alone keeps them private.`);
+  if (cardsIn.length && devsIn.some(k => /^coldcard/.test(k.device)))
+    out.push(`<b>A Coldcard may not sign for this vault.</b> It registers a multisig from extended keys only, and a card\u2019s key here is a plain key, so the Coldcard will probably refuse to register it \u2014 and it refuses to sign an unregistered multisig. Not yet tested: try a small spend before funding it.`);
   const reg = devsIn.filter(k => /^coldcard|^jade|^ledger|^bitbox/.test(k.device));
   if (reg.length) out.push(`${esc([...new Set(reg.map(k => deviceOf(k.device).name))].join(', '))} sign${reg.length === 1 ? 's' : ''} for a multisig only once the vault is registered on ${reg.length === 1 ? 'it' : 'them'}. The vault’s file for that comes with signing.`);
   return out;

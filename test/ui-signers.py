@@ -25,8 +25,10 @@ const H = {
     if (t.startsWith('84')) { const k = Object.assign({}, %(ss)s, { path: 'm/84h/0h/0h', script: 'wpkh' }); return { keys: [k, Object.assign({}, k, { path: 'm/44h/0h/0h', script: 'pkh' })], multisig: null }; }
     return { keys: [%(ss)s], multisig: %(ss)s }; },
   device_key_file: () => { throw 'cancelled'; },
-  spend_ceremony: () => { throw 'nothing staged'; },
   vault_create_signers: (a) => { __created = { cmd: 'signers', a }; window.__vaults = [%(mixed)s]; return window.__vaults[0]; },
+  spend_ceremony: (a) => { if (!window.__cer) throw 'no spend in progress'; return window.__cer; },
+  spend_qr: () => ({ parts: ['UR:CRYPTO-PSBT/1-2/AAA', 'UR:CRYPTO-PSBT/2-2/BBB', 'UR:CRYPTO-PSBT/3-2/CCC', 'UR:CRYPTO-PSBT/4-2/DDD'], single: null, bytes: 600, bbqr: ['B$2P0200AAAA', 'B$2P0201BBBB'] }),
+  spend_import: (a) => { (window.__imports = window.__imports || []).push(a.text); const n = (a.text || '').split('\\n').length; if (n < 2) throw 'some QR parts are missing; scan until the code completes'; window.__cer = Object.assign({}, window.__cer, { have: 1, keys: window.__cer.keys.map(k => k.name === 'SeedSigner' ? Object.assign({}, k, { signed: 1 }) : k) }); return window.__cer; },
   vault_create: (a) => { __created = { cmd: 'cards', a }; throw 'stop here'; },
 };
 window.__TAURI__ = { core: { invoke: async (cmd, args) => { __calls.push(cmd); if (!H[cmd]) { __unmocked.push(cmd); return null; } return H[cmd](args || {}); } }, event: { listen: async () => () => {} } };
@@ -43,6 +45,7 @@ with sync_playwright() as p:
     pg.on("pageerror", lambda e: errs.append(str(e)))
     pg.add_init_script(MOCK % dict(card1=json.dumps(card(C1, 111)), ss=json.dumps(SS), mixed=json.dumps(MIXED)))
     pg.goto((src / "index.html").as_uri()); pg.wait_for_timeout(700)
+    if errs: print("load errors:", errs[:3])
     pg.evaluate("setup = { k: 2, n: 3, keys: [], network: 'mainnet' }; show('setup')"); pg.wait_for_timeout(400)
     check("the setup screen offers a signing device", pg.is_visible("#add-device"))
     pg.click("#use-btn"); pg.wait_for_timeout(200)
@@ -113,8 +116,38 @@ with sync_playwright() as p:
     check("nor that Sparrow is known to read a card's plain key", "not yet tested" in pg.evaluate("document.querySelector('#keys-desc-ext').textContent"))
     pg.screenshot(path=str(out / "signers-keys.png"), full_page=True)
 
+    # ---- signing a spend of the mixed vault ----
+    cer = dict(ours=True, inputs=1, need=2, have=0, ready=False, fee=282, txid="ab" * 32, bytes=600,
+               pays=[dict(address="bc1q08zdgswgey4kqeau8af0v7ak8e72aqdpnhhsc45uqdush8qs44zs4zwyh7", sats=30000, ours=False), dict(address="bc1qchange", sats=69718, ours=True)],
+               keys=[dict(name=k["name"], pubkey=k["pubkey"], signed=0) for k in MIXED["keys"]])
+    pg.evaluate(f"__cards = []; window.__cer = {json.dumps(cer)}; show('sign')"); pg.wait_for_timeout(2600)
+    check("with no card in, the Sign screen turns to the device", pg.is_visible("#dev-sign-row") and not pg.is_visible("#act-row"), pg.inner_text("#sign-title"))
+    check("it names the device and says change shows as change", "SeedSigner" in pg.inner_text("#sign-title") and "change should show as change" in pg.inner_text("#sign-text"), pg.inner_text("#sign-text"))
+    check("and that a card would do too", "Or plug in" in pg.inner_text("#sign-text"))
+    check("the device's tile carries its drawing", pg.locator("#cer-keys .devart svg").count() == 1)
+    check("the guide shows the device, not a key to plug in", pg.locator("#guide .devguide svg").count() == 1)
+    pg.click("#dev-sign-show"); pg.wait_for_timeout(300)
+    check("Show the code opens the animated UR code", pg.is_visible("#qr-panel") and pg.evaluate("qrShow.fmt") == "ur" and "frame" in pg.inner_text("#qr-title").lower())   # the label is uppercased by CSS
+    pg.click("#qr-format"); pg.wait_for_timeout(200)
+    check("it can switch to BBQr for a Coldcard Q", pg.evaluate("qrShow.fmt") == "bbqr" and "BBQr" in pg.inner_text("#qr-note"), pg.inner_text("#qr-note"))
+    pg.screenshot(path=str(out / "signers-sign.png"), full_page=True)
+    # the signed code comes back animated: a fake camera, and the decoder fed the device's parts in turn
+    pg.evaluate("""() => { const cv = document.createElement('canvas'); cv.width = 64; cv.height = 48; const x = cv.getContext('2d'); setInterval(() => { x.fillStyle = '#' + Math.floor(Math.random() * 999); x.fillRect(0, 0, 64, 48); }, 50);
+      window.camOpen = async () => cv.captureStream(10);
+      const seq = ['ur:crypto-psbt/1-2/aaa', 'ur:crypto-psbt/1-2/aaa', 'ur:crypto-psbt/2-2/bbb']; let i = 0;
+      window.jsQR = () => (i < seq.length ? { data: seq[i++] } : null); }""")
+    pg.click("#dev-sign-scan"); pg.wait_for_timeout(1800)
+    imports = pg.evaluate("window.__imports || []")
+    check("each new part is tried once, a repeated part is not", len(imports) == 2 and imports[1].count("\n") == 1, json.dumps(imports))
+    check("once complete the scanner closes and the signature counts", not pg.is_visible("#pscan-modal") and "1 of 2 signatures" in pg.inner_text("#toast"), pg.inner_text("#toast"))
+    pg.wait_for_timeout(300)
+    check("the device's tile then reads signed", "signed" in pg.inner_text("#cer-keys"), pg.inner_text("#cer-keys"))
+    # a card of the vault plugged in takes over: the card path, with its PIN
+    pg.evaluate(f"__cards = [{json.dumps(card(C1, 111))}]"); pg.wait_for_timeout(2600)
+    check("a plugged-in card of this vault gets the PIN path", pg.is_visible("#pin-field") and not pg.is_visible("#dev-sign-row"), pg.inner_text("#sign-title"))
+
     # ---- removing a key, and cards alone keep the card path ----
-    pg.evaluate("setup = { k: 2, n: 2, keys: [], network: 'mainnet' }; show('setup')"); pg.wait_for_timeout(300)
+    pg.evaluate(f"__cards = [{json.dumps(card(C1, 111))}, {json.dumps(card(C2, 222))}]; setup = {{ k: 2, n: 2, keys: [], network: 'mainnet' }}; show('setup')"); pg.wait_for_timeout(300)
     pg.click("#use-btn"); pg.wait_for_timeout(2600); pg.click("#use-btn"); pg.wait_for_timeout(200)
     pg.click("[data-drop='1']"); pg.wait_for_timeout(100)
     check("a key can be taken out again", pg.evaluate("setup.keys.length") == 1)

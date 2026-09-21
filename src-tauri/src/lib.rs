@@ -489,7 +489,7 @@ async fn servers_test(electrum: String, explorer: String) -> R<String> {
 /// What a vault of extended keys cannot do yet, said before anything card-shaped is attempted rather than failing
 /// deep inside the card arithmetic with a message about public keys.
 fn cards_only(v: &Vault, what: &str) -> R<()> {
-    if v.ext.is_some() { return Err(format!("{what} works with YubiKeys, and this vault's keys sign on other devices. Spending from a vault like this — built here, signed on the SeedSigner by QR, sent from here — is the next step and is not built yet.")); }
+    if v.ext.is_some() { return Err(format!("{what} works with a vault of YubiKeys only; this vault's keys include other signing devices.")); }
     Ok(())
 }
 
@@ -497,7 +497,7 @@ fn cards_only(v: &Vault, what: &str) -> R<()> {
 async fn spend_build(name: String, to: String, amount: u64, rate: f64, send_all: bool, coins: Option<Vec<String>>) -> R<wallet::Built> {
     block(move || {
         let s = wallet::load()?;
-        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone(); cards_only(&v, "Building a spend")?;
+        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
         let servers = wallet::servers_for(&s, &v.network);
         let sc = wallet::scan(&v, &servers, s.settings.gap)?;
         let change_index = if wallet::rotates(&v) { wallet::CHANGE | sc.next_change } else { 0 };
@@ -601,12 +601,12 @@ fn spend_export(name: String, what: String) -> R<String> {
 #[tauri::command]
 fn spend_ceremony(name: String) -> R<wallet::Ceremony> {
     let s = wallet::load()?;
-    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?; cards_only(&v, "The signing screen")?;
+    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
     wallet::ceremony(v, s.last_psbt.as_deref().ok_or("no spend in progress")?)
 }
 
 #[derive(Serialize)]
-struct QrOut { parts: Vec<String>, single: Option<String>, bytes: usize }
+struct QrOut { parts: Vec<String>, single: Option<String>, bytes: usize, bbqr: Vec<String> }
 
 /// UR crypto-psbt codes for the screen: a looping set of parts, and one still code when the PSBT is small enough.
 #[tauri::command]
@@ -615,7 +615,8 @@ fn spend_qr() -> R<QrOut> {
     let s = wallet::load()?;
     let raw = bitcoin::psbt::Psbt::from_str(s.last_psbt.as_deref().ok_or("no spend in progress")?.trim()).map_err(|e| format!("psbt: {e}"))?.serialize();
     let single = if raw.len() <= 700 { export::ur_parts(&raw, usize::MAX, false)?.pop() } else { None };
-    Ok(QrOut { parts: export::ur_parts(&raw, 160, true)?, single, bytes: raw.len() })
+    // BBQr too, for the Coldcard Q, which reads that rather than UR
+    Ok(QrOut { parts: export::ur_parts(&raw, 160, true)?, single, bytes: raw.len(), bbqr: export::bbqr_parts(&raw, 'P', 400) })
 }
 
 fn sats_text(n: u64) -> String { let s = n.to_string(); let mut o = String::new(); for (i, c) in s.chars().enumerate() { if i > 0 && (s.len() - i) % 3 == 0 { o.push(','); } o.push(c); } o }
@@ -1964,6 +1965,49 @@ mod signers_vault_tests {
             assert_eq!(by("card two").device.as_deref(), Some("nitrokey3"));
             assert!(by("seedsigner").pubkey.starts_with("[c9ad277c/48h/0h/0h/2h]xpub"), "{}", by("seedsigner").pubkey);
         }
+    }
+    /// One made-up coin at receive index 3 of the mixed vault; the spend pays 30,000 sats away with change to change index 2.
+    fn mixed_spend() -> (Vault, wallet::Built) {
+        let v = signers_vault("m".into(), 2, &keys([0, 1, 2]), "mainnet").unwrap();
+        let coin = wallet::CoinAt { txid: "aa".repeat(32), vout: 1, value: 100_000, height: 900_000, index: 3 };
+        let to = "bc1q08zdgswgey4kqeau8af0v7ak8e72aqdpnhhsc45uqdush8qs44zs4zwyh7";   // another wallet's (ext-descriptors.json, sortedmulti receive 0)
+        let b = wallet::build(&v, &[coin], wallet::CHANGE | 2, to, 30_000, 2.0, false, None).unwrap();
+        (v, b)
+    }
+    /// Writes the unsigned spend for the fixture generator (tools/mixed-sign-fixture.py) to sign with embit.
+    #[test] #[ignore]
+    fn emit_mixed_spend() { println!("PSBT {}", mixed_spend().1.psbt); }
+
+    /// The whole round trip a SeedSigner makes, with embit — the library SeedSigner signs with — standing in for it:
+    /// our PSBT tells it enough to find its key and see change as change; it hands back only its signature; a card
+    /// signs too; the app merges both, checks each against its own sighash, and finalises.
+    #[test]
+    fn a_spend_signed_by_the_seedsigner_and_a_card_merges_checks_and_finalises() {
+        use std::str::FromStr;
+        let f: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!("{}/tests/fixtures/mixed-signed.json", env!("CARGO_MANIFEST_DIR"))).unwrap()).unwrap();
+        let (v, b) = mixed_spend();
+        assert_eq!(b.psbt, f["unsigned"].as_str().unwrap(), "the spend is built exactly as the fixture was signed");
+        let p = bitcoin::psbt::Psbt::from_str(&b.psbt).unwrap();
+        let fp = bitcoin::bip32::Fingerprint::from_str("c9ad277c").unwrap();
+        assert!(p.inputs[0].bip32_derivation.values().any(|(f, path)| *f == fp && path.to_string() == "48'/0'/0'/2'/0/3"), "the device finds its key at its full path");
+        assert!(p.outputs[1].bip32_derivation.values().any(|(f, path)| *f == fp && path.to_string() == "48'/0'/0'/2'/1/2"), "change carries the device's path, so it can see it is change");
+        assert!(p.outputs[0].bip32_derivation.is_empty(), "the payment is not ours");
+        // the device's answer, minimal as a SeedSigner's is: no witness UTXO, no script
+        let dev = export::parse(f["device_minimal"].as_str().unwrap().as_bytes()).unwrap();
+        assert!(dev.inputs[0].witness_utxo.is_none() && dev.inputs[0].partial_sigs.len() == 1);
+        let merged = wallet::adopt(&v, dev.clone(), Some(&b.psbt)).unwrap();
+        let c = wallet::ceremony(&v, &merged).unwrap();
+        assert_eq!((c.have, c.ready), (1, false));
+        assert_eq!(c.keys.iter().find(|k| k.name == "seedsigner").unwrap().signed, 1, "the signature is the device's, by name");
+        // alone, with nothing in progress, a minimal answer cannot be checked and is refused rather than trusted
+        assert!(wallet::adopt(&v, dev, None).is_err());
+        let card = export::parse(f["card_one"].as_str().unwrap().as_bytes()).unwrap();
+        let both = wallet::adopt(&v, card, Some(&merged)).unwrap();
+        let c = wallet::ceremony(&v, &both).unwrap();
+        assert_eq!((c.have, c.need, c.ready), (2, 2, true));
+        assert_eq!(c.keys.iter().filter(|k| k.signed == 1).map(|k| k.name.as_str()).collect::<Vec<_>>(), ["seedsigner", "card one"]);
+        let tx = wallet::finalize(&both).unwrap();
+        assert_eq!(bitcoin::consensus::encode::serialize_hex(&tx), f["final_tx"].as_str().unwrap_or(""), "the finished transaction is byte-for-byte what embit expects");
     }
     #[test]
     fn it_refuses_what_it_should() {

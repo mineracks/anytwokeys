@@ -533,6 +533,11 @@ pub fn build(vault: &Vault, coins: &[CoinAt], change_index: u32, to: &str, amoun
         psbt.inputs[i].witness_utxo = Some(TxOut { value: Amount::from_sat(c.value), script_pubkey: d.script_pubkey() });
         if n > 1 { psbt.inputs[i].witness_script = Some(d.explicit_script().map_err(|e| e.to_string())?); }
     }
+    if let Some(ext) = &vault.ext {
+        use miniscript::psbt::PsbtExt;
+        for (i, c) in chosen.iter().enumerate() { psbt.update_input_with_descriptor(i, &ext_definite(ext, c.index)?).map_err(|e| format!("input {}: {e}", i + 1))?; }
+        if change > 0 { psbt.update_output_with_descriptor(1, &ext_definite(ext, change_index)?).map_err(|e| format!("change: {e}"))?; }
+    }
     Ok(Built { psbt: psbt.to_string(), fee, vsize, change, inputs: chosen.len() })
 }
 
@@ -602,6 +607,12 @@ pub struct Ceremony { pub ours: bool, pub inputs: usize, pub need: usize, pub ha
 
 /// The key that signs input `inp` for vault key `base`: the key itself, or its child at the input's index.
 fn signer_at(v: &Vault, base: &str, index: u32) -> Result<bitcoin::PublicKey, String> {
+    if let Some(ext) = &v.ext {
+        // the descriptor's keys at that index, in its own order — which is the order v.keys was made in
+        let pos = v.keys.iter().position(|k| k.pubkey == base).ok_or("not one of this vault's keys")?;
+        let at = ext_keys_at(ext, index)?;
+        return PublicKey::from_str(at.get(pos).ok_or("the descriptor has fewer keys than the vault")?).map(bitcoin::PublicKey::new).map_err(|e| e.to_string());
+    }
     let q = PublicKey::from_str(base).map_err(|e| e.to_string())?;
     Ok(bitcoin::PublicKey::new(match cc_of(v) { Some(cc) => crate::hd::child_pubkey(&cc, &q, index), None => q }))
 }
@@ -635,6 +646,20 @@ pub fn ceremony(v: &Vault, psbt_b64: &str) -> Result<Ceremony, String> {
 /// If the same spend is already in progress the signatures are merged.
 pub fn adopt(v: &Vault, mut psbt: Psbt, current: Option<&str>) -> Result<String, String> {
     if psbt.inputs.is_empty() { return Err("that PSBT spends nothing".into()); }
+    if let Some(cur) = current {
+        let mine = Psbt::from_str(cur.trim()).map_err(|e| format!("psbt: {e}"))?;
+        if mine.unsigned_tx == psbt.unsigned_tx {
+            for (theirs, ours) in psbt.inputs.iter_mut().zip(mine.inputs.iter()) {
+                if theirs.witness_utxo.is_none() { theirs.witness_utxo = ours.witness_utxo.clone(); }
+                if theirs.witness_script.is_none() { theirs.witness_script = ours.witness_script.clone(); }
+                for (k, v) in &ours.bip32_derivation { theirs.bip32_derivation.entry(*k).or_insert_with(|| v.clone()); }
+            }
+            for (theirs, ours) in psbt.outputs.iter_mut().zip(mine.outputs.iter()) {
+                if theirs.witness_script.is_none() { theirs.witness_script = ours.witness_script.clone(); }
+                for (k, v) in &ours.bip32_derivation { theirs.bip32_derivation.entry(*k).or_insert_with(|| v.clone()); }
+            }
+        }
+    }
     let secp = Secp256k1::verification_only();
     let tx = psbt.unsigned_tx.clone();
     let mut cache = SighashCache::new(&tx);

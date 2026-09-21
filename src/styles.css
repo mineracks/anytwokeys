@@ -540,3 +540,5 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .chip{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
 .chip.on{border-color:var(--gold);color:var(--ink)}
 .warnbox{border:1px solid var(--line);border-left:3px solid var(--gold);border-radius:6px;padding:10px 12px;font-size:13px}
+.devguide{display:flex;align-items:center;justify-content:center;height:100%;color:var(--ink)} .devguide svg{width:150px;height:118px}
+.ckey .devart{width:44px;height:34px} .ckey .devart svg{width:44px;height:34px}
