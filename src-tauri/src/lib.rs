@@ -56,7 +56,11 @@ fn vault_key_seen(name: String, pubkey: String, serial: u32) -> R<Store> {
 #[tauri::command]
 fn key_form_seen(pubkey: String, form: u8, nfc: bool) -> R<Store> {
     // one byte per key: the form factor, 0x40 = NFC was asked, 0x80 = the key has NFC
-    wallet::update(move |s| { s.forms.insert(pubkey, (form & 0x0F) | 0x40 | if nfc { 0x80 } else { 0 }); })
+    let t = now();
+    wallet::update(move |s| {
+        s.forms.insert(pubkey.clone(), (form & 0x0F) | 0x40 | if nfc { 0x80 } else { 0 });
+        s.key_first.entry(pubkey).or_insert(t);   // written ONCE: the first time is the only one that means anything
+    })
 }
 
 /// When each transaction happened, what it moved, and what that was worth. Separate from the sync so the balance never waits on it.

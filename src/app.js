@@ -1325,6 +1325,34 @@ window.addEventListener('blur', hideDesc);   // switching to another app is when
 
 // Keys is ONE list. Each row is one key and says everything about it: what it is, whether it is plugged in, whether it
 // carries its share — and offers to seal it right there. (It used to be three cards listing the same three keys.)
+// ---------- what a key can honestly be said to know about itself ----------
+// A YubiKey carries a serial, a firmware version, a form factor and its OpenPGP version. It does NOT carry a
+// manufacture date, an end-of-life date or a warranty date. Yubico declares end of life per PRODUCT LINE and sets
+// no dates in advance — six months' notice before a product stops being sold, support for a year after — and
+// warranty runs from a purchase this app knows nothing about. So no end-of-life or warranty date is shown, because
+// there is none to show and a guessed one would be worse than silence.
+//
+// What CAN be done is check the firmware the key does report against advisories known when this build was made —
+// here, on this computer. Asking anyone "is serial 12345678 still supported?" would hand over a list of exactly
+// which keys guard this vault, which is the one thing this app must never send.
+const ADVISORIES_AS_OF = '21 September 2026';
+const verLt = (a, b) => { const p = (v) => String(v || '').split('.').map(n => parseInt(n, 10) || 0); const [x, y] = [p(a), p(b)];
+  for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) < (y[i] || 0); } return false; };
+const ADVISORIES = [{
+  id: 'YSA-2024-03',
+  title: 'Infineon ECDSA private key recovery (\u201cEUCLEAK\u201d)',
+  hits: (card) => !!card.firmware && verLt(card.firmware, '5.7.0'),
+  says: 'Yubico\u2019s advisory covers YubiKey 5 Series firmware before 5.7.0; 5.7.0 and newer are not affected. Someone who had the key in their hands for a time, with laboratory equipment, could recover the secret it holds. Yubico does not allow firmware to be updated on a key that already exists, so this one cannot be moved to 5.7 \u2014 only replaced. Their own advice is to keep physical control of it.',
+  here: 'In a vault like this one that matters less on its own: an attacker would need this key AND enough of the others to sign. It is still a reason to keep it somewhere only you reach, and a reason to prefer 5.7.0 or newer for a key you buy next.',
+}];
+const keyAdvisories = (card) => card ? ADVISORIES.filter(a => a.hits(card)) : [];
+const firstSeen = (pubkey) => ((store && store.key_first) || {})[pubkey];
+function firstSeenWords(pubkey) {
+  const t = firstSeen(pubkey); if (!t) return '';
+  const days = Math.floor((Date.now() / 1000 - t) / 86400);
+  const when = new Date(t * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' });
+  return `known to this computer since ${when}${days > 60 ? ` \u00b7 ${sats(days)} days` : ''}`;
+}
 const keysBusy = () => $$('#keys-list input').some(i => i.value || i === document.activeElement);   // a poll must not wipe a half-typed PIN or name
 const PENCIL = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
 function vaultKeyRow(k, i) {
@@ -1332,16 +1360,28 @@ function vaultKeyRow(k, i) {
   const art = card ? keyArt(card.form || 3, !!card.nfc, 52) : pf ? keyArt(pf, !!(pf & 0x80), 52) : '<svg width="24" height="24"><use href="#ring"/></svg>';
   const model = card ? modelName(card.form, card.nfc) : pf ? modelName(pf, !!(pf & 0x80), !!(pf & 0x40)) : 'YubiKey';
   const facts = [model, k.serial ? 'serial ' + k.serial : 'serial not seen on this computer yet'].concat(card ? [card.firmware ? 'firmware ' + card.firmware : '', 'touch ' + String(card.touch).toLowerCase()].filter(Boolean) : []);
-  return `<div class="keyrow vk"><span class="keyart">${art}</span><div class="who"><div class="name"><span class="name-text">${esc(k.name)}</span><button class="pencil" data-edit-idx="${i}" title="Rename this key">${PENCIL}</button></div><div class="muted" style="font-size:13px">${esc(facts.join(' · '))} · <span class="mono">${k.pubkey.slice(0, 12)}…</span></div></div>`
+  const seen = firstSeenWords(k.pubkey); if (seen) facts.push(seen);
+  const adv = keyAdvisories(card);
+  return `<div class="keyrow vk"><span class="keyart">${art}</span><div class="who"><div class="name"><span class="name-text">${esc(k.name)}</span><button class="pencil" data-edit-idx="${i}" title="Rename this key">${PENCIL}</button></div><div class="muted" style="font-size:13px">${esc(facts.join(' · '))} · <span class="mono">${k.pubkey.slice(0, 12)}…</span></div>${adv.map(a => `<div class="warn advline" style="font-size:13px;margin-top:6px"><b>${esc(a.id)}: ${esc(a.title)}.</b> ${esc(a.says)} ${esc(a.here)}</div>`).join('')}</div>`
     + `<div class="kright"><div class="state ${card ? 'here' : ''}"><i></i>${card ? 'plugged in' : 'not plugged in'}</div><div class="kseal" data-seal-slot="${i}"></div></div></div>`;
 }
 function renderKeys(force) {
   if (!vault) return;
+  paintKeyLife();
   if (force || !keysBusy()) { $('#keys-list').innerHTML = vault.keys.map(vaultKeyRow).join(''); paintSealSlots(); }
   invoke('vault_recovery', { name: vault.name }).then(l => { if (vault._recovery !== l) hideDesc.shown = false; vault._recovery = l; paintDesc(); }); $('#keys-k').textContent = vault.threshold; $$('.keys-k2').forEach(e => e.textContent = vault.threshold);
   renderKeysNow(); renderSeal();
 }
 function keyRow(name, sub, pub, state, idx) { const pen = idx === undefined ? '' : `<button class="pencil" data-edit-idx="${idx}" title="Rename this key"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>`; const pf = packedForm(pub); return `<div class="keyrow"><span class="keyart">${pf ? keyArt(pf, !!(pf & 0x80), 44) : '<svg width="22" height="22"><use href="#ring"/></svg>'}</span><div class="who"><div class="name"><span class="name-text">${name}</span>${pen}</div><div class="muted" style="font-size:13px">${pf ? modelName(pf, !!(pf & 0x80), !!(pf & 0x40)) + ' · ' : ''}${sub} · <span class="mono">${pub.slice(0, 12)}…</span></div></div><div class="state ${state}"><i></i>${{ ok: 'enrolled', off: 'not plugged in', here: 'plugged in' }[state]}</div></div>`; }
+// Said once, plainly, rather than left as a gap the person has to wonder about.
+function paintKeyLife() {
+  const plugged = cards.length, checked = cards.filter(c => c.firmware).length;
+  $('#key-life').innerHTML = `<div class="label">Age, end of life and warranty</div>
+    <div class="muted" style="font-size:13px">A YubiKey tells this computer its serial, its firmware version and its shape. It does <b>not</b> carry the day it was made, an end-of-life date, or anything about a warranty \u2014 so none is shown here, because a guessed one would be worse than nothing.</div>
+    <div class="muted" style="font-size:13px;margin-top:8px">Yubico retires a whole <b>product line</b>, not your particular key, and sets no date in advance: their policy is six months\u2019 notice before a product stops being sold, and support for a year after that. A warranty runs from a purchase this app knows nothing about. The nearest thing to an age it can honestly give is when this computer first saw each key, which is a floor and never the real age.</div>
+    <div class="muted" style="font-size:13px;margin-top:8px">The firmware each key reports <b>is</b> checked, here on this computer, against advisories known when this app was built (${esc(ADVISORIES_AS_OF)}). Nothing is asked of anyone: a question like \u201cis serial 12345678 still supported?\u201d would hand over a list of exactly which keys guard this vault.</div>
+    <div class="muted" style="font-size:13px;margin-top:8px">${plugged ? `${sats(checked)} of ${sats(plugged)} plugged-in key${plugged === 1 ? '' : 's'} answered with a firmware version. ${cards.some(c => keyAdvisories(c).length) ? 'One or more has something against it \u2014 see its row above.' : 'Nothing known stands against ' + (checked === 1 ? 'it' : 'them') + '.'}` : 'No key is plugged in just now, so only what was remembered is shown.'}</div>`;
+}
 function renderKeysNow() {
   // keys of this vault say "plugged in" on their own rows; this line is only for what ELSE is in the ports
   const others = cards.filter(c => !vault || !vault.keys.some(k => k.pubkey === c.pubkey));

@@ -70,6 +70,29 @@ with sync_playwright() as p:
     check("ONE list: a row per key, no second or third card repeating them", pg.locator("#s-keys .keyrow").count() == 3 and pg.locator("#seal-list").count() == 0 and "Plugged in now" not in pg.inner_text("#s-keys"))
     r0 = rows.nth(0).inner_text()
     check("the plugged-in key's row says what it is, that it is in, and that it is sealed", "YubiKey" in r0 and "plugged in" in r0 and "sealed" in r0 and "firmware" not in rows.nth(1).inner_text(), r0)
+    # ---- what a key can honestly be said to know about itself ----
+    check("the screen says plainly that a key carries NO end-of-life or warranty date, rather than leaving a gap",
+          "does" in pg.inner_text("#key-life") and "not" in pg.inner_text("#key-life") and "warranty" in pg.inner_text("#key-life") and "guessed one would be worse than nothing" in pg.inner_text("#key-life"), pg.inner_text("#key-life")[:200])
+    check("and that Yubico retires a product LINE, not your key, with no date set in advance",
+          "product line" in pg.inner_text("#key-life") and "six months" in pg.inner_text("#key-life") and "no date in advance" in pg.inner_text("#key-life"))
+    check("the firmware check is done HERE, and says why nothing is asked of anyone",
+          "on this computer" in pg.inner_text("#key-life") and "which keys guard this vault" in pg.inner_text("#key-life"))
+    check("it dates what it knows, so an old build cannot imply it knows today's advisories", "2026" in pg.inner_text("#key-life"))
+    pg.evaluate("__state.cards[0].firmware = '5.4.3'; renderKeys(true)"); pg.wait_for_timeout(400)
+    check("a key on firmware before 5.7.0 is told about YSA-2024-03, by name, on its own row",
+          "YSA-2024-03" in pg.inner_text("#keys-list") and "5.7.0 and newer are not affected" in pg.inner_text("#keys-list"), pg.inner_text("#keys-list")[:200])
+    check("and it says the firmware cannot be changed on a key that exists, so the only remedy is replacement",
+          "does not allow firmware to be updated" in pg.inner_text("#keys-list") and "only replaced" in pg.inner_text("#keys-list"), pg.inner_text("#keys-list")[:260])
+    check("and what it means for a vault of several keys, rather than sounding an alarm",
+          "enough of the others to sign" in pg.inner_text("#keys-list"))
+    pg.evaluate("__state.cards[0].firmware = '5.7.1'; renderKeys(true)"); pg.wait_for_timeout(400)
+    check("a key on 5.7.0 or newer is told nothing, because nothing is known against it",
+          "YSA-2024-03" not in pg.inner_text("#keys-list") and "Nothing known stands against" in pg.inner_text("#key-life"))
+    check("the version test is a real comparison, not a string match", pg.evaluate("[verLt('5.10.0','5.7.0'), verLt('5.7','5.7.0'), verLt('5.6.9','5.7.0'), verLt('','5.7.0')]") == [False, False, True, True])
+    pg.evaluate("store.key_first = store.key_first || {}; store.key_first[__state.cards[0].pubkey] = Math.floor(Date.now()/1000) - 400*86400; renderKeys(true)"); pg.wait_for_timeout(400)
+    check("the nearest thing to an age it can claim is when this computer first saw the key, shown as that and no more",
+          "known to this computer since" in pg.inner_text("#keys-list") and "400 days" in pg.inner_text("#keys-list"), pg.inner_text("#keys-list")[:220])
+    rows.nth(0).scroll_into_view_if_needed(); pg.wait_for_timeout(150)
     ab, cb = rows.nth(0).locator(".keyart svg").bounding_box(), pg.locator("#keys-list").bounding_box()
     check("its drawing is inside the list and on top", ab and ab["x"] >= cb["x"] and ab["width"] > 10 and pg.evaluate("() => { const r = document.querySelector('#keys-list .keyart svg').getBoundingClientRect(); const e = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2); return !!e && !!e.closest('.keyart'); }"), str(ab))
     check("a key that is away and unconfirmed says so without claiming it is unsealed", "seal not confirmed" in rows.nth(1).inner_text())

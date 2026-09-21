@@ -117,6 +117,9 @@ pub struct Store {
     #[serde(default)] pub contacts: Vec<Contact>,
     /// public key → YubiKey form factor, learnt when the card is plugged in, so a Nano is drawn as one
     #[serde(default)] pub forms: std::collections::HashMap<String, u8>,
+    /// when this computer FIRST saw each key, by public key. A YubiKey carries no manufacture date, so this is the
+    /// only age this app can honestly claim: how long it has known the key, which is a floor and never its real age.
+    #[serde(default)] pub key_first: std::collections::HashMap<String, u64>,
 }
 
 pub fn network_of(s: &str) -> Network {
