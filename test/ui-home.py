@@ -43,7 +43,13 @@ const H = {
   contact_delete: (a) => { __contacts = __contacts.filter(c => c.address !== a.address); return store(); }, contact_used: (a) => { __contacts.find(c => c.address === a.address).used += 1; return store(); },
   vault_receive_address: (a) => 'bc1qfreshaddressof' + a.name.replace(/[^a-z]/gi, '') + '0000000000000000000000007', device_locale: () => __state.os, cards_list: () => { throw 'no YubiKey found'; }, spend_ceremony: () => { throw 'no spend in progress'; }, fees_get: () => ({ slow: 1, medium: 2, fast: 3 }),
   settings_set: (a) => { if (a.fiat !== undefined) __state.fiat = a.fiat; return store(); },
-  vault_sync: (a) => ({ coins: [{ txid: '%(t0)s', vout: 0, value: 9430, height: 967374 }], balance: a.name === 'other vault' ? 111 : 9430, height: 967685, rotating: false, receive: 'bc1qexample', receive_index: 0, next_change: 0, gap: 20, servers: { electrum: 'ssl://electrum.mineracks.com:50002', explorer: 'https://mempool.mineracks.com' },
+  vault_addresses: (a) => [
+    { chain: 'receive', index: 0, position: 0, address: 'bc1qexample', current: true, future: false },
+    { chain: 'receive', index: 1, position: 1, address: 'bc1qnextone', current: false, future: true },
+    { chain: 'change', index: 2147483648, position: 0, address: 'bc1qchangeone', current: true, future: false }],
+  seal_read: () => (window.__seal || { cards: 0, foreign: [], found: [] }),
+  seal_preview: (a) => { window.__previewed = a.found.length; return window.__cands || []; },
+  vault_sync: (a) => ({ coins: [{ txid: '%(t0)s', vout: 0, value: 9430, height: 967374, index: 0 }], balance: a.name === 'other vault' ? 111 : 9430, height: 967685, rotating: !!window.__rotating, receive: 'bc1qexample', receive_index: 0, next_change: 0, gap: 20, servers: { electrum: 'ssl://electrum.mineracks.com:50002', explorer: 'https://mempool.mineracks.com' },
     history: [{ txid: '%(t0)s', height: 967374, index: 0 }, { txid: '%(t1)s', height: 967410, index: 0 }, { txid: '%(t2)s', height: 967497, index: 0 }, { txid: '%(t3)s', height: 0, index: 0 }] }),
   vault_activity: (a) => { __state.asked = a; if (__state.fail) throw 'electrum: connection refused'; const q = (p, b) => a.ccy ? { price: p, basis: b } : null; return { ccy: a.ccy, note: null, now: q(114209.6, 'daily 2026-09-19'), rows: [
     { txid: '%(t0)s', time: 1789627614, net: 20000, fee: null, quote: q(107389.64, 'hourly 2026-09-17 06:00 UTC') }, { txid: '%(t1)s', time: 1789648528, net: -5190, fee: 190, quote: q(107768.03, 'hourly 2026-09-17 12:00 UTC') },
@@ -250,7 +256,7 @@ with sync_playwright() as p:
     pg.evaluate("V.more = { ['tx:' + %s]: { ctx: { t: 1789648528, how: 'seen', device: { name: 'Test Mac' } } } }; vault = V; renderCtx()" % json.dumps(T[1])); pg.wait_for_timeout(200)
     check("a deposit says this is only where the computer was, and that places are off", "first saw it" in pg.inner_text("#tx-ctx") and "wherever the sender was" in pg.inner_text("#tx-ctx-dl") and "places are off" in pg.inner_text("#tx-ctx-dl"))
     pg.evaluate("show('home')"); pg.wait_for_timeout(300); pg.evaluate("__listeners['tauri://drag-drop']({ payload: { paths: ['/x/y.pdf'] } })"); pg.wait_for_timeout(200)
-    check("a drop with no transaction open attaches nothing and says why", "Open a transaction first" in pg.inner_text("#toast") and pg.evaluate("__dropped.paths.length") == 1)
+    check("a drop with no record open attaches nothing and says why", "Open a transaction, an address or a coin first" in pg.inner_text("#toast") and pg.evaluate("__dropped.paths.length") == 1)
     pg.locator("#activity tr").nth(2).click(); pg.wait_for_timeout(600)
     check("coming back, the attachments are still on that transaction (two files and the photo from the camera)", pg.locator("#tx-files .att").count() == 3)
     pg.evaluate("window.__badProof = true"); pg.click("#crumbs [data-crumb=home]"); pg.wait_for_timeout(500)
@@ -340,6 +346,92 @@ with sync_playwright() as p:
           pg.evaluate("__offline") is False and pg.evaluate("__nodeAsked.length") > asked and pg.get_attribute("#node", "data-state") == "online")
     pg.evaluate("show('home')"); pg.wait_for_timeout(200)
     pg.locator(".side").screenshot(path=str(out / "sidebar.png"))
+    check("every sidebar entry keeps its height when the list outgrows the window, and the whole of it can be reached",
+          pg.evaluate("""() => { const s = document.querySelector('.side');
+            const items = [...s.querySelectorAll('.nav, .sidegroup')];
+            return items.every(n => n.hidden || n.getBoundingClientRect().height > 8) && (s.scrollHeight <= s.clientHeight || getComputedStyle(s).overflowY === 'auto'); }"""),
+          pg.evaluate("JSON.stringify([...document.querySelectorAll('.side .sidegroup')].map(n => [n.textContent.slice(0,14), Math.round(n.getBoundingClientRect().height)]))"))
+
+    # ---- Activity: the whole history, with room ----
+    pg.evaluate("show('activity')"); pg.wait_for_timeout(500)
+    home_rows = pg.locator("#activity tr[data-txid]").count()
+    check("Activity holds every transaction, and Home keeps only a recent few with a way through to the rest",
+          pg.locator("#act-all tr[data-txid]").count() >= home_rows and "transaction" in pg.inner_text("#act-count") and pg.locator("#activity-more-row").count() == 1,
+          "%s in Activity, %s on Home" % (pg.locator("#act-all tr[data-txid]").count(), home_rows))
+    check("the amounts reach the Activity table too, not only Home's", "sats" in pg.inner_text("#act-all"), pg.inner_text("#act-all")[:90])
+    pg.fill("#act-find", "zzzznothing"); pg.wait_for_timeout(250)
+    check("finding nothing says so, and says a label or a note counts as well as an id", pg.locator("#act-all tr[data-txid]").count() == 0 and "label or a note" in pg.inner_text("#act-foot"))
+    pg.fill("#act-find", T[0][:8]); pg.wait_for_timeout(250)
+    check("and an id finds its transaction", pg.locator("#act-all tr[data-txid]").count() == 1)
+    pg.fill("#act-find", ""); pg.wait_for_timeout(250)
+
+    # ---- Addresses: its own screen, and a record per address ----
+    pg.evaluate("show('addresses')"); pg.wait_for_timeout(600)
+    check("a vault with ONE fixed address has no list, and the screen says that instead of sitting empty",
+          pg.locator("#addr-fixed").is_visible() and "single fixed address" in pg.inner_text("#addr-fixed") and not pg.locator("#addr-card").is_visible())
+    pg.evaluate("window.__rotating = true; vault._rotating = true; show('addresses')"); pg.wait_for_timeout(600)
+    check("Addresses is a screen of its own, both chains, including ones never used yet",
+          pg.locator("#addr-recv tbody tr").count() >= 2 and pg.locator("#addr-chg tbody tr").count() >= 1 and "unused" in pg.inner_text("#addr-recv"))
+    pg.locator("#addr-recv tbody tr").first.click(); pg.wait_for_timeout(400)
+    check("clicking an address opens its own record, and says why labelling an unused one is the point",
+          pg.locator("#addr-detail").is_visible() and "never been used" in pg.inner_text("#addr-detail") and "before you hand it out" in pg.inner_text("#addr-detail"))
+    check("the record card itself has MOVED to the address — one card, not a copy", pg.evaluate("document.querySelector('#addr-detail').contains(document.querySelector('#tx-notes'))"))
+    pg.fill("#tx-label", "for the plumber"); pg.evaluate("document.querySelector('#tx-label').blur()"); pg.wait_for_timeout(400)
+    check("a label typed there is saved against the ADDRESS, not a transaction",
+          pg.evaluate("JSON.stringify(Object.keys(V.labels))").count("addr:") == 1 and pg.evaluate("V.labels['addr:bc1qnextone']") == "for the plumber",
+          pg.evaluate("JSON.stringify(V.labels)"))
+    pg.fill("#tx-note", "he is coming on Tuesday"); pg.evaluate("document.querySelector('#tx-note').blur()"); pg.wait_for_timeout(400)
+    check("and so is a note", pg.evaluate("V.notes['addr:bc1qnextone']") == "he is coming on Tuesday", pg.evaluate("JSON.stringify(V.notes)"))
+    check("the drop zone follows the record, so files land on the address too", pg.evaluate("onRec()") is True)
+
+    # ---- Coins ----
+    pg.evaluate("show('coins')"); pg.wait_for_timeout(700)
+    check("Coins lists one row per unspent output, with what it is worth", pg.locator("#coin-rows tr[data-coin]").count() == 1 and "9,430 sats" in pg.inner_text("#coin-rows"))
+    check("and the address the coin sits on, worked out from its index", "bc1qexample" in pg.inner_text("#coin-rows tr[data-coin]"), pg.inner_text("#coin-rows"))
+    pg.locator("#coin-rows tr[data-coin]").first.click(); pg.wait_for_timeout(400)
+    check("clicking a coin opens its record, keyed on the output itself",
+          pg.locator("#coins-detail").is_visible() and pg.evaluate("recView.key") == "output:%s:0" % T[0] and pg.evaluate("document.querySelector('#coins-detail').contains(document.querySelector('#tx-notes'))"),
+          pg.evaluate("recView.key"))
+    pg.fill("#tx-note", "change from the car"); pg.evaluate("document.querySelector('#tx-note').blur()"); pg.wait_for_timeout(400)
+    check("a note on a coin is kept against that one coin", pg.evaluate("V.notes['output:%s:0']" % T[0]) == "change from the car")
+    check("while a coin's record is open the card is NOT back home", pg.evaluate("document.querySelector('#tx-notes').parentElement === recHome") is False)
+    pg.evaluate("show('home')"); pg.wait_for_timeout(400)
+    check("leaving the record screens puts the one card back where the transaction screen expects it",
+          pg.evaluate("document.querySelector('#tx-notes').parentElement === recHome"))
+    pg.evaluate("show('coins')"); pg.wait_for_timeout(400)
+    check("Coins can be put away for people who do not want it, and the tab goes",
+          pg.evaluate("localStorage.setItem('a2k-coins-tab','off'); paintCoinsTab(); document.querySelector('#nav-coins').hidden") is True)
+    pg.evaluate("localStorage.setItem('a2k-coins-tab','on'); paintCoinsTab()")
+
+    # ---- Vault settings, and the recovery drill ----
+    pg.evaluate("show('vault')"); pg.wait_for_timeout(400)
+    check("Vault settings says what this vault IS, and which network it is on",
+          "2 of 3" in pg.inner_text("#vs-facts") and pg.inner_text("#vs-facts").count("key") >= 1 and "network" in pg.inner_text("#vs-facts").lower(), pg.inner_text("#vs-facts")[:160])
+    check("a vault that has never been drilled says so, and says what that means",
+          "never been drilled" in pg.inner_text("#vs-drill-when") and "believe rather than something you have seen" in pg.inner_text("#vs-drill-when"))
+    check("and the drill promises to spend nothing", "Nothing is spent" in pg.inner_text("#vs-drill-what"))
+    pg.evaluate("window.__seal = { cards: 0, foreign: [], found: [] }; window.__cands = []")
+    pg.click("#vs-drill"); pg.wait_for_timeout(400)
+    check("with no key plugged in the drill says so rather than claiming anything", "No key plugged in" in pg.inner_text("#vs-drill-out"))
+    pg.evaluate("""window.__seal = { cards: 2, foreign: [], found: [
+        { pubkey: 'a', serial: 11, entry: { id: 'v1', k: 2, x: 1, locked: false } },
+        { pubkey: 'b', serial: 12, entry: { id: 'v1', k: 2, x: 2, locked: false } }] };
+      window.__cands = [{ id: 'v1', have: 2, locked: 0, need: 2, known_as: vault.name, address: vault.address,
+        line: 'wsh(...)', record: { name: vault.name, threshold: vault.threshold, pubkeys: ['a','b','c'], key_names: ['laptop','keyring','off-site'], network: vault.network, chain_code: null } }]""")
+    pg.click("#vs-drill"); pg.wait_for_timeout(600)
+    check("a drill that rebuilds THIS vault from the cards says so, naming the keys it used",
+          "Recovered" in pg.inner_text("#vs-drill-out") and "serial 11" in pg.inner_text("#vs-drill-out") and "same first address" in pg.inner_text("#vs-drill-out"), pg.inner_text("#vs-drill-out")[:200])
+    check("it says plainly which keys it did NOT try, so a success is not read as more than it is",
+          "not tried" in pg.inner_text("#vs-drill-out") and "says nothing about the" in pg.inner_text("#vs-drill-out"))
+    check("and the date of the drill is written down with the vault", "vault:drill" in pg.evaluate("JSON.stringify(Object.keys(V.notes))"))
+    pg.evaluate("show('vault')"); pg.wait_for_timeout(300)
+    check("so the next time the screen is opened it says when it was last proved", "Last drill" in pg.inner_text("#vs-drill-when"))
+    pg.evaluate("window.__cands[0].address = 'bc1qSOMETHINGELSE'; window.__cands[0].known_as = null")
+    pg.click("#vs-drill"); pg.wait_for_timeout(600)
+    check("a rebuild that does NOT derive this vault's address is a failure, however well it read the cards",
+          "not this vault" in pg.inner_text("#vs-drill-out"), pg.inner_text("#vs-drill-out")[:160])
+    pg.locator("#s-vault").screenshot(path=str(out / "vault-settings.png"))
+    pg.evaluate("show('home')"); pg.wait_for_timeout(300)
     check("labels live with the vault they belong to, on its Home", pg.locator("#s-home #labels-export").count() == 1 and pg.locator("#s-settings #labels-export").count() == 0)
     # ---- Settings ----
     pg.evaluate("__state.fail = false; show('settings')"); pg.wait_for_timeout(300)

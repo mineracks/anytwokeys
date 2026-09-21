@@ -60,16 +60,21 @@ function show(name) {
   // the vault you are in stays lit on every screen that is about it, matching the breadcrumb; not while making another, nor in app settings
   const inVault = vault && !['setup', 'restore', 'settings'].includes(name);
   $$('#vault-tabs .nav').forEach(n => n.classList.toggle('on', !!inVault && n.dataset.vault === vault.name));
-  $('#title').textContent = { home: vault ? vault.name : 'Vault', send: 'Send', receive: 'Receive', keys: 'Keys', settings: 'App settings', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
+  $('#title').textContent = { home: vault ? vault.name : 'Vault', activity: 'Activity', send: 'Send', receive: 'Receive', coins: 'Coins', addresses: 'Addresses', vault: 'Vault settings', keys: 'Keys', settings: 'App settings', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
   $('#title-edit').hidden = !(name === 'home' && vault); $('#title-input').hidden = true; $('#title').hidden = false;
   paintCrumbs(name); paintStaged(name);
   $('#side-vault').textContent = vault ? vault.name : 'No vault yet'; $('#side-vault').title = vault ? `These screens are about “${vault.name}”` : '';
   if (checkNode.net !== (vault ? vault.network : store.settings.network)) checkNode();
+  if (!['tx', 'addresses', 'coins'].includes(name) && $('#tx-notes').parentElement !== recHome) recHome.appendChild($('#tx-notes'));
   if (name !== 'restore') stopCam();
   if (name !== 'sign') stopQr();
   if (name !== 'keys') hideDesc();
   if (name === 'home') { sync(); labelsSync(); }
-  if (name === 'receive') { drawAddress(); renderAddresses(); }
+  if (name === 'receive') drawAddress();
+  if (name === 'activity') { if (vault && !vault._coins) sync(); else paintActivity(); }
+  if (name === 'addresses') { $('#addr-detail').hidden = true; renderAddresses(); }
+  if (name === 'coins') { $('#coins-detail').hidden = true; if (vault && !vault._coins) sync().then(() => Promise.resolve(renderAddresses()).then(renderCoins2)); else Promise.resolve(renderAddresses()).then(renderCoins2); }
+  if (name === 'vault') renderVaultSettings();
   if (name === 'send') { closeBook(); paintTo(); loadFees(); if (vault && !vault._coins) sync().then(renderCoins); else renderCoins(); }
   if (name === 'messages') renderMessages();
   if (name === 'keys') renderKeys();
@@ -280,6 +285,7 @@ const txHeadline = () => { const f = ((txFacts[vault.name] || {}).rows || {})[tx
 async function renderTx() {
   if (!vault || !txView.txid) return show('home');
   const name = vault.name, txid = txView.txid, mine = ++txView.seq, key = 'tx:' + txid;
+  recPoint('tx', key);
   const facts = txFacts[name] || {}, f = (facts.rows || {})[txid];
   paintCrumbs('tx'); $('#title').textContent = txHeadline();
   { const l = txOrder(), i = l.findIndex(x => x.txid === txid); $('#tx-prev').disabled = i <= 0; $('#tx-next').disabled = i < 0 || i >= l.length - 1; $('#tx-pos').textContent = i >= 0 ? `${i + 1} of ${l.length}` : ''; }
@@ -328,13 +334,36 @@ async function renderTx() {
   $('#tx-copyhex').onclick = () => navigator.clipboard.writeText(d.hex).then(() => toast('Raw transaction copied'));
 }
 // ---------- attachments on the transaction ----------
+// ---------- the record card travels ----------
+// Label, note and attachments are keyed by a plain string the backend does not interpret, and a record carries the
+// same three things whatever it is about. So there is ONE record card: it is moved into whichever screen is asking,
+// and everything hung off it — the note that saves itself, drag and drop, the camera, the photo cleaning — goes on
+// working because only the key underneath it changes.
+let recView = { kind: 'tx', key: '' };
+const recKey = () => recView.key;
+const recHome = $('#tx-notes').parentElement;
+const REC_WORDS = {
+  tx:   ['Anything worth keeping with this transaction: what it paid for, an invoice number, who to ask.', 'A few words: who, or what for'],
+  addr: ['Anything worth keeping with this address: who you gave it to, what it is for, when you handed it over.', 'A few words: who you gave it to'],
+  coin: ['Anything worth keeping with this coin: where it came from, what it is being kept for, why it is not to be spent yet.', 'A few words: where it came from'],
+};
+function recPoint(kind, key, slot) {
+  recView = { kind, key };
+  const card = $('#tx-notes'), want = slot || recHome;
+  if (card.parentElement !== want) want.appendChild(card);
+  const [note, label] = REC_WORDS[kind] || REC_WORDS.tx;
+  $('#tx-note').placeholder = note; $('#tx-label').placeholder = label;
+  if (document.activeElement !== $('#tx-label')) $('#tx-label').value = labelOf(key);
+  if (document.activeElement !== $('#tx-note')) $('#tx-note').value = (vault.notes || {})[key] || '';
+  fitNote(); recSaid(''); renderFiles();
+}
 const thumbCache = new Map();
 const sizeWords = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : n >= 1024 ? Math.round(n / 1024) + ' KB' : n + ' B';
 async function renderFiles() {
-  if (!vault || !txView.txid) return;
-  const name = vault.name, key = 'tx:' + txView.txid, list = ((vault.files || {})[key] || []).slice();
+  if (!vault || !recKey()) return;
+  const name = vault.name, key = recKey(), list = ((vault.files || {})[key] || []).slice();
   let here = []; try { here = await invoke('attach_have', { hashes: list.map(e => e.sha256) }); } catch {}
-  if (!vault || vault.name !== name || key !== 'tx:' + txView.txid) return;
+  if (!vault || vault.name !== name || key !== recKey()) return;
   const kind = (e) => (e.mime || '').startsWith('image/') ? 'IMG' : e.mime === 'application/pdf' ? 'PDF' : e.mime === 'text/plain' ? 'TXT' : 'FILE';
   $('#tx-files').innerHTML = list.map((e, i) => `<div class="att${here[i] ? '' : ' away'}" role="button" tabindex="0" data-att="${i}" title="${esc(e.name)}${here[i] ? '' : ' — on another computer; click to fetch it from your backup'}"><div class="pic" data-thumb="${esc(e.thumb || '')}"><span class="doc">${kind(e)}</span></div><div class="nm">${nameParts(e.name)}</div><div class="sz">${here[i] ? sizeWords(e.size) + (e.meta === 'original' && kind(e) === 'IMG' ? ' · as taken' : '') : 'click to fetch'}</div><button type="button" class="att-x" data-att-x="${i}" aria-label="Remove ${esc(e.name)}">×</button></div>`).join('');
   const total = list.reduce((n, e) => n + (e.size || 0), 0);
@@ -563,7 +592,7 @@ async function shotStart(deviceId) {
     $('#shot-note').classList.remove('warn'); $('#shot-note').textContent = 'A receipt, a label on a parcel, the thing you bought. It is kept with this transaction, encrypted like everything else.';
   } catch (e) { $('#shot-note').classList.add('warn'); $('#shot-note').textContent = /NotAllowed|denied/i.test(String(e)) ? 'macOS is not letting Any Two Keys use the camera: allow it in System Settings › Privacy & Security › Camera.' : /NotFound|Overconstrained/i.test(String(e)) ? 'No camera was found.' : 'The camera could not be started: ' + String(e.message || e); }
 }
-$('#tx-camera').onclick = () => { if (!onTx()) return; $('#shot-modal').classList.add('on'); shotStart(''); };
+$('#tx-camera').onclick = () => { if (!onRec()) return; $('#shot-modal').classList.add('on'); shotStart(''); };
 
 $('#shot-close').onclick = shotClose; $('#shot-again').onclick = () => shotStart('');
 $('#shot-take').onclick = async () => {
@@ -572,7 +601,7 @@ $('#shot-take').onclick = async () => {
     if (!v.videoWidth) { $('#shot-note').textContent = 'The camera has not produced a picture yet. Give it a moment.'; return; }
     cv.width = v.videoWidth; cv.height = v.videoHeight; cv.getContext('2d').drawImage(v, 0, 0); shotStop();
     v.hidden = true; cv.hidden = false; shot.taken = true; $('#shot-again').hidden = false; $('#shot-take').textContent = 'Keep it with this transaction'; return; }
-  const name = vault.name, key = 'tx:' + txView.txid; $('#shot-take').disabled = true;
+  const name = vault.name, key = recKey(); $('#shot-take').disabled = true;
   try { const blob = await new Promise(res => cv.toBlob(res, 'image/jpeg', 0.92)); const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = rej; r.readAsDataURL(blob); });
     const r = await invoke('attach_bytes', { name, key, filename: 'photo ' + new Date().toISOString().slice(0, 16).replace('T', ' ').replace(':', '.') + '.jpg', base64: b64, keepOriginal: false }); shotClose(); attachDone(r, name); }
   catch (e) { $('#shot-take').disabled = false; fail(e); }
@@ -597,21 +626,22 @@ function attachDone(r, name) {
   const said = [r.added ? `${r.added} file${r.added === 1 ? '' : 's'} attached` : '', ...r.notes, ...r.errors].filter(Boolean).join(' · ');
   if (said) toast(said, r.errors.length || r.notes.length ? 9000 : 3500);
 }
+const onRec = () => !!recKey() && ($('#s-tx').classList.contains('on') || $('#addr-detail').contains($('#tx-notes')) || $('#coins-detail').contains($('#tx-notes')));
 const onTx = () => $('#s-tx').classList.contains('on') && vault && txView.txid;
-$('#tx-addfiles').onclick = async () => { const name = vault.name; paintZone(false, true); try { attachDone(await invoke('attach_pick', { name, key: 'tx:' + txView.txid, keepOriginal: !stripOn() }), name); } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } finally { paintZone(false); } };
+$('#tx-addfiles').onclick = async () => { const name = vault.name; paintZone(false, true); try { attachDone(await invoke('attach_pick', { name, key: recKey(), keepOriginal: !stripOn() }), name); } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } finally { paintZone(false); } };
 // an OS drop reaches a Tauri window as PATHS in an event, never as File objects in the page
-for (const [ev, on] of [['tauri://drag-enter', true], ['tauri://drag-over', true], ['tauri://drag-leave', false]]) window.__TAURI__.event.listen(ev, () => { const lit = on && onTx(); if (lit && !$('#tx-addfiles').classList.contains('over')) $('#tx-addfiles').scrollIntoView({ block: 'nearest', behavior: 'smooth' }); paintZone(lit); });
+for (const [ev, on] of [['tauri://drag-enter', true], ['tauri://drag-over', true], ['tauri://drag-leave', false]]) window.__TAURI__.event.listen(ev, () => { const lit = on && onRec(); if (lit && !$('#tx-addfiles').classList.contains('over')) $('#tx-addfiles').scrollIntoView({ block: 'nearest', behavior: 'smooth' }); paintZone(lit); });
 window.__TAURI__.event.listen('tauri://drag-drop', async (e) => {
   paintZone(false);
   const paths = (e.payload && e.payload.paths) || []; if (!paths.length) return;
-  if (!onTx()) return toast('Open a transaction first: files attach to the one on screen');
-  const name = vault.name; paintZone(false, true); try { attachDone(await invoke('attach_paths', { name, key: 'tx:' + txView.txid, paths, keepOriginal: !stripOn() }), name); } catch (err) { fail(err); } finally { paintZone(false); }
+  if (!onRec()) return toast('Open a transaction, an address or a coin first: files attach to the record on screen');
+  const name = vault.name; paintZone(false, true); try { attachDone(await invoke('attach_paths', { name, key: recKey(), paths, keepOriginal: !stripOn() }), name); } catch (err) { fail(err); } finally { paintZone(false); }
 });
 document.addEventListener('paste', async (e) => {
-  if (!onTx()) return; const item = [...(e.clipboardData ? e.clipboardData.items : [])].find(i => i.kind === 'file' && i.type.startsWith('image/')); if (!item) return;   // text pastes into the note as usual
+  if (!onRec()) return; const item = [...(e.clipboardData ? e.clipboardData.items : [])].find(i => i.kind === 'file' && i.type.startsWith('image/')); if (!item) return;   // text pastes into the note as usual
   e.preventDefault(); const f = item.getAsFile(), name = vault.name;
   const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = rej; r.readAsDataURL(f); });
-  try { attachDone(await invoke('attach_bytes', { name, key: 'tx:' + txView.txid, filename: 'pasted ' + new Date().toISOString().slice(0, 16).replace('T', ' ').replace(':', '.') + '.png', base64: b64, keepOriginal: false }), name); } catch (err) { fail(err); }
+  try { attachDone(await invoke('attach_bytes', { name, key: recKey(), filename: 'pasted ' + new Date().toISOString().slice(0, 16).replace('T', ' ').replace(':', '.') + '.png', base64: b64, keepOriginal: false }), name); } catch (err) { fail(err); }
 });
 
 $('#tx-chain').addEventListener('toggle', () => { try { localStorage.setItem('a2k-chain-open', $('#tx-chain').open ? '1' : '0'); } catch {} });
@@ -627,15 +657,15 @@ $('#tx-pdf').onclick = async () => {
 };
 // the record saves itself: the label when you leave the field or press Enter, the note a moment after you stop typing
 async function saveTxField(which) {
-  if (!vault || !txView.txid) return;
-  const name = vault.name, key = 'tx:' + txView.txid, val = which === 'label' ? $('#tx-label').value.trim() : $('#tx-note').value;
+  if (!vault || !recKey()) return;
+  const name = vault.name, key = recKey(), val = which === 'label' ? $('#tx-label').value.trim() : $('#tx-note').value;
   const cur = which === 'label' ? labelOf(key) : ((vault.notes || {})[key] || '');
   if (val.trimEnd() === cur) return;
   recSaid('Saving…');
   try { store = await invoke(which === 'label' ? 'label_set' : 'note_set', which === 'label' ? { name, key, label: val } : { name, key, note: val }); vault = store.vaults.find(v => v.name === name) || vault;
     const sealed = vault.seal && vault.seal.shares && vault.seal.shares.length;
     recSaid('Saved ' + new Date().toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) + (sealed ? ' · backed up' : ' · on this computer'), true, sealed ? 'Encrypted and backed up with this vault\'s labels; any two keys bring it back' : 'Kept on this computer only. Seal the keys to back it up.');
-    if (which === 'label') { paintCrumbs('tx'); $('#title').textContent = txHeadline(); } }
+    if (which === 'label') { if (recView.kind === 'tx') { paintCrumbs('tx'); $('#title').textContent = txHeadline(); } else renderRecHead(); } }
   catch (e) { recSaid(''); fail(e); }
 }
 $('#tx-label').addEventListener('blur', () => saveTxField('label'));
@@ -656,21 +686,11 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('#s-tx
 async function fillActivity(name, s) {
   const ccy = s.servers && vault.network === 'mainnet' ? fiatCcy() : '';
   let a; try { a = await invoke('vault_activity', { name, history: s.history.map(h => [h.txid, h.height]), ccy }); }
-  catch (e) { if (vault && vault.name === name) { $$('#activity .when, #activity .amt').forEach(td => { if (td.textContent === '…') td.textContent = '—'; }); $('#activity-note').textContent = 'Dates and amounts could not be fetched: ' + e; $('#activity-note').hidden = false; } return; }
+  catch (e) { clearTimeout(fillLater.t); if (vault && vault.name === name) { $$('#activity .when, #activity .amt, #act-all .when, #act-all .amt').forEach(td => { if (td.textContent === '…') td.textContent = '—'; }); $('#activity-note').textContent = 'Dates and amounts could not be fetched: ' + e; $('#activity-note').hidden = false; } return; }
   if (!vault || vault.name !== name) return;
   txFacts[name] = { rows: Object.fromEntries(a.rows.map(r => [r.txid, r])), now: a.now, ccy: a.ccy };   // kept by vault NAME and txid, never on the vault object, which is replaced on every store re-read
   if ($('#s-tx').classList.contains('on')) renderTx();
-  for (const r of a.rows) {
-    const tr = $(`#activity tr[data-txid="${r.txid}"]`); if (!tr) continue;
-    const when = tr.querySelector('.when'), amt = tr.querySelector('.amt');
-    if (r.time) { const d = new Date(r.time * 1000); when.classList.remove('muted'); when.innerHTML = `${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}<small>${d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</small>`; when.title = d.toISOString().replace('.000Z', ' UTC').replace('T', ' ') + ' · the time in the block header'; }
-    else when.textContent = 'pending';
-    if (r.net === null) { amt.textContent = '—'; continue; }
-    const q = r.quote || (!r.time ? a.now : null);
-    amt.classList.remove('muted'); amt.classList.toggle('in', r.net > 0);
-    amt.innerHTML = `${r.net > 0 ? '+' : r.net < 0 ? '−' : ''}${sats(Math.abs(r.net))} sats<small>${q ? worth(Math.abs(r.net), q, a.ccy) + (r.time ? ' then' : ' now') : ''}${r.fee !== null && r.net < 0 ? (q ? ' · ' : '') + 'fee ' + sats(r.fee) : ''}</small>`;
-    if (q) amt.title = basisWords(q, a.ccy);
-  }
+  repaintFacts(txFacts[name]);
   vault._now = a.now ? { q: a.now, ccy: a.ccy } : null; paintBalance();
   if (a.note && vault.network === 'mainnet') { $('#activity-note').textContent = a.note; $('#activity-note').hidden = false; }
 }
@@ -694,20 +714,132 @@ async function sync() {
     const unconf = s.coins.filter(c => c.height === 0).reduce((a, c) => a + c.value, 0);
     $('#balance-sub').textContent = `${s.coins.length} coin${s.coins.length === 1 ? '' : 's'}` + (unconf ? ` · ${sats(unconf)} unconfirmed` : ' · all confirmed');
     $('#conn').textContent = `Connected to ${s.servers.electrum.replace(/^\w+:\/\//, '')} · block ${sats(s.height)}`;
-    const tb = $('#activity'); tb.innerHTML = ''; $('#activity-note').hidden = true;
-    if (!s.history.length) tb.innerHTML = '<tr><td class="muted" colspan="5">nothing yet</td></tr>';
-    for (const h of s.history.slice().reverse()) {
-      const tr = document.createElement('tr'); tr.dataset.txid = h.txid;
-      tr.innerHTML = `<td class="when muted">${h.height > 0 ? '…' : 'pending'}</td><td><span class="mono">${h.txid.slice(0, 10)}…${h.txid.slice(-6)}</span>${s.rotating ? ' <span class="muted">· ' + fmtIndex(h.index) + '</span>' : ''}</td><td>${lblHtml('tx:' + h.txid)}</td><td class="r amt muted">…</td><td class="r ${h.height > 0 ? 'ok' : 'muted'}">${h.height > 0 ? 'confirmed · ' + sats(h.height) : 'unconfirmed'}</td>`;
-      tb.appendChild(tr);
-    }
+    $('#activity-note').hidden = true;
     txList[vault.name] = s.history.slice().reverse();
-    tb.onclick = (e) => { if (e.target.closest('.lbl, a, button, input')) return; const tr = e.target.closest('tr[data-txid]'); if (tr) openTx(tr.dataset.txid); };
+    paintActivity();
     fillActivity(vault.name, s);   // dates, amounts and values arrive after the balance; the balance never waits for them
     $('#send-have').textContent = `${sats(s.balance)} sats`;
   } catch (e) { if (!vault || vault.name !== me) return; checkNode(); $('#balance-sub').textContent = 'could not reach the server'; $('#conn').textContent = String(e); }
 }
 document.addEventListener('click', (e) => { const a = e.target.closest('[data-tx]'); if (a) { e.preventDefault(); const base = ($('#conn').textContent.includes('signet') ? 'https://signet.mineracks.com' : (store.settings.custom && store.settings.explorer) || (netName() === 'mainnet' ? 'https://mempool.mineracks.com' : 'https://signet.mineracks.com')); invoke('open_url', { url: `${base}/tx/${a.dataset.tx}` }).catch(fail); } });
+
+// ---------- activity: Home keeps a recent few, the Activity screen holds the lot ----------
+// One row builder for both, so a transaction reads the same wherever it is seen, and fillActivity fills both tables.
+const HOME_ACT = 10, ACT_PAGE = 60;
+function actRowHtml(h) {
+  return `<td class="when muted">${h.height > 0 ? '…' : 'pending'}</td><td><span class="mono">${h.txid.slice(0, 10)}…${h.txid.slice(-6)}</span>${vault._rotating ? ' <span class="muted">· ' + fmtIndex(h.index) + '</span>' : ''}</td><td>${lblHtml('tx:' + h.txid)}</td><td class="r amt muted">…</td><td class="r ${h.height > 0 ? 'ok' : 'muted'}">${h.height > 0 ? 'confirmed · ' + sats(h.height) : 'unconfirmed'}</td>`;
+}
+function actFill(tb, list) {
+  tb.innerHTML = '';
+  if (!list.length) { tb.innerHTML = '<tr><td class="muted" colspan="5">nothing yet</td></tr>'; return; }
+  for (const h of list) { const tr = document.createElement('tr'); tr.dataset.txid = h.txid; tr.innerHTML = actRowHtml(h); tb.appendChild(tr); }
+  tb.onclick = (e) => { if (e.target.closest('.lbl, a, button, input')) return; const tr = e.target.closest('tr[data-txid]'); if (tr) openTx(tr.dataset.txid); };
+}
+function paintActivity() {
+  if (!vault) return;
+  const all = txList[vault.name] || [];
+  actFill($('#activity'), all.slice(0, HOME_ACT));
+  $('#activity-more-row').hidden = all.length <= HOME_ACT;
+  $('#activity-more').textContent = `See all ${sats(all.length)} transactions`;
+  renderActScreen();
+}
+let actShown = ACT_PAGE;
+function actMatch(h, q) {
+  if (!q) return true;
+  const k = 'tx:' + h.txid;
+  return (h.txid + ' ' + labelOf(k) + ' ' + ((vault.notes || {})[k] || '')).toLowerCase().includes(q);
+}
+function renderActScreen() {
+  if (!vault) return;
+  const all = txList[vault.name] || [], q = ($('#act-find').value || '').trim().toLowerCase();
+  const hits = all.filter(h => actMatch(h, q));
+  actFill($('#act-all'), hits.slice(0, actShown));
+  $('#act-count').textContent = q ? `${sats(hits.length)} of ${sats(all.length)}` : `${sats(all.length)} transaction${all.length === 1 ? '' : 's'}`;
+  $('#act-more').hidden = hits.length <= actShown;
+  $('#act-more').textContent = `Show ${sats(Math.min(ACT_PAGE, hits.length - actShown))} more`;
+  $('#act-foot').textContent = q && !hits.length ? 'Nothing here matches that. A label or a note you have written counts, as well as the id.'
+    : `Showing ${sats(Math.min(actShown, hits.length))}. Amounts and dates arrive from the server a moment after the list.`;
+  if (vault.name) fillLater();
+}
+const fillLater = () => { clearTimeout(fillLater.t); fillLater.t = setTimeout(() => { const f = txFacts[vault.name]; if (f) repaintFacts(f); }, 0); };
+// the amounts already fetched are put back into whichever rows have just been drawn
+function repaintFacts(facts) {
+  if (!facts) return;
+  for (const [txid, r] of Object.entries(facts.rows || {})) paintFactRow(txid, r, facts);
+}
+function paintFactRow(txid, r, facts) {
+  for (const tr of $$(`#activity tr[data-txid="${txid}"], #act-all tr[data-txid="${txid}"]`)) {
+    const when = tr.querySelector('.when'), amt = tr.querySelector('.amt');
+    if (!when || !amt) continue;
+    if (r.time) { const d = new Date(r.time * 1000); when.classList.remove('muted'); when.innerHTML = `${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}<small>${d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</small>`; when.title = d.toISOString().replace('.000Z', ' UTC').replace('T', ' ') + ' · the time in the block header'; }
+    else when.textContent = 'pending';
+    if (r.net === null) { amt.textContent = '—'; continue; }
+    const q = r.quote || (!r.time ? facts.now : null);
+    amt.classList.remove('muted'); amt.classList.toggle('in', r.net > 0);
+    amt.innerHTML = `${r.net > 0 ? '+' : r.net < 0 ? '−' : ''}${sats(Math.abs(r.net))} sats<small>${q ? worth(Math.abs(r.net), q, facts.ccy) + (r.time ? ' then' : ' now') : ''}${r.fee !== null && r.net < 0 ? (q ? ' · ' : '') + 'fee ' + sats(r.fee) : ''}</small>`;
+    if (q) amt.title = basisWords(q, facts.ccy);
+  }
+}
+$('#act-find').addEventListener('input', () => { actShown = ACT_PAGE; renderActScreen(); });
+$('#act-more').onclick = () => { actShown += ACT_PAGE; renderActScreen(); };
+
+// ---------- coins: one unspent output each, and a record of its own ----------
+function coinKey(c) { return `output:${c.txid}:${c.vout}`; }
+function coinAddr(c) { const r = (renderAddresses.rows || []).find(r => r.index === c.index); return r ? r.address : ''; }
+function renderCoins2() {
+  if (!vault) return;
+  const all = (vault._coins || []).slice().sort((a, b) => b.value - a.value);
+  const q = ($('#coin-find').value || '').trim().toLowerCase();
+  const hits = all.filter(c => !q || (coinKey(c) + ' ' + coinAddr(c) + ' ' + labelOf(coinKey(c)) + ' ' + ((vault.notes || {})[coinKey(c)] || '')).toLowerCase().includes(q));
+  const tb = $('#coin-rows'); tb.innerHTML = '';
+  if (!hits.length) tb.innerHTML = `<tr><td class="muted" colspan="5">${all.length ? 'nothing here matches that' : 'no coins yet: nothing has arrived, or nothing is left unspent'}</td></tr>`;
+  for (const c of hits) {
+    const k = coinKey(c), addr = coinAddr(c), tip = vault._height || 0, deep = c.height > 0 && tip ? tip - c.height + 1 : 0;
+    const tr = document.createElement('tr'); tr.className = 'rowpick'; tr.dataset.coin = k;
+    tr.innerHTML = `<td><span class="mono">${c.txid.slice(0, 8)}…:${c.vout}</span>${vault._rotating && c.index !== undefined ? ' <span class="muted">· ' + fmtIndex(c.index) + '</span>' : ''}</td><td class="mono" title="${esc(addr)}">${addr ? esc(addr.slice(0, 18)) + '…' : '—'}</td><td>${lblHtml(k)}</td><td class="r" style="font-variant-numeric:tabular-nums">${sats(c.value)} sats</td><td class="r ${c.height > 0 ? 'ok' : 'muted'}">${c.height > 0 ? (deep ? sats(deep) + ' deep' : 'confirmed') : 'unconfirmed'}</td>`;
+    tr.addEventListener('click', (e) => { if (e.target.closest('.lbl')) return; openCoin(c); });
+    tb.appendChild(tr);
+  }
+  const tot = hits.reduce((a, c) => a + c.value, 0);
+  $('#coin-count').textContent = `${sats(hits.length)} coin${hits.length === 1 ? '' : 's'} · ${sats(tot)} sats`;
+}
+$('#coin-find').addEventListener('input', renderCoins2);
+function openCoin(c) {
+  const k = coinKey(c), addr = coinAddr(c), tip = vault._height || 0, deep = c.height > 0 && tip ? tip - c.height + 1 : 0;
+  const box = $('#coins-detail'); box.hidden = false;
+  box.innerHTML = `<div class="rec-head"><h3>This coin</h3><button class="btn small" type="button" id="rec-close">Close</button></div>
+    <dl class="tx-dl"><dt>Amount</dt><dd>${sats(c.value)} sats</dd>
+    <dt>Output</dt><dd class="mono"><a href="#" data-tx="${c.txid}">${c.txid}</a>:${c.vout}</dd>
+    <dt>Address</dt><dd class="mono">${addr ? esc(addr) : 'not known until the next sync'}</dd>
+    <dt>Status</dt><dd>${c.height > 0 ? `in block ${sats(c.height)}${deep ? ' · ' + sats(deep) + ' deep' : ''}` : 'not in a block yet'}</dd></dl>
+    <div class="row" style="gap:10px"><button class="btn small" type="button" id="coin-open-tx">Open the transaction it came from</button><button class="btn small" type="button" id="coin-spend">Spend this coin</button></div>
+    <div id="rec-slot" style="margin-top:16px"></div>`;
+  $('#rec-close').onclick = () => { box.hidden = true; recPoint('tx', recKey(), recHome); };
+  $('#coin-open-tx').onclick = () => openTx(c.txid);
+  $('#coin-spend').onclick = () => { coinPick.clear(); coinPick.add(c.txid + ':' + c.vout); show('send'); setTimeout(() => { const d = $('#coins-adv'); if (d) d.open = true; renderCoins(); coinSum(); }, 60); };
+  recPoint('coin', k, $('#rec-slot'));
+  box.scrollIntoView({ block: 'nearest' });
+}
+function renderRecHead() { if (recView.kind === 'coin') renderCoins2(); if (recView.kind === 'addr') renderAddresses(); }
+
+// ---------- one address, with a record of its own ----------
+function openAddress(r) {
+  const k = 'addr:' + r.address, coins = (vault._coins || []).filter(c => c.index === r.index);
+  const bal = coins.reduce((a, c) => a + c.value, 0), used = (vault._history || []).some(x => x.index === r.index);
+  const box = $('#addr-detail'); box.hidden = false;
+  box.innerHTML = `<div class="rec-head"><h3>This address</h3><button class="btn small" type="button" id="rec-close">Close</button></div>
+    <dl class="tx-dl"><dt>Address</dt><dd class="mono" style="word-break:break-all;-webkit-user-select:text;user-select:text">${esc(r.address)}</dd>
+    <dt>Chain</dt><dd>${r.chain === 'change' ? 'change — the app sends what is left over here' : 'receive — this is one to hand out'}${vault._rotating ? ' · ' + fmtIndex(r.index) : ''}</dd>
+    <dt>Holding</dt><dd>${bal ? sats(bal) + ' sats in ' + sats(coins.length) + ' coin' + (coins.length === 1 ? '' : 's') : used ? 'nothing now — it has been used and spent from' : 'nothing yet — this address has never been used'}</dd></dl>
+    <div class="row" style="gap:10px"><button class="btn small" type="button" id="addr-show">Show it on Receive</button><button class="btn small" type="button" id="addr-copy">Copy it</button></div>
+    <div class="muted" style="font-size:13px;margin-top:10px">${used ? 'An address that has been used is public: whoever you gave it to can see everything it has ever held.' : 'Labelling an address before you hand it out is the point: when a deposit arrives you already know who it was from.'}</div>
+    <div id="rec-slot" style="margin-top:16px"></div>`;
+  $('#rec-close').onclick = () => { box.hidden = true; recPoint('tx', recKey(), recHome); };
+  $('#addr-show').onclick = () => { drawAddress(r); show('receive'); };
+  $('#addr-copy').onclick = () => navigator.clipboard.writeText(r.address).then(() => toast('Address copied'));
+  recPoint('addr', k, $('#rec-slot'));
+  box.scrollIntoView({ block: 'nearest' });
+}
 
 // ---------- receive ----------
 async function drawAddress(chosen) {
@@ -1081,9 +1213,12 @@ $('#consolidate').onclick = () => {
 // ---------- addresses ----------
 let addrAhead = 0;
 async function renderAddresses() {
-  const card = $('#addr-card'); if (!vault || !vault._rotating) { card.hidden = true; return; }
+  const card = $('#addr-card'); $('#addr-fixed').hidden = true;
+  // a vault with one fixed address has no list to show, but the screen must still say so rather than sit empty
+  if (!vault || !vault._rotating) { card.hidden = true; $('#addr-fixed').hidden = !vault; return; }
   try {
     const rows = await invoke('vault_addresses', { name: vault.name, ahead: addrAhead });
+    renderAddresses.rows = rows;
     const coins = vault._coins || [], hist = vault._history || [];
     for (const [chain, sel] of [['receive', '#addr-recv tbody'], ['change', '#addr-chg tbody']]) {
       const tb = $(sel); tb.innerHTML = '';
@@ -1092,7 +1227,7 @@ async function renderAddresses() {
         const used = hist.some(x => x.index === r.index);
         const tr = document.createElement('tr'); tr.className = 'rowpick' + (r.current ? ' cur' : '') + (r.future ? ' future' : '');
         tr.innerHTML = `<td class="muted">${r.position}</td><td class="mono" title="${r.address}">${r.address}</td><td>${lblHtml('addr:' + r.address)}</td><td class="r" style="font-variant-numeric:tabular-nums">${bal ? sats(bal) + ' sats' : '<span class="muted">—</span>'}</td><td class="r ${r.current ? 'ok' : 'muted'}">${r.current ? (chain === 'change' ? 'next change' : 'next deposit') : r.future ? 'unused · ahead' : used ? (bal ? 'in use' : 'spent') : 'unused'}</td>`;
-        tr.addEventListener('click', (e) => { if (e.target.closest('.lbl')) return; drawAddress(r); window.scrollTo({ top: 0, behavior: 'smooth' }); });
+        tr.addEventListener('click', (e) => { if (e.target.closest('.lbl')) return; openAddress(r); });
         tb.appendChild(tr);
       }
     }
@@ -1159,7 +1294,7 @@ async function labelsSync() {
     if (st.backed_up) renderActivityLabels();
   } catch (e) { $('#labels-out').textContent = 'Label backup: ' + String(e); }
 }
-function renderActivityLabels() { $$('#activity .lbl').forEach(box => { const key = box.dataset.lkey; const t = box.querySelector('.text'); if (t && t.textContent !== labelOf(key)) t.textContent = labelOf(key); }); }
+function renderActivityLabels() { $$('#activity .lbl, #act-all .lbl, #coin-rows .lbl, #addr-recv .lbl, #addr-chg .lbl').forEach(box => { const key = box.dataset.lkey; const t = box.querySelector('.text'); if (t && t.textContent !== labelOf(key)) t.textContent = labelOf(key); }); }
 $('#labels-sync').onclick = () => { $('#labels-out').textContent = 'syncing labels…'; labelsSync(); };
 $('#labels-export').onclick = async () => { try { $('#labels-out').textContent = 'Saved ' + await invoke('labels_export', { name: vault.name }); } catch (e) { if (!/cancelled/.test(String(e))) $('#labels-out').textContent = String(e); } };
 $('#labels-import').onclick = async () => { try { const n = await invoke('labels_import', { name: vault.name }); labelsSync(); store = await invoke('store_get'); vault = store.vaults.find(x => x.name === vault.name) || vault; $('#labels-out').textContent = `${n} label${n === 1 ? '' : 's'} imported into ${vault.name}.`; } catch (e) { if (!/cancelled/.test(String(e))) $('#labels-out').textContent = String(e); } };
@@ -1432,7 +1567,89 @@ async function readDescriptor(text) {
 }
 
 // ---------- settings ----------
+// Which nav items are shown is chrome, not data: it says nothing about the vault, so it sits with the other
+// per-computer preferences rather than in the sealed store.
+const coinsTab = () => { try { return localStorage.getItem('a2k-coins-tab') !== 'off'; } catch { return true; } };
+function paintCoinsTab() {
+  const on = coinsTab();
+  $('#nav-coins').hidden = !on;
+  $('#coins-switch').classList.toggle('on', on);
+  if (!on && $('#s-coins').classList.contains('on')) show('home');
+}
+function renderVaultSettings() {
+  if (!vault) return;
+  const n = vault.keys.length, single = n === 1;
+  const drill = (vault.notes || {})['vault:drill'] || '';
+  $('#vs-facts').innerHTML = [
+    ['Name', esc(vault.name)],
+    ['Network', vault.network === 'mainnet' ? 'mainnet \u2014 real coins' : esc(vault.network) + ' \u2014 a test network; these coins are worth nothing'],
+    ['Kind', single ? 'a single key' : `${vault.threshold} of ${n} keys \u2014 any ${vault.threshold} of them sign`],
+    ['Keys', vault.keys.map(k => esc(k.name)).join(' \u00b7 ')],
+    ['Made', vault.created ? new Date(vault.created * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' }) : '\u2014'],
+  ].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+  const def = store.settings.custom ? [store.settings.electrum, store.settings.explorer] : [$('#def-electrum').textContent, $('#def-explorer').textContent];
+  $('#vs-servers').innerHTML = [['Electrum server', esc(def[0] || '\u2014')], ['Block explorer', esc(def[1] || '\u2014')], ['Gap limit', sats(store.settings.gap || 20) + ' addresses past the last one used']]
+    .map(([k, v]) => `<dt>${k}</dt><dd class="mono" style="font-size:12.5px">${v}</dd>`).join('');
+  $('#vs-desc').textContent = vault._recovery || vault.descriptor || '';
+  $('#vs-drill-when').innerHTML = drill ? `Last drill: <b>${esc(drill)}</b>` : '<b>This vault has never been drilled.</b> Until it has, "the keys can recover it" is something you believe rather than something you have seen.';
+  $('#vs-drill-when').classList.toggle('warn', !drill);
+  $('#vs-drill').hidden = single;
+  $('#vs-drill-what').textContent = single
+    ? 'This vault has one key and no shares to rebuild from: its recovery is the recovery sheet, which you can save below and should keep somewhere else.'
+    : 'A drill rebuilds this vault from the cards themselves \u2014 each with its own PIN, exactly as a real recovery would \u2014 and checks that what comes back is this vault and derives the same first address. It reads the cards only. Nothing is spent, nothing is written to the chain, and the vault is not changed.';
+}
+// The drill keeps its OWN opened shares: borrowing what the Restore screen already opened would report a success
+// the cards in front of you did not earn.
+let drillFound = [];
+const drillSay = (html) => { const o = $('#vs-drill-out'); o.hidden = false; o.innerHTML = html; };
+function wireDrill() {
+  $$('[data-drill-unlock]').forEach(b => { const inp = $(`[data-drill-pin="${CSS.escape(b.dataset.drillUnlock)}"]`);
+    const go = async () => { const pin = inp.value; if (!pin) return toast('Enter this key\u2019s PIN');
+      if (/^[cbdefghijklnrtuv]{32,}$/.test(pin)) { inp.value = ''; return toast('That was the key typing a one-time code, not a PIN. Nothing was sent to the card.', 8000); }
+      b.disabled = true; b.textContent = 'opening\u2026';
+      try { const opened = await invoke('seal_unlock', { reader: b.dataset.drillUnlock, pin }); inp.value = ''; for (const f of opened) if (!drillFound.some(o => o.entry.id === f.entry.id && o.entry.x === f.entry.x)) drillFound.push(f); }
+      catch (e) { inp.value = ''; b.disabled = false; b.textContent = 'Unlock'; return fail(e); }
+      runDrill(); };
+    b.onclick = go; inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } }); });
+}
+async function runDrill() {
+  if (!vault) return;
+  drillSay('<div class="muted">Reading the keys\u2026</div>');
+  let r; try { r = await invoke('seal_read'); } catch (e) { return drillSay(`<div class="warn">${esc(String(e))}</div>`); }
+  const had = (f) => drillFound.some(o => o.entry.id === f.entry.id && o.entry.x === f.entry.x);
+  for (const f of r.found) if (!f.entry.locked && !had(f)) drillFound.push(f);
+  const stillLocked = r.found.filter(f => f.entry.locked && !had(f));
+  let cands = [];
+  try { cands = await invoke('seal_preview', { found: drillFound.concat(stillLocked) }); } catch (e) { return drillSay(`<div class="warn">${esc(String(e))}</div>`); }
+  const mine = cands.find(c => c.known_as === vault.name) || cands.find(c => c.address && c.address === vault.address) || cands[0];
+  const serials = [...new Set(drillFound.map(f => f.serial))];
+  const pinRows = [...new Set(stillLocked.map(f => f.serial))].map(sn => { const c = cards.find(c => c.serial === sn); return c ? `<div class="keyrow vk"><div class="who"><div class="name">YubiKey ${sn}</div><div class="muted" style="font-size:13px">Its share is locked. The drill is only a drill if the PIN opens it.</div></div><div class="kseal"><input type="password" autocomplete="off" placeholder="key PIN" data-drill-pin="${esc(c.reader)}" aria-label="PIN of key ${sn}"><button class="btn" data-drill-unlock="${esc(c.reader)}">Unlock</button></div></div>` : ''; }).join('');
+  if (!mine || !mine.record) {
+    const need = mine ? mine.need : vault.threshold;
+    drillSay(pinRows + `<div class="muted" style="font-size:13px;margin-top:10px">${r.cards ? sats(r.cards) + ' key' + (r.cards === 1 ? '' : 's') + ' plugged in. ' : 'No key plugged in. '}${drillFound.length ? sats(drillFound.length) + ' share(s) open' : 'Nothing open yet'} \u2014 this vault needs ${need}. ${stillLocked.length ? 'Open the locked one(s) above.' : 'Plug in another key of this vault; what has been opened is remembered until you leave this screen.'}</div>`);
+    return wireDrill();
+  }
+  const rec = mine.record, sameAddr = !!(mine.address && mine.address === vault.address);
+  const sameShape = rec.threshold === vault.threshold && rec.pubkeys.length === vault.keys.length && rec.network === vault.network;
+  const ok = sameAddr && sameShape, untried = vault.keys.length - serials.length;
+  drillSay(`<div class="${ok ? 'ok' : 'warn'}" style="font-weight:600;margin-bottom:8px">${ok ? 'Recovered. The cards rebuilt this vault.' : 'It rebuilt something, but not this vault.'}</div>
+    <dl class="tx-dl"><dt>Rebuilt from</dt><dd>${sats(mine.need)} key${mine.need === 1 ? '' : 's'}: ${serials.map(x => 'serial ' + x).join(' \u00b7 ')}</dd>
+    <dt>What came back</dt><dd>${esc(rec.name)} \u00b7 ${rec.threshold} of ${rec.pubkeys.length} \u00b7 ${esc(rec.network)}</dd>
+    <dt>First address</dt><dd class="mono" style="font-size:12px;word-break:break-all">${esc(mine.address || '\u2014')}</dd>
+    <dt>Matches this vault</dt><dd class="${ok ? 'ok' : 'warn'}">${ok ? 'yes \u2014 same shape, same network, same first address' : (sameShape ? 'no \u2014 the address it derives is not this vault\u2019s' : 'no \u2014 a different shape or network')}</dd></dl>
+    ${untried > 0 ? `<div class="muted" style="font-size:13px">${sats(untried)} of this vault\u2019s ${sats(vault.keys.length)} keys ${untried === 1 ? 'was' : 'were'} not tried. This drill proves the ${sats(serials.length)} used can recover it; it says nothing about the ${untried === 1 ? 'other' : 'others'}. Run it again with a different pair to prove ${untried === 1 ? 'that one' : 'those'} too.</div>` : '<div class="muted" style="font-size:13px">Every key of this vault was read.</div>'}`);
+  if (ok) { const when = new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' }) + ` \u00b7 keys ${serials.join(', ')}`;
+    const html = $('#vs-drill-out').innerHTML;
+    try { store = await invoke('note_set', { name: vault.name, key: 'vault:drill', note: when }); vault = store.vaults.find(v => v.name === vault.name) || vault; renderVaultSettings(); drillSay(html); } catch {} }
+}
+$('#vs-drill').onclick = () => { drillFound = []; runDrill(); };
+$('#vs-copy-desc').onclick = () => navigator.clipboard.writeText($('#vs-desc').textContent).then(() => toast('Recovery line copied'));
+$('#vs-pdf').onclick = () => invoke('vault_pdf', { name: vault.name }).then((p) => toast('Saved to ' + p)).catch(fail);
+$('#vs-rename').onclick = () => { show('home'); setTimeout(() => $('#title-edit').click(), 80); };
+askTwice($('#vs-forget'), 'Forget this vault on this computer? The coins stay on the chain; two sealed keys, or the recovery line and two keys, bring it back.', 'Yes, forget it here', async () => { store = await invoke('vault_forget', { name: vault.name }); vault = null; boot(); });
+$('#coins-switch').onclick = () => { try { localStorage.setItem('a2k-coins-tab', coinsTab() ? 'off' : 'on'); } catch {} paintCoinsTab(); };
 function renderSettings() {
+  paintCoinsTab();
   renderLock(); renderPlaces();
   $$('#net-pick .opt').forEach(o => o.classList.toggle('on', o.dataset.net === store.settings.network));
   const def = store.settings.network === 'mainnet' ? ['ssl://electrum.mineracks.com:50002', 'https://mempool.mineracks.com'] : ['tcp://100.94.4.10:50001', 'https://signet.mineracks.com'];
