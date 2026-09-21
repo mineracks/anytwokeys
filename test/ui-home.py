@@ -164,6 +164,35 @@ with sync_playwright() as p:
     pg.evaluate("localStorage.setItem('a2k-camera', 'gone-since'); window.__camAsked = []"); pg.evaluate("shotClose()"); pg.click("#tx-camera"); pg.wait_for_timeout(400)
     check("a camera that has been unplugged since is not asked for", "gone-since" not in pg.evaluate("JSON.stringify(__camAsked)"), pg.evaluate("JSON.stringify(__camAsked)"))
     pg.evaluate("localStorage.removeItem('a2k-camera')")
+    KINDS = {"FaceTime HD Camera": "mac", "Piers\u2019 iPhone Camera": "iphone", "Desk View Camera": "desk",
+             "Studio Display Camera": "display", "Piers\u2019 iPad Camera": "ipad", "OBS Virtual Camera": "virtual",
+             "Logitech BRIO": "webcam", "Elgato Facecam": "webcam", "USB Camera": "webcam",
+             "IPEVO VZ-X": "doc", "IPEVO DO-CAM": "doc", "AVerVision U50": "doc",
+             "IPEVO VZ-R HDMI/USB Document Camera": "doc",   # HDMI in the name of a document camera, not a capture stick
+             "Elgato Cam Link 4K": "capture",
+             "Canon EOS Webcam Utility": "slr",              # the word webcam in the name of something that is not one
+             "Sony ILCE-7M3": "slr", "Logitech Rally Camera": "ptz", "Jabra PanaCast 50": "ptz",
+             "GoPro HERO12 Black": "action",
+             "Insta360 Link": "webcam"}                      # the one Insta360 that sits on a desk
+    got = {n: pg.evaluate("(n) => camKind(n)", n) for n in KINDS}
+    check("the kind is read from the name macOS gives the device, and the awkward names land where they belong",
+          got == KINDS, " | ".join("%s: %s not %s" % (n, got[n], k) for n, k in KINDS.items() if got[n] != k))
+    check("every kind has a sketch of its own, and no two are the same drawing",
+          len({pg.evaluate("(k) => camArt(k)", k) for k in set(KINDS.values())}) == len(set(KINDS.values())))
+    check("a name keeps what makes it itself, losing only a trailing 'Camera'",
+          [pg.evaluate("(n) => camName(n, 0)", n) for n in ["FaceTime HD Camera", "IPEVO VZ-X Document Camera", "IPEVO DO-CAM"]]
+          == ["FaceTime HD", "IPEVO VZ-X", "IPEVO DO-CAM"])
+    check("the full name macOS gave the device is there to be read on hover, so a wrong sketch can be reported",
+          pg.locator("#shot-pick .camopt").nth(0).get_attribute("title") == "MacBook Pro Camera")
+    # every sketch side by side, for a person to check against the real things on their desk. It goes in a throwaway
+    # element of its own: clobbering the live chooser left the modal in a state the checks below could not use.
+    pg.evaluate("""(kinds) => { const d = document.createElement('div'); d.id = 'kind-sheet'; d.className = 'camrow';
+        d.style.cssText = 'position:fixed;left:0;top:0;z-index:9999;background:var(--ground);padding:14px;width:660px';
+        d.innerHTML = kinds.map(k => `<button type="button" class="camopt" data-kind="${k}" aria-checked="false">${camArt(k)}<span>${k}</span></button>`).join('');
+        document.body.appendChild(d); }""",
+        ["mac", "iphone", "desk", "ipad", "display", "webcam", "doc", "ptz", "slr", "action", "capture", "virtual"])
+    pg.locator("#kind-sheet").screenshot(path=str(out / "camera-kinds.png"))
+    pg.evaluate("document.querySelector('#kind-sheet').remove()")
     pg.click("#shot-take"); pg.wait_for_timeout(200)
     check("the first press holds the frame to be looked at; nothing is kept yet", pg.locator("#shot-still").is_visible() and "Keep it" in pg.inner_text("#shot-take") and pg.locator("#shot-again").is_visible() and tiles_.count() == before)
     pg.locator("#shot-modal .box").screenshot(path=str(out / "shot.png"))
@@ -197,6 +226,12 @@ with sync_playwright() as p:
     lb = pg.locator("#tx-place-list li[role=option]").nth(1).bounding_box(); check("the list is on top of what is below it, not cut off by the card", pg.evaluate("(p) => { const el = document.elementFromPoint(p.x, p.y); return !!(el && el.closest('#tx-place-list')); }", dict(x=lb["x"] + 20, y=lb["y"] + lb["height"] / 2)))
     pg.keyboard.press("ArrowDown"); pg.keyboard.press("ArrowDown"); pg.keyboard.press("ArrowUp"); pg.keyboard.press("Enter"); pg.wait_for_timeout(400)
     check("arrow keys and Enter choose an answer, which keeps its position so the record gets a map", pg.evaluate("__ctxSet.lat") == -27.4615 and "445 Upper Edward Street, Spring Hill, Brisbane, Queensland 4000, Australia" == pg.evaluate("__ctxSet.place") and "chose it from the search" in pg.inner_text("#tx-ctx-dl") and "· -27.46" in pg.inner_text("#tx-ctx-dl") and pg.input_value("#tx-place").endswith("Queensland 4000, Australia") and pg.locator("#tx-map").is_visible() and not pg.locator("#tx-place-list").is_visible(), pg.evaluate("JSON.stringify(__ctxSet)"))
+    pg.click("#tx-place-form button[type=submit]"); pg.wait_for_timeout(300)
+    check("pressing Save on the place you chose KEEPS the position it came with, and the map with it",
+          pg.evaluate("__ctxSet.lat") == -27.4615 and "chose it from the search" in pg.inner_text("#tx-ctx-dl") and pg.locator("#tx-map img").count() == 1 and pg.locator("#ctx-find").count() == 0,
+          pg.inner_text("#tx-ctx-dl")[:120])
+    pg.fill("#tx-place", "the office upstairs"); pg.click("#tx-place-form button[type=submit]"); pg.wait_for_timeout(300)
+    check("but words you have actually changed are your own, and give the position up", pg.evaluate("__ctxSet.lat") is None and "as you named it" in pg.inner_text("#tx-ctx-dl"))
     pg.evaluate("document.querySelector('#tx-map').dataset.for = ''; window.__asked = []; V.more['tx:' + txView.txid] = { ctx: { t: 9, how: 'noted', named: true, place: 'The Astor Centre, 445 Upper Edward Street', device: { name: 'Test Mac' } } }; vault = V; renderCtx()"); pg.wait_for_timeout(300)
     check("a place you typed has no position, so it offers to look it up rather than show an empty corner", pg.locator("#ctx-find").is_visible() and "No position for this place" in pg.inner_text("#tx-map"))
     pg.click("#ctx-find"); pg.wait_for_timeout(600)

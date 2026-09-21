@@ -407,7 +407,7 @@ async function paintMap(ctx) {
 const ctxSave = async (args) => { const name = vault.name; try { store = await invoke('ctx_set', { name, txid: txView.txid, remove: false, place: null, lat: null, lon: null, ...args }); vault = store.vaults.find(v => v.name === name) || vault; renderCtx(); } catch (e) { fail(e); } };
 // Search as you type — but not as you TYPE: the question goes (from Rust, to our own server only) once the typing has
 // stopped for a moment and there are four characters to ask about. Choosing an answer keeps its position too, so the
-// record gets a map; pressing Save keeps exactly the words in the box and no position.
+// record gets a map; pressing Save on words of your own keeps exactly those words and no position.
 const placeUI = { seq: 0, hits: [], at: -1, t: null };
 function placeList(hits, note) {
   const ul = $('#tx-place-list'); placeUI.hits = hits; placeUI.at = -1;
@@ -429,7 +429,17 @@ $('#tx-place').addEventListener('keydown', (e) => { const n = placeUI.hits.lengt
   else if (e.key === 'Enter' && placeUI.at >= 0) { e.preventDefault(); placeChoose(placeUI.hits[placeUI.at]); } else if (e.key === 'Escape') { e.stopPropagation(); placeList([]); } });
 $('#tx-place-list').addEventListener('mousedown', (e) => { const li = e.target.closest('li[role=option]'); if (li) { e.preventDefault(); placeChoose(placeUI.hits[+li.dataset.i]); } });
 $('#tx-place').addEventListener('blur', () => setTimeout(() => placeList([]), 120));
-$('#tx-place-form').onsubmit = (e) => { e.preventDefault(); clearTimeout(placeUI.t); placeUI.seq++; placeList([]); const p = $('#tx-place').value.trim(); if (p) ctxSave({ place: p }); };
+// Save, on words that are already the place on this record, must KEEP the position those words came with: choosing an
+// answer from the search has saved it already, and Save used to re-save the words alone — which drops the coordinates
+// by design (below), so the map vanished and the screen fell back to "as you named it". Only words that have actually
+// been changed are the person's own, and only those give up the position.
+$('#tx-place-form').onsubmit = (e) => {
+  e.preventDefault(); clearTimeout(placeUI.t); placeUI.seq++; placeList([]);
+  const p = $('#tx-place').value.trim(); if (!p) return;
+  const ctx = (((vault.more || {})['tx:' + txView.txid]) || {}).ctx;
+  const same = ctx && !ctx.removed && ctx.geo && ctx.place === [...p].slice(0, 160).join('');   // Rust keeps 160 characters
+  ctxSave(same ? { place: p, lat: ctx.geo.lat, lon: ctx.geo.lon } : { place: p });
+};
 askTwice($('#tx-ctx-remove'), 'The place comes off this record, here and in your backup. It cannot be worked out again later.', 'Remove it', () => ctxSave({ remove: true }));
 
 // ---------- App settings › Places ----------
@@ -449,19 +459,32 @@ for (const [id, key] of [['#loc-on', 'location'], ['#loc-exact', 'locationExact'
 // ---------- a picture from any camera the computer can see (built in, plugged in, or a phone nearby) ----------
 const shot = { stream: null, taken: false };
 // What KIND of camera this is, from the name macOS gives it — so the person picks a picture of the thing on their desk
-// rather than reading a list. Order matters: a Desk View camera is also an iPhone.
+// rather than reading a list. ORDER MATTERS, and the traps are real ones, not hypothetical: a Desk View camera is also
+// an iPhone; IPEVO's VZ-R has HDMI in its name but is a document camera, not a capture stick; Canon's bridge has the
+// word webcam in its name but is an SLR; and the one Insta360 that sits on a desk is a webcam while the rest of that
+// brand are action cameras. Each of these is checked before the rule that would otherwise swallow it.
+const CAM_KINDS = [
+  ['desk',    /desk ?view/],
+  ['display', /display/],
+  ['ipad',    /ipad/],
+  ['iphone',  /iphone|continuity/],
+  ['mac',     /facetime|macbook|built-?in|imac/],
+  ['doc',     /ipevo|vz-?[xr]\b|ziggi|do-?cam|point 2 view|avervision|visuali[sz]er|document|\belmo\b|okiocam|hue hd/],
+  ['ptz',     /rally|meetup|conferencecam|panacast|meeting owl|ptzoptics|poly studio|huddly|cam\d\d\d|group camera/],
+  ['slr',     /\beos\b|imaging edge|\bilce|lumix|nikon|fujifilm|\bx webcam\b|mirrorless|\bdslr\b/],
+  ['webcam',  /insta360 link/],
+  ['action',  /gopro|insta360|osmo action|hero ?\d/],
+  ['capture', /cam ?link|capture|hdmi|av\.io|magewell|ninja/],
+  ['virtual', /virtual|\bobs\b|camo|snap camera/],
+];
 function camKind(label) {
   const l = (label || '').toLowerCase();
-  if (l.includes('desk view')) return 'desk';
-  if (l.includes('studio display') || l.includes('display')) return 'display';
-  if (l.includes('ipad')) return 'ipad';
-  if (l.includes('iphone') || l.includes('continuity')) return 'iphone';
-  if (l.includes('facetime') || l.includes('macbook') || l.includes('built-in') || l.includes('imac')) return 'mac';
-  if (l.includes('virtual') || l.includes('obs') || l.includes('camo') || l.includes('snap')) return 'virtual';
-  return 'webcam';
+  for (const [kind, re] of CAM_KINDS) if (re.test(l)) return kind;
+  return 'webcam';   // a plain USB camera with a no-name label is far likelier to be a webcam than anything else
 }
-// its name without the word every one of them ends in
-const camName = (label, i) => ((label || '').replace(/\s*camera$/i, '').trim()) || ('Camera ' + (i + 1));
+// its name without the words nearly every one of them ends in — but only as whole trailing words, so IPEVO's DO-CAM
+// keeps its name
+const camName = (label, i) => ((label || '').replace(/\s+(usb\s+)?(document\s+|video\s+|web\s*)?camera$/i, '').trim()) || ('Camera ' + (i + 1));
 /// Draw the chooser into `row` and hide it when there is nothing to choose between. `pick(deviceId)` restarts whatever
 /// is using the camera. Names arrive only after the person has allowed one, so this is called once a stream is up.
 async function camChooser(row, stream, pick) {
@@ -472,7 +495,7 @@ async function camChooser(row, stream, pick) {
   const live = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
   const using = live && live.getSettings ? live.getSettings().deviceId : '';
   row.innerHTML = cams.map((d, i) => { const k = camKind(d.label), on = d.deviceId === using;
-    return `<button type="button" class="camopt" role="radio" data-id="${esc(d.deviceId)}" data-kind="${k}" aria-checked="${on ? 'true' : 'false'}" tabindex="${on ? '0' : '-1'}">${camArt(k)}<span>${esc(camName(d.label, i))}</span></button>`; }).join('');
+    return `<button type="button" class="camopt" role="radio" data-id="${esc(d.deviceId)}" data-kind="${k}" title="${esc(d.label || '')}" aria-checked="${on ? 'true' : 'false'}" tabindex="${on ? '0' : '-1'}">${camArt(k)}<span>${esc(camName(d.label, i))}</span></button>`; }).join('');
   $$('.camopt', row).forEach(b => { b.onclick = () => { try { localStorage.setItem('a2k-camera', b.dataset.id); } catch {} pick(b.dataset.id); }; });
   // the row is drawn again on every switch, so the button that is now chosen takes the focus the old one had
   if (had) { const now = $('.camopt[aria-checked="true"]', row); if (now) now.focus(); }
@@ -515,6 +538,16 @@ function camArt(kind) {
       return `<svg viewBox="0 0 72 56" role="img" aria-hidden="true"><rect class="c-body" x="20" y="4" width="32" height="44" rx="4"/>${lens(36, 11, 3)}<path class="c-line" d="M30 42h12"/></svg>`;
     case 'virtual':  // not a real camera: a screen with a lens drawn ON it
       return `<svg viewBox="0 0 72 56" role="img" aria-hidden="true"><rect class="c-body" x="8" y="8" width="56" height="34" rx="4"/>${lens(36, 25, 7)}<path class="c-beam" d="M14 14l44 24"/></svg>`;
+    case 'doc':      // a document camera: a weighted base, an arm over the desk, the head looking DOWN at a page
+      return `<svg viewBox="0 0 72 56" role="img" aria-hidden="true"><path class="c-line" d="M4 50h64"/><path class="c-body" d="M30 43h26l5 7H35z"/><rect class="c-body" x="6" y="44" width="20" height="5" rx="2"/><path class="c-line" d="M16 44V12a4 4 0 0 1 4-4h16a4 4 0 0 1 4 4v4"/><g transform="rotate(14 42 20)"><rect class="c-body" x="33" y="13" width="18" height="11" rx="3"/></g>${lens(43, 26, 3.6)}<path class="c-beam" d="M39 31l-5 10M48 31l5 10"/></svg>`;
+    case 'ptz':      // a conference bar: one lens in the middle, microphones either side, on a short stand
+      return `<svg viewBox="0 0 72 56" role="img" aria-hidden="true"><rect class="c-body" x="6" y="14" width="60" height="20" rx="10"/>${lens(36, 24, 6)}<circle class="c-fill" cx="17" cy="24" r="1.8"/><circle class="c-fill" cx="55" cy="24" r="1.8"/><path class="c-line" d="M31 34v8h10v-8M24 46h24"/><path class="c-line" d="M6 50h60"/></svg>`;
+    case 'slr':      // a camera body with a proper lens on the front, and the hump over the viewfinder
+      return `<svg viewBox="0 0 72 56" role="img" aria-hidden="true"><rect class="c-body" x="8" y="14" width="46" height="28" rx="4"/><path class="c-body" d="M24 14v-5h14v5"/><circle class="c-body" cx="31" cy="28" r="11"/>${lens(31, 28, 7)}<rect class="c-fill" x="44" y="19" width="6" height="3" rx="1.5"/><path class="c-line" d="M6 48h60"/></svg>`;
+    case 'action':   // a small square body, all lens, on its mount
+      return `<svg viewBox="0 0 72 56" role="img" aria-hidden="true"><rect class="c-body" x="18" y="12" width="36" height="28" rx="5"/><circle class="c-body" cx="32" cy="26" r="9"/>${lens(32, 26, 5.5)}<rect class="c-fill" x="44" y="18" width="5" height="5" rx="1"/><path class="c-line" d="M28 40v5M44 40v5"/><path class="c-line" d="M6 48h60"/></svg>`;
+    case 'capture':  // not a camera at all: a stick that takes in whatever is plugged into it
+      return `<svg viewBox="0 0 72 56" role="img" aria-hidden="true"><rect class="c-body" x="22" y="18" width="30" height="16" rx="3"/><path class="c-body" d="M10 21h12v10H10z"/><path class="c-line" d="M52 26h10"/><rect class="c-fill" x="28" y="24" width="5" height="4" rx="1.5"/><path class="c-beam" d="M16 14v-6M16 44v-6"/><path class="c-line" d="M6 50h60"/></svg>`;
     default:         // a webcam on a clip
       return `<svg viewBox="0 0 72 56" role="img" aria-hidden="true"><rect class="c-body" x="18" y="8" width="36" height="24" rx="11"/>${lens(36, 20, 6)}<path class="c-body" d="M24 32h24l4 10H20z"/><path class="c-line" d="M10 46h52"/></svg>`;
   }
