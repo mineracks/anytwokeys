@@ -120,6 +120,10 @@ pub struct Store {
     /// when this computer FIRST saw each key, by public key. A YubiKey carries no manufacture date, so this is the
     /// only age this app can honestly claim: how long it has known the key, which is a floor and never its real age.
     #[serde(default)] pub key_first: std::collections::HashMap<String, u64>,
+    /// the firmware each key reported, by public key. Yubico does not allow firmware to be changed on a key that
+    /// already exists, so a version once seen stays true — which is what makes it safe to answer for a key that is
+    /// not plugged in, and it is the only way an off-site key can be checked against an advisory at all.
+    #[serde(default)] pub key_fw: std::collections::HashMap<String, String>,
 }
 
 pub fn network_of(s: &str) -> Network {

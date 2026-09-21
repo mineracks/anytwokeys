@@ -158,6 +158,43 @@ fn connect(ctx: &Context, reader: &str) -> Result<Card, CardError> {
     Ok(card)
 }
 
+/// What a plugged-in Yubico device turned out to be, judged by what it ANSWERED rather than by its name.
+/// A reader with "yubi" in its name is only a Yubico device; whether it can hold a key for this app is decided by
+/// whether it answers the OpenPGP applet. A YubiKey Bio, a FIDO-only key or a PIV-only one is plugged in and
+/// working perfectly well — it is just not a key this app can use, and must never be mistaken for a key that is
+/// failing.
+pub enum Probe { Key(Card), Other(String) }
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OtherDevice { pub reader: String, pub why: String }
+
+fn probe(ctx: &Context, reader: &str) -> Result<Probe, CardError> {
+    let cname = std::ffi::CString::new(reader).map_err(|_| CardError::Parse)?;
+    let card = match ctx.connect(&cname, ShareMode::Shared, Protocols::ANY) {
+        Ok(c) => c,
+        // listed a moment ago and gone now, or a reader with nothing a smart-card service can talk to: that is not
+        // a key failing, it is not a key. (A YubiKey Bio showed up exactly this way on 2026-09-21.)
+        Err(pcsc::Error::UnknownReader) | Err(pcsc::Error::NoSmartcard) | Err(pcsc::Error::RemovedCard)
+        | Err(pcsc::Error::ReaderUnavailable) | Err(pcsc::Error::UnpoweredCard) | Err(pcsc::Error::UnresponsiveCard) =>
+            return Ok(Probe::Other("the computer can see it, but it does not answer as a smart card".into())),
+        Err(e) => return Err(e.into()),
+    };
+    match select(&card) {
+        Ok(()) => Ok(Probe::Key(card)),
+        Err(_) => Ok(Probe::Other("it has no OpenPGP applet, which is what Any Two Keys signs with".into())),
+    }
+}
+
+/// Every Yubico device plugged in that is NOT a key this app can use, and why.
+pub fn others() -> Vec<OtherDevice> {
+    let Ok(ctx) = Context::establish(Scope::User) else { return vec![] };
+    let Ok(names) = readers(&ctx) else { return vec![] };
+    names.into_iter().filter_map(|reader| match probe(&ctx, &reader) {
+        Ok(Probe::Other(why)) => Some(OtherDevice { reader, why }),
+        _ => None,
+    }).collect()
+}
+
 fn readers(ctx: &Context) -> Result<Vec<String>, CardError> {
     let mut buf = vec![0u8; 2048];
     let names = ctx.list_readers(&mut buf)?;
@@ -180,7 +217,7 @@ pub fn list() -> Result<Vec<CardInfo>, CardError> {
     let ctx = Context::establish(Scope::User)?;
     let mut out = Vec::new();
     for reader in readers(&ctx)? {
-        let card = match connect(&ctx, &reader) { Ok(c) => c, Err(_) => continue };
+        let card = match probe(&ctx, &reader) { Ok(Probe::Key(c)) => c, _ => continue };
         let ad = app_data(&card)?;
         let aid = find(&ad, 0x4F).ok_or(CardError::Parse)?;
         if aid.len() < 14 {
@@ -265,7 +302,10 @@ pub fn read_sealed() -> Result<Vec<Sealed>, CardError> {
     let ctx = Context::establish(Scope::User)?;
     let mut out = Vec::new();
     for reader in readers(&ctx)? {
-        let card = connect(&ctx, &reader)?;   // a key that is plugged in but unreadable is an error, not an absent key
+        // A KEY that is plugged in but unreadable is an error, not an absent key — so a failing vault key is never
+        // quietly treated as missing. But a device that is not an OpenPGP key at all (a Bio, a FIDO-only key) is not
+        // a key failing: it is skipped, and reported as plugged in and unusable by `others()`.
+        let card = match probe(&ctx, &reader)? { Probe::Key(c) => c, Probe::Other(_) => continue };
         let ad = app_data(&card)?;
         // extended capabilities (C0): bytes 4..6 = the longest certificate the card will store
         let room = find(&ad, 0x73).and_then(|d| find(d, 0xC0)).filter(|c| c.len() >= 6).map(|c| ((c[4] as usize) << 8) | c[5] as usize).unwrap_or(0);

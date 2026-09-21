@@ -3,6 +3,7 @@ const { invoke } = window.__TAURI__.core;
 const $ = (s) => document.querySelector(s);
 const $$ = (s, root) => Array.from((root || document).querySelectorAll(s));
 const sats = (n) => Number(n).toLocaleString('en-AU');
+let otherDevices = [];
 let store = null, vault = null, cards = [], cardsErr = '', fees = null, feeLevel = 'medium', built = null, camStream = null, camTimer = null;
 let setup = { k: 2, n: 3, keys: [], network: null };
 
@@ -245,7 +246,17 @@ const basisWords = (q, ccy) => `1 BTC = ${money(q.price, ccy)} · ${q.basis} · 
 // ---------- cards ----------
 async function pollCards() {
   try { cards = await invoke('cards_list'); cardsErr = ''; } catch (e) { cards = []; cardsErr = String(e); }
-  for (const c of cards) if (c.pubkey && c.form && packedForm(c.pubkey) !== ((c.form & 0x0F) | 0x40 | (c.nfc ? 0x80 : 0))) { try { store = await invoke('key_form_seen', { pubkey: c.pubkey, form: c.form, nfc: !!c.nfc }); renderSign.tiles = null; if ($('#s-keys').classList.contains('on') && !keysBusy()) renderKeys(); } catch {} }
+  try { otherDevices = await invoke('cards_other'); } catch { otherDevices = []; }
+  // A key's shape, and its firmware, are remembered the first time they are seen. Firmware in particular can
+  // never change on an existing YubiKey, so a version once seen answers for that key even when it is not plugged in.
+  for (const c of cards) {
+    const formNew = c.form && packedForm(c.pubkey) !== ((c.form & 0x0F) | 0x40 | (c.nfc ? 0x80 : 0));
+    const fwNew = c.firmware && ((store.key_fw || {})[c.pubkey] !== c.firmware);
+    if (!c.pubkey || !(formNew || fwNew)) continue;
+    try { store = await invoke('key_form_seen', { pubkey: c.pubkey, form: c.form || 0, nfc: !!c.nfc, firmware: c.firmware || null }); renderSign.tiles = null; if ($('#s-keys').classList.contains('on') && !keysBusy()) renderKeys(); } catch {}
+  }
+  const osig = otherDevices.map(d => d.reader).join('|');
+  if (osig !== pollCards.osig) { pollCards.osig = osig; if ($('#s-keys').classList.contains('on')) { renderKeysNow(); paintKeyLife(); } }
   if ($('#s-setup').classList.contains('on')) renderSetup();
   if ($('#s-settings').classList.contains('on')) { const sig = cards.map(c => c.reader + c.pubkey).join('|'); if (sig !== renderLock.sig) { renderLock.sig = sig; renderLock(); } }
   if ($('#s-keys').classList.contains('on')) { const sig = cards.map(c => c.serial + ':' + c.pubkey).sort().join(','); if (sig !== pollCards.sig) { if (!keysBusy()) { pollCards.sig = sig; renderKeys(); } } else renderKeysNow(); }
@@ -1359,9 +1370,12 @@ function vaultKeyRow(k, i) {
   const card = cards.find(c => c.pubkey === k.pubkey), pf = packedForm(k.pubkey);
   const art = card ? keyArt(card.form || 3, !!card.nfc, 52) : pf ? keyArt(pf, !!(pf & 0x80), 52) : '<svg width="24" height="24"><use href="#ring"/></svg>';
   const model = card ? modelName(card.form, card.nfc) : pf ? modelName(pf, !!(pf & 0x80), !!(pf & 0x40)) : 'YubiKey';
-  const facts = [model, k.serial ? 'serial ' + k.serial : 'serial not seen on this computer yet'].concat(card ? [card.firmware ? 'firmware ' + card.firmware : '', 'touch ' + String(card.touch).toLowerCase()].filter(Boolean) : []);
+  const fw = card && card.firmware ? card.firmware : ((store && store.key_fw) || {})[k.pubkey] || '';
+  const facts = [model, k.serial ? 'serial ' + k.serial : 'serial not seen on this computer yet']
+    .concat(fw ? ['firmware ' + fw + (card ? '' : ' (as it said when last plugged in)')] : [])
+    .concat(card ? ['touch ' + String(card.touch).toLowerCase()] : []);
   const seen = firstSeenWords(k.pubkey); if (seen) facts.push(seen);
-  const adv = keyAdvisories(card);
+  const adv = fw ? keyAdvisories({ firmware: fw }) : [];
   return `<div class="keyrow vk"><span class="keyart">${art}</span><div class="who"><div class="name"><span class="name-text">${esc(k.name)}</span><button class="pencil" data-edit-idx="${i}" title="Rename this key">${PENCIL}</button></div><div class="muted" style="font-size:13px">${esc(facts.join(' · '))} · <span class="mono">${k.pubkey.slice(0, 12)}…</span></div>${adv.map(a => `<div class="warn advline" style="font-size:13px;margin-top:6px"><b>${esc(a.id)}: ${esc(a.title)}.</b> ${esc(a.says)} ${esc(a.here)}</div>`).join('')}</div>`
     + `<div class="kright"><div class="state ${card ? 'here' : ''}"><i></i>${card ? 'plugged in' : 'not plugged in'}</div><div class="kseal" data-seal-slot="${i}"></div></div></div>`;
 }
@@ -1375,16 +1389,21 @@ function renderKeys(force) {
 function keyRow(name, sub, pub, state, idx) { const pen = idx === undefined ? '' : `<button class="pencil" data-edit-idx="${idx}" title="Rename this key"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>`; const pf = packedForm(pub); return `<div class="keyrow"><span class="keyart">${pf ? keyArt(pf, !!(pf & 0x80), 44) : '<svg width="22" height="22"><use href="#ring"/></svg>'}</span><div class="who"><div class="name"><span class="name-text">${name}</span>${pen}</div><div class="muted" style="font-size:13px">${pf ? modelName(pf, !!(pf & 0x80), !!(pf & 0x40)) + ' · ' : ''}${sub} · <span class="mono">${pub.slice(0, 12)}…</span></div></div><div class="state ${state}"><i></i>${{ ok: 'enrolled', off: 'not plugged in', here: 'plugged in' }[state]}</div></div>`; }
 // Said once, plainly, rather than left as a gap the person has to wonder about.
 function paintKeyLife() {
-  const plugged = cards.length, checked = cards.filter(c => c.firmware).length;
+  const plugged = cards.length, keys = vault ? vault.keys : [];
+  const fwOf = (pk) => { const c = cards.find(c => c.pubkey === pk); return (c && c.firmware) || ((store && store.key_fw) || {})[pk] || ''; };
+  const known = keys.filter(k => fwOf(k.pubkey)), hit = known.filter(k => keyAdvisories({ firmware: fwOf(k.pubkey) }).length);
   $('#key-life').innerHTML = `<div class="label">Age, end of life and warranty</div>
     <div class="muted" style="font-size:13px">A YubiKey tells this computer its serial, its firmware version and its shape. It does <b>not</b> carry the day it was made, an end-of-life date, or anything about a warranty \u2014 so none is shown here, because a guessed one would be worse than nothing.</div>
     <div class="muted" style="font-size:13px;margin-top:8px">Yubico retires a whole <b>product line</b>, not your particular key, and sets no date in advance: their policy is six months\u2019 notice before a product stops being sold, and support for a year after that. A warranty runs from a purchase this app knows nothing about. The nearest thing to an age it can honestly give is when this computer first saw each key, which is a floor and never the real age.</div>
     <div class="muted" style="font-size:13px;margin-top:8px">The firmware each key reports <b>is</b> checked, here on this computer, against advisories known when this app was built (${esc(ADVISORIES_AS_OF)}). Nothing is asked of anyone: a question like \u201cis serial 12345678 still supported?\u201d would hand over a list of exactly which keys guard this vault.</div>
-    <div class="muted" style="font-size:13px;margin-top:8px">${plugged ? `${sats(checked)} of ${sats(plugged)} plugged-in key${plugged === 1 ? '' : 's'} answered with a firmware version. ${cards.some(c => keyAdvisories(c).length) ? 'One or more has something against it \u2014 see its row above.' : 'Nothing known stands against ' + (checked === 1 ? 'it' : 'them') + '.'}` : 'No key is plugged in just now, so only what was remembered is shown.'}</div>`;
+    <div class="${hit.length ? 'warn' : 'muted'}" style="font-size:13px;margin-top:8px">${!keys.length ? '' : `The firmware of ${sats(known.length)} of this vault\u2019s ${sats(keys.length)} keys is known${known.length < keys.length ? ' \u2014 plug in the others once each and it is remembered, since it can never change' : ''}. ${hit.length === keys.length && keys.length ? `<b>All ${sats(keys.length)} are on firmware an advisory covers.</b> A vault of several keys usually means an attacker must beat more than one \u2014 but here every one of them has the same weakness, so that comfort is gone.` : hit.length ? `${sats(hit.length)} ${hit.length === 1 ? 'has' : 'have'} something against ${hit.length === 1 ? 'it' : 'them'} \u2014 see ${hit.length === 1 ? 'its row' : 'their rows'} above.` : known.length ? 'Nothing known stands against them.' : ''}`}</div>`;
 }
 function renderKeysNow() {
   // keys of this vault say "plugged in" on their own rows; this line is only for what ELSE is in the ports
   const others = cards.filter(c => !vault || !vault.keys.some(k => k.pubkey === c.pubkey));
+  const devName = (r) => { const m = r.match(/YubiKey[^,()]*/i); const n = (m ? m[0] : r).replace(/\s+(OTP|FIDO|CCID|U2F)(\+\w+)*.*$/i, '').trim(); return /bio/i.test(r) ? 'YubiKey Bio' : (n || 'A Yubico device'); };
+  const unusable = otherDevices.map(d => `<div class="keyrow"><svg width="22" height="22"><use href="#ring"/></svg><div class="who"><div class="name">${esc(devName(d.reader))} <span class="muted" style="font-weight:400">\u00b7 plugged in, cannot be used here</span></div><div class="muted" style="font-size:13px">${esc(d.why.charAt(0).toUpperCase() + d.why.slice(1))}.${/bio/i.test(d.reader) ? ' A YubiKey Bio signs in to websites with a fingerprint; it does not hold the kind of key a vault needs. It is perfectly fine \u2014 just for something else.' : ''} It is not one of this vault\u2019s keys and nothing was done to it.</div></div><div class="state"><i></i>not usable</div></div>`).join('');
+  $('#keys-other').innerHTML = unusable; $('#keys-other').hidden = !unusable;
   const text = others.length ? 'Also plugged in: ' + others.map(c => `${modelName(c.form, c.nfc)} · serial ${c.serial}${c.pubkey ? '' : ' · no signing key yet'}`).join('; ') + '. Not one of this vault’s keys.'
     : cardsErr && !/no YubiKey found/i.test(cardsErr) ? 'Card reader problem: ' + cardsErr : '';
   $('#keys-now').textContent = text; $('#keys-now').hidden = !text;

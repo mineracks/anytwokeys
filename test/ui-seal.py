@@ -11,10 +11,12 @@ vault = dict(name="family vault", network="signet", threshold=2, keys=[dict(name
 MOCK = """
 window.__calls = [];
 window.__state = { cards: %(cards)s, sealed: [], found: [] };
-const store = () => ({ vaults: [%(vault)s], settings: { network: 'signet', custom: false, electrum: '', explorer: '', gap: 20 }, seen: {} });
+const store = () => ({ vaults: [%(vault)s], settings: { network: 'signet', custom: false, electrum: '', explorer: '', gap: 20 }, seen: {}, key_fw: window.__keyFw || {}, key_first: window.__keyFirst || {} });
 window.__forgot = 0;
 const H = { vault_rename: (a) => { window.__renamed = a.keyNames[1]; const st = store(); st.vaults[0].keys[1].name = a.keyNames[1]; return st; }, vault_forget: () => { __forgot++; return { vaults: [], settings: { network: 'signet', custom: false, electrum: '', explorer: '', gap: 20 }, seen: {} }; },
   store_get: store, cards_list: () => { if (!__state.cards.length) throw 'no YubiKey found'; return __state.cards; },
+  cards_other: () => (window.__other || []),
+  key_form_seen: (a) => { window.__fwSeen = (window.__fwSeen || []).concat([a.firmware]); window.__keyFw = Object.assign({}, window.__keyFw || {}); if (a.firmware) window.__keyFw[a.pubkey] = a.firmware; window.__keyFirst = Object.assign({ [a.pubkey]: Math.floor(Date.now()/1000) }, window.__keyFirst || {}); return store(); },
   vault_recovery: () => 'wsh(sortedmulti(2,03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2,032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe,038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47))#5va274yx cc=' + 'ab'.repeat(32), vault_sync: () => { throw 'offline in the harness'; },
   seal_status: () => ({ id: 'deadbeef', threshold: 2, earlier: false, sealed: __state.sealed.length + (__state.open || []).length, open: (__state.open || []).length,
     keys: store().vaults[0].keys.map(k => ({ name: k.name, pubkey: k.pubkey, here: __state.cards.some(c => c.pubkey === k.pubkey), state: __state.sealed.includes(k.pubkey) ? 'sealed' : (__state.open || []).includes(k.pubkey) ? 'open' : 'unsealed' })) }),
@@ -89,7 +91,31 @@ with sync_playwright() as p:
     check("a key on 5.7.0 or newer is told nothing, because nothing is known against it",
           "YSA-2024-03" not in pg.inner_text("#keys-list") and "Nothing known stands against" in pg.inner_text("#key-life"))
     check("the version test is a real comparison, not a string match", pg.evaluate("[verLt('5.10.0','5.7.0'), verLt('5.7','5.7.0'), verLt('5.6.9','5.7.0'), verLt('','5.7.0')]") == [False, False, True, True])
-    pg.evaluate("store.key_first = store.key_first || {}; store.key_first[__state.cards[0].pubkey] = Math.floor(Date.now()/1000) - 400*86400; renderKeys(true)"); pg.wait_for_timeout(400)
+    pg.evaluate("window.__keyFirst = { [__state.cards[0].pubkey]: Math.floor(Date.now()/1000) - 400*86400 }; store.key_first = window.__keyFirst; renderKeys(true)"); pg.wait_for_timeout(400)
+    # ---- a device that is plugged in and is NOT a key: named, and why it will not do ----
+    pg.evaluate("window.__other = [{ reader: 'Yubico YubiKey Bio FIDO+CCID', why: 'the computer can see it, but it does not answer as a smart card' }]; pollCards()"); pg.wait_for_timeout(700)
+    check("a YubiKey Bio plugged in is NAMED, and said to be unusable here rather than ignored",
+          pg.locator("#keys-other").is_visible() and "YubiKey Bio" in pg.inner_text("#keys-other") and "cannot be used here" in pg.inner_text("#keys-other"), pg.inner_text("#keys-other")[:200])
+    check("it says WHY, in terms of what it is for, and that it is fine — just for something else",
+          "fingerprint" in pg.inner_text("#keys-other") and "just for something else" in pg.inner_text("#keys-other") and "nothing was done to it" in pg.inner_text("#keys-other"))
+    check("and the vault's own keys are still listed beside it — one device that is not a key must not hide the ones that are",
+          rows.count() >= 1 and "plugged in" in rows.nth(0).inner_text())
+    pg.evaluate("window.__other = [{ reader: 'Yubico YubiKey OTP+FIDO', why: 'it has no OpenPGP applet, which is what Any Two Keys signs with' }]; pollCards()"); pg.wait_for_timeout(700)
+    check("a key with no OpenPGP applet is told so in those words, not mistaken for a key that is failing",
+          "no OpenPGP applet" in pg.inner_text("#keys-other") and "YubiKey Bio" not in pg.inner_text("#keys-other"))
+    pg.evaluate("window.__other = []; pollCards()"); pg.wait_for_timeout(700)
+    check("unplugged, it goes", not pg.locator("#keys-other").is_visible())
+    # ---- firmware remembered, so an off-site key can be checked too ----
+    fw_key = pg.evaluate("vault.keys[1].pubkey")
+    pg.evaluate("window.__keyFw = { [vault.keys[1].pubkey]: '5.4.3' }; store.key_fw = window.__keyFw; renderKeys(true)"); pg.wait_for_timeout(400)
+    check("a key NOT plugged in still shows the firmware it gave last time, saying that is where it came from",
+          "firmware 5.4.3 (as it said when last plugged in)" in rows.nth(1).inner_text(), rows.nth(1).inner_text()[:200])
+    check("and the advisory reaches it — which is the only way an off-site key is ever checked",
+          "YSA-2024-03" in rows.nth(1).inner_text())
+    pg.evaluate("window.__keyFw = Object.fromEntries(vault.keys.map(k => [k.pubkey, '5.4.3'])); store.key_fw = window.__keyFw; __state.cards.forEach(c => c.firmware = '5.4.3'); renderKeys(true)"); pg.wait_for_timeout(400)
+    check("when EVERY key is on affected firmware it says so, and says what that takes away from a vault of several keys",
+          "All " in pg.inner_text("#key-life") and "every one of them has the same weakness" in pg.inner_text("#key-life") and "comfort is gone" in pg.inner_text("#key-life"), pg.inner_text("#key-life")[-260:])
+    pg.evaluate("window.__keyFw = {}; store.key_fw = {}; __state.cards.forEach(c => c.firmware = '5.7.1'); renderKeys(true)"); pg.wait_for_timeout(400)
     check("the nearest thing to an age it can claim is when this computer first saw the key, shown as that and no more",
           "known to this computer since" in pg.inner_text("#keys-list") and "400 days" in pg.inner_text("#keys-list"), pg.inner_text("#keys-list")[:220])
     rows.nth(0).scroll_into_view_if_needed(); pg.wait_for_timeout(150)
