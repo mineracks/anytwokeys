@@ -268,7 +268,9 @@ fn vault_restore(name: String, text: String, names: Vec<String>) -> R<Vault> {
     if s.vaults.iter().any(|v| v.name == name) { return Err(format!("a vault called '{name}' already exists")); }
     if names_extended_keys(&text) {
         let info = ext_for_this_network(&text, &s.settings.network)?;
-        if s.vaults.iter().any(|v| v.ext.as_deref() == Some(info.descriptor.as_str())) { return Err("this wallet is already here, under another name".into()); }
+        // the same wallet written 48h here and 48' there is still the same wallet
+        let same = |e: &str| wallet::ext_parse(e).ok().flatten().map(|i| i.canonical == info.canonical).unwrap_or(false);
+        if let Some(v) = s.vaults.iter().find(|v| v.ext.as_deref().map(same).unwrap_or(false)) { return Err(format!("this wallet is already here, as '{}'", v.name)); }
         let mut v = ext_vault(name, &info, &names);
         v.address = wallet::address_at(&v, 0)?;
         s.vaults.push(v.clone());

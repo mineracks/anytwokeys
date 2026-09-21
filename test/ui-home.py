@@ -384,6 +384,23 @@ with sync_playwright() as p:
     check("a deposit with no price is counted in the balance, and its cost is left OUT rather than guessed",
           L5["unpriced"] == 1 and L5["timeline"][-1]["basis"] == 0 and L5["timeline"][-1]["sats"] == 5000)
 
+    # ---- several transactions in ONE block: Piers's real round trip (19,639 out, 19,371 back, same block) ----
+    RT = """[{ name: 'A', rows: [
+        { txid: 'first', time: 1000, net: 19639, quote: { price: 100000 } },
+        { txid: '0dedec3f', time: 2000, net: 19371, quote: { price: 110000 } },
+        { txid: 'cb57ab55', time: 2000, net: -19639, quote: { price: 110000 } }] }]"""
+    Lr = pg.evaluate("buildLedger(%s)" % RT)
+    check("a coin sent out and its remainder back in the same block: the old coin is disposed of, the new one costs its own arrival — $21.3081, not an average with itself",
+          abs(Lr["timeline"][-1]["basis"] - 19371 / 1e8 * 110000) < 1e-9 and Lr["timeline"][-1]["sats"] == 19371, Lr["timeline"][-1])
+    check("inside that block the ledger never holds more than the vault did — no 39,010", max(e["sats"] for e in Lr["timeline"]) <= 19639, [e["sats"] for e in Lr["timeline"]])
+    Sr = pg.evaluate("sumSeries(buildLedger(%s), 0, 3000, {}, null)" % RT)
+    check("and the chart draws ONE point for that block, the state after it — no spike, no dip to nothing",
+          [p for p in Sr["bal"] if p[0] == 2000] == [[2000, 19371]], Sr["bal"])
+    Lc = pg.evaluate("""buildLedger([{ name: 'A', rows: [
+        { txid: 'aa', time: 5000, net: -9000, quote: { price: 50000 } },
+        { txid: 'bb', time: 5000, net: 10000, quote: { price: 50000 } }] }])""")
+    check("a coin received and spent in the same block is spent AFTER it arrives — holdings never go below nothing",
+          min(e["sats"] for e in Lc["timeline"]) >= 0 and Lc["timeline"][-1]["sats"] == 1000, [e["sats"] for e in Lc["timeline"]])
     # ---- the summary on Home ----
     pg.evaluate("show('home')"); pg.wait_for_timeout(1200)
     check("Home leads with stat tiles: what it holds, what it is worth, what it cost, and the gain not yet realised",

@@ -294,7 +294,7 @@ pub fn descriptor_at(v: &Vault, index: u32) -> Result<String, String> {
 pub struct ExtKey { pub fingerprint: String, pub path: String, pub xpub: String }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ExtInfo { pub descriptor: String, pub threshold: usize, pub keys: Vec<ExtKey>, pub network: String, pub kind: String }
+pub struct ExtInfo { pub descriptor: String, pub canonical: String, pub threshold: usize, pub keys: Vec<ExtKey>, pub network: String, pub kind: String }
 
 fn ext_desc(text: &str) -> Result<Descriptor<DescriptorPublicKey>, String> {
     // parsed whole, checksum and all, and case left alone: base58 is case-sensitive
@@ -336,7 +336,12 @@ pub fn ext_parse(text: &str) -> Result<Option<ExtInfo>, String> {
         other => return Err(format!("{other:?} descriptors are not supported yet: this app watches wsh(sortedmulti), wsh(multi) and wpkh wallets")),
     };
     let network = match net { Some(bitcoin::NetworkKind::Main) => "mainnet", _ => "signet" }.to_string();
-    Ok(Some(ExtInfo { descriptor: d.to_string(), threshold, keys, network, kind: kind.into() }))
+    // Kept AS WRITTEN when it came with a checksum that verified: miniscript re-writes 48h as 48' and the checksum
+    // covers the text, so its canonical form would carry a different checksum from the one Sparrow or the SeedSigner
+    // shows for the very same wallet (#ewpd0dfe became #h3zcql09). Without a checksum, the canonical form, which has one.
+    let trimmed = text.trim();
+    let descriptor = if trimmed.contains('#') { trimmed.to_string() } else { d.to_string() };
+    Ok(Some(ExtInfo { descriptor, canonical: d.to_string(), threshold, keys, network, kind: kind.into() }))
 }
 
 fn sorted_threshold(d: &Descriptor<DescriptorPublicKey>) -> Result<usize, String> {
@@ -789,6 +794,19 @@ mod ext_tests {
         assert_eq!(index_of_input(&v, &recv3).unwrap(), Some(3));
         let stranger = script_of(&descriptor_at(&vault_of(fixtures()["multi"]["descriptor"].as_str().unwrap()), 0).unwrap()).unwrap();
         assert_eq!(index_of_input(&v, &stranger).unwrap(), None, "and a different wallet's address is not");
+    }
+    #[test]
+    fn a_descriptor_is_kept_as_written_so_its_checksum_matches_the_other_wallets() {
+        // embit prints a descriptor WITHOUT a checksum, so give the 48h text its own, the way Sparrow shows it
+        let bare_h = fixtures()["sortedmulti"]["descriptor"].as_str().unwrap().split('#').next().unwrap().to_string();
+        let written = format!("{bare_h}#{}", miniscript::descriptor::checksum::desc_checksum(&bare_h).unwrap());
+        let info = ext_parse(&written).unwrap().unwrap();
+        assert_eq!(info.descriptor, written, "stored exactly as it came, checksum and all");
+        assert!(info.descriptor.contains("/48h/") && !info.canonical.contains("/48h/"), "the canonical form re-writes h as ' — which is why it is not what is kept");
+        let bare = written.split('#').next().unwrap();
+        let from_bare = ext_parse(bare).unwrap().unwrap();
+        assert!(from_bare.descriptor.contains('#'), "with no checksum given, one is added");
+        assert_eq!(from_bare.canonical, info.canonical, "and the two notations are recognised as the same wallet");
     }
     /// A real wallet scanned against the real server — the thing no mock can show: that the scan goes past the first
     /// address and down the change chain. `EXT_DESC='…' cargo test ext_live_scan -- --ignored --nocapture`

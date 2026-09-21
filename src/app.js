@@ -877,7 +877,21 @@ function buildLedger(inputs) {
     if (p && !e.price) e.price = p;
     ev.set(r.txid, e);
   }
-  const events = [...ev.values()].sort((a, b) => a.t - b.t || (a.txid < b.txid ? -1 : 1));
+  // Transactions in the same block share a timestamp, and their order inside the block is not in the history. Ordering
+  // them by txid is arbitrary, and wrong where it matters: a coin sent out and its own remainder coming straight back
+  // in the same block (a round trip) was taken deposit-first, averaging the outgoing coin's cost with its own return.
+  // Within one instant: spends the holdings can already cover go first, then arrivals, then any spend that can only
+  // be drawing on what just arrived (a chain received and spent in the same block).
+  const byT = new Map(); for (const e of ev.values()) { if (!byT.has(e.t)) byT.set(e.t, []); byT.get(e.t).push(e); }
+  const netOf = (e) => e.legs.reduce((a, l) => a + l.net, 0);
+  const events = []; let held = 0;
+  for (const t of [...byT.keys()].sort((a, b) => a - b)) {
+    const group = byT.get(t).sort((a, b) => (a.txid < b.txid ? -1 : 1));
+    const covered = [], rest = [];
+    for (const e of group) (netOf(e) < 0 && -netOf(e) <= held ? covered : rest).push(e);
+    const ordered = covered.concat(rest.filter(e => netOf(e) >= 0), rest.filter(e => netOf(e) < 0));
+    for (const e of ordered) { events.push(e); held += netOf(e); }
+  }
   const sats = {}, basis = {}, sum = (o) => Object.values(o).reduce((a, x) => a + x, 0);
   const timeline = []; let internal = 0, unpriced = 0;
   for (const e of events) {
@@ -907,7 +921,12 @@ const ledgerAt = (L, t) => { let s = { sats: 0, basis: 0 }; for (const e of L.ti
 // The three series for a range. Balance and basis only change at transactions, so they are steps; value moves with
 // the price, so it is sampled — and it steps at each transaction too, because holdings did.
 function sumSeries(L, from, to, prices, now) {
-  const inRange = L.timeline.filter(e => e.t > from && e.t <= to);
+  // one point per instant: several transactions in one block are drawn as the state after all of them, because the
+  // states in between existed only in the order this app chose to apply them (a spike to 39,010 sats, a dip to 0)
+  const raw = L.timeline.filter(e => e.t > from && e.t <= to), inRange = [];
+  for (const e of raw) { const last = inRange[inRange.length - 1];
+    if (last && last.t === e.t) inRange[inRange.length - 1] = Object.assign({}, e, { before: last.before, price: last.price || e.price });
+    else inRange.push(e); }
   const start = ledgerAt(L, from);
   const bal = [[from, start.sats]], cost = [[from, start.basis]], val = [];
   for (const e of inRange) { bal.push([e.t, e.sats]); cost.push([e.t, e.basis]); }
@@ -935,7 +954,7 @@ function xLabel(t, span) {
   const d = new Date(t * 1000);
   if (span <= 3 * 86400) return d.toLocaleString(undefined, { day: 'numeric', month: 'short', hour: 'numeric' });
   if (span <= 200 * 86400) return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
-  return d.toLocaleDateString(undefined, { month: 'short', year: '2-digit' });
+  return d.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });   // "Dec 22" read as the 22nd of December
 }
 // The value a series has AT time t: a step series holds its last value; a sampled one reads its nearest point.
 function seriesAt(s, t) {
@@ -1963,7 +1982,7 @@ function drillState(v) {
 const drillWords = (d) => d.iso ? new Date(d.iso + 'T00:00:00Z').toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' }) + (d.keys ? ' \u00b7' + d.keys : '') : '';
 function paintDrillNudge() {
   const row = $('#drill-nudge');
-  if (!vault || vault.keys.length < 2) { row.hidden = true; return; }
+  if (!vault || vault.keys.length < 2 || vault.ext) { row.hidden = true; return; }   // no cards to read on a vault of other devices' keys
   const d = drillState(vault);
   if (!d.due || paintDrillNudge.hidden === vault.name) { row.hidden = true; return; }
   row.hidden = false;
