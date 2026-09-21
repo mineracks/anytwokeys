@@ -117,6 +117,32 @@ pub fn quote_at(prices_url: &str, ccy: &str, t: Option<u32>) -> Option<Quote> {
     Some(q)
 }
 
+/// The daily price on each of `days`, for drawing a value over time.
+///
+/// The public price service answers one day per request at 5 requests a second, so a daily line across a year would
+/// be 365 of them. The window asks for a handful of evenly spaced days instead, and this keeps each one in the sealed
+/// cache for good: a PAST day's close never changes, so it is asked for at most once, ever. Today's is not kept — the
+/// day has not closed. A day with no price comes back `None`, never a guess.
+pub fn daily_series(prices_url: &str, ccy: &str, days: &[String]) -> Vec<(String, Option<Quote>)> {
+    let today = crate::export::ymd(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+    let mut cache = load_cache();
+    let mut dirty = false;
+    let http = match reqwest::blocking::Client::builder().user_agent("anytwokeys/0.1").timeout(std::time::Duration::from_secs(12)).build() {
+        Ok(h) => h, Err(_) => return days.iter().map(|d| (d.clone(), None)).collect(),
+    };
+    let mut out = Vec::with_capacity(days.len());
+    for day in days {
+        let key = format!("{ccy}:{day}");
+        if let Some(q) = cache.prices.get(&key) { out.push((day.clone(), Some(q.clone()))); continue; }
+        let q = fetch(&http, prices_url, ccy, day, None);   // None: the day's close
+        if let (Some(q), true) = (&q, day.as_str() < today.as_str()) { cache.prices.insert(key, q.clone()); dirty = true; }
+        out.push((day.clone(), q));
+        std::thread::sleep(std::time::Duration::from_millis(230));   // under the service's 5 a second
+    }
+    if dirty { save_cache(&cache); }
+    out
+}
+
 // ---------- one transaction, in full ----------
 #[derive(Debug, Serialize, serde::Deserialize)]
 pub struct TxInput { pub outpoint: String, pub address: Option<String>, pub sats: Option<u64>, pub ours: Option<u32>, pub sequence: u32, pub witness: usize, pub signers: Vec<String> }

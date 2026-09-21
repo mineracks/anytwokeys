@@ -59,9 +59,9 @@ function show(name) {
   const navName = name === 'sign' ? (paintCrumbs.via || 'send') : name === 'tx' ? 'home' : name;   // Sign has no sidebar entry of its own: light the screen it came from
   $$('.nav[data-go]').forEach(n => n.classList.toggle('on', n.dataset.go === navName));
   // the vault you are in stays lit on every screen that is about it, matching the breadcrumb; not while making another, nor in app settings
-  const inVault = vault && !['setup', 'restore', 'settings'].includes(name);
+  const inVault = vault && !['setup', 'restore', 'settings', 'overview'].includes(name);
   $$('#vault-tabs .nav').forEach(n => n.classList.toggle('on', !!inVault && n.dataset.vault === vault.name));
-  $('#title').textContent = { home: vault ? vault.name : 'Vault', activity: 'Activity', send: 'Send', receive: 'Receive', coins: 'Coins', addresses: 'Addresses', vault: 'Vault settings', keys: 'Keys', settings: 'App settings', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
+  $('#title').textContent = { overview: 'All vaults', home: vault ? vault.name : 'Vault', activity: 'Activity', send: 'Send', receive: 'Receive', coins: 'Coins', addresses: 'Addresses', vault: 'Vault settings', keys: 'Keys', settings: 'App settings', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
   $('#title-edit').hidden = !(name === 'home' && vault); $('#title-input').hidden = true; $('#title').hidden = false;
   paintCrumbs(name); paintStaged(name);
   $('#side-vault').textContent = vault ? vault.name : 'No vault yet'; $('#side-vault').title = vault ? `These screens are about “${vault.name}”` : '';
@@ -76,6 +76,7 @@ function show(name) {
   if (name === 'addresses') { $('#addr-detail').hidden = true; renderAddresses(); }
   if (name === 'coins') { $('#coins-detail').hidden = true; if (vault && !vault._coins) sync().then(() => Promise.resolve(renderAddresses()).then(renderCoins2)); else Promise.resolve(renderAddresses()).then(renderCoins2); }
   if (name === 'vault') renderVaultSettings();
+  if (name === 'overview') renderOverview();
   if (name === 'send') { closeBook(); paintTo(); loadFees(); if (vault && !vault._coins) sync().then(renderCoins); else renderCoins(); }
   if (name === 'messages') renderMessages();
   if (name === 'keys') renderKeys();
@@ -703,6 +704,7 @@ async function fillActivity(name, s) {
   if ($('#s-tx').classList.contains('on')) renderTx();
   repaintFacts(txFacts[name]);
   vault._now = a.now ? { q: a.now, ccy: a.ccy } : null; paintBalance();
+  renderHomeSummary();
   if (a.note && vault.network === 'mainnet') { $('#activity-note').textContent = a.note; $('#activity-note').hidden = false; }
 }
 async function sync() {
@@ -850,6 +852,286 @@ function openAddress(r) {
   $('#addr-copy').onclick = () => navigator.clipboard.writeText(r.address).then(() => toast('Address copied'));
   recPoint('addr', k, $('#rec-slot'));
   box.scrollIntoView({ block: 'nearest' });
+}
+
+// ---------- a vault over time: balance, value, and what it cost ----------
+// The ledger is where correctness lives, so it is a plain function of the transactions and nothing else.
+//
+// COST BASIS is average cost, and it MOVES WITH THE COINS. A deposit from outside costs what it was worth when it
+// arrived. A spend takes its share of the basis with it. A transfer between two vaults in scope is not a sale and a
+// purchase: the coins' cost goes across with them and only the fee's share is spent — otherwise moving coins between
+// your own vaults would quietly reset their cost to that day's price. Such a transfer is recognised the only reliable
+// way there is: the same transaction appears in more than one vault's history.
+//
+// It is what each deposit was worth on arrival, which is a cost only if the deposit was a purchase. A deposit from a
+// wallet this app does not hold (an exchange, Sparrow) is counted at that day's price because nothing better is known.
+function buildLedger(inputs) {
+  const ev = new Map();
+  for (const v of inputs) for (const r of v.rows) {
+    if (r.net === null || r.net === undefined) continue;
+    const t = r.time || Math.floor(Date.now() / 1000);   // not in a block yet: it is happening now
+    const e = ev.get(r.txid) || { txid: r.txid, t, legs: [], price: null };
+    e.t = Math.min(e.t, t);
+    e.legs.push({ vault: v.name, net: r.net });
+    const p = r.quote ? r.quote.price : (!r.time && v.now ? v.now.price : null);
+    if (p && !e.price) e.price = p;
+    ev.set(r.txid, e);
+  }
+  const events = [...ev.values()].sort((a, b) => a.t - b.t || (a.txid < b.txid ? -1 : 1));
+  const sats = {}, basis = {}, sum = (o) => Object.values(o).reduce((a, x) => a + x, 0);
+  const timeline = []; let internal = 0, unpriced = 0;
+  for (const e of events) {
+    const outs = e.legs.filter(l => l.net < 0), ins = e.legs.filter(l => l.net > 0);
+    const before = { sats: sum(sats), basis: sum(basis) };
+    const outflow = outs.reduce((a, l) => a - l.net, 0), inflow = ins.reduce((a, l) => a + l.net, 0);
+    let leaving = 0;
+    for (const l of outs) {
+      const s0 = sats[l.vault] || 0, b0 = basis[l.vault] || 0, out = -l.net;
+      const share = s0 > 0 ? b0 * Math.min(1, out / s0) : 0;
+      basis[l.vault] = b0 - share; sats[l.vault] = s0 - out; leaving += share;
+    }
+    if (outs.length && ins.length) {
+      internal++;
+      const carried = outflow > 0 ? leaving * Math.min(1, inflow / outflow) : 0;   // the fee's share is what is spent
+      for (const l of ins) { basis[l.vault] = (basis[l.vault] || 0) + carried * (l.net / inflow); sats[l.vault] = (sats[l.vault] || 0) + l.net; }
+    } else for (const l of ins) {
+      if (e.price) basis[l.vault] = (basis[l.vault] || 0) + l.net / 1e8 * e.price; else unpriced++;
+      sats[l.vault] = (sats[l.vault] || 0) + l.net;
+    }
+    timeline.push({ t: e.t, txid: e.txid, price: e.price, before, sats: sum(sats), basis: sum(basis), internal: outs.length > 0 && ins.length > 0 });
+  }
+  return { timeline, internal, unpriced, perVault: { sats, basis } };
+}
+const ledgerAt = (L, t) => { let s = { sats: 0, basis: 0 }; for (const e of L.timeline) { if (e.t > t) break; s = e; } return s; };
+
+// Days to ask a price for: evenly spaced across the part of the range that held anything, never more than 36.
+// Before the first arrival the value is nothing whatever the price, so nothing is asked for those days.
+function sampleDays(from, to) {
+  const DAY = 86400, a = Math.floor(from / DAY), b = Math.floor(to / DAY), span = b - a;
+  const n = Math.max(2, Math.min(36, span + 1)), out = new Set();
+  for (let i = 0; i < n; i++) out.add(new Date(Math.round(a + span * i / (n - 1)) * DAY * 1000).toISOString().slice(0, 10));
+  return [...out];
+}
+
+// The three series for a range. Balance and basis only change at transactions, so they are steps; value moves with
+// the price, so it is sampled — and it steps at each transaction too, because holdings did.
+function sumSeries(L, from, to, prices, now) {
+  const inRange = L.timeline.filter(e => e.t > from && e.t <= to);
+  const start = ledgerAt(L, from);
+  const bal = [[from, start.sats]], cost = [[from, start.basis]], val = [];
+  for (const e of inRange) { bal.push([e.t, e.sats]); cost.push([e.t, e.basis]); }
+  bal.push([to, (inRange.length ? inRange[inRange.length - 1] : start).sats]);
+  cost.push([to, (inRange.length ? inRange[inRange.length - 1] : start).basis]);
+  const px = (day) => { const q = prices[day]; return q ? q.price : null; };
+  for (const [day] of Object.entries(prices)) {
+    const t = Date.parse(day + 'T23:59:59Z') / 1000; if (t < from || t > to) continue;
+    const p = px(day); if (p === null) continue;
+    val.push([t, ledgerAt(L, t).sats / 1e8 * p]);
+  }
+  const dayPrices = Object.entries(prices).filter(([, q]) => q).map(([d, q]) => [Date.parse(d + 'T12:00:00Z') / 1000, q.price]);
+  const nearPrice = (t) => { let best = null; for (const [x, p] of dayPrices) if (!best || Math.abs(x - t) < Math.abs(best[0] - t)) best = [x, p]; return best ? best[1] : (now ? now.price : null); };
+  for (const e of inRange) { const p = e.price || nearPrice(e.t); if (p === null) continue; val.push([e.t, e.before.sats / 1e8 * p]); val.push([e.t, e.sats / 1e8 * p]); }
+  if (now) val.push([to, (inRange.length ? inRange[inRange.length - 1] : start).sats / 1e8 * now.price]);
+  val.sort((a, b) => a[0] - b[0]);
+  return { bal, cost, val };
+}
+
+// ---------- a line chart: one axis, thin marks, a crosshair, and a table behind it ----------
+const niceMax = (m) => { if (!(m > 0)) return { top: 1, step: 1 }; const raw = m / 4, mag = 10 ** Math.floor(Math.log10(raw)), f = raw / mag; const step = (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * mag; return { top: Math.ceil(m * 1.06 / step) * step, step }; };
+const csats = (n) => n >= 1e8 ? +(n / 1e8).toFixed(2) + ' BTC' : n >= 1e6 ? +(n / 1e6).toFixed(1) + 'M' : n >= 1e4 ? Math.round(n / 1e3) + 'k' : n >= 1e3 ? +(n / 1e3).toFixed(1) + 'k' : String(Math.round(n));
+const cmoney = (n, ccy) => { try { return new Intl.NumberFormat(undefined, { style: 'currency', currency: ccy, notation: 'compact', maximumFractionDigits: 1 }).format(n); } catch { return money(n, ccy); } };
+function xLabel(t, span) {
+  const d = new Date(t * 1000);
+  if (span <= 3 * 86400) return d.toLocaleString(undefined, { day: 'numeric', month: 'short', hour: 'numeric' });
+  if (span <= 200 * 86400) return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  return d.toLocaleDateString(undefined, { month: 'short', year: '2-digit' });
+}
+// The value a series has AT time t: a step series holds its last value; a sampled one reads its nearest point.
+function seriesAt(s, t) {
+  if (!s.pts.length) return null;
+  if (s.step) { let v = s.pts[0][1]; for (const [x, y] of s.pts) { if (x > t) break; v = y; } return v; }
+  let i = -1; for (let k = 0; k < s.pts.length; k++) if (s.pts[k][0] <= t) i = k;
+  if (i < 0) return s.pts[0][1];
+  if (i === s.pts.length - 1) return s.pts[i][1];
+  const [x0, y0] = s.pts[i], [x1, y1] = s.pts[i + 1];
+  return x1 === x0 ? y1 : y0 + (y1 - y0) * (t - x0) / (x1 - x0);
+}
+function lineChart(el, { title, sub, series, fmt, fmtAxis, from, to }) {
+  el.innerHTML = '';
+  const h4 = document.createElement('h4'); h4.textContent = title; el.appendChild(h4);
+  if (sub) { const d = document.createElement('div'); d.className = 'sub'; d.textContent = sub; el.appendChild(d); }
+  if (series.length > 1) {   // two or more: a legend, always, with line keys because these are lines
+    const lg = document.createElement('div'); lg.className = 'legend';
+    for (const s of series) { const sp = document.createElement('span'); const i = document.createElement('i'); i.style.background = s.color; sp.append(i, document.createTextNode(s.name)); lg.appendChild(sp); }
+    el.appendChild(lg);
+  }
+  const W = Math.max(280, el.clientWidth || 560), H = 168, m = { l: 58, r: 84, t: 8, b: 22 };
+  const pw = W - m.l - m.r, ph = H - m.t - m.b;
+  const maxY = Math.max(0, ...series.flatMap(s => s.pts.map(p => p[1])));
+  const { top, step } = niceMax(maxY);
+  const span = Math.max(1, to - from);
+  const X = (t) => m.l + (t - from) / span * pw, Y = (v) => m.t + ph - (v / top) * ph;
+  const NS = 'http://www.w3.org/2000/svg', mk = (tag, a) => { const n = document.createElementNS(NS, tag); for (const k in a) n.setAttribute(k, a[k]); return n; };
+  const svg = mk('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img' });
+  svg.setAttribute('aria-label', `${title}. ${series.map(s => `${s.name}: ${fmt(seriesAt(s, to) || 0)} now`).join('; ')}. A table of the same figures is below.`);
+  const ax = mk('g', { class: 'axis' });
+  for (let v = 0; v <= top + 1e-9; v += step) {   // recessive: one-step-off-surface hairlines, solid
+    ax.appendChild(mk('line', { class: 'grid', x1: m.l, x2: m.l + pw, y1: Y(v), y2: Y(v) }));
+    const tx = mk('text', { x: m.l - 8, y: Y(v) + 3.5, 'text-anchor': 'end' }); tx.textContent = fmtAxis(v); ax.appendChild(tx);
+  }
+  for (let i = 0; i <= 3; i++) { const t = from + span * i / 3; const tx = mk('text', { x: X(t), y: H - 6, 'text-anchor': i === 0 ? 'start' : i === 3 ? 'end' : 'middle' }); tx.textContent = xLabel(t, span); ax.appendChild(tx); }
+  svg.appendChild(ax);
+  const ends = [];
+  for (const s of series) {
+    if (!s.pts.length) continue;
+    let d = '';
+    s.pts.forEach(([t, v], i) => { const x = X(t), y = Y(v); d += i === 0 ? `M${x},${y}` : s.step ? `H${x}V${y}` : `L${x},${y}`; });
+    if (s.area && series.length === 1) { const a = mk('path', { class: 'wash', d: `${d}V${Y(0)}H${X(s.pts[0][0])}Z` }); a.style.fill = s.color; svg.appendChild(a); }
+    const ln = mk('path', { class: 'ln', d }); ln.style.stroke = s.color; svg.appendChild(ln);
+    const [lt, lv] = s.pts[s.pts.length - 1];
+    const dot = mk('circle', { class: 'dot', cx: X(lt), cy: Y(lv), r: 4 }); dot.style.fill = s.color; svg.appendChild(dot);
+    ends.push({ y: Y(lv), x: X(lt), text: fmt(lv) });
+  }
+  ends.sort((a, b) => a.y - b.y);   // end labels never sit on each other
+  for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < 14) ends[i].y = ends[i - 1].y + 14;
+  for (const e of ends) { const tx = mk('text', { class: 'endlbl', x: e.x + 9, y: e.y + 4 }); tx.textContent = e.text; svg.appendChild(tx); }
+  // the crosshair finds the X: a hairline that snaps to the nearest moment anything changed, one readout for all
+  const xs = [...new Set(series.flatMap(s => s.pts.map(p => p[0])))].sort((a, b) => a - b);
+  const hair = mk('line', { class: 'hair', y1: m.t, y2: m.t + ph, visibility: 'hidden' }); svg.appendChild(hair);
+  const hit = mk('rect', { class: 'hit plotframe', x: m.l, y: m.t, width: pw, height: ph, tabindex: 0 });
+  hit.setAttribute('aria-label', `${title}: use the arrow keys to move through the dates`);
+  svg.appendChild(hit); el.appendChild(svg);
+  const tip = document.createElement('div'); tip.className = 'ctip'; tip.hidden = true; el.appendChild(tip);
+  let at = xs.length - 1;
+  const show = (i, clientX) => {
+    if (!xs.length) return; at = Math.max(0, Math.min(xs.length - 1, i)); const t = xs[at], x = X(t);
+    hair.setAttribute('x1', x); hair.setAttribute('x2', x); hair.setAttribute('visibility', 'visible');
+    tip.innerHTML = ''; const dd = document.createElement('div'); dd.className = 'd';
+    dd.textContent = new Date(t * 1000).toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' }); tip.appendChild(dd);
+    for (const s of series) { const r = document.createElement('div'); r.className = 'r'; const i2 = document.createElement('i'); i2.style.background = s.color; const b = document.createElement('b'); b.textContent = fmt(seriesAt(s, t) || 0); const n = document.createElement('span'); n.textContent = s.name; r.append(i2, b, n); tip.appendChild(r); }
+    tip.hidden = false;
+    const px = x / W * el.clientWidth, right = px > el.clientWidth - 190;
+    tip.style.left = (right ? px - tip.offsetWidth - 12 : px + 12) + 'px'; tip.style.top = (m.t + 30) + 'px';
+  };
+  const hide = () => { hair.setAttribute('visibility', 'hidden'); tip.hidden = true; };
+  const nearest = (clientX) => { const r = svg.getBoundingClientRect(), t = from + ((clientX - r.left) / r.width * W - m.l) / pw * span; let bi = 0; xs.forEach((x, i) => { if (Math.abs(x - t) < Math.abs(xs[bi] - t)) bi = i; }); return bi; };
+  hit.addEventListener('pointermove', (e) => show(nearest(e.clientX)));
+  hit.addEventListener('pointerleave', hide);
+  hit.addEventListener('focus', () => show(at)); hit.addEventListener('blur', hide);
+  hit.addEventListener('keydown', (e) => { if (e.key === 'ArrowLeft') { e.preventDefault(); show(at - 1); } if (e.key === 'ArrowRight') { e.preventDefault(); show(at + 1); } if (e.key === 'Home') { e.preventDefault(); show(0); } if (e.key === 'End') { e.preventDefault(); show(xs.length - 1); } });
+  return { xs };
+}
+
+window.addEventListener('resize', () => { clearTimeout(window.__sumResize); window.__sumResize = setTimeout(() => { if ($('#s-home').classList.contains('on')) renderHomeSummary(); if ($('#s-overview').classList.contains('on')) renderOverview(); }, 180); });
+// ---------- the summary card, for one vault or for all of them ----------
+const SUM_RANGES = [['30', '30 days', 30], ['90', '90 days', 90], ['365', '1 year', 365], ['all', 'All', 0]];
+const sumPref = (k, d) => { try { return localStorage.getItem('a2k-sum-' + k) || d; } catch { return d; } };
+const sumSave = (k, v) => { try { localStorage.setItem('a2k-sum-' + k, v); } catch {} };
+const sumPrices = {};   // "CCY:YYYY-MM-DD" → quote, for this session; the sealed cache in Rust keeps them for good
+async function pricesFor(ccy, days) {
+  const want = days.filter(d => !((ccy + ':' + d) in sumPrices));
+  if (want.length) { try { for (const [d, q] of await invoke('prices_on', { ccy, days: want })) sumPrices[ccy + ':' + d] = q; } catch {} }
+  return Object.fromEntries(days.map(d => [d, sumPrices[ccy + ':' + d] || null]));
+}
+// What the ledger needs for one vault: its transactions with dates, amounts and prices. The screen usually has it.
+async function sumInput(name) {
+  const v = store.vaults.find(x => x.name === name); if (!v) return null;
+  const ccy = v.network === 'mainnet' ? fiatCcy() : '';
+  let f = txFacts[name];
+  if (!f || (f.ccy || '') !== ccy) {
+    const s = await invoke('vault_sync', { name });
+    const a = await invoke('vault_activity', { name, history: s.history.map(h => [h.txid, h.height]), ccy });
+    f = txFacts[name] = { rows: Object.fromEntries(a.rows.map(r => [r.txid, r])), now: a.now, ccy: a.ccy };
+  }
+  return { name, network: v.network, rows: Object.values(f.rows), now: f.now, ccy: f.ccy };
+}
+async function renderSummary(box, names, opts = {}) {
+  const me = (renderSummary.seq = (renderSummary.seq || 0) + 1);
+  box.classList.add('sum-loading');   // refetch keeps the frame: the last drawing stays, dimmed, until the new one is ready
+  let inputs = [];
+  try { inputs = (await Promise.all(names.map(sumInput))).filter(Boolean); } catch (e) { if (me !== renderSummary.seq) return; box.classList.remove('sum-loading'); box.innerHTML = `<div class="label">Over time</div><div class="sum-empty">The history could not be fetched: ${esc(String(e))}</div>`; return; }
+  if (me !== renderSummary.seq) return;
+  const priced = inputs.length && inputs.every(i => i.network === 'mainnet' && i.ccy);
+  const ccy = priced ? inputs[0].ccy : '';
+  const now = priced ? (inputs.find(i => i.now) || {}).now : null;
+  const L = buildLedger(inputs);
+  const rangeKey = sumPref('range', 'all'), R = SUM_RANGES.find(r => r[0] === rangeKey) || SUM_RANGES[3];
+  const to = Math.floor(Date.now() / 1000), first = L.timeline.length ? L.timeline[0].t : to;
+  const from = R[2] ? Math.min(to - R[2] * 86400, to - 3600) : Math.max(0, first - Math.max(3600, (to - first) * 0.03));
+  const prices = priced && L.timeline.length ? await pricesFor(ccy, sampleDays(Math.max(from, first), to)) : {};
+  if (me !== renderSummary.seq) return;
+  const S = sumSeries(L, from, to, prices, now);
+  const nowState = L.timeline.length ? L.timeline[L.timeline.length - 1] : { sats: 0, basis: 0 };
+  const value = now ? nowState.sats / 1e8 * now.price : null, gain = value !== null ? value - nowState.basis : null;
+  box.classList.remove('sum-loading');
+  box.innerHTML = '';
+  const topRow = document.createElement('div'); topRow.className = 'sum-top';
+  const lbl = document.createElement('div'); lbl.className = 'label'; lbl.textContent = opts.title || 'Over time';
+  const filters = document.createElement('div'); filters.className = 'sum-filters';
+  if (opts.chips) filters.appendChild(opts.chips);
+  const seg = document.createElement('div'); seg.className = 'seg'; seg.setAttribute('role', 'radiogroup'); seg.setAttribute('aria-label', 'Time range');
+  for (const [k, n] of SUM_RANGES) { const b = document.createElement('button'); b.type = 'button'; b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', k === R[0] ? 'true' : 'false'); b.dataset.range = k; b.textContent = n; b.onclick = () => { sumSave('range', k); renderSummary(box, names, opts); }; seg.appendChild(b); }
+  filters.appendChild(seg); topRow.append(lbl, filters); box.appendChild(topRow);
+  if (!L.timeline.length) { const e = document.createElement('div'); e.className = 'sum-empty'; e.textContent = opts.empty || 'Nothing has arrived yet, so there is nothing to draw.'; box.appendChild(e); return; }
+  // stat tiles first: the numbers a reader came for, before any picture
+  const k = document.createElement('div'); k.className = 'kpis';
+  const tile = (key, v, sub, cls) => { const d = document.createElement('div'); d.className = 'kpi'; d.innerHTML = `<div class="k"></div><div class="v"></div><div class="s"></div>`; d.querySelector('.k').textContent = key; d.querySelector('.v').textContent = v; const sEl = d.querySelector('.s'); sEl.textContent = sub || ''; if (cls) sEl.classList.add(cls); return d; };
+  k.appendChild(tile('Holding', sats(nowState.sats) + ' sats', inputs.length > 1 ? `across ${inputs.length} vaults` : ''));
+  if (priced && value !== null) {
+    k.appendChild(tile('Worth now', money(value, ccy), '1 BTC = ' + money(now.price, ccy)));
+    k.appendChild(tile('Cost basis', money(nowState.basis, ccy), 'what it was worth as it arrived'));
+    const pct = nowState.basis > 0 ? gain / nowState.basis * 100 : null;
+    // a status colour, so it goes with a sign and an arrow and never by colour alone
+    k.appendChild(tile('Unrealised', (gain >= 0 ? '▲ +' : '▼ −') + money(Math.abs(gain), ccy), pct === null ? '' : (gain >= 0 ? '+' : '−') + Math.abs(pct).toFixed(1) + '% on cost', gain >= 0 ? 'up' : 'down'));
+  }
+  box.appendChild(k);
+  const c1 = document.createElement('div'); c1.className = 'chart'; box.appendChild(c1);
+  lineChart(c1, { title: 'Balance, in sats', sub: 'It changes only when something arrives or leaves.', from, to,
+    series: [{ name: 'Balance', color: 'var(--series-value)', pts: S.bal, step: true, area: true }],
+    fmt: (v) => sats(Math.round(v)) + ' sats', fmtAxis: (v) => csats(v) });
+  if (priced) {
+    const c2 = document.createElement('div'); c2.className = 'chart'; box.appendChild(c2);
+    lineChart(c2, { title: `What it is worth, and what it cost, in ${ccy}`, sub: 'The gap between the two lines is the gain or loss not yet realised.', from, to,
+      series: [{ name: 'Worth', color: 'var(--series-value)', pts: S.val, step: false }, { name: 'Cost basis', color: 'var(--series-cost)', pts: S.cost, step: true }],
+      fmt: (v) => money(v, ccy), fmtAxis: (v) => cmoney(v, ccy) });
+  }
+  // what the figures rest on, said once and plainly
+  const notes = [];
+  if (!priced) notes.push(inputs.some(i => i.network !== 'mainnet') ? 'Test coins have no price, so only the balance is drawn.' : 'No currency is chosen in App settings, so only the balance is drawn.');
+  if (priced) notes.push('Worth is drawn from daily closing prices on up to 36 days across the range, and at each transaction, so a sharp move between two of those days does not show.');
+  if (priced) notes.push('Cost basis is what each deposit was worth when it arrived — a true cost only if the deposit was a purchase.');
+  if (L.internal) notes.push(`${L.internal} transfer${L.internal === 1 ? '' : 's'} between these vaults ${L.internal === 1 ? 'was' : 'were'} recognised and counted as a move, not a sale and a purchase: the coins kept their cost.`);
+  if (L.unpriced) notes.push(`${L.unpriced} deposit${L.unpriced === 1 ? ' has' : 's have'} no price, so ${L.unpriced === 1 ? 'its' : 'their'} cost is left out rather than guessed.`);
+  if (opts.extra) notes.push(opts.extra);
+  const nt = document.createElement('div'); nt.className = 'muted'; nt.style.cssText = 'font-size:12.5px;margin-top:12px'; nt.textContent = notes.join(' '); box.appendChild(nt);
+  // a table of the same figures: nothing is reachable only by hovering
+  const tg = document.createElement('button'); tg.type = 'button'; tg.className = 'linkish'; tg.style.marginTop = '8px'; tg.textContent = 'Show the figures as a table';
+  const tw = document.createElement('div'); tw.className = 'sum-table'; tw.hidden = true;
+  tg.onclick = () => {
+    tw.hidden = !tw.hidden; tg.textContent = tw.hidden ? 'Show the figures as a table' : 'Hide the table'; if (tw.hidden) return;
+    const cols = [{ n: 'Balance', s: { pts: S.bal, step: true }, f: (v) => sats(Math.round(v)) + ' sats' }].concat(priced ? [{ n: 'Worth', s: { pts: S.val }, f: (v) => money(v, ccy) }, { n: 'Cost basis', s: { pts: S.cost, step: true }, f: (v) => money(v, ccy) }] : []);
+    const xs = [...new Set([...S.bal, ...S.val, ...S.cost].map(p => p[0]))].sort((a, b) => b - a);
+    const t = document.createElement('table'), hr = t.insertRow(); for (const h of ['When'].concat(cols.map(c => c.n))) { const th = document.createElement('th'); th.textContent = h; hr.appendChild(th); }
+    for (const x of xs) { const r = t.insertRow(); r.insertCell().textContent = new Date(x * 1000).toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' }); for (const c of cols) r.insertCell().textContent = c.f(seriesAt(c.s, x) || 0); }
+    tw.innerHTML = ''; tw.appendChild(t);
+  };
+  box.append(tg, tw);
+}
+function renderHomeSummary() { if (vault && $('#s-home').classList.contains('on')) renderSummary($('#home-summary'), [vault.name]); }
+
+// ---------- all vaults: the same view, of everything that has a price ----------
+function renderOverview() {
+  const main = store.vaults.filter(v => v.network === 'mainnet'), test = store.vaults.filter(v => v.network !== 'mainnet');
+  let off = []; try { off = JSON.parse(sumPref('off', '[]')); } catch {}
+  const names = main.map(v => v.name).filter(n => !off.includes(n));
+  const chips = document.createElement('div'); chips.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap';
+  for (const v of main) { const b = document.createElement('button'); b.type = 'button'; b.className = 'vchip'; b.setAttribute('aria-pressed', off.includes(v.name) ? 'false' : 'true'); b.textContent = v.name;
+    b.onclick = () => { const set = new Set(off); set.has(v.name) ? set.delete(v.name) : set.add(v.name); sumSave('off', JSON.stringify([...set])); renderOverview(); }; chips.appendChild(b); }
+  $('#ov-note').textContent = test.length ? `Not counted: ${test.map(v => '“' + v.name + '”').join(', ')} — on a test network, whose coins are worth nothing and must never be added to real ones.` : '';
+  if (!main.length) { $('#ov-summary').innerHTML = '<div class="label">All vaults</div><div class="sum-empty">No vault on mainnet yet. Test-network vaults are never added into a total of real coins.</div>'; return; }
+  renderSummary($('#ov-summary'), names, { title: 'All vaults', chips: main.length > 1 ? chips : null,
+    empty: names.length ? 'Nothing has arrived in these vaults yet.' : 'Every vault is switched off above. Switch one on to see it.',
+    extra: main.length > 1 ? 'Switch a vault off above to leave it out; a transfer from a vault that is switched off then counts as coming from outside.' : '' });
 }
 
 // ---------- receive ----------

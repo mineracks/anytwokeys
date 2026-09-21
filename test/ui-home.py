@@ -52,6 +52,7 @@ const H = {
   seal_preview: (a) => { window.__previewed = a.found.length; return window.__cands || []; },
   vault_sync: (a) => ({ coins: [{ txid: '%(t0)s', vout: 0, value: 9430, height: 967374, index: 0 }], balance: a.name === 'other vault' ? 111 : 9430, height: 967685, rotating: !!window.__rotating, receive: 'bc1qexample', receive_index: 0, next_change: 0, gap: 20, servers: { electrum: 'ssl://electrum.mineracks.com:50002', explorer: 'https://mempool.mineracks.com' },
     history: [{ txid: '%(t0)s', height: 967374, index: 0 }, { txid: '%(t1)s', height: 967410, index: 0 }, { txid: '%(t2)s', height: 967497, index: 0 }, { txid: '%(t3)s', height: 0, index: 0 }] }),
+  prices_on: (a) => { window.__pricesAsked = (window.__pricesAsked || 0) + a.days.length; window.__lastDays = a.days; return a.days.map(d => [d, { price: 110000, basis: 'daily ' + d }]); },
   vault_activity: (a) => { __state.asked = a; if (__state.fail) throw 'electrum: connection refused'; const q = (p, b) => a.ccy ? { price: p, basis: b } : null; return { ccy: a.ccy, note: null, now: q(114209.6, 'daily 2026-09-19'), rows: [
     { txid: '%(t0)s', time: 1789627614, net: 20000, fee: null, quote: q(107389.64, 'hourly 2026-09-17 06:00 UTC') }, { txid: '%(t1)s', time: 1789648528, net: -5190, fee: 190, quote: q(107768.03, 'hourly 2026-09-17 12:00 UTC') },
     { txid: '%(t2)s', time: 1789699744, net: -5380, fee: 380, quote: null }, { txid: '%(t3)s', time: null, net: 1000, fee: null, quote: null }] }; } };
@@ -352,6 +353,83 @@ with sync_playwright() as p:
             const items = [...s.querySelectorAll('.nav, .sidegroup')];
             return items.every(n => n.hidden || n.getBoundingClientRect().height > 8) && (s.scrollHeight <= s.clientHeight || getComputedStyle(s).overflowY === 'auto'); }"""),
           pg.evaluate("JSON.stringify([...document.querySelectorAll('.side .sidegroup')].map(n => [n.textContent.slice(0,14), Math.round(n.getBoundingClientRect().height)]))"))
+
+    # ---- the ledger: checked against figures worked out by hand, not by the code under test ----
+    L1 = pg.evaluate("""buildLedger([{ name: 'A', rows: [{ txid: 'd1', time: 1000, net: 100000, quote: { price: 50000 } }] }])""")
+    check("a deposit costs what it was worth when it arrived: 0.001 BTC at $50,000 is $50", abs(L1["timeline"][-1]["basis"] - 50) < 1e-9 and L1["timeline"][-1]["sats"] == 100000, L1["timeline"][-1])
+    L2 = pg.evaluate("""buildLedger([{ name: 'A', rows: [{ txid: 'd1', time: 1000, net: 100000, quote: { price: 50000 } }, { txid: 's1', time: 2000, net: -50000, quote: { price: 60000 } }] }])""")
+    check("spending half takes half the cost with it — average cost, whatever the price on the day it left",
+          abs(L2["timeline"][-1]["basis"] - 25) < 1e-9 and L2["timeline"][-1]["sats"] == 50000, L2["timeline"][-1])
+    L3 = pg.evaluate("""buildLedger([
+        { name: 'A', rows: [{ txid: 'd1', time: 1000, net: 100000, quote: { price: 50000 } }, { txid: 'X', time: 3000, net: -60500, quote: { price: 55000 } }] },
+        { name: 'B', rows: [{ txid: 'X', time: 3000, net: 60000, quote: { price: 55000 } }] }])""")
+    check("a transfer between two of your vaults is RECOGNISED — the same transaction in both histories", L3["internal"] == 1)
+    check("and the coins keep their cost: B gets exactly $30.00 of basis, not 60,000 sats at that day's $55,000 ($33)",
+          abs(L3["perVault"]["basis"]["B"] - 30) < 1e-9, L3["perVault"])
+    check("only the fee is spent: combined holdings drop by 500 sats and combined cost by the fee's share, $0.25",
+          L3["timeline"][-1]["sats"] == 99500 and abs(L3["timeline"][-1]["basis"] - 49.75) < 1e-9, L3["timeline"][-1])
+    L4 = pg.evaluate("""buildLedger([{ name: 'B', rows: [{ txid: 'X', time: 3000, net: 60000, quote: { price: 55000 } }] }])""")
+    check("seen from B alone, the same coins count as bought that day ($33) — which is why scope has to be said",
+          abs(L4["timeline"][-1]["basis"] - 33) < 1e-9 and L4["internal"] == 0)
+    L5 = pg.evaluate("""buildLedger([{ name: 'A', rows: [{ txid: 'd1', time: 1000, net: 5000, quote: null }] }])""")
+    check("a deposit with no price is counted in the balance, and its cost is left OUT rather than guessed",
+          L5["unpriced"] == 1 and L5["timeline"][-1]["basis"] == 0 and L5["timeline"][-1]["sats"] == 5000)
+    check("price days are bounded, even across years", pg.evaluate("sampleDays(0, 86400 * 3000).length") == 36 and pg.evaluate("sampleDays(86400*10, 86400*12).length") == 3)
+
+    # ---- the summary on Home ----
+    pg.evaluate("show('home')"); pg.wait_for_timeout(1200)
+    check("Home leads with stat tiles: what it holds, what it is worth, what it cost, and the gain not yet realised",
+          [t.strip().lower() for t in pg.locator("#home-summary .kpi .k").all_inner_texts()] == ["holding", "worth now", "cost basis", "unrealised"],
+          pg.locator("#home-summary .kpi .k").all_inner_texts())
+    check("the gain is said with a sign and an arrow, never by colour alone", any(ch in pg.inner_text("#home-summary .kpi:nth-child(4) .v") for ch in "▲▼"))
+    charts = pg.locator("#home-summary .chart")
+    check("sats and money are on TWO charts — never one chart with two scales",
+          charts.count() == 2 and "sats" in charts.nth(0).locator("h4").inner_text() and any(c in charts.nth(1).locator("h4").inner_text() for c in ("USD", "EUR", "AUD", "GBP")),
+          [charts.nth(i).locator("h4").inner_text() for i in range(charts.count())])
+    check("the one-series chart has no legend box; the two-series chart always has one",
+          charts.nth(0).locator(".legend").count() == 0 and charts.nth(1).locator(".legend span").count() == 2)
+    check("worth and cost basis are the two lines on the money chart", "Worth" in charts.nth(1).locator(".legend").inner_text() and "Cost basis" in charts.nth(1).locator(".legend").inner_text())
+    check("every line ends in a labelled dot", charts.nth(1).locator("circle.dot").count() == 2 and charts.nth(1).locator("text.endlbl").count() == 2)
+    # the crosshair: one readout for every series at the moment under the pointer
+    hb = charts.nth(1).locator("rect.hit").bounding_box()
+    pg.mouse.move(hb["x"] + hb["width"] * 0.6, hb["y"] + hb["height"] / 2); pg.wait_for_timeout(200)
+    tip = charts.nth(1).locator(".ctip")
+    check("hovering shows ONE readout listing every series, the value leading the name", tip.is_visible() and tip.locator(".r").count() == 2 and tip.locator(".r b").count() == 2, tip.inner_text() if tip.is_visible() else "hidden")
+    pg.mouse.move(5, 5); pg.wait_for_timeout(150)
+    charts.nth(0).locator("rect.hit").focus(); pg.keyboard.press("Home"); pg.wait_for_timeout(150)
+    check("the same readout is reachable from the keyboard", charts.nth(0).locator(".ctip").is_visible())
+    pg.keyboard.press("Tab")
+    pg.click("#home-summary .linkish"); pg.wait_for_timeout(200)
+    check("and every figure is in a table too, so nothing is reachable only by hovering", pg.locator("#home-summary .sum-table table tr").count() >= 2)
+    check("the notes say what the figures rest on: sampled prices, and what 'cost' means here",
+          "daily closing prices" in pg.inner_text("#home-summary") and "true cost only if the deposit was a purchase" in pg.inner_text("#home-summary"))
+    bad = pg.evaluate("""() => { const rows = [...document.querySelectorAll('#home-summary .sum-table tr')].slice(1);
+        const num = (s) => parseFloat(String(s).replace(/[^0-9.]/g, ''));
+        return rows.map(r => [...r.cells].map(c => c.textContent)).filter(c => { const bal = num(c[1]), worth = num(c[2]);
+          const implied = bal > 0 ? worth / (bal / 1e8) : 0; return bal > 0 && (implied < 90000 || implied > 130000); }).map(c => c.join(' | ')); }""")
+    check("the chart agrees with ITSELF: at every moment in the table, worth is the balance at a real price — never the balance before a spend",
+          bad == [], bad)
+    pg.locator("#home-summary").screenshot(path=str(out / "summary.png"))
+    asked = pg.evaluate("window.__pricesAsked || 0")
+    pg.click('#home-summary .seg button[data-range="90"]'); pg.wait_for_timeout(900)
+    check("the time range scopes everything below it, and is remembered", pg.get_attribute('#home-summary .seg button[data-range="90"]', "aria-checked") == "true" and pg.evaluate("localStorage.getItem('a2k-sum-range')") == "90")
+    pg.click('#home-summary .seg button[data-range="all"]'); pg.wait_for_timeout(900)
+    check("a price already fetched this session is not asked for again", (pg.evaluate("window.__pricesAsked || 0") - asked) <= len(pg.evaluate("window.__lastDays || []")))
+
+    # ---- all vaults ----
+    pg.evaluate("show('overview')"); pg.wait_for_timeout(1500)
+    check("All vaults is a screen of its own, at the app tier, with the same view", pg.locator("#ov-summary .kpi").count() >= 1 and pg.locator("#ov-summary .chart").count() >= 1, pg.inner_text("#ov-summary")[:160])
+    check("a test-network vault is NEVER added into a total of real coins, and the screen says which were left out",
+          "a signet one" in pg.inner_text("#ov-note") and "must never be added to real ones" in pg.inner_text("#ov-note"), pg.inner_text("#ov-note"))
+    check("and it counts across vaults", "across" in pg.inner_text("#ov-summary .kpi:first-child") or pg.locator("#ov-summary .vchip").count() >= 1)
+    pg.locator("#s-overview").screenshot(path=str(out / "overview.png"))
+    pg.emulate_media(color_scheme="dark"); pg.evaluate("renderOverview()"); pg.wait_for_timeout(900)
+    check("dark mode draws with ITS OWN validated steps, not the light ones",
+          pg.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--series-value').trim().toUpperCase()") == "#B08A26"
+          and pg.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--series-cost').trim().toUpperCase()") == "#4A83C8")
+    pg.locator("#s-overview").screenshot(path=str(out / "overview-dark.png"))
+    pg.emulate_media(color_scheme="light"); pg.wait_for_timeout(200)
+    pg.evaluate("show('home')"); pg.wait_for_timeout(400)
 
     # ---- Activity: the whole history, with room ----
     pg.evaluate("show('activity')"); pg.wait_for_timeout(500)

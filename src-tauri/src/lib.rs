@@ -30,6 +30,21 @@ async fn cards_list() -> R<Vec<cards::CardInfo>> {
     block(|| cards::list().map_err(|e| e.to_string())).await
 }
 
+/// Daily prices for the value-over-time charts. Bounded, validated, paced and cached in `activity::daily_series`.
+#[tauri::command]
+async fn prices_on(ccy: String, days: Vec<String>) -> R<Vec<(String, Option<activity::Quote>)>> {
+    block(move || {
+        if !(ccy.len() == 3 && ccy.chars().all(|c| c.is_ascii_uppercase())) { return Err("the currency is a three-letter code".into()); }
+        if days.len() > 150 { return Err("that is more days than one chart needs".into()); }
+        let well_formed = |d: &String| d.len() == 10 && d.as_bytes()[4] == b'-' && d.as_bytes()[7] == b'-' && d.chars().filter(|c| c.is_ascii_digit()).count() == 8;
+        if !days.iter().all(well_formed) { return Err("a day is written YYYY-MM-DD".into()); }
+        let s = wallet::load()?;
+        let prices = if s.settings.custom { s.settings.prices.clone() } else { activity::PRICES.to_string() };
+        if prices.is_empty() { return Ok(days.into_iter().map(|d| (d, None)).collect()); }
+        Ok(activity::daily_series(&prices, &ccy, &days))
+    }).await
+}
+
 /// Yubico devices that are plugged in but cannot hold a key for this app — shown so a person who plugs one in is
 /// told what it is and why it will not do, rather than seeing nothing happen.
 #[tauri::command]
@@ -1594,7 +1609,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![net_offline, drill_every, cards_other, location_status, location_preview, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![net_offline, drill_every, cards_other, prices_on, location_status, location_preview, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
