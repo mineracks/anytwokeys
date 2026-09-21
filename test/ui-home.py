@@ -13,7 +13,7 @@ MOCK = """
 window.__state = { fiat: %(fiat)s, asked: null, fail: false, os: %(os)s };
 const V = %(vault)s; window.V = V;
 window.__contacts = []; window.__extra = [];
-const store = () => ({ forms: {}, contacts: __contacts, vaults: [V].concat(__extra), settings: { network: V.network, custom: false, electrum: '', explorer: '', gap: 20, fiat: __state.fiat, prices: '', offline: !!window.__offline }, seen: {}, last_psbt: null, last_message: null });
+const store = () => ({ forms: {}, contacts: __contacts, vaults: [V].concat(__extra), settings: { network: V.network, custom: false, electrum: '', explorer: '', gap: 20, fiat: __state.fiat, prices: '', offline: !!window.__offline, drill_days: window.__drillDays === undefined ? 90 : window.__drillDays }, seen: {}, last_psbt: null, last_message: null });
 const H = {
   attach_fetch: (a) => { (window.__fetched = window.__fetched || []).push(a); if (window.__fetchFails) throw 'the computer that added this file has not finished backing it up yet'; window.__away = (window.__away || []).filter(h => h !== a.sha256); return true; },
   attach_have: (a) => a.hashes.map(h => !(window.__away || []).includes(h)),
@@ -30,6 +30,7 @@ const H = {
   tx_pdf: (a) => { window.__pdf = a; if (window.__pdfCancel) throw 'cancelled'; return '/Users/p/Desktop/anytwokeys-demo-vault-758adfd2.pdf'; },
   tx_map: (a) => { window.__mapAsked = a; return window.__noMap ? null : { png: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', metres_per_px: 4.0625, width: 640 }; },
   net_offline: (a) => { window.__offline = a.on; return store(); },
+  drill_every: (a) => { window.__drillDays = a.days; return store(); },
   ctx_set: (a) => { window.__ctxSet = a; V.more = V.more || {}; const r = V.more['tx:' + a.txid] = V.more['tx:' + a.txid] || {}; if (a.remove) r.ctx = { removed: true, t: 9 }; else { r.ctx = Object.assign({ t: 9, how: 'noted', device: { name: 'Test Mac' } }, r.ctx || {}, { place: a.place, named: true }); delete r.ctx.geo; delete r.ctx.picked; if (a.lat !== null && a.lat !== undefined) { r.ctx.geo = { lat: a.lat, lon: a.lon, acc: 0 }; r.ctx.picked = true; } } return store(); },
   label_set: (a) => { V.labels = V.labels || {}; if (a.label) V.labels[a.key] = a.label; else delete V.labels[a.key]; return store(); },
   note_set: (a) => { window.__noteCalls = (window.__noteCalls || 0) + 1; V.notes = V.notes || {}; if (a.note.trim()) V.notes[a.key] = a.note; else delete V.notes[a.key]; return store(); },
@@ -423,7 +424,31 @@ with sync_playwright() as p:
           "Recovered" in pg.inner_text("#vs-drill-out") and "serial 11" in pg.inner_text("#vs-drill-out") and "same first address" in pg.inner_text("#vs-drill-out"), pg.inner_text("#vs-drill-out")[:200])
     check("it says plainly which keys it did NOT try, so a success is not read as more than it is",
           "not tried" in pg.inner_text("#vs-drill-out") and "says nothing about the" in pg.inner_text("#vs-drill-out"))
-    check("and the date of the drill is written down with the vault", "vault:drill" in pg.evaluate("JSON.stringify(Object.keys(V.notes))"))
+    check("and the date of the drill is written down with the vault, as a date that can be COMPARED, shown in words",
+          __import__("re").match(r"^\d{4}-\d{2}-\d{2} ", pg.evaluate("V.notes['vault:drill']")) is not None and "Last drill" in pg.inner_text("#vs-drill-when"), pg.evaluate("V.notes['vault:drill']"))
+    check("a fresh drill counts as today and says when the next is due", "today" in pg.inner_text("#vs-drill-when") and "due in 90 days" in pg.inner_text("#vs-drill-when"), pg.inner_text("#vs-drill-when"))
+    # ---- the reminder ----
+    pg.evaluate("V.notes['vault:drill'] = '2020-01-01 \u00b7 keys 11, 12'; paintDrillNudge.hidden = null; show('vault')"); pg.wait_for_timeout(300)
+    check("a drill long past its interval is called out as overdue, not merely reported",
+          "past the 90 days" in pg.inner_text("#vs-drill-when") and "warn" in (pg.get_attribute("#vs-drill-when", "class") or ""), pg.inner_text("#vs-drill-when"))
+    pg.evaluate("show('home')"); pg.wait_for_timeout(500)
+    check("and Home carries a quiet line about it, with a way straight to the drill",
+          pg.locator("#drill-nudge").is_visible() and "days since this vault was proved recoverable" in pg.inner_text("#drill-nudge") and pg.locator("#drill-nudge-go").is_visible())
+    check("the line says WHY, which is that a key fails without saying so", "die, be wiped or lock itself out" in pg.inner_text("#drill-nudge"))
+    pg.click("#drill-nudge-hide"); pg.wait_for_timeout(200)
+    check("it can be put aside, and it never blocks anything", not pg.locator("#drill-nudge").is_visible())
+    pg.evaluate("delete V.notes['vault:drill']; paintDrillNudge.hidden = null; paintDrillNudge()"); pg.wait_for_timeout(200)
+    check("a vault that has NEVER been drilled is nudged too, in its own words",
+          pg.locator("#drill-nudge").is_visible() and "never been proved recoverable" in pg.inner_text("#drill-nudge"))
+    pg.evaluate("show('settings')"); pg.wait_for_timeout(300)
+    check("the interval defaults to 90 days and can be changed, up to once a year or never",
+          pg.input_value("#drill-every") == "90" and [o.strip() for o in pg.locator("#drill-every option").all_inner_texts()] == ["every 30 days", "every 90 days", "every 6 months", "once a year", "never ask"])
+    pg.select_option("#drill-every", "0"); pg.wait_for_timeout(300)
+    pg.evaluate("paintDrillNudge.hidden = null; show('home')"); pg.wait_for_timeout(400)
+    check("asking never to be reminded is honoured", pg.evaluate("__drillDays") == 0 and not pg.locator("#drill-nudge").is_visible())
+    pg.evaluate("window.__drillDays = 90; store.settings.drill_days = 90")
+    # put the drill back as the checks below expect to find it: this block borrowed the record to test the reminder
+    pg.evaluate("V.notes['vault:drill'] = new Date().toISOString().slice(0,10) + ' \u00b7 keys 11, 12'; paintDrillNudge.hidden = null")
     pg.evaluate("show('vault')"); pg.wait_for_timeout(300)
     check("so the next time the screen is opened it says when it was last proved", "Last drill" in pg.inner_text("#vs-drill-when"))
     pg.evaluate("window.__cands[0].address = 'bc1qSOMETHINGELSE'; window.__cands[0].known_as = null")

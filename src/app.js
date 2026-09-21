@@ -69,7 +69,7 @@ function show(name) {
   if (name !== 'restore') stopCam();
   if (name !== 'sign') stopQr();
   if (name !== 'keys') hideDesc();
-  if (name === 'home') { sync(); labelsSync(); }
+  if (name === 'home') { sync(); labelsSync(); paintDrillNudge(); }
   if (name === 'receive') drawAddress();
   if (name === 'activity') { if (vault && !vault._coins) sync(); else paintActivity(); }
   if (name === 'addresses') { $('#addr-detail').hidden = true; renderAddresses(); }
@@ -1576,6 +1576,27 @@ function paintCoinsTab() {
   $('#coins-switch').classList.toggle('on', on);
   if (!on && $('#s-coins').classList.contains('on')) show('home');
 }
+// How a vault stands with its drills. `last` is the ISO date the drill wrote; days is how long ago.
+function drillState(v) {
+  const raw = ((v && v.notes) || {})['vault:drill'] || '';
+  const iso = (raw.match(/^\d{4}-\d{2}-\d{2}/) || [])[0] || '';
+  const every = store && store.settings ? (store.settings.drill_days === undefined ? 90 : store.settings.drill_days) : 90;
+  if (!iso) return { raw, iso: '', every, never: true, due: every > 0, days: null };
+  const days = Math.floor((Date.now() - Date.parse(iso + 'T00:00:00Z')) / 86400000);
+  return { raw, iso, every, never: false, days, due: every > 0 && days >= every, keys: raw.split('\u00b7')[1] || '' };
+}
+const drillWords = (d) => d.iso ? new Date(d.iso + 'T00:00:00Z').toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' }) + (d.keys ? ' \u00b7' + d.keys : '') : '';
+function paintDrillNudge() {
+  const row = $('#drill-nudge');
+  if (!vault || vault.keys.length < 2) { row.hidden = true; return; }
+  const d = drillState(vault);
+  if (!d.due || paintDrillNudge.hidden === vault.name) { row.hidden = true; return; }
+  row.hidden = false;
+  $('#drill-nudge-text').innerHTML = d.never
+    ? '<b>This vault has never been proved recoverable.</b> A drill reads its cards and checks they really do rebuild it. Nothing is spent.'
+    : `<b>It has been ${sats(d.days)} days since this vault was proved recoverable.</b> A key can die, be wiped or lock itself out without saying so.`;
+}
+$('#drill-nudge-hide').onclick = () => { paintDrillNudge.hidden = vault && vault.name; paintDrillNudge(); };
 function renderVaultSettings() {
   if (!vault) return;
   const n = vault.keys.length, single = n === 1;
@@ -1591,8 +1612,11 @@ function renderVaultSettings() {
   $('#vs-servers').innerHTML = [['Electrum server', esc(def[0] || '\u2014')], ['Block explorer', esc(def[1] || '\u2014')], ['Gap limit', sats(store.settings.gap || 20) + ' addresses past the last one used']]
     .map(([k, v]) => `<dt>${k}</dt><dd class="mono" style="font-size:12.5px">${v}</dd>`).join('');
   $('#vs-desc').textContent = vault._recovery || vault.descriptor || '';
-  $('#vs-drill-when').innerHTML = drill ? `Last drill: <b>${esc(drill)}</b>` : '<b>This vault has never been drilled.</b> Until it has, "the keys can recover it" is something you believe rather than something you have seen.';
-  $('#vs-drill-when').classList.toggle('warn', !drill);
+  const ds = drillState(vault);
+  $('#vs-drill-when').innerHTML = ds.never
+    ? '<b>This vault has never been drilled.</b> Until it has, "the keys can recover it" is something you believe rather than something you have seen.'
+    : `Last drill: <b>${esc(drillWords(ds))}</b> \u2014 ${ds.days === 0 ? 'today' : sats(ds.days) + ' day' + (ds.days === 1 ? '' : 's') + ' ago'}. ${ds.every ? (ds.due ? 'That is past the ' + sats(ds.every) + ' days you asked for.' : 'The next is due in ' + sats(ds.every - ds.days) + ' day' + (ds.every - ds.days === 1 ? '' : 's') + '.') : 'You have asked not to be reminded.'}`;
+  $('#vs-drill-when').classList.toggle('warn', ds.due);
   $('#vs-drill').hidden = single;
   $('#vs-drill-what').textContent = single
     ? 'This vault has one key and no shares to rebuild from: its recovery is the recovery sheet, which you can save below and should keep somewhere else.'
@@ -1638,9 +1662,9 @@ async function runDrill() {
     <dt>First address</dt><dd class="mono" style="font-size:12px;word-break:break-all">${esc(mine.address || '\u2014')}</dd>
     <dt>Matches this vault</dt><dd class="${ok ? 'ok' : 'warn'}">${ok ? 'yes \u2014 same shape, same network, same first address' : (sameShape ? 'no \u2014 the address it derives is not this vault\u2019s' : 'no \u2014 a different shape or network')}</dd></dl>
     ${untried > 0 ? `<div class="muted" style="font-size:13px">${sats(untried)} of this vault\u2019s ${sats(vault.keys.length)} keys ${untried === 1 ? 'was' : 'were'} not tried. This drill proves the ${sats(serials.length)} used can recover it; it says nothing about the ${untried === 1 ? 'other' : 'others'}. Run it again with a different pair to prove ${untried === 1 ? 'that one' : 'those'} too.</div>` : '<div class="muted" style="font-size:13px">Every key of this vault was read.</div>'}`);
-  if (ok) { const when = new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' }) + ` \u00b7 keys ${serials.join(', ')}`;
+  if (ok) { const when = new Date().toISOString().slice(0, 10) + ` \u00b7 keys ${serials.join(', ')}`;   // ISO first so it can be compared, shown in words
     const html = $('#vs-drill-out').innerHTML;
-    try { store = await invoke('note_set', { name: vault.name, key: 'vault:drill', note: when }); vault = store.vaults.find(v => v.name === vault.name) || vault; renderVaultSettings(); drillSay(html); } catch {} }
+    try { store = await invoke('note_set', { name: vault.name, key: 'vault:drill', note: when }); vault = store.vaults.find(v => v.name === vault.name) || vault; paintDrillNudge.hidden = null; renderVaultSettings(); paintDrillNudge(); drillSay(html); } catch {} }
 }
 $('#vs-drill').onclick = () => { drillFound = []; runDrill(); };
 $('#vs-copy-desc').onclick = () => navigator.clipboard.writeText($('#vs-desc').textContent).then(() => toast('Recovery line copied'));
@@ -1648,8 +1672,10 @@ $('#vs-pdf').onclick = () => invoke('vault_pdf', { name: vault.name }).then((p) 
 $('#vs-rename').onclick = () => { show('home'); setTimeout(() => $('#title-edit').click(), 80); };
 askTwice($('#vs-forget'), 'Forget this vault on this computer? The coins stay on the chain; two sealed keys, or the recovery line and two keys, bring it back.', 'Yes, forget it here', async () => { store = await invoke('vault_forget', { name: vault.name }); vault = null; boot(); });
 $('#coins-switch').onclick = () => { try { localStorage.setItem('a2k-coins-tab', coinsTab() ? 'off' : 'on'); } catch {} paintCoinsTab(); };
+$('#drill-every').onchange = async () => { try { store = await invoke('drill_every', { days: +$('#drill-every').value }); paintDrillNudge(); } catch (e) { fail(e); } };
 function renderSettings() {
   paintCoinsTab();
+  $('#drill-every').value = String(store.settings.drill_days === undefined ? 90 : store.settings.drill_days);
   renderLock(); renderPlaces();
   $$('#net-pick .opt').forEach(o => o.classList.toggle('on', o.dataset.net === store.settings.network));
   const def = store.settings.network === 'mainnet' ? ['ssl://electrum.mineracks.com:50002', 'https://mempool.mineracks.com'] : ['tcp://100.94.4.10:50001', 'https://signet.mineracks.com'];

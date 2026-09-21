@@ -75,12 +75,17 @@ pub struct Settings {
     #[serde(default = "default_geocode")] pub geocode: String,
     /// work offline: no request leaves the app until this is turned off again
     #[serde(default)] pub offline: bool,
+    /// how often a vault should be proved recoverable from its cards, in days; 0 = never ask
+    #[serde(default = "default_drill")] pub drill_days: u32,
 }
 pub fn default_geocode() -> String { "https://geocode.mineracks.com".into() }
 pub fn default_tiles() -> String { "https://tiles.mineracks.com/planet.pmtiles".into() }
 pub fn default_vss() -> String { crate::labels::DEFAULT_VSS.into() }
 pub fn default_fiat() -> String { "auto".into() }   // "auto" = from the device's region; "" = none; else an ISO code
 pub fn default_gap() -> u32 { GAP }
+/// 90 days. A key that has died, been wiped or had its PIN locked out fails SILENTLY: nothing tells you until the
+/// day you need it. The interval is a guess at how long is tolerable to have been wrong for, not a wear estimate.
+pub fn default_drill() -> u32 { 90 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StagedMessage { pub vault: String, pub address: String, pub message: String, pub index: u32 }
