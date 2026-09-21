@@ -1,7 +1,7 @@
 // Any Two Keys — the UI. Every real thing happens in Rust behind `invoke`.
 const { invoke } = window.__TAURI__.core;
 const $ = (s) => document.querySelector(s);
-const $$ = (s) => Array.from(document.querySelectorAll(s));
+const $$ = (s, root) => Array.from((root || document).querySelectorAll(s));
 const sats = (n) => Number(n).toLocaleString('en-AU');
 let store = null, vault = null, cards = [], cardsErr = '', fees = null, feeLevel = 'medium', built = null, camStream = null, camTimer = null;
 let setup = { k: 2, n: 3, keys: [], network: null };
@@ -379,7 +379,22 @@ function renderCtx() {
 // the picture is drawn in Rust from tiles on our own host; the window only adds the dot and how sure it is
 async function paintMap(ctx) {
   const box = $('#tx-map'), want = ctx && ctx.geo ? `${ctx.geo.lat},${ctx.geo.lon},${matchMedia('(prefers-color-scheme: dark)').matches}` : '';
-  if (!want) { box.hidden = true; box.dataset.for = ''; return; }
+  // a place with a name but no position: no map can be drawn, so offer to look the name up rather than show nothing
+  if (!want) {
+    box.dataset.for = '';
+    if (ctx && ctx.place && !ctx.removed) {
+      box.innerHTML = `<div class="nomap"><b>No position for this place</b><span>A place you typed carries no coordinates.</span><button type="button" class="btn small" id="ctx-find">Find it on the map</button></div>`;
+      box.hidden = false;
+      $('#ctx-find').onclick = async () => { const b = $('#ctx-find'), place = ctx.place; b.disabled = true; b.textContent = 'Looking…';
+        try { const hits = await invoke('place_search', { q: place });
+          if (!hits.length) { b.textContent = 'Find it on the map'; b.disabled = false; return toast(`Nothing found for “${place}”. Retype it and pick from the list.`, 8000); }
+          const h = hits[0];
+          await ctxSave({ place: [h.label, h.detail.replace(/ · /g, ', ')].filter(Boolean).join(', ').slice(0, 160), lat: h.lat, lon: h.lon });
+          toast(hits.length > 1 ? `Found ${h.label}. If that is the wrong one, retype the place and pick from the list.` : `Found ${h.label}.`, 8000);
+        } catch (e) { b.textContent = 'Find it on the map'; b.disabled = false; fail(e); } };
+    } else box.hidden = true;
+    return;
+  }
   if (box.dataset.for === want) return; box.dataset.for = want; box.hidden = true;
   let pic = null; try { pic = await invoke('tx_map', { lat: ctx.geo.lat, lon: ctx.geo.lon, dark: want.endsWith('true') }); } catch {}
   if (box.dataset.for !== want) return;
@@ -433,22 +448,91 @@ for (const [id, key] of [['#loc-on', 'location'], ['#loc-exact', 'locationExact'
 
 // ---------- a picture from any camera the computer can see (built in, plugged in, or a phone nearby) ----------
 const shot = { stream: null, taken: false };
+// What KIND of camera this is, from the name macOS gives it — so the person picks a picture of the thing on their desk
+// rather than reading a list. Order matters: a Desk View camera is also an iPhone.
+function camKind(label) {
+  const l = (label || '').toLowerCase();
+  if (l.includes('desk view')) return 'desk';
+  if (l.includes('studio display') || l.includes('display')) return 'display';
+  if (l.includes('ipad')) return 'ipad';
+  if (l.includes('iphone') || l.includes('continuity')) return 'iphone';
+  if (l.includes('facetime') || l.includes('macbook') || l.includes('built-in') || l.includes('imac')) return 'mac';
+  if (l.includes('virtual') || l.includes('obs') || l.includes('camo') || l.includes('snap')) return 'virtual';
+  return 'webcam';
+}
+// its name without the word every one of them ends in
+const camName = (label, i) => ((label || '').replace(/\s*camera$/i, '').trim()) || ('Camera ' + (i + 1));
+/// Draw the chooser into `row` and hide it when there is nothing to choose between. `pick(deviceId)` restarts whatever
+/// is using the camera. Names arrive only after the person has allowed one, so this is called once a stream is up.
+async function camChooser(row, stream, pick) {
+  if (!row) return;
+  const had = row.contains(document.activeElement);
+  let cams = [];
+  try { cams = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput'); } catch {}
+  const live = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+  const using = live && live.getSettings ? live.getSettings().deviceId : '';
+  row.innerHTML = cams.map((d, i) => { const k = camKind(d.label), on = d.deviceId === using;
+    return `<button type="button" class="camopt" role="radio" data-id="${esc(d.deviceId)}" data-kind="${k}" aria-checked="${on ? 'true' : 'false'}" tabindex="${on ? '0' : '-1'}">${camArt(k)}<span>${esc(camName(d.label, i))}</span></button>`; }).join('');
+  $$('.camopt', row).forEach(b => { b.onclick = () => { try { localStorage.setItem('a2k-camera', b.dataset.id); } catch {} pick(b.dataset.id); }; });
+  // the row is drawn again on every switch, so the button that is now chosen takes the focus the old one had
+  if (had) { const now = $('.camopt[aria-checked="true"]', row); if (now) now.focus(); }
+  row.onkeydown = (e) => {
+    if (!/^Arrow(Left|Right|Up|Down)$/.test(e.key)) return;
+    const all = $$('.camopt', row); if (all.length < 2) return;
+    e.preventDefault();
+    const at = all.findIndex(b => b.getAttribute('aria-checked') === 'true');
+    all[(at + (/Left|Up/.test(e.key) ? all.length - 1 : 1)) % all.length].click();
+  };
+  const holder = row.closest('.field') || row;
+  holder.hidden = cams.length < 2;
+}
+/// The camera the person last chose, if it is still there; otherwise whatever the computer offers.
+async function camWanted() {
+  let want = ''; try { want = localStorage.getItem('a2k-camera') || ''; } catch {}
+  if (!want) return null;
+  try { if (!(await navigator.mediaDevices.enumerateDevices()).some(d => d.kind === 'videoinput' && d.deviceId === want)) return null; } catch {}
+  return want;
+}
+/// Ask for a camera: the one named, else the one last chosen, else any. Never throws for a device that has gone.
+async function camOpen(deviceId) {
+  const want = deviceId || await camWanted();
+  const plain = { width: { ideal: 1920 }, height: { ideal: 1080 } };
+  if (want) { try { return await navigator.mediaDevices.getUserMedia({ video: Object.assign({ deviceId: { exact: want } }, plain) }); } catch (e) { if (/NotAllowed|denied/i.test(String(e))) throw e; } }
+  return await navigator.mediaDevices.getUserMedia({ video: Object.assign({ facingMode: 'environment' }, plain) });
+}
+function camArt(kind) {
+  const lens = (cx, cy, r) => `<circle class="c-glass" cx="${cx}" cy="${cy}" r="${r}"/><circle class="c-fill" cx="${cx}" cy="${cy}" r="${r / 2.6}"/>`;
+  switch (kind) {
+    case 'mac':      // a laptop, lens over the screen
+      return `<svg viewBox="0 0 72 56" role="img" aria-hidden="true"><rect class="c-body" x="12" y="6" width="48" height="32" rx="3"/>${lens(36, 11, 2.6)}<path class="c-line" d="M4 46h64"/><path class="c-body" d="M12 38h48l6 8H6z"/></svg>`;
+    case 'iphone':   // a phone stood on the desk edge, looking at you
+      return `<svg viewBox="0 0 72 56" role="img" aria-hidden="true"><rect class="c-body" x="24" y="2" width="24" height="42" rx="5"/><rect class="c-fill" x="31" y="6" width="10" height="2.6" rx="1.3"/>${lens(36, 23, 5)}<path class="c-line" d="M8 50h56"/><path class="c-line" d="M27 50v-6h18v6"/></svg>`;
+    case 'desk':     // the same phone, tipped over the top of the screen, looking DOWN at the desk
+      return `<svg viewBox="0 0 72 56" role="img" aria-hidden="true"><g transform="rotate(-28 27 18)"><rect class="c-body" x="17" y="3" width="20" height="32" rx="4.5"/>${lens(27, 18, 4)}</g><path class="c-beam" d="M31 33l-7 13M41 31l9 15"/><path class="c-line" d="M6 48h60"/><ellipse class="c-body" cx="38" cy="45" rx="12" ry="3.4"/></svg>`;
+    case 'display':  // a big screen on a stand, lens centred at the top
+      return `<svg viewBox="0 0 72 56" role="img" aria-hidden="true"><rect class="c-body" x="6" y="6" width="60" height="36" rx="3"/>${lens(36, 11.5, 2.8)}<path class="c-line" d="M30 42v6h12v-6M22 50h28"/></svg>`;
+    case 'ipad':
+      return `<svg viewBox="0 0 72 56" role="img" aria-hidden="true"><rect class="c-body" x="20" y="4" width="32" height="44" rx="4"/>${lens(36, 11, 3)}<path class="c-line" d="M30 42h12"/></svg>`;
+    case 'virtual':  // not a real camera: a screen with a lens drawn ON it
+      return `<svg viewBox="0 0 72 56" role="img" aria-hidden="true"><rect class="c-body" x="8" y="8" width="56" height="34" rx="4"/>${lens(36, 25, 7)}<path class="c-beam" d="M14 14l44 24"/></svg>`;
+    default:         // a webcam on a clip
+      return `<svg viewBox="0 0 72 56" role="img" aria-hidden="true"><rect class="c-body" x="18" y="8" width="36" height="24" rx="11"/>${lens(36, 20, 6)}<path class="c-body" d="M24 32h24l4 10H20z"/><path class="c-line" d="M10 46h52"/></svg>`;
+  }
+}
 const shotStop = () => { if (shot.stream) { shot.stream.getTracks().forEach(t => t.stop()); shot.stream = null; } };
 function shotClose() { shotStop(); $('#shot-modal').classList.remove('on'); }
 async function shotStart(deviceId) {
   shotStop(); shot.taken = false; $('#shot-still').hidden = true; $('#shot-video').hidden = false; $('#shot-again').hidden = true; $('#shot-take').textContent = 'Take the picture'; $('#shot-take').disabled = true;
   try {
-    shot.stream = await navigator.mediaDevices.getUserMedia({ video: Object.assign({ width: { ideal: 3840 }, height: { ideal: 2160 } }, deviceId ? { deviceId: { exact: deviceId } } : {}) });
+    shot.stream = await camOpen(deviceId);
     $('#shot-video').srcObject = shot.stream; $('#shot-take').disabled = false;
-    // names are only given once the person has allowed a camera, so the list is read after the first stream starts
-    const cams = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput'), live = shot.stream.getVideoTracks()[0], using = live && live.getSettings ? live.getSettings().deviceId : '';
-    $('#shot-pick').innerHTML = cams.map((d, i) => `<option value="${esc(d.deviceId)}"${d.deviceId === using ? ' selected' : ''}>${esc(d.label || 'Camera ' + (i + 1))}</option>`).join(''); $('#shot-pick-row').hidden = cams.length < 2;
+    await camChooser($('#shot-pick'), shot.stream, shotStart);
     $('#shot-note').classList.remove('warn'); $('#shot-note').textContent = 'A receipt, a label on a parcel, the thing you bought. It is kept with this transaction, encrypted like everything else.';
   } catch (e) { $('#shot-note').classList.add('warn'); $('#shot-note').textContent = /NotAllowed|denied/i.test(String(e)) ? 'macOS is not letting Any Two Keys use the camera: allow it in System Settings › Privacy & Security › Camera.' : /NotFound|Overconstrained/i.test(String(e)) ? 'No camera was found.' : 'The camera could not be started: ' + String(e.message || e); }
 }
-$('#tx-camera').onclick = () => { if (!onTx()) return; $('#shot-modal').classList.add('on'); let last = ''; try { last = localStorage.getItem('a2k-camera') || ''; } catch {} shotStart(last).then(() => { if (!shot.stream && last) shotStart(''); }); };
-$('#shot-pick').onchange = () => { try { localStorage.setItem('a2k-camera', $('#shot-pick').value); } catch {} shotStart($('#shot-pick').value); };
-$('#shot-close').onclick = shotClose; $('#shot-again').onclick = () => shotStart($('#shot-pick').value);
+$('#tx-camera').onclick = () => { if (!onTx()) return; $('#shot-modal').classList.add('on'); shotStart(''); };
+
+$('#shot-close').onclick = shotClose; $('#shot-again').onclick = () => shotStart('');
 $('#shot-take').onclick = async () => {
   const v = $('#shot-video'), cv = $('#shot-still');
   if (!shot.taken) {   // first press: hold the frame so it can be looked at before it is kept
@@ -530,7 +614,10 @@ function fitNote() { const n = $('#tx-note'); n.style.height = 'auto'; n.style.h
 $('#tx-note').addEventListener('input', () => { fitNote(); clearTimeout(saveTxField.t); recSaid('Not saved yet…'); saveTxField.t = setTimeout(() => saveTxField('note'), 1200); });
 $('#tx-note').addEventListener('blur', () => { clearTimeout(saveTxField.t); saveTxField('note'); });
 $('#tx-prev').onclick = () => stepTx(-1); $('#tx-next').onclick = () => stepTx(1);
-document.addEventListener('keydown', (e) => { if (!$('#s-tx').classList.contains('on') || /INPUT|TEXTAREA/.test(document.activeElement.tagName) || e.metaKey || e.ctrlKey || e.altKey) return; if (e.key === 'ArrowLeft') stepTx(-1); if (e.key === 'ArrowRight') stepTx(1); });
+// Newer / Older on the arrow keys — but not while something is in front of the screen, or while a control that uses
+// the arrows itself has the focus: a camera being chosen must not step to another transaction underneath it.
+const overTx = () => $('.modal.on') || !$('#lock').hidden || /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) || document.activeElement.closest('[role="radiogroup"], [role="listbox"], details[open] > summary');
+document.addEventListener('keydown', (e) => { if (!$('#s-tx').classList.contains('on') || overTx() || e.metaKey || e.ctrlKey || e.altKey) return; if (e.key === 'ArrowLeft') stepTx(-1); if (e.key === 'ArrowRight') stepTx(1); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('#s-tx').classList.contains('on') && !/INPUT|TEXTAREA/.test(document.activeElement.tagName)) show('home'); });
 
 async function fillActivity(name, s) {
@@ -674,15 +761,19 @@ function fillDestination(text) {
   toast('Destination filled');
 }
 let cam2Stream = null, cam2Timer = null;
-$('#scan-to').onclick = async () => {
+const openScan = async (deviceId) => {
+  if (cam2Timer) { clearInterval(cam2Timer); cam2Timer = null; }
+  if (cam2Stream) { cam2Stream.getTracks().forEach(t => t.stop()); cam2Stream = null; }
   $('#scan-modal').classList.add('on');
   try {
-    cam2Stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+    cam2Stream = await camOpen(deviceId);
     $('#cam2').srcObject = cam2Stream;
+    camChooser($('#scan-pick'), cam2Stream, openScan);
     const cv = document.createElement('canvas'); const ctx = cv.getContext('2d', { willReadFrequently: true });
     cam2Timer = setInterval(() => { const v = $('#cam2'); if (!v.videoWidth) return; cv.width = v.videoWidth; cv.height = v.videoHeight; ctx.drawImage(v, 0, 0); const img = ctx.getImageData(0, 0, cv.width, cv.height); const code = jsQR(img.data, cv.width, cv.height); if (code && code.data && /^(bitcoin:|bc1|tb1|[13mn2])/i.test(code.data.trim())) { fillDestination(code.data); closeScan(); } }, 350);
   } catch { $('#cam2-note').textContent = 'No camera available on this computer. Paste the address instead.'; }
 };
+$('#scan-to').onclick = () => openScan('');
 function closeScan() { if (cam2Timer) clearInterval(cam2Timer); cam2Timer = null; if (cam2Stream) { cam2Stream.getTracks().forEach(t => t.stop()); cam2Stream = null; } $('#scan-modal').classList.remove('on'); }
 $('#scan-close').onclick = closeScan;
 
@@ -1255,9 +1346,11 @@ async function readSeals(force) {
 // ---------- restore ----------
 function restoreTab(name) { restoreTab.now = name; $$('.tabs div').forEach(x => x.classList.toggle('on', x.dataset.tab === name)); for (const t of ['keys', 'scan', 'paste']) $('#tab-' + t).hidden = t !== name; $('#sheet-note').hidden = name === 'keys'; if (name === 'scan') startCam(); else stopCam(); if (name === 'keys') { readSeals.sig = null; readSeals(); } }
 $$('.tabs div').forEach(t => t.onclick = () => restoreTab(t.dataset.tab));
-async function startCam() {
-  if (camStream) return;
-  try { camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }); $('#cam').srcObject = camStream; const cv = document.createElement('canvas'); const ctx = cv.getContext('2d', { willReadFrequently: true });
+async function startCam(deviceId) {
+  if (camStream && !deviceId) return;
+  if (camTimer) { clearInterval(camTimer); camTimer = null; }
+  if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
+  try { camStream = await camOpen(deviceId); $('#cam').srcObject = camStream; camChooser($('#scan-pick2'), camStream, startCam); const cv = document.createElement('canvas'); const ctx = cv.getContext('2d', { willReadFrequently: true });
     camTimer = setInterval(() => { const v = $('#cam'); if (!v.videoWidth) return; cv.width = v.videoWidth; cv.height = v.videoHeight; ctx.drawImage(v, 0, 0); const img = ctx.getImageData(0, 0, cv.width, cv.height); const code = jsQR(img.data, cv.width, cv.height); if (code && code.data && /^(wsh|wpkh)\(/.test(code.data)) { $('#cam-note').textContent = 'Read a descriptor from the code.'; readDescriptor(code.data); } }, 400);
   } catch (e) { $('#cam-note').textContent = 'No camera available. Paste the line instead.'; }
 }

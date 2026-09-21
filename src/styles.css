@@ -451,4 +451,18 @@ details.card.quiet > *:not(summary){margin-top:12px}
 #tx-place-list .foot{padding:6px 10px 4px;font-family:var(--display);font-size:11px;color:var(--muted);cursor:default;background:none}
 #tx-place-list.up{top:auto;bottom:calc(100% + 4px);box-shadow:0 -10px 30px rgba(0,0,0,.14)}
 .cam.shot{height:auto;aspect-ratio:4/3;max-height:56vh} .cam.shot video,.cam.shot canvas{width:100%;height:100%;object-fit:contain;display:block}
-.nomap{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;text-align:center;padding:14px;color:var(--muted);font-size:13px} .nomap b{font-family:var(--display);font-weight:600;color:var(--ink);font-size:14px} .nomap span:first-of-type{font-family:var(--mono);font-size:12.5px}
+.nomap{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;text-align:center;padding:14px;color:var(--muted);font-size:13px} .nomap b{font-family:var(--display);font-weight:600;color:var(--ink);font-size:14px} .nomap .btn{margin-top:6px} .nomap span:first-of-type{font-family:var(--mono);font-size:12.5px}
+
+/* which camera: a sketch of each one, not a list of names */
+.camrow{display:flex;flex-wrap:wrap;gap:10px}
+.camopt{display:flex;flex-direction:column;align-items:center;gap:6px;width:104px;padding:10px 6px 8px;border:1.5px solid var(--line);border-radius:10px;background:var(--panel);color:var(--muted);cursor:pointer;font:inherit;text-align:center}
+.camopt:hover{border-color:var(--gold);color:var(--ink)}
+.camopt:focus-visible{outline:3px solid var(--gold-soft);outline-offset:1px}
+.camopt[aria-checked="true"]{border-color:var(--gold);background:var(--gold-soft);color:var(--ink)}
+.camopt svg{width:54px;height:44px;display:block}
+.camopt span{font-family:var(--display);font-size:12px;font-weight:600;line-height:1.25;overflow-wrap:anywhere}
+.c-body{fill:var(--panel);stroke:currentColor;stroke-width:2;stroke-linejoin:round}
+.c-fill{fill:currentColor}
+.c-glass{fill:var(--ground);stroke:currentColor;stroke-width:1.5}
+.c-line{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round}
+.c-beam{fill:none;stroke:currentColor;stroke-width:1.5;stroke-dasharray:3 3;opacity:.75}

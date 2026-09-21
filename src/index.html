@@ -183,7 +183,7 @@
         <div style="display:flex;flex-direction:column;gap:14px">
           <div class="tabs"><div class="on" data-tab="keys">From the keys</div><div data-tab="scan">Scan the sheet</div><div data-tab="paste">Paste the line</div></div>
           <div id="tab-keys"><div class="muted" id="seal-read-note">Plug in the keys, together or one after another. Each asks for its own PIN: a sealed key gives up its share only for that, so holding the keys is not enough to see what a vault holds.</div><div id="seal-read-list" style="display:flex;flex-direction:column;gap:10px;margin-top:12px"></div></div>
-          <div id="tab-scan" hidden><div class="cam"><video id="cam" autoplay playsinline muted></video><div class="frame"></div></div><div class="muted" style="font-size:13px;margin-top:8px" id="cam-note">Hold the sheet's code in the frame.</div></div>
+          <div id="tab-scan" hidden><div class="field" hidden style="margin-bottom:12px"><div class="cap">Camera</div><div class="camrow" id="scan-pick2" role="radiogroup" aria-label="Which camera"></div></div><div class="cam"><video id="cam" autoplay playsinline muted></video><div class="frame"></div></div><div class="muted" style="font-size:13px;margin-top:8px" id="cam-note">Hold the sheet's code in the frame.</div></div>
           <div id="tab-paste" hidden><div class="field"><textarea id="desc-in" class="mono" placeholder="wsh(sortedmulti(2,02…,03…,03…))#checksum cc=…" spellcheck="false"></textarea></div><button class="btn" id="desc-read">Read it</button><button class="btn" id="bsms-open" title="Open a BSMS descriptor record (BIP 129)">Open a BSMS file</button></div>
           <div class="muted" id="sheet-note" hidden style="font-size:13px">The code on a recovery sheet carries the descriptor alone. Nothing on it can spend.</div>
         </div>
@@ -312,6 +312,7 @@
 
 <div class="modal" id="scan-modal"><div class="box" style="width:520px">
   <h2>Scan a QR code</h2>
+  <div class="field" hidden><div class="cap">Camera</div><div class="camrow" id="scan-pick" role="radiogroup" aria-label="Which camera"></div></div>
   <div class="cam"><video id="cam2" autoplay playsinline muted></video><div class="frame"></div></div>
   <div class="muted" style="font-size:13px" id="cam2-note">An address, or a bitcoin: link with an amount.</div>
   <div class="row" style="justify-content:flex-end"><button class="btn" id="scan-close">Cancel</button></div>
@@ -319,7 +320,7 @@
 
 <div class="modal" id="shot-modal"><div class="box" style="width:640px">
   <h2>Take a picture</h2>
-  <div class="field" id="shot-pick-row"><label class="cap" for="shot-pick">Camera</label><select id="shot-pick"></select></div>
+  <div class="field" id="shot-pick-row"><div class="cap">Camera</div><div class="camrow" id="shot-pick" role="radiogroup" aria-label="Which camera"></div></div>
   <div class="cam shot"><video id="shot-video" autoplay playsinline muted></video><canvas id="shot-still" hidden></canvas></div>
   <div class="muted" style="font-size:13px" id="shot-note">A receipt, a label on a parcel, the thing you bought. It is kept with this transaction, encrypted like everything else.</div>
   <div class="row" style="justify-content:flex-end"><button class="btn" id="shot-close" type="button">Cancel</button><button class="btn" id="shot-again" type="button" hidden>Take another</button><button class="btn primary" id="shot-take" type="button">Take the picture</button></div>
