@@ -280,6 +280,7 @@ async fn call<Req: prost::Message, Resp: prost::Message + Default>(url: &str, ke
     use vss_client_ng::headers::VssHeaderProvider;
     let body = req.encode_to_vec();
     let headers = SigsAuthProvider::new(keys.auth, HashMap::new()).get_headers(&body).await.map_err(|e| VssError::AuthError(e.to_string()))?;
+    crate::net::out("your labels").map_err(VssError::InternalError)?;
     let client = reqwest::Client::builder().timeout(Duration::from_secs(90)).build().map_err(|e| VssError::InternalError(e.to_string()))?;
     let mut r = client.post(format!("{}/{method}", url.trim_end_matches('/'))).header("content-type", "application/octet-stream").body(body);
     for (k, v) in headers { r = r.header(k, v); }

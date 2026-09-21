@@ -29,6 +29,7 @@ pub struct Coin {
 pub struct Fees { pub slow: f64, pub medium: f64, pub fast: f64 }
 
 pub fn client(servers: &Servers) -> Result<Client, String> {
+    crate::net::out("the node")?;
     let cfg = ConfigBuilder::new().timeout(Some(20)).validate_domain(true).build();
     Client::from_config(&servers.electrum, cfg).map_err(|e| format!("electrum {}: {e}", servers.electrum))
 }
@@ -60,6 +61,7 @@ pub fn broadcast(servers: &Servers, tx: &Transaction) -> Result<Txid, String> {
 }
 
 pub fn fees(servers: &Servers) -> Result<Fees, String> {
+    crate::net::out("fee rates")?;
     let url = format!("{}/api/v1/fees/recommended", servers.explorer.trim_end_matches('/'));
     let http = reqwest::blocking::Client::builder().user_agent("anytwokeys/0.1").timeout(std::time::Duration::from_secs(15)).build().map_err(|e| e.to_string())?;
     let v: serde_json::Value = http.get(&url).send().map_err(|e| format!("fees: {e}"))?.json().map_err(|e| format!("fees: {e}"))?;

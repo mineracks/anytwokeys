@@ -327,8 +327,18 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .node[data-state="online"] i{background:var(--signal);box-shadow:0 0 0 3px color-mix(in srgb,var(--signal) 22%,transparent)}
 .node[data-state="checking"] i{background:var(--gold);animation:gblink 1s steps(2,start) infinite}
 .node[data-state="offline"] i{background:var(--no)} .node[data-state="offline"]{color:var(--no)}
+.node[data-state="paused"] i{background:var(--muted);box-shadow:0 0 0 3px color-mix(in srgb,var(--muted) 16%,transparent)}
+/* a ring leaving the dot each time a request actually goes out — Rust says when, so this is traffic, not a guess */
+.node i{position:relative}
+.node[data-busy] i::after{content:'';position:absolute;inset:-4px;border-radius:50%;border:1.5px solid currentColor;color:var(--signal);animation:netping .75s ease-out}
+.node[data-state="paused"][data-busy] i::after{display:none}
+@keyframes netping{from{transform:scale(.55);opacity:.85}to{transform:scale(2.6);opacity:0}}
+.sidefoot{position:relative}
+.netmenu{position:absolute;left:12px;right:12px;bottom:46px;z-index:40;display:flex;flex-direction:column;gap:6px;padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--panel);box-shadow:0 12px 34px rgba(0,0,0,.18)}
+.netmenu .muted{font-size:12px;line-height:1.35}
+.netmenu .btn{width:100%;justify-content:center}
 .actfoot{border-top:1px solid var(--line);padding-top:12px;gap:10px}
-@media (prefers-reduced-motion: reduce){.node[data-state="checking"] i{animation:none}}
+@media (prefers-reduced-motion: reduce){.node[data-state="checking"] i{animation:none} .node[data-busy] i::after{animation-duration:.01ms}}
 
 /* Keys: one row per key, carrying everything about it — what it is, whether it is plugged in, whether it is sealed */
 .keyrow.vk{align-items:center;flex-wrap:wrap;row-gap:10px}

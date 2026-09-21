@@ -43,6 +43,7 @@ pub fn search(host: &str, q: &str, near: Option<(f64, f64)>) -> Result<Vec<Hit>,
     let mut url = reqwest::Url::parse(&format!("{}/api", host.trim_end_matches('/'))).map_err(|_| "the place-search host is not a web address".to_string())?;
     url.query_pairs_mut().append_pair("q", &q.chars().take(120).collect::<String>()).append_pair("limit", "6").append_pair("lang", "en");
     if let Some((lat, lon)) = near { url.query_pairs_mut().append_pair("lat", &format!("{:.1}", lat)).append_pair("lon", &format!("{:.1}", lon)); }
+    crate::net::out("place search")?;
     let c = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(8)).user_agent("AnyTwoKeys").build().map_err(|e| e.to_string())?;
     let r = c.get(url).send().map_err(|_| "the place search could not be reached".to_string())?;
     if !r.status().is_success() { return Err(format!("the place search answered {}", r.status().as_u16())); }

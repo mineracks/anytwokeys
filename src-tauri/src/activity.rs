@@ -50,6 +50,7 @@ fn fetch(http: &reqwest::blocking::Client, base: &str, ccy: &str, day: &str, hou
     let ask = |with_time: bool| -> Option<Quote> {
         let mut url = format!("{}/v1/price?day={day}&ccy={ccy}", base.trim_end_matches('/'));
         if let (true, Some(h)) = (with_time, hour) { url.push_str(&format!("&time={h:02}:00")); }   // the hour, never the minute: the server need not learn more
+        crate::net::out("prices").ok()?;
         let r = http.get(&url).send().ok()?;
         if !r.status().is_success() { return None; }
         read_quote(&r.json::<serde_json::Value>().ok()?, ccy, day)

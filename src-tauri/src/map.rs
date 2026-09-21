@@ -81,6 +81,7 @@ pub trait Source { fn range(&self, from: u64, len: u64) -> Result<Vec<u8>, Strin
 pub struct Http { pub url: String }
 impl Source for Http {
     fn range(&self, from: u64, len: u64) -> Result<Vec<u8>, String> {
+        crate::net::out("the map")?;
         let c = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(20)).user_agent("AnyTwoKeys").build().map_err(|e| e.to_string())?;
         let r = c.get(&self.url).header("Range", format!("bytes={}-{}", from, from + len - 1)).send().map_err(|_| "the map host could not be reached".to_string())?;
         if r.status().as_u16() != 206 { return Err(format!("the map host answered {}", r.status().as_u16())); }

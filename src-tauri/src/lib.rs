@@ -1,4 +1,5 @@
 mod activity;
+mod net;
 mod attach;
 mod cards;
 mod chain;
@@ -138,7 +139,18 @@ async fn tx_detail(name: String, txid: String, height: i32) -> R<activity::Detai
 
 #[tauri::command]
 fn store_get() -> Result<Store, String> {
-    wallet::load()
+    let s = wallet::load()?;
+    net::seed(s.settings.offline);   // the window asks for the store on every start and after every unlock
+    Ok(s)
+}
+
+/// Work offline, or stop. Everything the app would send is refused while this is on (net.rs is the one gate), and the
+/// setting is written down so quitting and opening again does not quietly put the app back on the network.
+#[tauri::command]
+fn net_offline(on: bool) -> R<Store> {
+    let s = wallet::update(|s| s.settings.offline = on)?;
+    net::seed(on);
+    Ok(s)
 }
 
 #[derive(Deserialize)]
@@ -249,7 +261,7 @@ fn settings_set(app: tauri::AppHandle, network: String, custom: bool, electrum: 
     let (location, location_exact) = (location.unwrap_or(s.settings.location), location_exact.unwrap_or(s.settings.location_exact));
     let tiles = tiles.map(|v| v.trim().to_string()).unwrap_or_else(|| s.settings.tiles.clone());
     if !(tiles.is_empty() || tiles.starts_with("https://")) { return Err("the map host is an https address of a .pmtiles file, or empty for no maps".into()); }
-    s.settings = wallet::Settings { network, custom, electrum: electrum.trim().to_string(), explorer: explorer.trim().to_string(), gap, fiat, prices, vss, location, location_exact, tiles, geocode: geocode.map(|v| v.trim().trim_end_matches('/').to_string()).filter(|v| v.is_empty() || v.starts_with("https://")).unwrap_or_else(|| s.settings.geocode.clone()) };
+    s.settings = wallet::Settings { network, custom, electrum: electrum.trim().to_string(), explorer: explorer.trim().to_string(), gap, fiat, prices, vss, location, location_exact, tiles, geocode: geocode.map(|v| v.trim().trim_end_matches('/').to_string()).filter(|v| v.is_empty() || v.starts_with("https://")).unwrap_or_else(|| s.settings.geocode.clone()), offline: s.settings.offline };
     wallet::save(&s)?;
     location_follow(&app, location);
     Ok(s)
@@ -1527,6 +1539,7 @@ mod watch {
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(8));
             loop {
+                if crate::net::offline() { std::thread::sleep(std::time::Duration::from_secs(20)); continue; }   // nothing goes out while offline, least of all on a timer
                 let events = pass();
                 for e in &events {
                     let r = app.notification().builder().title(&e.title).body(&e.body).show();
@@ -1545,7 +1558,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
-            attach::clear_opened(); watch::start(app.handle().clone());
+            attach::clear_opened();
+            net::attach(app.handle().clone());
+            if let Ok(s) = wallet::load() { net::seed(s.settings.offline); }   // a store that cannot be read yet is seeded by the window's first store_get
+            watch::start(app.handle().clone());
             // when the Mac's screen locks, so does this: the key leaves memory and the window is told to forget what it knew
             let h = app.handle().clone();
             std::thread::spawn(move || loop {
@@ -1556,7 +1572,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![location_status, location_preview, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![net_offline, location_status, location_preview, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])

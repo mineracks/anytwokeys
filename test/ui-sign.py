@@ -16,7 +16,7 @@ const V = %(vault)s, K = %(keys)s;
 const store = () => ({ forms: __state.forms || {}, vaults: [V], settings: { network: 'signet', custom: false, electrum: '', explorer: '', gap: 20 }, seen: {}, last_psbt: __state.psbt ? 'cHNidP8B' : null, last_message: null });
 const ceremony = () => { if (!__state.psbt) throw 'no spend in progress'; const full = __state.signed.filter(n => n >= __state.inputs).length; return { ours: __state.ours !== false, inputs: __state.inputs, need: 2, have: Math.min(full, 2), ready: full >= 2, fee: 190, txid: 'bcd3fb3d', bytes: 398,
   keys: V.keys.map((k, i) => ({ name: k.name, pubkey: k.pubkey, signed: __state.signed[i] })), pays: [{ address: 'tb1qrecipient0000000000000000000000000000000000000000000dest', sats: 5000, ours: false }, { address: 'tb1qchange', sats: 4810, ours: true }] }; };
-const H = { store_get: store, cards_list: () => { if (!__state.cards.length) throw 'no YubiKey found'; return __state.cards; }, vault_sync: () => { throw 'offline'; }, fees_get: () => ({ slow: 1, medium: 2, fast: 3 }),
+const H = { store_get: store, cards_list: () => { if (!__state.cards.length) throw 'no YubiKey found'; return __state.cards; }, vault_sync: () => { throw 'offline'; }, fees_get: () => (window.__fees || { slow: 1, medium: 2, fast: 3 }),
   key_form_seen: (a) => { __state.forms = Object.assign({}, __state.forms, { [a.pubkey]: a.form }); return store(); }, spend_discard: () => { __state.psbt = false; sessionStorage.setItem('discards', String(1 + +(sessionStorage.getItem('discards') || 0))); },
   spend_sign: async (a) => { __state.signCalls = (__state.signCalls || 0) + 1; await new Promise(r => window.__signRelease = r); const i = +a.reader.slice(-1); __state.signed[i] = __state.inputs; return { signer: V.keys[i].name, signed_inputs: [0, 1], psbt: 'x', status: {} }; },
   spend_ceremony: ceremony, spend_qr: () => ({ parts: %(parts)s, single: %(single)s, bytes: 398 }), spend_pdf: () => '/tmp/x.pdf',
@@ -114,6 +114,35 @@ with sync_playwright() as p:
     pg.evaluate("__state.psbt = true; __state.ours = false; show('sign')"); pg.wait_for_timeout(500)
     check("another vault's spend is named as such, not drawn as ours", "another vault" in pg.inner_text("#nospend-title").lower() and not pg.locator("#ceremony").is_visible())
     pg.evaluate("__state.psbt = false; __state.ours = true")
+    # ---- a fee of your own ----
+    pg.evaluate("vault._coins = vault._coins || []; show('send')"); pg.wait_for_timeout(200)
+    pg.evaluate("loadFees()"); pg.wait_for_timeout(400)
+    check("the three rates each say what they would cost for THIS vault's shape",
+          "1 sat/vB" in pg.inner_text('[data-fee="slow"]') and "sats" in pg.inner_text('[data-fee="fast"]') and "per input set" in pg.inner_text("#fee-note"), pg.inner_text("#fee-note")[:120])
+    check("a rate of your own is offered, and its box stays out of the way until it is chosen",
+          pg.locator('[data-fee="custom"]').count() == 1 and not pg.locator("#fee-custom-row").is_visible())
+    pg.click('[data-fee="custom"]'); pg.wait_for_timeout(200)
+    check("choosing Custom opens the box and says what a rate has to be", pg.locator("#fee-custom-row").is_visible() and "not pass it on" in pg.inner_text("#fee-custom-out"))
+    pg.fill("#fee-custom", "7.5"); pg.wait_for_timeout(150)
+    vb = pg.evaluate("loadFees.vb")
+    want = "{:,}".format(-(-int(vb * 75) // 10))   # ceil(vb * 7.5), grouped as the window groups it
+    check("what you type is costed for THIS spend, under the button and beside the box",
+          f"7.5 sat/vB · \u2248{want} sats" == pg.inner_text('[data-fee="custom"] small') and want in pg.inner_text("#fee-custom-out"),
+          "%s | %s | vb %s" % (pg.inner_text('[data-fee="custom"] small'), pg.inner_text("#fee-custom-out")[:60], vb))
+    check("and it is the rate the builder would be given", pg.evaluate("feeRate()") == 7.5)
+    pg.fill("#fee-custom", "0.4"); pg.wait_for_timeout(150)
+    check("a rate under 1 sat/vB is costed, and warned about, rather than quietly accepted", "will not relay it" in pg.inner_text("#fee-custom-out"))
+    pg.fill("#fee-custom", "abc"); pg.wait_for_timeout(150)
+    check("something that is not a rate is refused, and Build says so rather than sending at 1",
+          pg.evaluate("feeRate()") is None and "not a rate" in pg.inner_text("#fee-custom-out"))
+    pg.fill("#fee-custom", "900"); pg.wait_for_timeout(150)
+    check("a rate far above Fast is costed AND named as such, since it is the person's own money", "five times the Fast rate" in pg.inner_text("#fee-custom-out"), pg.inner_text("#fee-custom-out"))
+    pg.click('[data-fee="medium"]'); pg.wait_for_timeout(150)
+    check("going back to Medium puts the box away and uses the explorer's rate again", not pg.locator("#fee-custom-row").is_visible() and pg.evaluate("feeRate()") == 2)
+    pg.evaluate("window.__fees = { slow: 2, medium: 2, fast: 2 }; loadFees()"); pg.wait_for_timeout(400)
+    check("three buttons quoting ONE rate are not three choices, and the note says so instead of pretending",
+          "same rate for all three" in pg.inner_text("#fee-note") and "Choose Custom" in pg.inner_text("#fee-note"), pg.inner_text("#fee-note")[:140])
+    pg.evaluate("window.__fees = null")
     pg.evaluate("show('send')"); pg.click("#psbt-paste-toggle"); pg.fill("#psbt-text", "cHNidP8BAH0C"); pg.click("#psbt-load"); pg.wait_for_timeout(700)
     check("pasted PSBT goes to the backend and lands on the Sign screen", pg.evaluate("__state.imported && __state.imported.text") == "cHNidP8BAH0C" and pg.locator("#s-sign.on").count() == 1 and pg.inner_text("#cer-have") == "1")
     # ---- the drawn guide: one scene for the step you are on, for the key you hold ----

@@ -13,7 +13,7 @@ MOCK = """
 window.__state = { fiat: %(fiat)s, asked: null, fail: false, os: %(os)s };
 const V = %(vault)s; window.V = V;
 window.__contacts = []; window.__extra = [];
-const store = () => ({ forms: {}, contacts: __contacts, vaults: [V].concat(__extra), settings: { network: V.network, custom: false, electrum: '', explorer: '', gap: 20, fiat: __state.fiat, prices: '' }, seen: {}, last_psbt: null, last_message: null });
+const store = () => ({ forms: {}, contacts: __contacts, vaults: [V].concat(__extra), settings: { network: V.network, custom: false, electrum: '', explorer: '', gap: 20, fiat: __state.fiat, prices: '', offline: !!window.__offline }, seen: {}, last_psbt: null, last_message: null });
 const H = {
   attach_fetch: (a) => { (window.__fetched = window.__fetched || []).push(a); if (window.__fetchFails) throw 'the computer that added this file has not finished backing it up yet'; window.__away = (window.__away || []).filter(h => h !== a.sha256); return true; },
   attach_have: (a) => a.hashes.map(h => !(window.__away || []).includes(h)),
@@ -29,6 +29,7 @@ const H = {
   place_search: (a) => { (window.__asked = window.__asked || []).push(a.q); if (/zzzz/.test(a.q)) return []; return [{ label: '445 Upper Edward Street', detail: 'Spring Hill, Brisbane · Queensland 4000 · Australia', lat: -27.4615, lon: 153.0245 }, { label: '445 Upper Roma Street', detail: 'Brisbane City, Brisbane · Queensland 4000 · Australia', lat: -27.4655, lon: 153.0125 }]; },
   tx_pdf: (a) => { window.__pdf = a; if (window.__pdfCancel) throw 'cancelled'; return '/Users/p/Desktop/anytwokeys-demo-vault-758adfd2.pdf'; },
   tx_map: (a) => { window.__mapAsked = a; return window.__noMap ? null : { png: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', metres_per_px: 4.0625, width: 640 }; },
+  net_offline: (a) => { window.__offline = a.on; return store(); },
   ctx_set: (a) => { window.__ctxSet = a; V.more = V.more || {}; const r = V.more['tx:' + a.txid] = V.more['tx:' + a.txid] || {}; if (a.remove) r.ctx = { removed: true, t: 9 }; else { r.ctx = Object.assign({ t: 9, how: 'noted', device: { name: 'Test Mac' } }, r.ctx || {}, { place: a.place, named: true }); delete r.ctx.geo; delete r.ctx.picked; if (a.lat !== null && a.lat !== undefined) { r.ctx.geo = { lat: a.lat, lon: a.lon, acc: 0 }; r.ctx.picked = true; } } return store(); },
   label_set: (a) => { V.labels = V.labels || {}; if (a.label) V.labels[a.key] = a.label; else delete V.labels[a.key]; return store(); },
   note_set: (a) => { window.__noteCalls = (window.__noteCalls || 0) + 1; V.notes = V.notes || {}; if (a.note.trim()) V.notes[a.key] = a.note; else delete V.notes[a.key]; return store(); },
@@ -310,10 +311,34 @@ with sync_playwright() as p:
     check("the sidebar heads the vault's screens with the vault's name, and keeps the app's own things apart", pg.inner_text("#side-vault").lower() == "demo vault" and "App settings" in side and pg.evaluate("() => { const s = [...document.querySelectorAll('.side .nav[data-go]')].map(n => n.dataset.go); return s.indexOf('settings') === s.length - 1 && !!document.querySelector('.sidefoot .nav[data-go=settings]'); }"), side[:200])
     check("the light is green on a fresh answer and names the node", pg.get_attribute("#node", "data-state") == "online" and pg.inner_text("#node-text") == "Online · mineracks node" and "block 967,686" in pg.get_attribute("#node", "title") and "84 ms" in pg.get_attribute("#node", "title"), pg.inner_text("#node-text"))
     nb = pg.locator("#node").bounding_box(); check("bottom left of the window", nb["x"] < 60 and nb["y"] > 700, str(nb))
-    pg.evaluate("window.__nodeDown = true"); pg.click("#node"); pg.wait_for_timeout(300)
+    pg.evaluate("window.__nodeDown = true"); pg.click("#node"); pg.click("#net-recheck"); pg.wait_for_timeout(300)
     check("no answer: red, says so, and the reason is on hover", pg.get_attribute("#node", "data-state") == "offline" and "Offline" in pg.inner_text("#node-text") and "connection refused" in pg.get_attribute("#node", "title"))
-    pg.evaluate("window.__nodeDown = false"); pg.click("#node"); pg.wait_for_timeout(300)
+    pg.evaluate("window.__nodeDown = false"); pg.click("#node"); pg.click("#net-recheck"); pg.wait_for_timeout(300)
     check("a click asks again", pg.get_attribute("#node", "data-state") == "online")
+    # ---- the light pulses on traffic the app really made, and can be switched off ----
+    pg.evaluate("netPing('the node')")
+    check("the light pulses when a request actually goes out, and says what it was talking to",
+          pg.get_attribute("#node", "data-busy") == "the node" and pg.get_attribute("#node", "data-last") == "the node")
+    pg.wait_for_timeout(900)
+    check("and it stops pulsing once the request is done", pg.get_attribute("#node", "data-busy") is None)
+    pg.click("#node"); pg.wait_for_timeout(150)
+    check("the light is where working offline is offered, not buried in settings",
+          pg.locator("#net-menu").is_visible() and pg.inner_text("#net-toggle") == "Work offline" and pg.locator("#net-recheck").is_visible())
+    asked = pg.evaluate("__nodeAsked.length")
+    pg.click("#net-toggle"); pg.wait_for_timeout(400)
+    check("turning it on says so plainly, in the light and in App settings",
+          pg.get_attribute("#node", "data-state") == "paused" and "Offline · by choice" in pg.inner_text("#node-text") and pg.evaluate("__offline") is True)
+    pg.evaluate("checkNode()"); pg.wait_for_timeout(300)
+    check("and the app stops asking the node at all — offline is kept, not merely displayed", pg.evaluate("__nodeAsked.length") == asked)
+    pg.evaluate("show('settings')"); pg.wait_for_timeout(200)
+    check("the switch in App settings shows the same state", "on" in (pg.get_attribute("#offline-switch", "class") or ""))
+    pg.locator("#net-menu").wait_for(state="hidden")
+    pg.click("#node"); pg.wait_for_timeout(150)
+    check("offline, the light offers the way back and stops offering to check", pg.inner_text("#net-toggle") == "Go back online" and not pg.locator("#net-recheck").is_visible())
+    pg.click("#net-toggle"); pg.wait_for_timeout(500)
+    check("and going back online asks the node again straight away",
+          pg.evaluate("__offline") is False and pg.evaluate("__nodeAsked.length") > asked and pg.get_attribute("#node", "data-state") == "online")
+    pg.evaluate("show('home')"); pg.wait_for_timeout(200)
     pg.locator(".side").screenshot(path=str(out / "sidebar.png"))
     check("labels live with the vault they belong to, on its Home", pg.locator("#s-home #labels-export").count() == 1 and pg.locator("#s-settings #labels-export").count() == 0)
     # ---- Settings ----

@@ -73,6 +73,8 @@ pub struct Settings {
     #[serde(default = "default_tiles")] pub tiles: String,
     /// the place-search host (Photon); empty = the place is plain text
     #[serde(default = "default_geocode")] pub geocode: String,
+    /// work offline: no request leaves the app until this is turned off again
+    #[serde(default)] pub offline: bool,
 }
 pub fn default_geocode() -> String { "https://geocode.mineracks.com".into() }
 pub fn default_tiles() -> String { "https://tiles.mineracks.com/planet.pmtiles".into() }

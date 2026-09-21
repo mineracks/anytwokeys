@@ -733,8 +733,14 @@ async function loadFees() {
   try {
     fees = await invoke('fees_get', { network: vault.network });
     const vb = vault.keys.length === 1 ? 141 : (11 + inVb(vault.threshold, vault.keys.length) + 31 + 43);
+    loadFees.vb = vb;
     for (const lvl of ['slow', 'medium', 'fast']) { const r = fees[lvl]; $(`[data-fee="${lvl}"] small`).textContent = `${r} sat/vB · ≈${sats(Math.ceil(r * vb))} sats`; }
-    $('#fee-note').textContent = `Rates from the explorer just now. A ${vault.keys.length === 1 ? 'single-key' : vault.threshold + '-of-' + vault.keys.length} spend is about ${vb} vB per input set.`;
+    const shape = `A ${vault.keys.length === 1 ? 'single-key' : vault.threshold + '-of-' + vault.keys.length} spend is about ${vb} vB per input set.`;
+    // when the three are the same number they are not three choices, and saying so beats three buttons that pretend
+    $('#fee-note').textContent = fees.slow === fees.fast
+      ? `The explorer is quoting the same rate for all three just now, so Slow, Medium and Fast come to the same fee. Choose Custom to set your own. ${shape}`
+      : `Rates from the explorer just now. ${shape}`;
+    paintCustomFee();
   } catch (e) { $('#fee-note').textContent = 'Could not read fee rates: ' + e; }
 }
 function inVb(k, n) { if (n === 1) return 68; const sl = 1 + 34 * n + 2; return 41 + Math.ceil((1 + 1 + k * 73 + (sl < 76 ? 1 : 2) + sl) / 4); }
@@ -810,13 +816,31 @@ $('#scan-to').onclick = () => openScan('');
 function closeScan() { if (cam2Timer) clearInterval(cam2Timer); cam2Timer = null; if (cam2Stream) { cam2Stream.getTracks().forEach(t => t.stop()); cam2Stream = null; } $('#scan-modal').classList.remove('on'); }
 $('#scan-close').onclick = closeScan;
 
-$('#fee-pick').addEventListener('click', (e) => { const o = e.target.closest('.opt'); if (!o) return; feeLevel = o.dataset.fee; $$('#fee-pick .opt').forEach(x => x.classList.toggle('on', x === o)); });
+// ---------- the fee, including one of your own ----------
+// A rate typed here goes to the builder exactly as it goes to the buttons: one function answers what the rate is, so
+// the review, the estimate under the button and the transaction cannot disagree.
+const customRate = () => { const v = parseFloat(($('#fee-custom').value || '').replace(/[^0-9.]/g, '')); return Number.isFinite(v) && v > 0 ? v : null; };
+const feeRate = () => feeLevel === 'custom' ? customRate() : (fees ? fees[feeLevel] : 1);
+function paintCustomFee() {
+  const r = customRate(), vb = loadFees.vb || 0, raw = ($('#fee-custom').value || '').trim();
+  $('#fee-custom-row').hidden = feeLevel !== 'custom';
+  $('[data-fee="custom"] small').textContent = r ? `${r} sat/vB · ≈${sats(Math.ceil(r * vb))} sats` : 'your rate';
+  const out = $('#fee-custom-out');
+  out.classList.toggle('warn', !!raw && !r);
+  out.textContent = !raw ? 'Anything above 1 sat/vB. Below 1 and most nodes will not pass it on.'
+    : !r ? 'That is not a rate. Give a number of sats per virtual byte, like 2.5.'
+    : r < 1 ? `≈${sats(Math.ceil(r * vb))} sats — but under 1 sat/vB most nodes will not relay it at all.`
+    : `≈${sats(Math.ceil(r * vb))} sats for this spend${fees && r > fees.fast * 5 ? `, which is more than five times the Fast rate of ${fees.fast} sat/vB` : ''}.`;
+}
+$('#fee-custom').addEventListener('input', paintCustomFee);
+$('#fee-pick').addEventListener('click', (e) => { const o = e.target.closest('.opt'); if (!o) return; feeLevel = o.dataset.fee; $$('#fee-pick .opt').forEach(x => x.classList.toggle('on', x === o)); paintCustomFee(); if (feeLevel === 'custom') $('#fee-custom').focus(); });
 $('#send-all').onchange = () => { $('#send-amount').disabled = $('#send-all').checked; };
 $('#build-btn').onclick = async () => {
   const to = $('#send-to').value.trim(), all = $('#send-all').checked, amount = +($('#send-amount').value.replace(/[^0-9]/g, '') || 0);
   if (!to) return toast('Enter a destination address');
   if (!all && !amount) return toast('Enter an amount in sats');
-  const rate = fees ? fees[feeLevel] : 1;
+  const rate = feeRate();
+  if (!rate) return toast('Give a fee rate in sats per virtual byte, or choose Slow, Medium or Fast');
   try {
     built = await invoke('spend_build', { name: vault.name, to, amount, rate, sendAll: all, coins: [...coinPick] });
     $('#review').innerHTML = `<div style="display:flex;flex-direction:column;gap:8px;font-size:14px">
@@ -1414,6 +1438,7 @@ function renderSettings() {
   const def = store.settings.network === 'mainnet' ? ['ssl://electrum.mineracks.com:50002', 'https://mempool.mineracks.com'] : ['tcp://100.94.4.10:50001', 'https://signet.mineracks.com'];
   $('#def-electrum').textContent = def[0]; $('#def-explorer').textContent = def[1];
   $('#own-servers').classList.toggle('on', !store.settings.custom);
+  $('#offline-switch').classList.toggle('on', !!store.settings.offline);
   $('#c-electrum').value = store.settings.electrum || ''; $('#c-explorer').value = store.settings.explorer || '';
   $('#custom-card').style.opacity = store.settings.custom ? 1 : .6;
   $('#gap-in').value = store.settings.gap || 20;
@@ -1435,6 +1460,7 @@ $('#test-servers').onclick = async () => { $('#test-out').textContent = 'testing
 // Green only on a fresh answer from the Electrum server of the network on screen; asked every 30 s, on a vault switch, and on a click.
 function paintNode(state, text, title) { const n = $('#node'); n.dataset.state = state; $('#node-text').textContent = text; n.title = title; }
 async function checkNode() {
+  if (store && store.settings.offline) return paintNode('paused', 'Offline · by choice', 'Nothing leaves Any Two Keys while this is on. Click to go back online.');
   const net = vault ? vault.network : store.settings.network; checkNode.net = net; const mine = ++checkNode.n;
   if ($('#node').dataset.state !== 'online') paintNode('checking', 'Connecting…', 'Asking the ' + net + ' server…');
   try {
@@ -1444,7 +1470,38 @@ async function checkNode() {
   } catch (e) { if (mine !== checkNode.n) return; paintNode('offline', 'Offline · no answer', `${net}: ${String(e)}. Balances and sends need the server. Click to try again.`); }
 }
 checkNode.n = 0;
-$('#node').onclick = () => { paintNode('checking', 'Checking…', ''); checkNode(); };
+// The light pulses on traffic the app is REALLY making: Rust reports each request as it goes out (net.rs), so this
+// is what the app did, not what the window supposed it was doing. Restarting the animation needs the attribute to go
+// and come back, hence the reflow.
+function netPing(what) {
+  const n = $('#node'); if (!n) return;
+  n.dataset.last = what || ''; n.removeAttribute('data-busy'); void n.offsetWidth; n.dataset.busy = what || '1';
+  clearTimeout(netPing.t); netPing.t = setTimeout(() => n.removeAttribute('data-busy'), 780);
+}
+window.__TAURI__.event.listen('net', (ev) => netPing(ev.payload));
+
+const netMenu = (on) => {
+  $('#net-menu').hidden = !on; $('#node').setAttribute('aria-expanded', on ? 'true' : 'false');
+  if (!on) return;
+  const off = !!store.settings.offline;
+  $('#net-toggle').textContent = off ? 'Go back online' : 'Work offline';
+  $('#net-recheck').hidden = off;
+  $('#net-menu-note').textContent = off ? 'Nothing is leaving the app.' : ($('#node').title.split('. Click')[0] || '');
+};
+async function setOffline(on) {
+  try { const name = vault && vault.name; store = await invoke('net_offline', { on }); if (name) vault = store.vaults.find(v => v.name === name) || vault; }
+  catch (e) { return fail(e); }
+  $('#offline-switch').classList.toggle('on', on);
+  if (on) { checkNode(); toast('Working offline. Nothing leaves Any Two Keys until you turn this off.', 7000); }
+  else { paintNode('checking', 'Connecting…', ''); checkNode(); toast('Back online.'); }
+}
+$('#node').onclick = (e) => { e.stopPropagation(); netMenu($('#net-menu').hidden); };
+$('#net-menu').onclick = (e) => e.stopPropagation();
+$('#net-recheck').onclick = () => { netMenu(false); paintNode('checking', 'Checking…', ''); checkNode(); };
+$('#net-toggle').onclick = () => { netMenu(false); setOffline(!store.settings.offline); };
+$('#offline-switch').onclick = () => setOffline(!store.settings.offline);
+document.addEventListener('click', () => { if (!$('#net-menu').hidden) netMenu(false); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#net-menu').hidden) netMenu(false); });
 setInterval(() => { if (!document.hidden) checkNode(); }, 30000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) checkNode(); });
 
