@@ -13,7 +13,9 @@ use std::str::FromStr;
 use crate::chain::{self, Servers};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KeyRef { pub name: String, pub serial: u32, pub pubkey: String }
+pub struct KeyRef { pub name: String, pub serial: u32, pub pubkey: String,
+    /// which signing device holds it, from the app's catalogue ("yubikey", "seedsigner", "coldcard-mk4", …)
+    #[serde(default)] pub device: Option<String> }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Vault {
@@ -299,7 +301,9 @@ pub fn descriptor_at(v: &Vault, index: u32) -> Result<String, String> {
 /// One key of an extended-key descriptor, for showing and for building a PSBT a hardware signer will recognise:
 /// the signer matches BOTH the master fingerprint and the full path from master, or refuses it as "not my key".
 #[derive(Debug, Clone, Serialize)]
-pub struct ExtKey { pub fingerprint: String, pub path: String, pub xpub: String }
+pub struct ExtKey { pub fingerprint: String, pub path: String, pub xpub: String,
+    /// a FIXED key — a card in a mixed vault: the same key at every address, with no origin
+    #[serde(default)] pub fixed: bool }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ExtInfo { pub descriptor: String, pub canonical: String, pub threshold: usize, pub keys: Vec<ExtKey>, pub network: String, pub kind: String }
@@ -318,21 +322,24 @@ pub fn ext_parse(text: &str) -> Result<Option<ExtInfo>, String> {
     let mut all: Vec<DescriptorPublicKey> = Vec::new(); d.for_each_key(|k| { all.push(k.clone()); true });
     for k in all {
         match &k {
-            DescriptorPublicKey::Single(_) => fixed += 1,
+            DescriptorPublicKey::Single(sk) => { fixed += 1; let hex = match &sk.key { miniscript::descriptor::SinglePubKey::FullKey(pk) => pk.to_string(), miniscript::descriptor::SinglePubKey::XOnly(x) => x.to_string() };
+                keys.push(ExtKey { fingerprint: String::new(), path: String::new(), xpub: hex, fixed: true }); }
             DescriptorPublicKey::XPub(x) => {
                 if x.origin.is_none() { return Err("each key needs its origin, like [dc567276/48h/0h/0h/2h]xpub…: without the fingerprint and path a hardware signer cannot tell it is one of its own keys".into()); }
                 net = Some(x.xkey.network);
-                keys.push(ExtKey { fingerprint: k.master_fingerprint().to_string(), path: format!("m/{}", x.origin.as_ref().unwrap().1), xpub: x.xkey.to_string() });
+                keys.push(ExtKey { fingerprint: k.master_fingerprint().to_string(), path: format!("m/{}", x.origin.as_ref().unwrap().1), xpub: x.xkey.to_string(), fixed: false });
             }
             DescriptorPublicKey::MultiXPub(x) => {
                 if x.origin.is_none() { return Err("each key needs its origin, like [dc567276/48h/0h/0h/2h]xpub…: without the fingerprint and path a hardware signer cannot tell it is one of its own keys".into()); }
                 net = Some(x.xkey.network);
-                keys.push(ExtKey { fingerprint: k.master_fingerprint().to_string(), path: format!("m/{}", x.origin.as_ref().unwrap().1), xpub: x.xkey.to_string() });
+                keys.push(ExtKey { fingerprint: k.master_fingerprint().to_string(), path: format!("m/{}", x.origin.as_ref().unwrap().1), xpub: x.xkey.to_string(), fixed: false });
             }
         }
     }
-    if keys.is_empty() { return Ok(None); }   // fixed keys only: the card path reads it
-    if fixed > 0 { return Err("this descriptor mixes extended keys with fixed ones. Vaults that mix a YubiKey with other signers are not supported yet — see roadmap/anytwokeys/XPUB-VAULTS.md".into()); }
+    if keys.iter().all(|k| k.fixed) { return Ok(None); }   // fixed keys only: the card path reads it
+    // Extended keys beside fixed ones: a card in a mixed vault. Standard, so other wallets and signers can derive it;
+    // the cost — the card's key is the same in every spend — is said where the vault is made.
+    let _ = fixed;
     if !d.is_multipath() { return Err("this descriptor names one chain only. Paste the whole wallet descriptor, with <0;1>/* on each key, so both receive and change addresses are watched".into()); }
     let singles = d.clone().into_single_descriptors().map_err(|e| e.to_string())?;
     if singles.len() != 2 { return Err("a wallet descriptor has exactly two chains, <0;1> — receive and change".into()); }
@@ -669,7 +676,7 @@ mod tests {
     fn vault(cc: Option<&str>) -> Vault {
         let keys = ["03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2", "032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe", "038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47"];
         let descriptor = descriptor_for(2, &keys.iter().map(|k| k.to_string()).collect::<Vec<_>>()).unwrap();
-        Vault { name: "t".into(), network: "signet".into(), threshold: 2, keys: keys.iter().enumerate().map(|(i, k)| KeyRef { name: format!("k{i}"), serial: 0, pubkey: k.to_string() }).collect(),
+        Vault { name: "t".into(), network: "signet".into(), threshold: 2, keys: keys.iter().enumerate().map(|(i, k)| KeyRef { name: format!("k{i}"), serial: 0, pubkey: k.to_string() , device: None }).collect(),
             descriptor, address: String::new(), created: 0, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None }
     }
     #[test]
@@ -773,7 +780,9 @@ mod ext_tests {
         let fixed = "02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13";
         let first_key_end = sm.find(",[").map(|i| &sm[i + 1..]).unwrap();
         let mixed = format!("wsh(sortedmulti(2,{fixed},{first_key_end}");
-        assert!(ext_parse(&mixed).unwrap_err().contains("mixes extended keys with fixed ones"), "{:?}", ext_parse(&mixed));
+        // a mixed vault is now one the app builds itself (a card as a FIXED key beside device keys) — accepted, the card marked
+        let m = ext_parse(&mixed).unwrap().unwrap();
+        assert!(m.keys.iter().any(|k| k.fixed && k.xpub == fixed) && m.keys.iter().any(|k| !k.fixed), "{m:?}");
         assert!(keys_of("wsh(multi(2,02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13,03e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13))").unwrap_err().contains("order"),
             "a fixed-key multi() is refused, never silently rebuilt as sortedmulti()");
     }
@@ -815,6 +824,19 @@ mod ext_tests {
         let from_bare = ext_parse(bare).unwrap().unwrap();
         assert!(from_bare.descriptor.contains('#'), "with no checksum given, one is added");
         assert_eq!(from_bare.canonical, info.canonical, "and the two notations are recognised as the same wallet");
+    }
+    #[test]
+    fn a_mixed_vault_of_a_device_key_and_two_cards_derives_what_embit_derives() {
+        let f: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!("{}/tests/fixtures/mixed-descriptor.json", env!("CARGO_MANIFEST_DIR"))).unwrap()).unwrap();
+        let v = vault_of(f["descriptor"].as_str().unwrap());
+        for (chain, base) in [("recv", 0u32), ("chg", CHANGE)] {
+            for (i, want) in f[chain].as_array().unwrap().iter().enumerate() { assert_eq!(address_at(&v, base | i as u32).unwrap(), want.as_str().unwrap(), "{chain} {i}"); }
+        }
+        let info = ext_parse(f["descriptor"].as_str().unwrap()).unwrap().unwrap();
+        let cards: Vec<&str> = f["cards"].as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
+        assert_eq!(info.keys.iter().filter(|k| k.fixed).map(|k| k.xpub.as_str()).collect::<Vec<_>>().len(), 2);
+        assert!(info.keys.iter().filter(|k| k.fixed).all(|k| cards.contains(&k.xpub.as_str())), "each card is the bare key it holds, so a card plugged in is recognised");
+        assert!(rotates(&v) && address_at(&v, 0).unwrap() != address_at(&v, 1).unwrap(), "still a fresh address every deposit: the device key moves");
     }
     /// A real wallet scanned against the real server — the thing no mock can show: that the scan goes past the first
     /// address and down the change chain. `EXT_DESC='…' cargo test ext_live_scan -- --ignored --nocapture`

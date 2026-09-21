@@ -1,5 +1,6 @@
 mod activity;
 mod net;
+mod signers;
 mod attach;
 mod cards;
 mod chain;
@@ -234,7 +235,7 @@ fn vault_create(name: String, threshold: usize, keys: Vec<NewKey>, rotating: Opt
     let descriptor = wallet::descriptor_for(threshold, &pubs)?;
     let network = wallet::network_of(&s.settings.network);
     let mut v = Vault { name, network: s.settings.network.clone(), threshold,
-        keys: keys.into_iter().map(|k| wallet::KeyRef { name: k.name, serial: k.serial, pubkey: k.pubkey.to_lowercase() }).collect(),
+        keys: keys.into_iter().map(|k| wallet::KeyRef { name: k.name, serial: k.serial, pubkey: k.pubkey.to_lowercase(), device: None }).collect(),
         descriptor, address: String::new(), created: now(),
         chain_code: if rotating.unwrap_or(true) { Some(fresh_chain_code()) } else { None }, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None };
     v.address = wallet::address_at(&v, 0)?;
@@ -277,7 +278,7 @@ fn descriptor_parse(text: String) -> R<Parsed> {
     let (desc_text, cc) = wallet::split_recovery(&text);
     let (threshold, keys) = wallet::keys_of(&desc_text)?;
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
-    let tmp = Vault { name: String::new(), network: s.settings.network.clone(), threshold, keys: keys.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.clone() }).collect(),
+    let tmp = Vault { name: String::new(), network: s.settings.network.clone(), threshold, keys: keys.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.clone(), device: None }).collect(),
         descriptor: descriptor.clone(), address: String::new(), created: 0, chain_code: cc.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None };
     let address = wallet::address_at(&tmp, 0)?;
     Ok(Parsed { threshold, keys, descriptor: wallet::recovery_line(&tmp), address, rotating: cc.is_some(), ext: None, kind: "cards".into() })
@@ -302,7 +303,7 @@ fn vault_restore(name: String, text: String, names: Vec<String>) -> R<Vault> {
     let (threshold, keys) = wallet::keys_of(&desc_text)?;
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
     let mut v = Vault { name, network: s.settings.network.clone(), threshold,
-        keys: keys.iter().enumerate().map(|(i, k)| wallet::KeyRef { name: names.get(i).cloned().unwrap_or_else(|| format!("key {}", i + 1)), serial: 0, pubkey: k.clone() }).collect(),
+        keys: keys.iter().enumerate().map(|(i, k)| wallet::KeyRef { name: names.get(i).cloned().unwrap_or_else(|| format!("key {}", i + 1)), serial: 0, pubkey: k.clone(), device: None }).collect(),
         descriptor, address: String::new(), created: now(), chain_code: cc, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None };
     v.address = wallet::address_at(&v, 0)?;
     s.vaults.push(v.clone());
@@ -310,12 +311,83 @@ fn vault_restore(name: String, text: String, names: Vec<String>) -> R<Vault> {
     Ok(v)
 }
 
+// ---------- a vault of any mix of signers ----------
+
+/// What a signing device handed over, read into its keys; the one a native-segwit multisig wants is marked.
+#[derive(Serialize)]
+struct DeviceRead { keys: Vec<signers::DeviceKey>, multisig: Option<signers::DeviceKey> }
+#[tauri::command]
+fn device_key_read(text: String) -> R<DeviceRead> {
+    let keys = signers::parse(&text)?;
+    let multisig = signers::multisig_key(&keys).cloned();
+    Ok(DeviceRead { keys, multisig })
+}
+/// The same, from a file a device wrote (Coldcard's ccxp-XXXX.json, Passport's export, a text file).
+#[tauri::command]
+fn device_key_file() -> R<DeviceRead> {
+    let path = rfd::FileDialog::new().set_title("Open the key file your signing device wrote").add_filter("Key file", &["json", "txt", "bsms"]).pick_file().ok_or("cancelled")?;
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    device_key_read(text)
+}
+
+#[derive(Deserialize)]
+struct SignerIn { name: String, device: String, #[serde(default)] card: Option<String>, #[serde(default)] expression: Option<String>, #[serde(default)] serial: u32 }
+
+/// A vault of any mix of signers: cards as FIXED keys, devices by their extended keys with origins — a standard
+/// descriptor that other wallets and every signer in it can derive. (A vault of cards alone keeps the app's private
+/// rotation, through vault_create.)
+#[tauri::command]
+fn vault_create_signers(name: String, threshold: usize, keys: Vec<SignerIn>, network: Option<String>) -> R<Vault> {
+    let mut s = wallet::load()?;
+    if let Some(n) = network { if n != "mainnet" && n != "signet" { return Err("network must be mainnet or signet".into()); } s.settings.network = n; }
+    if s.vaults.iter().any(|v| v.name == name) { return Err(format!("a vault called '{name}' already exists")); }
+    let v = signers_vault(name, threshold, &keys, &s.settings.network)?;
+    s.vaults.push(v.clone());
+    wallet::save(&s)?;
+    Ok(v)
+}
+
+/// The vault itself, touching no store — so it can be tested exactly.
+fn signers_vault(name: String, threshold: usize, keys: &[SignerIn], network: &str) -> R<Vault> {
+    use std::str::FromStr;
+    if keys.len() < 2 || keys.len() > 15 || threshold < 1 || threshold > keys.len() { return Err("a vault of several signers has 2 to 15 keys, and needs between 1 and all of them".into()); }
+    if keys.iter().all(|k| k.card.is_some()) { return Err("every key here is a card: make it as a card vault, which gives each deposit a private fresh address".into()); }
+    let mainnet = network == "mainnet";
+    let mut exprs = Vec::new();
+    for k in keys {
+        match (&k.card, &k.expression) {
+            (Some(pk), _) => { bitcoin::PublicKey::from_str(pk).map_err(|_| format!("{}: not a public key", k.name))?; exprs.push(pk.to_lowercase()); }
+            (None, Some(e)) => {
+                let dk = signers::parse(e)?.into_iter().next().ok_or_else(|| format!("{}: no key in it", k.name))?;
+                if dk.mainnet() != mainnet { return Err(format!("{}'s key is for {}, and this vault is on {}", k.name, if dk.mainnet() { "mainnet" } else { "a test network" }, network)); }
+                exprs.push(format!("{}/<0;1>/*", dk.expression()));
+            }
+            _ => return Err(format!("{}: neither a card nor a device key", k.name)),
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    for e in &exprs { if !seen.insert(e.split('/').next().unwrap_or(e).to_string() + e) { return Err("the same key is in this vault twice".into()); } }
+    let body = format!("wsh(sortedmulti({threshold},{}))", exprs.join(","));
+    let desc = miniscript::Descriptor::<miniscript::DescriptorPublicKey>::from_str(&body).map_err(|e| format!("descriptor: {e}"))?.to_string();
+    let info = wallet::ext_parse(&desc)?.ok_or("that made no vault of extended keys")?;
+    let mut v = ext_vault(name, &info, &[]);
+    // names and devices follow the keys as the person listed them, matched by key rather than position (sortedmulti reorders)
+    for kr in v.keys.iter_mut() {
+        let src = keys.iter().find(|k| k.card.as_deref().map(|c| c.eq_ignore_ascii_case(&kr.pubkey)).unwrap_or(false)
+            || k.expression.as_deref().and_then(|e| signers::parse(e).ok()).and_then(|d| d.into_iter().next()).map(|d| kr.pubkey.ends_with(&format!("]{}", d.xpub))).unwrap_or(false));
+        if let Some(src) = src { kr.name = src.name.clone(); kr.device = Some(src.device.clone()); kr.serial = src.serial; }
+    }
+    v.address = wallet::address_at(&v, 0)?;
+    Ok(v)
+}
+
 /// A vault of extended keys held by other signers. Each key is named for the person, and keeps its origin — the
 /// fingerprint and path a hardware signer matches on — as the "pubkey" shown for it; it is never a card's key.
 fn ext_vault(name: String, info: &wallet::ExtInfo, names: &[String]) -> Vault {
     Vault { name, network: info.network.clone(), threshold: info.threshold,
-        keys: info.keys.iter().enumerate().map(|(i, k)| wallet::KeyRef { name: names.get(i).cloned().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| format!("key {} · {}", i + 1, k.fingerprint)),
-            serial: 0, pubkey: format!("[{}/{}]{}", k.fingerprint, k.path.trim_start_matches("m/"), k.xpub) }).collect(),
+        keys: info.keys.iter().enumerate().map(|(i, k)| wallet::KeyRef { name: names.get(i).cloned().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| if k.fixed { format!("key {} · a card", i + 1) } else { format!("key {} · {}", i + 1, k.fingerprint) }),
+            // a fixed key is kept as the bare key, so a card plugged in is recognised as this vault's by the key it holds
+            serial: 0, pubkey: if k.fixed { k.xpub.clone() } else { format!("[{}/{}]{}", k.fingerprint, k.path.trim_start_matches("m/").replace('\'', "h"), k.xpub) }, device: if k.fixed { Some("card".into()) } else { None } }).collect(),
         descriptor: info.descriptor.clone(), address: String::new(), created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
         labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0,
         seal: Default::default(), ext: Some(info.descriptor.clone()), cost_method: None }
@@ -879,7 +951,7 @@ struct Candidate { id: String, have: usize, locked: usize, need: usize, record: 
 fn seal_vault(rec: &seal::Record, name: String, shares: Vec<String>, sealed: Vec<String>) -> R<Vault> {
     let descriptor = wallet::descriptor_for(rec.threshold, &rec.pubkeys)?;
     let mut v = Vault { name, network: rec.network.clone(), threshold: rec.threshold,
-        keys: rec.pubkeys.iter().zip(&rec.key_names).map(|(p, n)| wallet::KeyRef { name: n.clone(), serial: 0, pubkey: p.clone() }).collect(),
+        keys: rec.pubkeys.iter().zip(&rec.key_names).map(|(p, n)| wallet::KeyRef { name: n.clone(), serial: 0, pubkey: p.clone(), device: None }).collect(),
         descriptor, address: String::new(), created: now(), chain_code: rec.chain_code.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0,
         seal: wallet::Seal { shares, sealed }, ext: None, cost_method: None };
     v.address = wallet::address_at(&v, 0)?;
@@ -1735,7 +1807,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
@@ -1865,3 +1937,42 @@ mod bsms_tests {
         assert!(bsms_read(&lie, "mainnet").unwrap_err().contains("do not agree"));
     }
 }
+
+#[cfg(test)]
+mod signers_vault_tests {
+    use super::*;
+    fn mixed() -> serde_json::Value { serde_json::from_str(&std::fs::read_to_string(format!("{}/tests/fixtures/mixed-descriptor.json", env!("CARGO_MANIFEST_DIR"))).unwrap()).unwrap() }
+    fn keys(order: [usize; 3]) -> Vec<SignerIn> {
+        let f = mixed(); let cards: Vec<String> = f["cards"].as_array().unwrap().iter().map(|c| c.as_str().unwrap().to_string()).collect();
+        let x = f["xkey"].as_str().unwrap().to_string();
+        let all = vec![
+            SignerIn { name: "seedsigner".into(), device: "seedsigner".into(), card: None, expression: Some(x), serial: 0 },
+            SignerIn { name: "card one".into(), device: "yubikey".into(), card: Some(cards[0].clone()), expression: None, serial: 111 },
+            SignerIn { name: "card two".into(), device: "nitrokey3".into(), card: Some(cards[1].clone()), expression: None, serial: 222 }];
+        order.iter().map(|&i| SignerIn { name: all[i].name.clone(), device: all[i].device.clone(), card: all[i].card.clone(), expression: all[i].expression.clone(), serial: all[i].serial }).collect()
+    }
+    #[test]
+    fn any_order_of_a_device_and_two_cards_makes_the_vault_embit_derives_and_each_name_stays_with_its_key() {
+        let f = mixed();
+        for order in [[0, 1, 2], [2, 0, 1], [1, 2, 0]] {
+            let v = signers_vault("m".into(), 2, &keys(order), "mainnet").unwrap();
+            for (chain, base) in [("recv", 0u32), ("chg", wallet::CHANGE)] {
+                for (i, want) in f[chain].as_array().unwrap().iter().enumerate() { assert_eq!(wallet::address_at(&v, base | i as u32).unwrap(), want.as_str().unwrap(), "{order:?} {chain} {i}"); }
+            }
+            let by = |n: &str| v.keys.iter().find(|k| k.name == n).unwrap().clone();
+            assert_eq!((by("card one").pubkey, by("card one").device.as_deref(), by("card one").serial), (f["cards"][0].as_str().unwrap().to_string(), Some("yubikey"), 111), "{order:?}");
+            assert_eq!(by("card two").device.as_deref(), Some("nitrokey3"));
+            assert!(by("seedsigner").pubkey.starts_with("[c9ad277c/48h/0h/0h/2h]xpub"), "{}", by("seedsigner").pubkey);
+        }
+    }
+    #[test]
+    fn it_refuses_what_it_should() {
+        let k = keys([0, 1, 2]);
+        assert!(signers_vault("m".into(), 2, &k, "signet").unwrap_err().contains("is for mainnet"), "a mainnet key in a test-network vault");
+        let cards_only: Vec<SignerIn> = k.into_iter().filter(|x| x.card.is_some()).collect();
+        assert!(signers_vault("m".into(), 2, &cards_only, "mainnet").unwrap_err().contains("every key here is a card"));
+        let mut twice = keys([0, 1, 2]); twice[2].card = twice[1].card.clone();
+        assert!(signers_vault("m".into(), 2, &twice, "mainnet").is_err(), "the same key twice");
+    }
+}
+

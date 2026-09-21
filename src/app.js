@@ -1707,10 +1707,14 @@ $('#bsms-open').onclick = async () => { try { const r = await invoke('bsms_impor
 // The recovery line says what the vault holds. Until Reveal is pressed the page carries a scrambled stand-in of the same
 // shape, blurred — so a screenshot, a screen share or a screen reader gets nothing. Copy and Save as PDF work without revealing.
 const standIn = (line) => { let x = line.length * 2654435761 >>> 0; return line.replace(/[a-z0-9]/gi, () => { x = (x * 1664525 + 1013904223) >>> 0; return '0123456789abcdef'[x >>> 28]; }); };
+// the cards in a vault of mixed signers: fixed keys, kept bare, made on the card and never copied off it
+const fixedCards = (v) => (v && v.ext ? v.keys.filter(k => /^0[23][0-9a-f]{64}$/i.test(k.pubkey)) : []);
 function paintDescWords() {
   const ext = !!(vault && vault.ext);
   $('#keys-desc-cards').hidden = ext; $('#keys-desc-ext').hidden = !ext;
-  if (ext) $('#keys-desc-ext').textContent = `This is the wallet descriptor: complete and standard \u2014 Sparrow, Bitcoin Core and the signing devices read it whole. With any ${vault.threshold} of the keys\u2019 seed words it rebuilds this vault anywhere; on its own it can only watch. Keep it apart from the seed words: together they are the vault.`;
+  const fc = fixedCards(vault);
+  if (ext && fc.length) $('#keys-desc-ext').textContent = `This is the wallet descriptor: complete and standard. Bitcoin Core reads it whole; whether Sparrow accepts a card\u2019s plain key beside the others is not yet tested. With any ${vault.threshold} of the keys \u2014 a device\u2019s seed words, or a card itself \u2014 it rebuilds this vault anywhere; on its own it can only watch.`;
+  else if (ext) $('#keys-desc-ext').textContent = `This is the wallet descriptor: complete and standard \u2014 Sparrow, Bitcoin Core and the signing devices read it whole. With any ${vault.threshold} of the keys\u2019 seed words it rebuilds this vault anywhere; on its own it can only watch. Keep it apart from the seed words: together they are the vault.`;
 }
 function paintDesc() {
   paintDescWords();
@@ -1764,8 +1768,15 @@ function firstSeenWords(pubkey) {
 const keysBusy = () => $$('#keys-list input').some(i => i.value || i === document.activeElement);   // a poll must not wipe a half-typed PIN or name
 const PENCIL = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
 function extKeyRow(k, i) {
+  // a card in a mixed vault is a fixed key, kept bare: shown as the card it is, plugged in or not
+  if (/^0[23][0-9a-f]{64}$/i.test(k.pubkey)) {
+    const card = cards.find(c => c.pubkey === k.pubkey), d = deviceOf(k.device && k.device !== 'card' ? k.device : 'yubikey');
+    return `<div class="keyrow vk"><span class="devart">${d.svg}</span><div class="who"><div class="name"><span class="name-text">${esc(k.name)}</span><button class="pencil" data-edit-idx="${i}" title="Rename this key">${PENCIL}</button></div><div class="muted" style="font-size:13px">${esc(d.name)} · a fixed key in this vault · <span class="mono">${esc(k.pubkey.slice(0, 12))}…</span></div></div>`
+      + `<div class="kright"><div class="state ${card ? 'here' : ''}"><i></i>${card ? 'plugged in' : 'not plugged in'}</div></div></div>`;
+  }
   const m = /^\[([0-9a-f]{8})\/([^\]]+)\](\S+)$/i.exec(k.pubkey) || [];
-  return `<div class="keyrow vk"><span class="keyart"><svg width="24" height="24"><use href="#ring"/></svg></span><div class="who"><div class="name"><span class="name-text">${esc(k.name)}</span><button class="pencil" data-edit-idx="${i}" title="Rename this key">${PENCIL}</button></div><div class="muted" style="font-size:13px">fingerprint <span class="mono">${esc(m[1] || '?')}</span> \u00b7 m/${esc(m[2] || '?')} \u00b7 <span class="mono">${esc((m[3] || '').slice(0, 14))}\u2026</span></div></div>`
+  const art = k.device ? `<span class="devart">${deviceOf(k.device).svg}</span>` : '<span class="keyart"><svg width="24" height="24"><use href="#ring"/></svg></span>';
+  return `<div class="keyrow vk">${art}<div class="who"><div class="name"><span class="name-text">${esc(k.name)}</span><button class="pencil" data-edit-idx="${i}" title="Rename this key">${PENCIL}</button></div><div class="muted" style="font-size:13px">${k.device ? esc(deviceOf(k.device).name) + ' \u00b7 ' : ''}fingerprint <span class="mono">${esc(m[1] || '?')}</span> \u00b7 m/${esc(m[2] || '?')} \u00b7 <span class="mono">${esc((m[3] || '').slice(0, 14))}\u2026</span></div></div>`
     + `<div class="kright"><div class="state"><i></i>signs on another device</div></div></div>`;
 }
 function vaultKeyRow(k, i) {
@@ -1868,13 +1879,17 @@ function renderSetup() {
   const kp = $('#k-pick'); kp.innerHTML = '';
   for (let k = 1; k <= setup.n; k++) { const o = document.createElement('div'); o.className = 'opt' + (k === setup.k ? ' on' : ''); o.textContent = `${k} of ${setup.n}`; o.onclick = () => { setup.k = k; renderSetup(); }; kp.appendChild(o); }
   $('#k-note').textContent = setup.k === 1 ? 'Any one key spends: convenient, but one stolen key with its PIN spends everything.' : setup.k === setup.n ? 'Every key must sign: losing any one key loses the funds.' : `${setup.k} of ${setup.n} is the balance: one key can be lost without loss, and one stolen key with its PIN spends nothing.`;
-  $('#setup-done').innerHTML = setup.keys.map(k => keyRow(k.name, `serial ${k.serial}`, k.pubkey, 'ok')).join('');
+  $('#setup-done').innerHTML = setup.keys.map((k, i) => (k.expression ? deviceRow(k) : keyRow(k.name, `serial ${k.serial}`, k.pubkey, 'ok')).replace(/<\/div>$/, `<button class="btn small" data-drop="${i}" type="button" title="Take this key out of the vault being made">Remove</button></div>`)).join('');
+  $$('#setup-done [data-drop]').forEach(b => b.onclick = () => { setup.keys.splice(+b.dataset.drop, 1); renderSetup(); });
+  $('#setup-warn').innerHTML = setupWarnings().map(w => `<div class="warnbox">${w}</div>`).join('');
   const box = $('#setup-now');
   const remaining = setup.n - setup.keys.length;
   $('#setup-finish').disabled = remaining > 0;
-  if (remaining === 0) { box.innerHTML = `<div class="ok">All ${setup.n} keys enrolled.</div>`; return; }
+  $('#add-device').closest('.row').hidden = setup.n < 2;
+  $('#add-device').disabled = remaining <= 0;
+  if (remaining === 0) { box.innerHTML = `<div class="ok">All ${setup.n} keys ${setup.keys.some(k => k.expression) ? 'added' : 'enrolled'}.</div>`; return; }
   const fresh = cards.find(c => !setup.keys.some(k => k.serial === c.serial));
-  if (!fresh) { box.innerHTML = `<div class="muted">Plug in key ${setup.keys.length + 1} of ${setup.n}.</div>`; return; }
+  if (!fresh) { box.innerHTML = `<div class="muted">Key ${setup.keys.length + 1} of ${setup.n}: plug in a YubiKey${setup.n > 1 ? ', or add a signing device' : ''}.</div>`; return; }
   const nameGuess = ['laptop', 'keyring', 'off-site'][setup.keys.length] || `key ${setup.keys.length + 1}`;
   const has = !!fresh.pubkey;
   box.innerHTML = `<div style="font-family:var(--display);font-weight:600;font-size:15px">Key ${setup.keys.length + 1}: ${cardLabel(fresh)}</div>
@@ -1883,7 +1898,7 @@ function renderSetup() {
     ${has ? '' : '<div class="muted" style="font-size:13px">Factory admin PIN is 12345678. Change it first with YubiKey Manager if you have not. Touch policy will be set to FIXED, which cannot be undone without wiping the key.</div>'}
     <div class="row">${has ? '<button class="btn primary" id="use-btn">Use this card\'s key</button><button class="btn" id="replace-btn" style="border-color:var(--no);color:var(--no)">Replace it with a new key…</button>' : '<button class="btn primary" id="enrol-btn">Generate key on card</button>'}</div>`;
   if (has) {
-    $('#use-btn').onclick = () => { setup.keys.push({ name: $('#enrol-name').value.trim() || nameGuess, serial: fresh.serial, pubkey: fresh.pubkey }); toast('enrolled with its existing key'); renderSetup(); };
+    $('#use-btn').onclick = () => { setup.keys.push({ name: $('#enrol-name').value.trim() || nameGuess, serial: fresh.serial, pubkey: fresh.pubkey, device: cardDevice(fresh) }); toast('enrolled with its existing key'); renderSetup(); };
     askTwice($('#replace-btn'), 'Generate a NEW key on this card? The key it holds now will be destroyed, and any vault it belongs to loses that cosigner for good. Only for a card that has never held funds.', 'Yes, replace its key', async () => {
       box.innerHTML += '<div class="field" style="margin-top:12px"><div class="label">Admin PIN</div><input id="enrol-admin" type="password" autocomplete="off" style="max-width:260px"></div><button class="btn" id="enrol-btn" style="border-color:var(--no);color:var(--no);margin-top:10px">Generate a new key, destroying the old one</button>';
       wireGenerate();
@@ -1893,17 +1908,117 @@ function renderSetup() {
     const name = $('#enrol-name').value.trim() || nameGuess, admin = $('#enrol-admin').value;
     if (!admin) return toast('Enter the admin PIN');
     $('#enrol-btn').disabled = true;
-    try { const pub = await invoke('card_generate', { reader: fresh.reader, adminPin: admin }); setup.keys.push({ name, serial: fresh.serial, pubkey: pub }); toast(`${name} enrolled`); }
+    try { const pub = await invoke('card_generate', { reader: fresh.reader, adminPin: admin }); setup.keys.push({ name, serial: fresh.serial, pubkey: pub, device: cardDevice(fresh) }); toast(`${name} enrolled`); }
     catch (e) { fail(e); }
     renderSetup();
   }; }
 }
+function cardDevice(c) { return /nitrokey/i.test(c.reader || '') ? 'nitrokey3' : 'yubikey'; }
+function deviceRow(k) {
+  const d = deviceOf(k.device), m = /^\[([0-9a-f]{8})\/([^\]]+)\](\w+)/.exec(k.expression) || [];
+  return `<div class="keyrow"><span class="devart">${d.svg}</span><div class="who"><div class="name"><span class="name-text">${esc(k.name)}</span></div><div class="muted" style="font-size:13px">${esc(d.name)} · fingerprint <span class="mono">${esc(m[1] || '?')}</span> · m/${esc(m[2] || '?')} · <span class="mono">${esc((m[3] || '').slice(0, 12))}…</span></div></div><div class="state ok"><i></i>added</div></div>`;
+}
+/// What the shape of the keys chosen so far means, said before the vault exists — warnings, never a block.
+function setupWarnings() {
+  const out = [], keys = setup.keys;
+  // who made each key: an unknown signer counts as its own maker (it is at least not the same device as another)
+  const maker = (k) => deviceOf(k.device || 'yubikey').maker || ('signer ' + (k.fingerprint || k.name));
+  const by = new Map(); for (const k of keys) by.set(maker(k), (by.get(maker(k)) || []).concat([k]));
+  const cardsIn = keys.filter(k => !k.expression), devsIn = keys.filter(k => k.expression);
+  if (by.size > 1) for (const [m, ks] of by) if (ks.length >= setup.k)
+    out.push(`<b>${ks.length} of these keys are ${esc(m)}’s, and ${setup.k} can spend.</b> ${esc(ks.map(k => k.name).join(' and '))} alone reach the quorum, so one flaw in ${esc(m)}’s design reaches it too, and the other signers are never needed. Mixing makers only adds independence when no one maker holds ${setup.k} keys — for example a SeedSigner, a YubiKey and a Nitrokey 3.`);
+  if (cardsIn.length && devsIn.length)
+    out.push(`<b>In a vault with other signers, a card’s key is fixed.</b> Addresses still change with every deposit, and any wallet can rebuild them from the recovery line; but ${cardsIn.length > 1 ? 'each card’s key is' : esc(cardsIn[0].name) + '’s key is'} the same in every spend it signs, so those spends can be linked to one another on the chain. A vault of cards alone keeps them private.`);
+  const reg = devsIn.filter(k => /^coldcard|^jade|^ledger|^bitbox/.test(k.device));
+  if (reg.length) out.push(`${esc([...new Set(reg.map(k => deviceOf(k.device).name))].join(', '))} sign${reg.length === 1 ? 's' : ''} for a multisig only once the vault is registered on ${reg.length === 1 ? 'it' : 'them'}. The vault’s file for that comes with signing.`);
+  return out;
+}
+
+// ---------- adding a signing device: pick it, then scan, open or paste its key ----------
+const devSt = { dev: null, parts: new Set(), stream: null, timer: null };
+function devStop() { if (devSt.timer) clearInterval(devSt.timer); devSt.timer = null; if (devSt.stream) devSt.stream.getTracks().forEach(t => t.stop()); devSt.stream = null; devSt.parts = new Set(); }
+function devClose() { devStop(); $('#dev-modal').classList.remove('on'); }
+function devList() {
+  devStop(); devSt.dev = null;
+  $('#dev-title').textContent = 'Add a signing device'; $('#dev-pick').hidden = false; $('#dev-one').hidden = true; $('#dev-back').hidden = true;
+  const groups = [['airgap', 'By QR code or SD card — nothing plugged in'], ['usb', 'By USB or Bluetooth — paste its key for now'], ['card', 'Security keys — plug in'], ['other', 'Anything else']];
+  $('#dev-pick').innerHTML = groups.map(([g, t]) => `<div class="devgroup"><div class="cap">${t}</div><div class="devrow">${DEVICES.filter(d => d.group === g).map(d => `<button class="devopt" data-dev="${d.id}" type="button">${d.svg}<span>${esc(d.name)}</span><small>${d.offers.map(o => DEVICE_WORDS[o]).join(' · ') || 'text, file or code'}</small></button>`).join('')}</div></div>`).join('');
+  $$('#dev-pick [data-dev]').forEach(b => b.onclick = () => devShow(b.dataset.dev));
+}
+function devShow(id) {
+  const d = deviceOf(id); devSt.dev = d;
+  $('#dev-title').textContent = d.name; $('#dev-pick').hidden = true; $('#dev-one').hidden = false; $('#dev-back').hidden = false;
+  const chips = d.offers.map(o => `<span class="chip${DEVICE_NOW[o] ? ' on' : ''}" title="${DEVICE_NOW[o] ? 'This app uses it' : 'The device has it; this app does not use it yet'}">${DEVICE_WORDS[o]}${DEVICE_NOW[o] ? '' : ' · later'}</span>`).join('');
+  const head = `<div class="devhead">${d.svg}<div style="display:flex;flex-direction:column;gap:6px"><div class="muted" style="font-size:13px">${esc(d.maker)}</div><div class="chips">${chips}</div></div></div>`;
+  if (d.group === 'card') {
+    $('#dev-one').innerHTML = head + (d.id === 'yubikey'
+      ? '<div>Plug it in and close this: a YubiKey appears on the setup screen by itself, ready to enrol.</div>'
+      : '<div>Not yet. A Nitrokey 3 can hold the same kind of key as a YubiKey, and the app will read it once it has been tested on a real one.</div>');
+    return;
+  }
+  const qr = d.offers.includes('qr') || d.group === 'other', sd = d.offers.includes('sd') || d.group === 'other';
+  const usbNote = d.group === 'usb' ? `<div class="muted" style="font-size:13px">A direct ${d.offers.includes('ble') ? 'USB or Bluetooth ' : 'USB '}connection comes later. For now the key can come from the device’s own app, or from Sparrow with the device plugged in: copy its <b>multisig</b> key, <span class="mono">[fingerprint/48h/0h/0h/2h]xpub…</span>, and paste it below.</div>` : '';
+  $('#dev-one').innerHTML = head + (d.how ? `<div>${esc(d.how)}</div>` : '') + usbNote
+    + `<div class="row">${qr ? '<button class="btn" id="dev-scan" type="button">Scan its code</button>' : ''}${sd ? '<button class="btn" id="dev-file" type="button">Open a file…</button>' : ''}</div>
+      <div class="cam" id="dev-cam" hidden><video id="cam3" autoplay playsinline muted></video><div class="frame"></div></div><div class="muted" style="font-size:13px" id="dev-cam-note" hidden></div>
+      <div class="field"><div class="label">Or paste it</div><textarea id="dev-text" class="mono" rows="3" spellcheck="false" placeholder="[a1b2c3d4/48h/0h/0h/2h]xpub…  ·  a Coldcard JSON  ·  ur:crypto-account/…"></textarea></div>
+      <div class="row"><button class="btn" id="dev-read" type="button">Read it</button></div>
+      <div id="dev-got"></div>`;
+  if ($('#dev-scan')) $('#dev-scan').onclick = devScan;
+  if ($('#dev-file')) $('#dev-file').onclick = async () => { try { devGot(await invoke('device_key_file')); } catch (e) { if (String(e) !== 'cancelled') devSay(e); } };
+  $('#dev-read').onclick = async () => { try { devGot(await invoke('device_key_read', { text: $('#dev-text').value })); } catch (e) { devSay(e); } };
+}
+function devSay(e) { $('#dev-got').innerHTML = `<div class="warnbox">${esc(String(e && e.message || e))}</div>`; }
+async function devScan() {
+  devStop();
+  const note = $('#dev-cam-note'); note.hidden = false; $('#dev-cam').hidden = false;
+  try { devSt.stream = await camOpen(); $('#cam3').srcObject = devSt.stream; } catch (e) { note.textContent = 'No camera available. Open its file, or paste the key instead.'; $('#dev-cam').hidden = true; return; }
+  note.textContent = 'Hold the device’s code in the frame.';
+  const cv = document.createElement('canvas'), ctx = cv.getContext('2d', { willReadFrequently: true });
+  let busy = false;
+  devSt.timer = setInterval(async () => {
+    const v = $('#cam3'); if (busy || !v || !v.videoWidth) return;
+    cv.width = v.videoWidth; cv.height = v.videoHeight; ctx.drawImage(v, 0, 0);
+    const code = jsQR(ctx.getImageData(0, 0, cv.width, cv.height).data, cv.width, cv.height); if (!code || !code.data) return;
+    const t = code.data.trim();
+    // an animated UR arrives a part at a time, in any order; a plain code is the whole thing
+    if (/^ur:/i.test(t)) { const before = devSt.parts.size; devSt.parts.add(t.toLowerCase()); if (devSt.parts.size === before) return; }
+    busy = true;
+    try { const r = await invoke('device_key_read', { text: /^ur:/i.test(t) ? [...devSt.parts].join(' ') : t }); devStop(); $('#dev-cam').hidden = true; note.textContent = 'Read.'; devGot(r); }
+    catch (e) { const m = /\/(\d+)-(\d+)\//.exec(t); if (/missing/i.test(String(e)) && m) note.textContent = `Reading an animated code: ${devSt.parts.size} part${devSt.parts.size === 1 ? '' : 's'} of ${m[2]} so far. Keep it in the frame.`; else { note.textContent = String(e); } }
+    busy = false;
+  }, 250);
+}
+/// A device's export read: choose its multisig key, check it belongs in THIS vault, and let it be named.
+function devGot(r) {
+  const d = devSt.dev, keys = (r && r.keys) || [];
+  const k = r.multisig || (keys.length === 1 ? keys[0] : null);
+  if (!k) return devSay(keys.length ? `That export holds ${keys.length} keys, none of them the multisig (native segwit) one. On the device, choose its multisig export.` : 'No key found in that.');
+  const main = /^xpub/.test(k.xpub);
+  if (main !== (setup.network === 'mainnet')) return devSay(`That key is for ${main ? 'mainnet' : 'a test network'}, and this vault is on ${setup.network}. Switch the device (or this vault) so they match.`);
+  if (setup.keys.some(x => x.fingerprint === k.fingerprint)) return devSay(`A key from that device (fingerprint ${k.fingerprint}) is already in this vault. One device holding two of its keys is one point of failure, not two.`);
+  const path = k.path.replace(/^m\//, ''), expression = `[${k.fingerprint}/${path}]${k.xpub}`;
+  const usual = /^48h\/[01]h\/\d+h\/2h$/.test(path);
+  const taken = new Set(setup.keys.map(x => x.name)); let name = d.name, i = 2; while (taken.has(name)) name = `${d.name} ${i++}`;
+  $('#dev-got').innerHTML = `<div class="ok">Found its key: fingerprint <span class="mono">${esc(k.fingerprint)}</span> · m/${esc(path)} · <span class="mono">${esc(k.xpub.slice(0, 14))}…</span></div>
+    ${usual ? '' : `<div class="warnbox">That is not the usual multisig path (m/48h/…/2h). Some signers will not recognise a multisig spend from it. Use it only if you know this device exported it for multisig.</div>`}
+    <div class="field"><div class="label">Name this key</div><input id="dev-name" value="${esc(name)}"></div>
+    <div class="row"><button class="btn primary" id="dev-add" type="button">Add to the vault</button></div>`;
+  $('#dev-add').onclick = () => { setup.keys.push({ name: $('#dev-name').value.trim() || name, device: d.id, expression, fingerprint: k.fingerprint, serial: 0 }); devClose(); toast(`${d.name} added`); renderSetup(); };
+}
+$('#add-device').onclick = () => { devList(); $('#dev-modal').classList.add('on'); };
+$('#dev-back').onclick = devList;
+$('#dev-close').onclick = devClose;
 $('#preset-pick').addEventListener('click', (e) => { const o = e.target.closest('.opt'); if (!o) return; if (setup.keys.length > +o.dataset.n) return toast('More keys already enrolled than that shape holds'); setup.n = +o.dataset.n; setup.k = +o.dataset.k; renderSetup(); });
 $('#n-less').onclick = () => { if (setup.n > Math.max(2, setup.keys.length)) { setup.n--; if (setup.k > setup.n) setup.k = setup.n; renderSetup(); } };
 $('#n-more').onclick = () => { if (setup.n < 15) { setup.n++; renderSetup(); } };
 $('#setup-net-pick').addEventListener('click', (e) => { const o = e.target.closest('.opt'); if (o) { setup.network = o.dataset.net; renderSetup(); } });
 $('#setup-finish').onclick = async () => {
-  try { vault = await invoke('vault_create', { name: $('#setup-name').value.trim() || 'vault', threshold: setup.k, keys: setup.keys, rotating: true, network: setup.network }); store = await invoke('store_get'); rememberVault(vault); toast('Vault created'); paintNet(); show('keys'); }
+  const name = $('#setup-name').value.trim() || 'vault';
+  try { vault = setup.keys.some(k => k.expression)
+      ? await invoke('vault_create_signers', { name, threshold: setup.k, network: setup.network, keys: setup.keys.map(k => k.expression ? { name: k.name, device: k.device, expression: k.expression, serial: 0 } : { name: k.name, device: k.device || 'yubikey', card: k.pubkey, serial: k.serial }) })
+      : await invoke('vault_create', { name, threshold: setup.k, keys: setup.keys.map(k => ({ name: k.name, serial: k.serial, pubkey: k.pubkey })), rotating: true, network: setup.network });
+    store = await invoke('store_get'); rememberVault(vault); toast('Vault created'); paintNet(); show('keys'); }
   catch (e) { fail(e); }
 };
 
@@ -1945,6 +2060,8 @@ function paintSealSlots() {
 }
 async function renderSeal(force) {
   if (!vault) return;
+  const fc = fixedCards(vault);
+  if (fc.length) { const nd = vault.keys.length - fc.length; $('#seal-note').textContent = `Any ${vault.threshold} of these ${vault.keys.length} keys sign. ${nd === 1 ? 'One signs on its own device, from its seed words' : nd + ' sign on their own devices, from their seed words'}; ${fc.length === 1 ? 'the card\u2019s key was made on the card and cannot be copied off it' : 'each card\u2019s key was made on the card and cannot be copied off it'}, so a lost card is a lost key \u2014 which is what the other keys are for. Nothing is sealed on a card in a vault like this: the seed words, the cards, and the wallet descriptor below are how it comes back.`; return; }
   if (vault.ext) { $('#seal-note').textContent = `Any ${vault.threshold} of these ${vault.keys.length} keys sign, each on its own device from its own seed words. Nothing is sealed on a card: the seed words, plus the wallet descriptor below, are how this vault comes back.`; return; }
   const name = vault.name;
   let st; try { st = await invoke('seal_status', { name }); } catch (e) { $('#seal-note').textContent = String(e); return; }
@@ -2117,7 +2234,8 @@ function renderVaultSettings() {
     : `Last drill: <b>${esc(drillWords(ds))}</b> \u2014 ${ds.days === 0 ? 'today' : sats(ds.days) + ' day' + (ds.days === 1 ? '' : 's') + ' ago'}. ${ds.every ? (ds.due ? 'That is past the ' + sats(ds.every) + ' days you asked for.' : 'The next is due in ' + sats(ds.every - ds.days) + ' day' + (ds.every - ds.days === 1 ? '' : 's') + '.') : 'You have asked not to be reminded.'}`;
   $('#vs-drill-when').classList.toggle('warn', ds.due);
   $('#vs-drill').hidden = single || !!vault.ext;
-  if (vault.ext) { $('#vs-drill-when').classList.remove('warn'); $('#vs-drill-when').textContent = ''; $('#vs-drill-what').textContent = `This vault's keys live on other devices, each from its own seed words, so there are no cards here to drill. To check it can be recovered: on each signing device, load its seed words and confirm it shows the fingerprint on this vault's Keys screen; then load the wallet descriptor below into it and confirm the first address matches this vault's.`; }
+  if (fixedCards(vault).length) { $('#vs-drill-when').classList.remove('warn'); $('#vs-drill-when').textContent = ''; $('#vs-drill-what').textContent = `To check this vault can be recovered: plug in each card \u2014 the Keys screen shows it plugged in only if it holds this vault\u2019s key; on each signing device, load its seed words and confirm it shows the fingerprint on the Keys screen; then load the wallet descriptor below into a wallet and confirm the first address matches this vault\u2019s.`; }
+  else if (vault.ext) { $('#vs-drill-when').classList.remove('warn'); $('#vs-drill-when').textContent = ''; $('#vs-drill-what').textContent = `This vault's keys live on other devices, each from its own seed words, so there are no cards here to drill. To check it can be recovered: on each signing device, load its seed words and confirm it shows the fingerprint on this vault's Keys screen; then load the wallet descriptor below into it and confirm the first address matches this vault's.`; }
   else $('#vs-drill-what').textContent = single
     ? 'This vault has one key and no shares to rebuild from: its recovery is the recovery sheet, which you can save below and should keep somewhere else.'
     : 'A drill rebuilds this vault from the cards themselves \u2014 each with its own PIN, exactly as a real recovery would \u2014 and checks that what comes back is this vault and derives the same first address. It reads the cards only. Nothing is spent, nothing is written to the chain, and the vault is not changed.';

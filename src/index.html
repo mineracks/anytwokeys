@@ -236,9 +236,11 @@
     <section id="s-setup" class="screen">
       <div class="split">
         <div style="display:flex;flex-direction:column;gap:14px">
-          <div class="muted">Plug each key in, one at a time. The app generates a Bitcoin key on the card that never leaves it, and locks the touch requirement on.</div>
+          <div class="muted">Plug each YubiKey in, one at a time: the app makes a Bitcoin key on the card that never leaves it. Or add a signing device: a SeedSigner, Coldcard, Jade, Keystone and more hand over their key by QR code or a file.</div>
           <div id="setup-done" style="display:flex;flex-direction:column;gap:10px"></div>
           <div class="card hot" id="setup-now"><div class="muted">No YubiKey plugged in.</div></div>
+          <div class="row"><button class="btn" id="add-device">Add a signing device…</button></div>
+          <div id="setup-warn" style="display:flex;flex-direction:column;gap:10px"></div>
         </div>
         <div class="card"><div class="label">Vault</div>
           <div class="field"><div class="label">Name</div><input id="setup-name" value="vault"></div>
@@ -396,6 +398,12 @@
   <div class="row" style="justify-content:flex-end"><button class="btn primary" id="single-instead">Make it 2 of 3 instead</button><button class="btn" id="single-go" disabled>Continue with one key</button></div>
 </div></div>
 
+<div class="modal" id="dev-modal"><div class="box" style="width:760px;max-height:90vh;overflow:auto">
+  <h2 id="dev-title">Add a signing device</h2>
+  <div id="dev-pick"></div>
+  <div id="dev-one" hidden></div>
+  <div class="row" style="justify-content:flex-end"><button class="btn" id="dev-back" hidden>‹ All devices</button><button class="btn" id="dev-close">Cancel</button></div>
+</div></div>
 <div class="modal" id="scan-modal"><div class="box" style="width:520px">
   <h2>Scan a QR code</h2>
   <div class="field" hidden><div class="cap">Camera</div><div class="camrow" id="scan-pick" role="radiogroup" aria-label="Which camera"></div></div>
@@ -427,6 +435,7 @@
 <div id="notices" aria-live="polite"></div>
 <script src="vendor/jsQR.js"></script>
 <script src="vendor/qrcode.js"></script>
+<script src="devices.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

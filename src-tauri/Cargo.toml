@@ -31,6 +31,7 @@ num-bigint = "0.4"
 num-traits = "0.2"
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 ur = "0.5"
+ciborium = "0.2"
 qrcode = { version = "0.14", default-features = false }
 # labels backed up on a VSS host (labels.rs)
 vss-client-ng = { version = "0.6", default-features = false, features = ["sigs-auth"] }

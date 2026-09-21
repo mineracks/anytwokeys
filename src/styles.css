@@ -524,3 +524,19 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .sum-table th:first-child,.sum-table td:first-child{text-align:left}
 .sum-empty{padding:26px 8px;text-align:center;color:var(--muted);font-size:13px}
 .sum-loading{opacity:.55;transition:opacity .2s}
+
+/* signing-device picker: the camera chooser's tiles, larger, grouped */
+.devgroup{margin:4px 0 14px}
+.devgroup > .cap{margin-bottom:8px}
+.devrow{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:10px}
+.devopt{display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px 6px 8px;border:1.5px solid var(--line);border-radius:10px;background:var(--panel);color:var(--ink);cursor:pointer;font:inherit;text-align:center;font-size:13px}
+.devopt:hover,.devopt:focus-visible{border-color:var(--gold);background:var(--gold-soft)}
+.devopt svg{width:72px;height:56px}
+.devopt small{color:var(--muted);font-size:11px}
+.devhead{display:flex;gap:16px;align-items:center}
+.devhead svg{width:108px;height:84px;flex:0 0 auto;color:var(--ink)}
+.devart{display:inline-flex;width:52px;height:40px;color:var(--ink)} .devart svg{width:52px;height:40px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+.chip.on{border-color:var(--gold);color:var(--ink)}
+.warnbox{border:1px solid var(--line);border-left:3px solid var(--gold);border-radius:6px;padding:10px 12px;font-size:13px}

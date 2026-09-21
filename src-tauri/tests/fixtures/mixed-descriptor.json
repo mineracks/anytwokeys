@@ -1,0 +1,20 @@
+{
+ "descriptor": "wsh(sortedmulti(2,[c9ad277c/48h/0h/0h/2h]xpub6EAC4GduaPj3EpUtjzHbL7gLZ9jNyf4vaVtYSpNRj3KWy2xrg84nRg5ajnnaH3m7sx4VHHCVKThWWtBHUXjrpZCh6dh64X2iA2FaAqc7m6f/<0;1>/*,03c58267e856160ede38923c7582224b211b306de4b42265a546ce4dea4c38c7ce,0331794a619d6632ccce693398df84fa6e1433896fcb98ea13ac74dccfd21f0a99))",
+ "cards": [
+  "03c58267e856160ede38923c7582224b211b306de4b42265a546ce4dea4c38c7ce",
+  "0331794a619d6632ccce693398df84fa6e1433896fcb98ea13ac74dccfd21f0a99"
+ ],
+ "xkey": "[c9ad277c/48h/0h/0h/2h]xpub6EAC4GduaPj3EpUtjzHbL7gLZ9jNyf4vaVtYSpNRj3KWy2xrg84nRg5ajnnaH3m7sx4VHHCVKThWWtBHUXjrpZCh6dh64X2iA2FaAqc7m6f/<0;1>/*",
+ "recv": [
+  "bc1qywcf59uvvuejdy5aml6w64xvghz6wy73m3smwezf92dcnwflkhgseqjshx",
+  "bc1q5t508dql62n0n6k7t6epvcsnv8yx48tlsqlqcl6k8frkux5pen6shdscwa",
+  "bc1q9qy4mln0a6pqknj9hevd4s76m34jccu0s35addv4apd47lwzgxfqh9z4g4",
+  "bc1q6uvgemwlc856rrzluwhr6mppje7ad9dzs7u2kw0ajpy5g0u4r9kqhwflpg"
+ ],
+ "chg": [
+  "bc1qlyetjv3rv6v4p99vqfvusqtsjumku5muu8epfej2det54yp5tgrstel0dd",
+  "bc1q05yyms8r74zcl6400sczace745d73gyq0r5uwp55qyvm5y4ms9nqh6r9c4",
+  "bc1qat49ds4fus9v36s88xcuhvf7am2uk3wmsr8u32wt7dq62yjyhvjs4w00zz",
+  "bc1qqgsqq7wtpv68895syduenmwzcvtqnkxkmzcjygcwyu88pgz9duwq2fmhf8"
+ ]
+}
