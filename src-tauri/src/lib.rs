@@ -1530,29 +1530,78 @@ async fn labels_import(name: String) -> R<usize> {
 fn bsms_export(name: String) -> R<String> {
     let s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
-    let first = wallet::address_at(v, 0)?;
-    let text = format!("BSMS 1.0\n{}\nNo path restrictions\n{first}\n", v.descriptor);
+    let text = bsms_record(v)?;
     let path = rfd::FileDialog::new().set_title("Save the vault as a BSMS descriptor record").set_file_name(format!("{}.bsms", v.name.replace(' ', "-"))).add_filter("BSMS", &["bsms", "txt"]).save_file().ok_or("cancelled")?;
     std::fs::write(&path, text).map_err(|e| e.to_string())?;
     Ok(path.display().to_string())
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct BsmsIn { descriptor: String, first_address: String }
 
-/// Read a BSMS 1.0 descriptor record. Only fixed public keys can come back: the cards hold no xpubs.
+/// A BSMS 1.0 descriptor record (BIP 129): version, descriptor, path restrictions, first address. For a vault of
+/// extended keys the descriptor is the TEMPLATE — each key ends `/**` — with the restriction line `/0/*,/1/*` and the
+/// first address of the first restricted path; "No path restrictions" is only for a descriptor that has none.
+pub fn bsms_record(v: &Vault) -> R<String> {
+    let first = wallet::address_at(v, 0)?;
+    match &v.ext {
+        Some(ext) => {
+            let body = ext.split('#').next().unwrap_or(ext);
+            if !body.contains("/<0;1>/*") { return Err("this vault's descriptor is not written with <0;1>/*, so it cannot be put in a BSMS template".into()); }
+            Ok(format!("BSMS 1.0\n{}\n/0/*,/1/*\n{first}\n", body.replace("/<0;1>/*", "/**")))
+        }
+        None => Ok(format!("BSMS 1.0\n{}\nNo path restrictions\n{first}\n", v.descriptor)),
+    }
+}
+
+/// Read a BSMS record into the text the Restore screen reads — and CHECK its fourth line: the first address is there
+/// so both sides can confirm they derived the same wallet, and a record whose address this app does not derive is
+/// refused rather than restored into a vault that watches the wrong addresses.
+pub fn bsms_read(text: &str, network: &str) -> R<BsmsIn> {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if lines.len() < 2 || !lines[0].starts_with("BSMS") { return Err("not a BSMS descriptor record (first line should be 'BSMS 1.0')".into()); }
+    let (desc, restrictions, claimed) = (lines[1], lines.get(2).copied().unwrap_or(""), lines.get(3).copied().unwrap_or(""));
+    if names_extended_keys(desc) {
+        let restricted = restrictions.replace(' ', "");
+        if !(restricted == "/0/*,/1/*" || restrictions.eq_ignore_ascii_case("No path restrictions")) {
+            return Err(format!("this record restricts its keys to {restrictions:?}; this app reads wallets of receive and change, /0/*,/1/*"));
+        }
+        let descriptor = desc.split('#').next().unwrap_or(desc).replace("/**", "/<0;1>/*");
+        let info = ext_for_this_network(&descriptor, network)?;
+        let mut v = ext_vault(String::new(), &info, &[]);
+        let derived = wallet::address_at(&v, 0)?; v.address = derived.clone();
+        if !claimed.is_empty() && claimed != derived { return Err(format!("the record says its first address is {claimed}, but these keys give {derived}: the record and its keys do not agree, so it was not read")); }
+        return Ok(BsmsIn { descriptor: info.descriptor, first_address: derived });
+    }
+    let desc = desc.replace("/**", "");
+    let (threshold, keys) = wallet::keys_of(&desc)?;
+    let descriptor = wallet::descriptor_for(threshold, &keys)?;
+    Ok(BsmsIn { descriptor, first_address: claimed.to_string() })
+}
+
+/// Read a BSMS 1.0 descriptor record from a file.
 #[tauri::command]
 fn bsms_import() -> R<BsmsIn> {
     let path = rfd::FileDialog::new().set_title("Open a BSMS descriptor record").add_filter("BSMS", &["bsms", "txt"]).pick_file().ok_or("cancelled")?;
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    if lines.len() < 2 || !lines[0].starts_with("BSMS") { return Err("not a BSMS descriptor record (first line should be 'BSMS 1.0')".into()); }
-    let desc = lines[1].replace("/**", "");
-    if desc.contains("pub") && (desc.contains("xpub") || desc.contains("tpub") || desc.contains('[')) { return Err("this record uses extended keys with derivation paths; YubiKeys hold single keys, so only fixed-key records can be restored here".into()); }
-    let (threshold, keys) = wallet::keys_of(&desc)?;
-    let descriptor = wallet::descriptor_for(threshold, &keys)?;
-    let first_address = lines.get(3).unwrap_or(&"").to_string();
-    Ok(BsmsIn { descriptor, first_address })
+    let s = wallet::load()?;
+    bsms_read(&text, &s.settings.network)
+}
+
+/// The same wallet, written the way another wallet writes it. A vault's descriptor is kept exactly as it was pasted, and
+/// one pasted before that was true is stored in the canonical form (48' rather than 48h — and so a different checksum
+/// from the one Sparrow or the SeedSigner shows). This replaces the TEXT only, and only when it is the same wallet.
+#[tauri::command]
+fn vault_ext_rewrite(name: String, text: String) -> R<Store> {
+    let mut s = wallet::load()?;
+    let v = s.vaults.iter_mut().find(|v| v.name == name).ok_or("no such vault")?;
+    let stored = v.ext.clone().ok_or("this vault's keys are cards; its recovery line is its own")?;
+    let (old, new) = (wallet::ext_parse(&stored)?.ok_or("stored descriptor")?, wallet::ext_parse(&text)?.ok_or("that names no extended keys")?);
+    if old.canonical != new.canonical { return Err("that is a different wallet from this vault's, so it was not put in its place".into()); }
+    if !text.trim().contains('#') { return Err("paste it with its checksum (the #… at the end), exactly as the other wallet shows it".into()); }
+    v.ext = Some(new.descriptor.clone()); v.descriptor = new.descriptor;
+    wallet::save(&s)?;
+    Ok(s)
 }
 
 fn now() -> u64 {
@@ -1686,7 +1735,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![net_offline, drill_every, cost_method_set, vault_cost_method, cards_other, prices_series, location_status, location_preview, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
@@ -1786,5 +1835,33 @@ mod sheet_tests {
         let pdf = export::doc(&title, &subtitle, &blocks).unwrap();
         let dir = std::env::temp_dir().join("a2k-pdf"); std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("sheet.pdf"), &pdf).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod bsms_tests {
+    use super::*;
+    fn fixture(k: &str) -> String { let f: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!("{}/tests/fixtures/ext-descriptors.json", env!("CARGO_MANIFEST_DIR"))).unwrap()).unwrap(); f[k]["descriptor"].as_str().unwrap().to_string() }
+    fn ext(desc: &str) -> Vault { let i = wallet::ext_parse(desc).unwrap().unwrap(); let mut v = ext_vault("t".into(), &i, &[]); v.address = wallet::address_at(&v, 0).unwrap(); v }
+
+    #[test]
+    fn a_bsms_record_of_extended_keys_is_the_bip129_template_and_reads_back_to_the_same_wallet() {
+        let v = ext(&fixture("sortedmulti"));
+        let rec = bsms_record(&v).unwrap();
+        let lines: Vec<&str> = rec.lines().collect();
+        assert_eq!(lines[0], "BSMS 1.0");
+        assert!(lines[1].contains("/**") && !lines[1].contains("<0;1>") && !lines[1].contains('#'), "a template: each key ends /**");
+        assert_eq!(lines[2], "/0/*,/1/*", "restricted to receive and change — never 'No path restrictions' for a wallet that has them");
+        assert_eq!(lines[3], wallet::address_at(&v, 0).unwrap());
+        let back = bsms_read(&rec, "mainnet").unwrap();
+        let (a, b) = (wallet::ext_parse(&back.descriptor).unwrap().unwrap(), wallet::ext_parse(&fixture("sortedmulti")).unwrap().unwrap());
+        assert_eq!(a.canonical, b.canonical, "the record reads back as the very same wallet");
+    }
+    #[test]
+    fn a_record_whose_address_its_keys_do_not_give_is_refused() {
+        let rec = bsms_record(&ext(&fixture("sortedmulti"))).unwrap();
+        let other = wallet::address_at(&ext(&fixture("multi")), 0).unwrap();
+        let lie = rec.replace(rec.lines().nth(3).unwrap(), &other);
+        assert!(bsms_read(&lie, "mainnet").unwrap_err().contains("do not agree"));
     }
 }

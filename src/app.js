@@ -1707,7 +1707,13 @@ $('#bsms-open').onclick = async () => { try { const r = await invoke('bsms_impor
 // The recovery line says what the vault holds. Until Reveal is pressed the page carries a scrambled stand-in of the same
 // shape, blurred — so a screenshot, a screen share or a screen reader gets nothing. Copy and Save as PDF work without revealing.
 const standIn = (line) => { let x = line.length * 2654435761 >>> 0; return line.replace(/[a-z0-9]/gi, () => { x = (x * 1664525 + 1013904223) >>> 0; return '0123456789abcdef'[x >>> 28]; }); };
+function paintDescWords() {
+  const ext = !!(vault && vault.ext);
+  $('#keys-desc-cards').hidden = ext; $('#keys-desc-ext').hidden = !ext;
+  if (ext) $('#keys-desc-ext').textContent = `This is the wallet descriptor: complete and standard \u2014 Sparrow, Bitcoin Core and the signing devices read it whole. With any ${vault.threshold} of the keys\u2019 seed words it rebuilds this vault anywhere; on its own it can only watch. Keep it apart from the seed words: together they are the vault.`;
+}
 function paintDesc() {
+  paintDescWords();
   const line = (vault && vault._recovery) || '', shown = !!hideDesc.shown && !!line;   // an empty line is never 'revealed'
   $('#keys-desc').textContent = shown ? line : standIn(line); $('#keys-desc').setAttribute('aria-hidden', String(!shown));
   $('#desc-wrap').dataset.hidden = shown ? '0' : '1'; $('#desc-hide').hidden = !shown; $('#desc-copy').hidden = !shown;
@@ -2100,7 +2106,11 @@ function renderVaultSettings() {
   const def = store.settings.custom ? [store.settings.electrum, store.settings.explorer] : [$('#def-electrum').textContent, $('#def-explorer').textContent];
   $('#vs-servers').innerHTML = [['Electrum server', esc(def[0] || '\u2014')], ['Block explorer', esc(def[1] || '\u2014')], ['Gap limit', sats(store.settings.gap || 20) + ' addresses past the last one used']]
     .map(([k, v]) => `<dt>${k}</dt><dd class="mono" style="font-size:12.5px">${v}</dd>`).join('');
-  $('#vs-desc').textContent = vault._recovery || vault.descriptor || '';
+  // hidden until asked for, as on Keys: showing it here in full would undo the care taken there
+  const line = vault.ext || vault._recovery || vault.descriptor || '', shown = renderVaultSettings.shown === vault.name;
+  $('#vs-desc').textContent = shown ? line : standIn(line); $('#vs-desc').setAttribute('aria-hidden', String(!shown));
+  $('#vs-desc-wrap').dataset.hidden = shown ? '0' : '1'; $('#vs-desc-reveal').hidden = shown;
+  $('#vs-rewrite').hidden = !vault.ext;
   const ds = drillState(vault);
   $('#vs-drill-when').innerHTML = ds.never
     ? '<b>This vault has never been drilled.</b> Until it has, "the keys can recover it" is something you believe rather than something you have seen.'
@@ -2157,7 +2167,11 @@ async function runDrill() {
     try { store = await invoke('note_set', { name: vault.name, key: 'vault:drill', note: when }); vault = store.vaults.find(v => v.name === vault.name) || vault; paintDrillNudge.hidden = null; renderVaultSettings(); paintDrillNudge(); drillSay(html); } catch {} }
 }
 $('#vs-drill').onclick = () => { drillFound = []; runDrill(); };
-$('#vs-copy-desc').onclick = () => navigator.clipboard.writeText($('#vs-desc').textContent).then(() => toast('Recovery line copied'));
+$('#vs-desc-reveal').onclick = () => { renderVaultSettings.shown = vault.name; renderVaultSettings(); };
+$('#vs-copy-desc').onclick = () => navigator.clipboard.writeText(vault.ext || vault._recovery || vault.descriptor || '').then(() => toast('Recovery line copied'));
+$('#vs-rewrite-go').onclick = async () => { const text = $('#vs-rewrite-in').value.trim(), name = vault.name; if (!text) return toast('Paste the other wallet\u2019s version first');
+  try { store = await invoke('vault_ext_rewrite', { name, text }); vault = store.vaults.find(v => v.name === name) || vault; $('#vs-rewrite-in').value = ''; renderVaultSettings.shown = name; renderVaultSettings(); toast('Same wallet \u2014 its recovery line now reads as your other wallet writes it'); }
+  catch (e) { fail(e); } };
 $('#vs-pdf').onclick = () => invoke('vault_pdf', { name: vault.name }).then((p) => toast('Saved to ' + p)).catch(fail);
 $('#vs-rename').onclick = () => { show('home'); setTimeout(() => $('#title-edit').click(), 80); };
 askTwice($('#vs-forget'), 'Forget this vault on this computer? The coins stay on the chain; two sealed keys, or the recovery line and two keys, bring it back.', 'Yes, forget it here', async () => { store = await invoke('vault_forget', { name: vault.name }); vault = null; boot(); });

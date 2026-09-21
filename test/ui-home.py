@@ -38,6 +38,7 @@ const H = {
     descriptor: a.text, ext: a.text, address: 'bc1q3wtn9xskmmkp4m0zpagq6rngjujj0tfhvzt9xemlaanzgjul7rqq90hsk4', created: 1789600000, labels: {}, notes: {}, files: {}, more: {}, seal: { shares: [], sealed: [] } };
     __extra.push(v); return v; },
   drill_every: (a) => { window.__drillDays = a.days; return store(); },
+  vault_ext_rewrite: (a) => { window.__rewrite = a; const v = __extra.find(v => v.name === a.name); if (v) { v.ext = a.text; v.descriptor = a.text; } return store(); },
   cost_method_set: (a) => { window.__method = a.method; return store(); },
   vault_cost_method: (a) => { const v = store().vaults.find(v => v.name === a.name); window.__vaultMethod = a; V.cost_method = a.method; return store(); },
   ctx_set: (a) => { window.__ctxSet = a; V.more = V.more || {}; const r = V.more['tx:' + a.txid] = V.more['tx:' + a.txid] || {}; if (a.remove) r.ctx = { removed: true, t: 9 }; else { r.ctx = Object.assign({ t: 9, how: 'noted', device: { name: 'Test Mac' } }, r.ctx || {}, { place: a.place, named: true }); delete r.ctx.geo; delete r.ctx.picked; if (a.lat !== null && a.lat !== undefined) { r.ctx.geo = { lat: a.lat, lon: a.lon, acc: 0 }; r.ctx.picked = true; } } return store(); },
@@ -519,10 +520,21 @@ with sync_playwright() as p:
           pg.inner_text("#keys-list")[:200])
     check("the seal note says how THIS vault comes back: seed words plus the descriptor", "seed words" in pg.inner_text("#seal-note") and "descriptor" in pg.inner_text("#seal-note"))
     check("and the YubiKey firmware / end-of-life card is not shown for keys that are not YubiKeys", not pg.locator("#key-life").is_visible())
+    kd = pg.inner_text("#keys-desc-ext") if pg.locator("#keys-desc-ext").is_visible() else ""
+    check("the recovery line on Keys is described as what it is — a standard wallet descriptor — with no word of seals, cc= or PINs",
+          "wallet descriptor" in kd and "seed words" in kd and not pg.locator("#keys-desc-cards").is_visible(), kd[:160])
     pg.evaluate("show('send')"); pg.wait_for_timeout(500)
     check("Send says plainly that spending is not built yet for this vault, and the build button cannot be pressed",
           pg.locator("#ext-send").is_visible() and "not built yet" in pg.inner_text("#ext-send") and pg.locator("#build-btn").is_disabled())
-    pg.evaluate("show('vault')"); pg.wait_for_timeout(400)
+    pg.evaluate("renderVaultSettings.shown = null; show('vault')"); pg.wait_for_timeout(400)
+    real = pg.evaluate("vault.ext")
+    check("Vault settings keeps the recovery line HIDDEN until asked, as Keys does — it shows every address the vault will use",
+          pg.inner_text("#vs-desc") != real and pg.locator("#vs-desc-reveal").is_visible(), pg.inner_text("#vs-desc")[:60])
+    pg.click("#vs-desc-reveal"); pg.wait_for_timeout(200)
+    check("and shows it when asked", pg.inner_text("#vs-desc") == real)
+    check("an xpub vault is offered a way to take its other wallet's wording", pg.locator("#vs-rewrite").is_visible())
+    pg.fill("#vs-rewrite-in", real); pg.click("#vs-rewrite-go"); pg.wait_for_timeout(400)
+    check("which goes to the app to be checked as the same wallet before it replaces anything", pg.evaluate("__rewrite.text") == real and pg.evaluate("__rewrite.name") == "seedsigner demo")
     check("Vault settings does not offer a card drill for a vault with no cards, and says how to check it instead",
           not pg.locator("#vs-drill").is_visible() and "load its seed words and confirm it shows the fingerprint" in pg.inner_text("#vs-drill-what"))
     pg.evaluate("vault = store.vaults[0]; show('home')"); pg.wait_for_timeout(400)
