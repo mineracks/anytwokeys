@@ -13,7 +13,7 @@ MOCK = """
 window.__state = { fiat: %(fiat)s, asked: null, fail: false, os: %(os)s };
 const V = %(vault)s; window.V = V;
 window.__contacts = []; window.__extra = [];
-const store = () => ({ forms: {}, contacts: __contacts, vaults: [V].concat(__extra), settings: { network: V.network, custom: false, electrum: '', explorer: '', gap: 20, fiat: __state.fiat, prices: '', offline: !!window.__offline, drill_days: window.__drillDays === undefined ? 90 : window.__drillDays }, seen: {}, last_psbt: null, last_message: null });
+const store = () => ({ forms: {}, contacts: __contacts, vaults: [V].concat(__extra), settings: { network: V.network, custom: false, electrum: '', explorer: '', gap: 20, fiat: __state.fiat, prices: '', offline: !!window.__offline, drill_days: window.__drillDays === undefined ? 90 : window.__drillDays, cost_method: window.__method || 'utxo' }, seen: {}, last_psbt: null, last_message: null });
 const H = {
   attach_fetch: (a) => { (window.__fetched = window.__fetched || []).push(a); if (window.__fetchFails) throw 'the computer that added this file has not finished backing it up yet'; window.__away = (window.__away || []).filter(h => h !== a.sha256); return true; },
   attach_have: (a) => a.hashes.map(h => !(window.__away || []).includes(h)),
@@ -38,6 +38,8 @@ const H = {
     descriptor: a.text, ext: a.text, address: 'bc1q3wtn9xskmmkp4m0zpagq6rngjujj0tfhvzt9xemlaanzgjul7rqq90hsk4', created: 1789600000, labels: {}, notes: {}, files: {}, more: {}, seal: { shares: [], sealed: [] } };
     __extra.push(v); return v; },
   drill_every: (a) => { window.__drillDays = a.days; return store(); },
+  cost_method_set: (a) => { window.__method = a.method; return store(); },
+  vault_cost_method: (a) => { const v = store().vaults.find(v => v.name === a.name); window.__vaultMethod = a; V.cost_method = a.method; return store(); },
   ctx_set: (a) => { window.__ctxSet = a; V.more = V.more || {}; const r = V.more['tx:' + a.txid] = V.more['tx:' + a.txid] || {}; if (a.remove) r.ctx = { removed: true, t: 9 }; else { r.ctx = Object.assign({ t: 9, how: 'noted', device: { name: 'Test Mac' } }, r.ctx || {}, { place: a.place, named: true }); delete r.ctx.geo; delete r.ctx.picked; if (a.lat !== null && a.lat !== undefined) { r.ctx.geo = { lat: a.lat, lon: a.lon, acc: 0 }; r.ctx.picked = true; } } return store(); },
   label_set: (a) => { V.labels = V.labels || {}; if (a.label) V.labels[a.key] = a.label; else delete V.labels[a.key]; return store(); },
   note_set: (a) => { window.__noteCalls = (window.__noteCalls || 0) + 1; V.notes = V.notes || {}; if (a.note.trim()) V.notes[a.key] = a.note; else delete V.notes[a.key]; return store(); },
@@ -63,8 +65,11 @@ const H = {
     const out = []; for (let t = Date.parse(a.from + 'T00:00:00Z'); t <= Date.parse(a.to + 'T00:00:00Z'); t += 86400000) { const d = new Date(t).toISOString().slice(0, 10); out.push([d, window.__holeDay === d ? null : { price: 110000, basis: 'daily ' + d }]); }
     return { every: 1, points: out }; },
   vault_activity: (a) => { __state.asked = a; if (__state.fail) throw 'electrum: connection refused'; const q = (p, b) => a.ccy ? { price: p, basis: b } : null; return { ccy: a.ccy, note: null, now: q(114209.6, 'daily 2026-09-19'), rows: [
-    { txid: '%(t0)s', time: 1789627614, net: 20000, fee: null, quote: q(107389.64, 'hourly 2026-09-17 06:00 UTC') }, { txid: '%(t1)s', time: 1789648528, net: -5190, fee: 190, quote: q(107768.03, 'hourly 2026-09-17 12:00 UTC') },
-    { txid: '%(t2)s', time: 1789699744, net: -5380, fee: 380, quote: null }, { txid: '%(t3)s', time: null, net: 1000, fee: null, quote: null }] }; } };
+    // one coin spent down: 20,000 in; spent, 14,810 change; spent, 9,430 change; and 1,000 not yet in a block
+    { txid: '%(t0)s', time: 1789627614, net: 20000, fee: null, quote: q(107389.64, 'hourly 2026-09-17 06:00 UTC'), ins: [], outs: [[0, 20000]] },
+    { txid: '%(t1)s', time: 1789648528, net: -5190, fee: 190, quote: q(107768.03, 'hourly 2026-09-17 12:00 UTC'), ins: [['%(t0)s:0', 20000]], outs: [[1, 14810]] },
+    { txid: '%(t2)s', time: 1789699744, net: -5380, fee: 380, quote: null, ins: [['%(t1)s:1', 14810]], outs: [[1, 9430]] },
+    { txid: '%(t3)s', time: null, net: 1000, fee: null, quote: null, ins: [], outs: [[0, 1000]] }] }; } };
 window.__TAURI__ = { core: { invoke: async (cmd, args) => { if (!H[cmd]) throw 'unmocked: ' + cmd; if (cmd === 'vault_sync' && window.__hold === (args || {}).name) await new Promise(r => window.__release = r);   // a slow server, on demand
   return H[cmd](args || {}); } }, event: { listen: async (name, fn) => { (window.__listeners = window.__listeners || {})[name] = fn; return () => {}; } } };
 """
@@ -384,6 +389,37 @@ with sync_playwright() as p:
     check("a deposit with no price is counted in the balance, and its cost is left OUT rather than guessed",
           L5["unpriced"] == 1 and L5["timeline"][-1]["basis"] == 0 and L5["timeline"][-1]["sats"] == 5000)
 
+    # ---- realised gains: the SAME history under three methods, every figure worked out by hand ----
+    H3 = """[{ name: 'A', rows: [
+        { txid: 'd1', time: 1000, net: 100000, quote: { price: 10000 }, ins: [], outs: [[0, 100000]] },
+        { txid: 'd2', time: 2000, net: 100000, quote: { price: 50000 }, ins: [], outs: [[0, 100000]] },
+        { txid: 's1', time: 3000, net: -60000, quote: { price: 60000 }, ins: [['d2:0', 100000]], outs: [[1, 40000]] }] }]"""
+    r = {m: pg.evaluate("buildLedger(%s, '%s')" % (H3, m)) for m in ("utxo", "fifo", "average")}
+    g = {m: r[m]["realised"]["s1"] for m in r}
+    check("UTXO: the coin the transaction ACTUALLY spent (bought at $50,000) — cost $30, worth $36 as it left, +$6",
+          abs(g["utxo"]["cost"] - 30) < 1e-9 and abs(g["utxo"]["proceeds"] - 36) < 1e-9 and abs(g["utxo"]["gain"] - 6) < 1e-9 and g["utxo"]["from"] == 2000, g["utxo"])
+    check("FIFO: the OLDEST coin first (bought at $10,000) — cost $6, +$30, dated from the first purchase",
+          abs(g["fifo"]["cost"] - 6) < 1e-9 and abs(g["fifo"]["gain"] - 30) < 1e-9 and g["fifo"]["from"] == 1000, g["fifo"])
+    check("average: one pool of $60 over 200,000 sats — cost $18, +$18",
+          abs(g["average"]["cost"] - 18) < 1e-9 and abs(g["average"]["gain"] - 18) < 1e-9, g["average"])
+    check("and what is still held carries the rest: UTXO $30 (the first coin $10 + change $20), FIFO $54, average $42",
+          [round(r[m]["timeline"][-1]["basis"], 9) for m in ("utxo", "fifo", "average")] == [30, 54, 42], [r[m]["timeline"][-1]["basis"] for m in r])
+    # a move between two of your vaults: not a disposal, and the coins keep their DATE as well as their cost
+    MV = """[{ name: 'A', rows: [
+        { txid: 'd1', time: 1000, net: 100000, quote: { price: 10000 }, ins: [], outs: [[0, 100000]] },
+        { txid: 'X', time: 5000, net: -100000, quote: { price: 20000 }, ins: [['d1:0', 100000]], outs: [] }] },
+      { name: 'B', rows: [{ txid: 'X', time: 5000, net: 99000, quote: { price: 20000 }, ins: [], outs: [[0, 99000]] }] }]"""
+    mv = pg.evaluate("buildLedger(%s, 'utxo')" % MV)
+    check("a move to another of your vaults carries 99% of the cost ($9.90) to it; only the 1,000-sat fee is realised ($0.20 worth, $0.10 cost)",
+          mv["internal"] == 1 and abs(mv["perVault"]["basis"]["B"] - 9.9) < 1e-9 and abs(mv["realised"]["X"]["cost"] - 0.1) < 1e-9 and abs(mv["realised"]["X"]["proceeds"] - 0.2) < 1e-9, [mv["perVault"], mv["realised"].get("X")])
+    later = pg.evaluate("""(() => { const L = buildLedger(%s.concat([]), 'utxo'); return L; })()""" % MV.replace("rows: [{ txid: 'X', time: 5000, net: 99000, quote: { price: 20000 }, ins: [], outs: [[0, 99000]] }]",
+        "rows: [{ txid: 'X', time: 5000, net: 99000, quote: { price: 20000 }, ins: [], outs: [[0, 99000]] }, { txid: 'Y', time: 9000, net: -99000, quote: { price: 30000 }, ins: [['X:0', 99000]], outs: [] }]"))
+    check("so when B later spends it, the holding runs from the ORIGINAL purchase in A, not from the day it moved",
+          later["realised"]["Y"]["from"] == 1000 and abs(later["realised"]["Y"]["cost"] - 9.9) < 1e-9, later["realised"].get("Y"))
+    noprice = pg.evaluate("""buildLedger([{ name: 'A', rows: [{ txid: 'd1', time: 1000, net: 5000, quote: null, ins: [], outs: [[0, 5000]] },
+        { txid: 's', time: 2000, net: -5000, quote: { price: 50000 }, ins: [['d1:0', 5000]], outs: [] }] }], 'utxo')""")
+    check("a coin whose purchase had no price: its disposal's cost and gain are UNKNOWN, never counted as zero",
+          noprice["realised"]["s"]["cost"] is None and noprice["realised"]["s"]["gain"] is None and noprice["unpriced"] == 1, noprice["realised"]["s"])
     # ---- several transactions in ONE block: Piers's real round trip (19,639 out, 19,371 back, same block) ----
     RT = """[{ name: 'A', rows: [
         { txid: 'first', time: 1000, net: 19639, quote: { price: 100000 } },
@@ -404,7 +440,7 @@ with sync_playwright() as p:
     # ---- the summary on Home ----
     pg.evaluate("show('home')"); pg.wait_for_timeout(1200)
     check("Home leads with stat tiles: what it holds, what it is worth, what it cost, and the gain not yet realised",
-          [t.strip().lower() for t in pg.locator("#home-summary .kpi .k").all_inner_texts()] == ["holding", "worth now", "cost basis", "unrealised"],
+          [t.strip().lower() for t in pg.locator("#home-summary .kpi .k").all_inner_texts()] == ["holding", "worth now", "cost basis", "unrealised", "realised"],
           pg.locator("#home-summary .kpi .k").all_inner_texts())
     check("the gain is said with a sign and an arrow, never by colour alone", any(ch in pg.inner_text("#home-summary .kpi:nth-child(4) .v") for ch in "▲▼"))
     charts = pg.locator("#home-summary .chart")
@@ -427,7 +463,7 @@ with sync_playwright() as p:
     pg.click("#home-summary .linkish"); pg.wait_for_timeout(200)
     check("and every figure is in a table too, so nothing is reachable only by hovering", pg.locator("#home-summary .sum-table table tr").count() >= 2)
     check("the notes say what the figures rest on: which closing prices, and what 'cost' means here",
-          "closing price" in pg.inner_text("#home-summary") and "true cost only if the deposit was a purchase" in pg.inner_text("#home-summary"))
+          "closing price" in pg.inner_text("#home-summary") and "a true cost only if it was a purchase" in pg.inner_text("#home-summary"))
     bad = pg.evaluate("""() => { const rows = [...document.querySelectorAll('#home-summary .sum-table tr')].slice(1);
         const num = (s) => parseFloat(String(s).replace(/[^0-9.]/g, ''));
         return rows.map(r => [...r.cells].map(c => c.textContent)).filter(c => { const bal = num(c[1]), worth = num(c[2]);
@@ -492,6 +528,42 @@ with sync_playwright() as p:
     pg.evaluate("vault = store.vaults[0]; show('home')"); pg.wait_for_timeout(400)
     check("and a card vault is untouched by all of this: its Send still builds", (pg.evaluate("show('send')") or True) and not pg.locator("#build-btn").is_disabled() and not pg.locator("#ext-send").is_visible())
     pg.evaluate("show('home')"); pg.wait_for_timeout(300)
+
+    # ---- realised, on screen: the mock vault's coin spent down twice ----
+    pg.evaluate("show('home')"); pg.wait_for_timeout(1200)
+    L = pg.evaluate("vaultLedger(vault.name)")
+    # by hand: the 20,000-sat coin cost 20,000 x 107,389.64 / 1e8 = 21.477928. The first spend sends 5,190 of it away
+    # (5,000 + 190 fee) at 107,768.03: cost 5190/20000 x 21.477928, worth 5190 x 107,768.03 / 1e8.
+    c1, p1 = 5190 / 20000 * (20000 * 107389.64 / 1e8), 5190 * 107768.03 / 1e8
+    r1 = L["realised"][T[1]]
+    check("the first spend is realised against the coin it actually spent — cost and worth to the cent of the hand figure",
+          abs(r1["cost"] - c1) < 1e-9 and abs(r1["proceeds"] - p1) < 1e-9 and abs(r1["gain"] - (p1 - c1)) < 1e-9 and L["method"] == "utxo", r1)
+    check("the second spend had no price on its day: its gain is unknown, and it is NOT counted as zero", L["realised"][T[2]]["gain"] is None)
+    pg.evaluate("openTx(%r)" % T[1]); pg.wait_for_timeout(1200)
+    dl = pg.inner_text("#tx-dl")
+    check("the transaction screen shows what the spend realised, what the coins had cost, how long they were held, and by which method",
+          "realised" in dl.lower() and "had cost" in dl and "held" in dl and "the coins this transaction actually spent" in dl, dl[-300:])
+    pg.evaluate("openTx(%r)" % T[0]); pg.wait_for_timeout(1200)
+    check("a deposit shows its cost: what it was worth as it arrived", "cost" in pg.inner_text("#tx-dl").lower() and "worth as it arrived" in pg.inner_text("#tx-dl"), pg.inner_text("#tx-dl")[-200:])
+    pg.evaluate("show('activity')"); pg.wait_for_timeout(900)
+    check("Activity carries the realised figure under each spend it is known for", "realised +" in pg.inner_text("#act-all") or "realised \u2212" in pg.inner_text("#act-all"), pg.inner_text("#act-all")[:300])
+    pg.evaluate("show('settings')"); pg.wait_for_timeout(300)
+    check("App settings: the method, defaulting to the coins actually spent, and says where each is accepted",
+          pg.input_value("#cost-method") == "utxo" and "ATO" in pg.inner_text("#cost-method-note"))
+    pg.select_option("#cost-method", "average"); pg.wait_for_timeout(400)
+    check("average cost is offered only for reference, and says plainly where it is NOT accepted",
+          pg.evaluate("__method") == "average" and "NOT generally accepted" in pg.inner_text("#cost-method-note") and "warn" in (pg.get_attribute("#cost-method-note", "class") or ""))
+    pg.select_option("#cost-method", "fifo"); pg.wait_for_timeout(400)
+    check("choosing a method re-works every realised figure", pg.evaluate("vaultLedger(vault.name).method") == "fifo")
+    pg.select_option("#cost-method", "utxo"); pg.wait_for_timeout(300)
+    pg.evaluate("show('vault')"); pg.wait_for_timeout(300)
+    check("Vault settings follows the app's method unless told otherwise, and says an override is for a different taxpayer",
+          pg.input_value("#vs-method") == "" and "different taxpayer" in pg.inner_text("#vs-method-note"))
+    pg.select_option("#vs-method", "fifo"); pg.wait_for_timeout(500)
+    check("an override is saved against that vault, and warns that one person cannot pick methods per wallet to choose the result",
+          pg.evaluate("__vaultMethod.method") == "fifo" and "cannot use different methods for different wallets" in pg.inner_text("#vs-method-note"))
+    pg.select_option("#vs-method", ""); pg.wait_for_timeout(400)
+    pg.evaluate("show('home')"); pg.wait_for_timeout(400)
 
     # ---- Activity: the whole history, with room ----
     pg.evaluate("show('activity')"); pg.wait_for_timeout(500)

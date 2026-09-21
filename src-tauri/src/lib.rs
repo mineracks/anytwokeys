@@ -177,6 +177,27 @@ fn store_get() -> Result<Store, String> {
     Ok(s)
 }
 
+const COST_METHODS: [&str; 3] = ["utxo", "fifo", "average"];
+
+/// How the cost of what leaves a vault is found. It belongs to the TAXPAYER, so it is set once for the app.
+#[tauri::command]
+fn cost_method_set(method: String) -> R<Store> {
+    if !COST_METHODS.contains(&method.as_str()) { return Err(format!("{method:?} is not a method this app computes")); }
+    wallet::update(|s| s.settings.cost_method = method)
+}
+
+/// A vault that belongs to a different taxpayer — a company's, a client's — may follow that taxpayer's method.
+/// None puts it back on the app's.
+#[tauri::command]
+fn vault_cost_method(name: String, method: Option<String>) -> R<Store> {
+    if let Some(m) = &method { if !COST_METHODS.contains(&m.as_str()) { return Err(format!("{m:?} is not a method this app computes")); } }
+    let mut s = wallet::load()?;
+    let v = s.vaults.iter_mut().find(|v| v.name == name).ok_or("no such vault")?;
+    v.cost_method = method;
+    wallet::save(&s)?;
+    Ok(s)
+}
+
 /// How often each vault should be proved recoverable from its cards. 0 means never ask.
 #[tauri::command]
 fn drill_every(days: u32) -> R<Store> {
@@ -215,7 +236,7 @@ fn vault_create(name: String, threshold: usize, keys: Vec<NewKey>, rotating: Opt
     let mut v = Vault { name, network: s.settings.network.clone(), threshold,
         keys: keys.into_iter().map(|k| wallet::KeyRef { name: k.name, serial: k.serial, pubkey: k.pubkey.to_lowercase() }).collect(),
         descriptor, address: String::new(), created: now(),
-        chain_code: if rotating.unwrap_or(true) { Some(fresh_chain_code()) } else { None }, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None };
+        chain_code: if rotating.unwrap_or(true) { Some(fresh_chain_code()) } else { None }, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None };
     v.address = wallet::address_at(&v, 0)?;
     let _ = network;
     s.vaults.push(v.clone());
@@ -257,7 +278,7 @@ fn descriptor_parse(text: String) -> R<Parsed> {
     let (threshold, keys) = wallet::keys_of(&desc_text)?;
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
     let tmp = Vault { name: String::new(), network: s.settings.network.clone(), threshold, keys: keys.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.clone() }).collect(),
-        descriptor: descriptor.clone(), address: String::new(), created: 0, chain_code: cc.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None };
+        descriptor: descriptor.clone(), address: String::new(), created: 0, chain_code: cc.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None };
     let address = wallet::address_at(&tmp, 0)?;
     Ok(Parsed { threshold, keys, descriptor: wallet::recovery_line(&tmp), address, rotating: cc.is_some(), ext: None, kind: "cards".into() })
 }
@@ -282,7 +303,7 @@ fn vault_restore(name: String, text: String, names: Vec<String>) -> R<Vault> {
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
     let mut v = Vault { name, network: s.settings.network.clone(), threshold,
         keys: keys.iter().enumerate().map(|(i, k)| wallet::KeyRef { name: names.get(i).cloned().unwrap_or_else(|| format!("key {}", i + 1)), serial: 0, pubkey: k.clone() }).collect(),
-        descriptor, address: String::new(), created: now(), chain_code: cc, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None };
+        descriptor, address: String::new(), created: now(), chain_code: cc, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None };
     v.address = wallet::address_at(&v, 0)?;
     s.vaults.push(v.clone());
     wallet::save(&s)?;
@@ -297,7 +318,7 @@ fn ext_vault(name: String, info: &wallet::ExtInfo, names: &[String]) -> Vault {
             serial: 0, pubkey: format!("[{}/{}]{}", k.fingerprint, k.path.trim_start_matches("m/"), k.xpub) }).collect(),
         descriptor: info.descriptor.clone(), address: String::new(), created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
         labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0,
-        seal: Default::default(), ext: Some(info.descriptor.clone()) }
+        seal: Default::default(), ext: Some(info.descriptor.clone()), cost_method: None }
 }
 
 #[tauri::command]
@@ -347,7 +368,7 @@ fn settings_set(app: tauri::AppHandle, network: String, custom: bool, electrum: 
     let (location, location_exact) = (location.unwrap_or(s.settings.location), location_exact.unwrap_or(s.settings.location_exact));
     let tiles = tiles.map(|v| v.trim().to_string()).unwrap_or_else(|| s.settings.tiles.clone());
     if !(tiles.is_empty() || tiles.starts_with("https://")) { return Err("the map host is an https address of a .pmtiles file, or empty for no maps".into()); }
-    s.settings = wallet::Settings { network, custom, electrum: electrum.trim().to_string(), explorer: explorer.trim().to_string(), gap, fiat, prices, vss, location, location_exact, tiles, geocode: geocode.map(|v| v.trim().trim_end_matches('/').to_string()).filter(|v| v.is_empty() || v.starts_with("https://")).unwrap_or_else(|| s.settings.geocode.clone()), offline: s.settings.offline, drill_days: s.settings.drill_days };
+    s.settings = wallet::Settings { network, custom, electrum: electrum.trim().to_string(), explorer: explorer.trim().to_string(), gap, fiat, prices, vss, location, location_exact, tiles, geocode: geocode.map(|v| v.trim().trim_end_matches('/').to_string()).filter(|v| v.is_empty() || v.starts_with("https://")).unwrap_or_else(|| s.settings.geocode.clone()), offline: s.settings.offline, drill_days: s.settings.drill_days, cost_method: s.settings.cost_method.clone() };
     wallet::save(&s)?;
     location_follow(&app, location);
     Ok(s)
@@ -860,7 +881,7 @@ fn seal_vault(rec: &seal::Record, name: String, shares: Vec<String>, sealed: Vec
     let mut v = Vault { name, network: rec.network.clone(), threshold: rec.threshold,
         keys: rec.pubkeys.iter().zip(&rec.key_names).map(|(p, n)| wallet::KeyRef { name: n.clone(), serial: 0, pubkey: p.clone() }).collect(),
         descriptor, address: String::new(), created: now(), chain_code: rec.chain_code.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0,
-        seal: wallet::Seal { shares, sealed }, ext: None };
+        seal: wallet::Seal { shares, sealed }, ext: None, cost_method: None };
     v.address = wallet::address_at(&v, 0)?;
     Ok(v)
 }
@@ -1665,7 +1686,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![net_offline, drill_every, cards_other, prices_series, location_status, location_preview, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![net_offline, drill_every, cost_method_set, vault_cost_method, cards_other, prices_series, location_status, location_preview, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])

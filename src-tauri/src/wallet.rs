@@ -46,6 +46,8 @@ pub struct Vault {
     /// wallet descriptor exactly as it came, multipath `<0;1>/*` for receive and change. Present = every address comes
     /// from here by ordinary BIP32, and none of the card machinery (chain code, seal, card signing) applies.
     #[serde(default)] pub ext: Option<String>,
+    /// this vault's own method, when it belongs to a different taxpayer from the app's (a company's, a client's)
+    #[serde(default)] pub cost_method: Option<String>,
 }
 
 /// The recovery record split across the cards (seal.rs). Shares are made once so cards sealed on different days agree.
@@ -81,6 +83,8 @@ pub struct Settings {
     #[serde(default)] pub offline: bool,
     /// how often a vault should be proved recoverable from its cards, in days; 0 = never ask
     #[serde(default = "default_drill")] pub drill_days: u32,
+    /// how a disposal's cost is found: "utxo" (the coins actually spent, as the chain records them), "fifo", "average"
+    #[serde(default = "default_method")] pub cost_method: String,
 }
 pub fn default_geocode() -> String { "https://geocode.mineracks.com".into() }
 pub fn default_tiles() -> String { "https://tiles.mineracks.com/planet.pmtiles".into() }
@@ -90,6 +94,10 @@ pub fn default_gap() -> u32 { GAP }
 /// 90 days. A key that has died, been wiped or had its PIN locked out fails SILENTLY: nothing tells you until the
 /// day you need it. The interval is a guess at how long is tolerable to have been wrong for, not a wear estimate.
 pub fn default_drill() -> u32 { 90 }
+/// The coins a transaction actually spent: specific identification, with the chain as the record. Accepted in
+/// Australia ("your selection of the identity", with records) and the US (specific identification); see
+/// roadmap/anytwokeys/ACCOUNTING.md for the sources and for where it is NOT the rule (the UK pools).
+pub fn default_method() -> String { "utxo".into() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StagedMessage { pub vault: String, pub address: String, pub message: String, pub index: u32 }
@@ -662,7 +670,7 @@ mod tests {
         let keys = ["03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2", "032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe", "038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47"];
         let descriptor = descriptor_for(2, &keys.iter().map(|k| k.to_string()).collect::<Vec<_>>()).unwrap();
         Vault { name: "t".into(), network: "signet".into(), threshold: 2, keys: keys.iter().enumerate().map(|(i, k)| KeyRef { name: format!("k{i}"), serial: 0, pubkey: k.to_string() }).collect(),
-            descriptor, address: String::new(), created: 0, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None }
+            descriptor, address: String::new(), created: 0, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None }
     }
     #[test]
     fn a_part_signed_psbt_from_elsewhere_is_checked_before_it_is_taken_in() {
@@ -733,7 +741,7 @@ mod ext_tests {
         let info = ext_parse(desc).unwrap().unwrap();
         Vault { name: "ext".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
             chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(),
-            files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: Some(info.descriptor) }
+            files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: Some(info.descriptor), cost_method: None }
     }
     fn fixtures() -> serde_json::Value { serde_json::from_str(&std::fs::read_to_string(format!("{}/tests/fixtures/ext-descriptors.json", env!("CARGO_MANIFEST_DIR"))).unwrap()).unwrap() }
     fn check_against_embit(case: &str) {

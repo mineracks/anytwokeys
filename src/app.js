@@ -328,10 +328,13 @@ async function renderTx() {
     if (oursOut.length) rows.push(['Change', oursOut.map(outLine).join('')]);
     rows.push(['Fee', d.fee !== null ? `${sats(d.fee)} sats<small>${d.fee_rate.toFixed(2)} sat/vB · ${sats(d.vsize)} vB</small>` : 'not known']);
     rows.push(['Signed by', signers.length ? signers.map(esc).join(' and ') + `<small>read from the signatures on the transaction</small>` : 'could not be read from the witness']);
+    const rl = realisedRow(name, txid); if (rl) rows.push(['Realised', rl]);
   } else {                        // a deposit
     rows.push(['From', `outside this vault · ${d.inputs.length} input${d.inputs.length === 1 ? '' : 's'}`]);
     rows.push(['To', oursOut.map(outLine).join('') || '—']);
     rows.push(['Fee', d.fee !== null ? `${sats(d.fee)} sats, paid by the sender` : 'paid by the sender']);
+    const facts = txFacts[name], q = facts && facts.rows[txid] && facts.rows[txid].quote;
+    if (q && vault.network === 'mainnet') rows.push(['Cost', `${money(Math.abs(facts.rows[txid].net) / 1e8 * q.price, facts.ccy)}<small>what it was worth as it arrived \u2014 its cost, if it was bought</small>`]);
   }
   $('#tx-dl').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
   $('#tx-proof').textContent = d.proof === 'proved' ? `the node proved it is in block ${sats(d.height)}` : d.proof === 'unconfirmed' ? 'not in a block yet' : d.proof;
@@ -416,6 +419,16 @@ function renderCtx() {
   $('#tx-ctx-remove').hidden = gone || !(ctx.place || ctx.geo);
   if (document.activeElement !== $('#tx-place') || (ctx && ctx.picked)) $('#tx-place').value = ctx && ctx.named ? ctx.place : '';
   paintMap(gone ? null : ctx);
+}
+// What a spend realised: what the coins that left had cost, what they were worth as they left, and how long they were
+// held — measured by the vault's method, and saying which. Facts an accountant can use, not a tax position.
+function realisedRow(name, txid) {
+  const L = vaultLedger(name), r = L && L.realised[txid], ccy = (txFacts[name] || {}).ccy;
+  if (!r || !ccy) return '';
+  const day = (t) => new Date(t * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+  const held = r.from ? (r.from === r.to ? `bought ${day(r.from)}` : `bought between ${day(r.from)} and ${day(r.to)}`) + ` \u00b7 held ${sats(Math.floor((r.t - r.to) / 86400))}${r.from !== r.to ? '\u2013' + sats(Math.floor((r.t - r.from) / 86400)) : ''} days` : 'bought on a day not known here';
+  if (r.gain === null) return `unknown<small>${r.cost === null ? 'some of the coins that left have no known cost' : 'no price for the day they left'} \u00b7 ${held} \u00b7 by ${esc(COST_METHODS[r.method].short)}</small>`;
+  return `<span class="${r.gain >= 0 ? 'ok' : 'warn'}">${r.gain >= 0 ? '\u25b2 +' : '\u25bc \u2212'}${money(Math.abs(r.gain), ccy)}</span><small>worth ${money(r.proceeds, ccy)} as ${sats(Math.round(r.sats))} sats left \u00b7 they had cost ${money(r.cost, ccy)} \u00b7 ${held} \u00b7 by ${esc(COST_METHODS[r.method].short)}</small>`;
 }
 // the picture is drawn in Rust from tiles on our own host; the window only adds the dot and how sure it is
 async function paintMap(ctx) {
@@ -789,7 +802,9 @@ function paintFactRow(txid, r, facts) {
     if (r.net === null) { amt.textContent = '—'; continue; }
     const q = r.quote || (!r.time ? facts.now : null);
     amt.classList.remove('muted'); amt.classList.toggle('in', r.net > 0);
-    amt.innerHTML = `${r.net > 0 ? '+' : r.net < 0 ? '−' : ''}${sats(Math.abs(r.net))} sats<small>${q ? worth(Math.abs(r.net), q, facts.ccy) + (r.time ? ' then' : ' now') : ''}${r.fee !== null && r.net < 0 ? (q ? ' · ' : '') + 'fee ' + sats(r.fee) : ''}</small>`;
+    const vn = (tr.closest('#act-all, #activity') && vault) ? vault.name : null, L = vn ? vaultLedger(vn) : null, rz = L && L.realised[txid];
+    const rtext = rz && rz.gain !== null ? ` \u00b7 realised ${rz.gain >= 0 ? '+' : '\u2212'}${money(Math.abs(rz.gain), facts.ccy)}` : '';
+    amt.innerHTML = `${r.net > 0 ? '+' : r.net < 0 ? '−' : ''}${sats(Math.abs(r.net))} sats<small>${q ? worth(Math.abs(r.net), q, facts.ccy) + (r.time ? ' then' : ' now') : ''}${r.fee !== null && r.net < 0 ? (q ? ' · ' : '') + 'fee ' + sats(r.fee) : ''}${rtext}</small>`;
     if (q) amt.title = basisWords(q, facts.ccy);
   }
 }
@@ -865,57 +880,126 @@ function openAddress(r) {
 //
 // It is what each deposit was worth on arrival, which is a cost only if the deposit was a purchase. A deposit from a
 // wallet this app does not hold (an exchange, Sparrow) is counted at that day's price because nothing better is known.
-function buildLedger(inputs) {
+function buildLedger(inputs, method) {
+  method = method || 'average';
+  // ---- events: one per transaction, with a leg per vault it touched and the coins it spent and made ----
   const ev = new Map();
   for (const v of inputs) for (const r of v.rows) {
     if (r.net === null || r.net === undefined) continue;
     const t = r.time || Math.floor(Date.now() / 1000);   // not in a block yet: it is happening now
     const e = ev.get(r.txid) || { txid: r.txid, t, legs: [], price: null };
     e.t = Math.min(e.t, t);
-    e.legs.push({ vault: v.name, net: r.net });
+    e.legs.push({ vault: v.name, net: r.net, ins: r.ins || [], outs: (r.outs || []).map(([n, sats]) => [r.txid + ':' + n, sats]) });
     const p = r.quote ? r.quote.price : (!r.time && v.now ? v.now.price : null);
     if (p && !e.price) e.price = p;
     ev.set(r.txid, e);
   }
-  // Transactions in the same block share a timestamp, and their order inside the block is not in the history. Ordering
-  // them by txid is arbitrary, and wrong where it matters: a coin sent out and its own remainder coming straight back
-  // in the same block (a round trip) was taken deposit-first, averaging the outgoing coin's cost with its own return.
-  // Within one instant: spends the holdings can already cover go first, then arrivals, then any spend that can only
-  // be drawing on what just arrived (a chain received and spent in the same block).
+  // ---- order: by time; inside one instant, a transaction that spends a coin another one made comes after it (the
+  // chain's own order); anything still undecided takes covered spends first, then arrivals, then the rest ----
   const byT = new Map(); for (const e of ev.values()) { if (!byT.has(e.t)) byT.set(e.t, []); byT.get(e.t).push(e); }
   const netOf = (e) => e.legs.reduce((a, l) => a + l.net, 0);
   const events = []; let held = 0;
   for (const t of [...byT.keys()].sort((a, b) => a - b)) {
-    const group = byT.get(t).sort((a, b) => (a.txid < b.txid ? -1 : 1));
-    const covered = [], rest = [];
-    for (const e of group) (netOf(e) < 0 && -netOf(e) <= held ? covered : rest).push(e);
-    const ordered = covered.concat(rest.filter(e => netOf(e) >= 0), rest.filter(e => netOf(e) < 0));
-    for (const e of ordered) { events.push(e); held += netOf(e); }
+    let group = byT.get(t).sort((a, b) => (a.txid < b.txid ? -1 : 1));
+    while (group.length) {
+      // ready = spends no coin that another transaction still waiting in this instant makes
+      const madeBy = new Map(); for (const e of group) for (const l of e.legs) for (const [op] of l.outs) madeBy.set(op, e);
+      const ready = group.filter(e => !e.legs.some(l => l.ins.some(([op]) => { const m = madeBy.get(op); return m && m !== e; })));
+      const pick = ready.length ? ready : group;
+      const covered = pick.filter(e => netOf(e) < 0 && -netOf(e) <= held), arr = pick.filter(e => netOf(e) >= 0), rest = pick.filter(e => netOf(e) < 0 && -netOf(e) > held);
+      const next = (covered[0] || arr[0] || rest[0]);
+      events.push(next); held += netOf(next); group = group.filter(e => e !== next);
+    }
   }
-  const sats = {}, basis = {}, sum = (o) => Object.values(o).reduce((a, x) => a + x, 0);
-  const timeline = []; let internal = 0, unpriced = 0;
+  // ---- the three ways of finding what a disposal cost ----
+  const scale = (lots, f) => lots.map(l => ({ sats: l.sats * f, cost: l.cost === null ? null : l.cost * f, t: l.t }));
+  const sumCost = (lots) => lots.some(l => l.cost === null) ? null : lots.reduce((a, l) => a + l.cost, 0);
+  const coins = new Map();        // utxo: "txid:vout" → { vault, lots }
+  const queues = {};              // fifo: vault → lots, oldest first
+  const pools = {};               // average: vault → { sats, basis }
+  const realised = {}, sats = {}, timeline = [];
+  let internal = 0, unpriced = 0;
+  const heldLots = () => method === 'utxo' ? [...coins.values()].flatMap(c => c.lots) : method === 'fifo' ? Object.values(queues).flat() : null;
+  const basisNow = () => method === 'average' ? Object.values(pools).reduce((a, p) => a + p.basis, 0) : (heldLots().reduce((a, l) => a + (l.cost || 0), 0));
+  const popFifo = (vault, n) => { const q = queues[vault] || (queues[vault] = []), out = []; let need = n;
+    while (need > 1e-9 && q.length) { const l = q[0]; if (l.sats <= need + 1e-9) { out.push(q.shift()); need -= l.sats; } else { const f = need / l.sats; out.push({ sats: need, cost: l.cost === null ? null : l.cost * f, t: l.t }); l.sats -= need; if (l.cost !== null) l.cost *= (1 - f); need = 0; } }
+    if (need > 1e-9) out.push({ sats: need, cost: null, t: null });   // more left than was known to be held: its cost is unknown, never zero
+    return out; };
   for (const e of events) {
-    const outs = e.legs.filter(l => l.net < 0), ins = e.legs.filter(l => l.net > 0);
-    const before = { sats: sum(sats), basis: sum(basis) };
-    const outflow = outs.reduce((a, l) => a - l.net, 0), inflow = ins.reduce((a, l) => a + l.net, 0);
-    let leaving = 0;
-    for (const l of outs) {
-      const s0 = sats[l.vault] || 0, b0 = basis[l.vault] || 0, out = -l.net;
-      const share = s0 > 0 ? b0 * Math.min(1, out / s0) : 0;
-      basis[l.vault] = b0 - share; sats[l.vault] = s0 - out; leaving += share;
+    const before = { sats: Object.values(sats).reduce((a, x) => a + x, 0), basis: basisNow() };
+    const insAll = e.legs.flatMap(l => l.ins.map(([op, n]) => ({ op, sats: n, vault: l.vault })));
+    const outsAll = e.legs.flatMap(l => l.outs.map(([op, n]) => ({ op, sats: n, vault: l.vault })));
+    const inTotal = insAll.reduce((a, x) => a + x.sats, 0), outTotal = outsAll.reduce((a, x) => a + x.sats, 0);
+    const srcVaults = new Set(e.legs.filter(l => l.net < 0).map(l => l.vault)), dstVaults = new Set(e.legs.filter(l => l.net > 0).map(l => l.vault));
+    const isInternal = srcVaults.size > 0 && dstVaults.size > 0 && [...dstVaults].some(v => !srcVaults.has(v));
+    if (isInternal) internal++;
+    let pool = null, left = 0;
+    if (method === 'utxo' && (insAll.length || !e.legs.some(l => l.net < 0))) {
+      pool = insAll.flatMap(i => { const c = coins.get(i.op); coins.delete(i.op); return c ? c.lots : [{ sats: i.sats, cost: null, t: null }]; });
+      if (!insAll.length) {
+        for (const o of outsAll) { const cost = e.price ? o.sats / 1e8 * e.price : null; if (cost === null) unpriced++; coins.set(o.op, { vault: o.vault, lots: [{ sats: o.sats, cost, t: e.t }] }); }
+      } else {
+        const carry = Math.min(1, outTotal / inTotal), extra = Math.max(0, outTotal - inTotal);
+        // each coin that stays with us (change, or a move to another vault in scope) carries its share of every
+        // spent coin's lots, WITH their dates; coins in beyond ours (a payjoin) are bought at that moment
+        for (const o of outsAll) {
+          const share = outTotal > 0 ? o.sats / outTotal : 0;
+          const carried = scale(pool, share * carry);
+          if (extra > 0) carried.push({ sats: extra * share, cost: e.price ? extra * share / 1e8 * e.price : null, t: e.t });
+          coins.set(o.op, { vault: o.vault, lots: carried });
+        }
+        left = Math.max(0, inTotal - outTotal);
+        if (left > 0) pool = scale(pool, left / inTotal); else pool = null;
+      }
+    } else if (method === 'fifo') {
+      const leaving = [...srcVaults].map(v => { const l = e.legs.find(x => x.vault === v); return [v, -l.net]; });
+      const popped = leaving.flatMap(([v, n]) => popFifo(v, n));
+      const outflow = leaving.reduce((a, x) => a + x[1], 0), toOthersInScope = e.legs.filter(l => l.net > 0 && isInternal).reduce((a, l) => a + l.net, 0);
+      for (const l of e.legs.filter(x => x.net > 0)) {
+        const q = queues[l.vault] || (queues[l.vault] = []);
+        if (isInternal && outflow > 0) q.push(...scale(popped, l.net / outflow));   // a move keeps the coins' dates and cost
+        else { const cost = e.price ? l.net / 1e8 * e.price : null; if (cost === null) unpriced++; q.push({ sats: l.net, cost, t: e.t }); }
+        q.sort((a, b) => (a.t || 0) - (b.t || 0));
+      }
+      left = outflow - toOthersInScope;
+      pool = left > 0 && outflow > 0 ? scale(popped, left / outflow) : null;
+    } else {   // average: per vault, one pool
+      let leaving = 0;
+      for (const l of e.legs.filter(x => x.net < 0)) { const p = pools[l.vault] || (pools[l.vault] = { sats: 0, basis: 0 }); const out = -l.net;
+        const share = p.sats > 0 ? p.basis * Math.min(1, out / p.sats) : 0; p.basis -= share; p.sats -= out; leaving += share; }
+      const outflow = e.legs.filter(x => x.net < 0).reduce((a, l) => a - l.net, 0), inflow = e.legs.filter(x => x.net > 0).reduce((a, l) => a + l.net, 0);
+      for (const l of e.legs.filter(x => x.net > 0)) { const p = pools[l.vault] || (pools[l.vault] = { sats: 0, basis: 0 });
+        if (isInternal) p.basis += (outflow > 0 ? leaving * Math.min(1, inflow / outflow) : 0) * (l.net / inflow); else if (e.price) p.basis += l.net / 1e8 * e.price; else unpriced++;
+        p.sats += l.net; }
+      left = Math.max(0, outflow - (isInternal ? inflow : 0));
+      pool = left > 0 ? [{ sats: left, cost: outflow > 0 ? leaving * left / outflow : 0, t: null }] : null;
     }
-    if (outs.length && ins.length) {
-      internal++;
-      const carried = outflow > 0 ? leaving * Math.min(1, inflow / outflow) : 0;   // the fee's share is what is spent
-      for (const l of ins) { basis[l.vault] = (basis[l.vault] || 0) + carried * (l.net / inflow); sats[l.vault] = (sats[l.vault] || 0) + l.net; }
-    } else for (const l of ins) {
-      if (e.price) basis[l.vault] = (basis[l.vault] || 0) + l.net / 1e8 * e.price; else unpriced++;
-      sats[l.vault] = (sats[l.vault] || 0) + l.net;
+    for (const l of e.legs) sats[l.vault] = (sats[l.vault] || 0) + l.net;
+    if (pool && left > 0) {
+      const cost = sumCost(pool), proceeds = e.price ? left / 1e8 * e.price : null;
+      const dated = pool.filter(l => l.t !== null);
+      realised[e.txid] = { sats: left, cost, proceeds, gain: cost !== null && proceeds !== null ? proceeds - cost : null, t: e.t,
+        from: dated.length ? Math.min(...dated.map(l => l.t)) : null, to: dated.length ? Math.max(...dated.map(l => l.t)) : null, lots: pool, method };
     }
-    timeline.push({ t: e.t, txid: e.txid, price: e.price, before, sats: sum(sats), basis: sum(basis), internal: outs.length > 0 && ins.length > 0 });
+    timeline.push({ t: e.t, txid: e.txid, price: e.price, before, sats: Object.values(sats).reduce((a, x) => a + x, 0), basis: basisNow(), internal: isInternal });
   }
-  return { timeline, internal, unpriced, perVault: { sats, basis } };
+  return { timeline, internal, unpriced, realised, method, perVault: { sats, basis: method === 'average' ? Object.fromEntries(Object.entries(pools).map(([k, p]) => [k, p.basis])) : Object.fromEntries(Object.keys(sats).map(v => [v, (method === 'utxo' ? [...coins.values()].filter(c => c.vault === v).flatMap(c => c.lots) : (queues[v] || [])).reduce((a, l) => a + (l.cost || 0), 0)])) } };
 }
+// Which coins a disposal is taken to be — the taxpayer's rule, not the app's. Sources in roadmap/anytwokeys/ACCOUNTING.md.
+const COST_METHODS = {
+  utxo:    { name: 'The coins actually spent', short: 'the coins this transaction actually spent', note: 'Specific identification, with the chain as the record: a transaction names exactly which coins it spends. Accepted in Australia (the ATO accepts your identification of the units disposed of, with records) and in the United States.' },
+  fifo:    { name: 'First in, first out', short: 'first in, first out', note: 'The oldest coins are taken to leave first, whichever the transaction spent. The fallback in Australia and the default in the United States when units are not identified; counted vault by vault, as US rules have required since 2025.' },
+  average: { name: 'Average cost', short: 'average cost', note: 'Every coin costs the same average. NOT generally accepted for bitcoin: the ATO accepts it only for units acquired on the same day, and the US not at all. The UK pools instead, with its own same-day and 30-day rules, which this app does not compute. Kept for reference.' },
+};
+const methodFor = (v) => (v && v.cost_method) || (store && store.settings && store.settings.cost_method) || 'utxo';
+function vaultLedger(name) {
+  const f = txFacts[name], v = store && store.vaults.find(x => x.name === name);
+  if (!f || !v) return null;
+  const m = methodFor(v), key = m + ':' + Object.keys(f.rows).length + ':' + (f.now ? f.now.price : 0);
+  if (!vaultLedger.memo[name] || vaultLedger.memo[name].key !== key) vaultLedger.memo[name] = { key, L: buildLedger([{ name, rows: Object.values(f.rows), now: f.now }], m) };
+  return vaultLedger.memo[name].L;
+}
+vaultLedger.memo = {};
 const ledgerAt = (L, t) => { let s = { sats: 0, basis: 0 }; for (const e of L.timeline) { if (e.t > t) break; s = e; } return s; };
 
 // The three series for a range. Balance and basis only change at transactions, so they are steps; value moves with
@@ -1070,7 +1154,9 @@ async function renderSummary(box, names, opts = {}) {
   const priced = inputs.length && inputs.every(i => i.network === 'mainnet' && i.ccy);
   const ccy = priced ? inputs[0].ccy : '';
   const now = priced ? (inputs.find(i => i.now) || {}).now : null;
-  const L = buildLedger(inputs);
+  const methods = [...new Set(inputs.map(i => methodFor(store.vaults.find(v => v.name === i.name))))];
+  const method = methods.length === 1 ? methods[0] : methodFor(null);
+  const L = buildLedger(inputs, method);
   const rangeKey = sumPref('range', 'all'), R = SUM_RANGES.find(r => r[0] === rangeKey) || SUM_RANGES[3];
   const to = Math.floor(Date.now() / 1000), first = L.timeline.length ? L.timeline[0].t : to;
   const from = R[2] ? Math.min(to - R[2] * 86400, to - 3600) : Math.max(0, first - Math.max(3600, (to - first) * 0.03));
@@ -1100,6 +1186,8 @@ async function renderSummary(box, names, opts = {}) {
     const pct = nowState.basis > 0 ? gain / nowState.basis * 100 : null;
     // a status colour, so it goes with a sign and an arrow and never by colour alone
     k.appendChild(tile('Unrealised', (gain >= 0 ? '▲ +' : '▼ −') + money(Math.abs(gain), ccy), pct === null ? '' : (gain >= 0 ? '+' : '−') + Math.abs(pct).toFixed(1) + '% on cost', gain >= 0 ? 'up' : 'down'));
+    const inR = Object.values(L.realised).filter(x => x.t > from && x.t <= to), known = inR.filter(x => x.gain !== null), rg = known.reduce((a, x) => a + x.gain, 0);
+    k.appendChild(tile('Realised', inR.length ? (rg >= 0 ? '▲ +' : '▼ −') + money(Math.abs(rg), ccy) : 'nothing yet', inR.length ? `${inR.length} disposal${inR.length === 1 ? '' : 's'} in this range${known.length < inR.length ? ` \u00b7 ${inR.length - known.length} of unknown cost` : ''}` : 'nothing has left in this range', inR.length ? (rg >= 0 ? 'up' : 'down') : ''));
   }
   box.appendChild(k);
   const c1 = document.createElement('div'); c1.className = 'chart'; box.appendChild(c1);
@@ -1119,7 +1207,8 @@ async function renderSummary(box, names, opts = {}) {
   if (priced && !run.ok) notes.push(`Daily prices could not be fetched just now (${run.why}), so worth is drawn only at each transaction.`);
   const holes = Object.values(prices).filter(q => q === null).length;
   if (priced && holes) notes.push(`${holes} day${holes === 1 ? ' has' : 's have'} no price at the source and ${holes === 1 ? 'is' : 'are'} left out rather than filled from ${holes === 1 ? 'its' : 'their'} neighbours.`);
-  if (priced) notes.push('Cost basis is what each deposit was worth when it arrived — a true cost only if the deposit was a purchase.');
+  if (priced) notes.push(`Cost is by ${COST_METHODS[method].short}: what each coin was worth when it arrived \u2014 a true cost only if it was a purchase.`);
+  if (methods.length > 1) notes.push('These vaults do not all follow the same method, so they are counted here by the app\u2019s; each vault\u2019s own Home shows it by its own.');
   if (L.internal) notes.push(`${L.internal} transfer${L.internal === 1 ? '' : 's'} between these vaults ${L.internal === 1 ? 'was' : 'were'} recognised and counted as a move, not a sale and a purchase: the coins kept their cost.`);
   if (L.unpriced) notes.push(`${L.unpriced} deposit${L.unpriced === 1 ? ' has' : 's have'} no price, so ${L.unpriced === 1 ? 'its' : 'their'} cost is left out rather than guessed.`);
   if (opts.extra) notes.push(opts.extra);
@@ -1993,6 +2082,12 @@ function paintDrillNudge() {
 $('#drill-nudge-hide').onclick = () => { paintDrillNudge.hidden = vault && vault.name; paintDrillNudge(); };
 function renderVaultSettings() {
   if (!vault) return;
+  $('#vs-method').value = vault.cost_method || '';
+  const own = vault.cost_method, app = store.settings.cost_method || 'utxo';
+  $('#vs-method-note').textContent = own
+    ? `This vault follows ${COST_METHODS[own].short}, not the app\u2019s ${COST_METHODS[app].short}. That is right only if it belongs to a different taxpayer \u2014 a company\u2019s, a client\u2019s \u2014 whose rules differ. One person cannot use different methods for different wallets to choose the result.`
+    : `Follows the app\u2019s method: ${COST_METHODS[app].short}. Change it here only for a vault that belongs to a different taxpayer.`;
+  $('#vs-method-note').classList.toggle('warn', !!own);
   const n = vault.keys.length, single = n === 1;
   const drill = (vault.notes || {})['vault:drill'] || '';
   $('#vs-facts').innerHTML = [
@@ -2067,9 +2162,16 @@ $('#vs-pdf').onclick = () => invoke('vault_pdf', { name: vault.name }).then((p) 
 $('#vs-rename').onclick = () => { show('home'); setTimeout(() => $('#title-edit').click(), 80); };
 askTwice($('#vs-forget'), 'Forget this vault on this computer? The coins stay on the chain; two sealed keys, or the recovery line and two keys, bring it back.', 'Yes, forget it here', async () => { store = await invoke('vault_forget', { name: vault.name }); vault = null; boot(); });
 $('#coins-switch').onclick = () => { try { localStorage.setItem('a2k-coins-tab', coinsTab() ? 'off' : 'on'); } catch {} paintCoinsTab(); };
+// A change of method changes every realised figure, so every ledger is worked out again.
+const methodChanged = () => { vaultLedger.memo = {}; if ($('#s-home').classList.contains('on')) renderHomeSummary(); };
+function paintMethodNote() { const m = $('#cost-method').value; $('#cost-method-note').textContent = COST_METHODS[m] ? COST_METHODS[m].note : ''; $('#cost-method-note').classList.toggle('warn', m === 'average'); }
+$('#cost-method').onchange = async () => { try { store = await invoke('cost_method_set', { method: $('#cost-method').value }); paintMethodNote(); methodChanged(); toast('Every realised figure is now worked out by ' + COST_METHODS[$('#cost-method').value].short); } catch (e) { fail(e); } };
+$('#vs-method').onchange = async () => { const m = $('#vs-method').value || null, name = vault.name;
+  try { store = await invoke('vault_cost_method', { name, method: m }); vault = store.vaults.find(v => v.name === name) || vault; methodChanged(); renderVaultSettings(); } catch (e) { fail(e); } };
 $('#drill-every').onchange = async () => { try { store = await invoke('drill_every', { days: +$('#drill-every').value }); paintDrillNudge(); } catch (e) { fail(e); } };
 function renderSettings() {
   paintCoinsTab();
+  $('#cost-method').value = store.settings.cost_method || 'utxo'; paintMethodNote();
   $('#drill-every').value = String(store.settings.drill_days === undefined ? 90 : store.settings.drill_days);
   renderLock(); renderPlaces();
   $$('#net-pick .opt').forEach(o => o.classList.toggle('on', o.dataset.net === store.settings.network));

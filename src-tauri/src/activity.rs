@@ -18,7 +18,11 @@ struct Cache { #[serde(default)] times: HashMap<String, u32>, #[serde(default)] 
 pub struct Quote { pub price: f64, pub basis: String }   // basis: "hourly 2026-09-18 08:00 UTC" | "daily 2026-09-19"
 
 #[derive(Debug, Serialize)]
-pub struct Row { pub txid: String, pub time: Option<u32>, pub net: Option<i64>, pub fee: Option<u64>, pub quote: Option<Quote> }
+pub struct Row { pub txid: String, pub time: Option<u32>, pub net: Option<i64>, pub fee: Option<u64>, pub quote: Option<Quote>,
+    /// the lineage of the vault's own coins through this transaction: which of its coins went IN ("txid:vout", sats),
+    /// and which outputs came back to it (vout, sats). Enough to follow each coin's cost from the day it arrived to the
+    /// day it left — so a gain is measured against the coins actually spent, which the chain itself records.
+    #[serde(default)] pub ins: Vec<(String, u64)>, #[serde(default)] pub outs: Vec<(u32, u64)> }
 #[derive(Debug, Serialize)]
 pub struct Activity { pub ccy: String, pub rows: Vec<Row>, pub now: Option<Quote>, pub note: Option<String> }
 
@@ -79,11 +83,12 @@ pub fn build(v: &wallet::Vault, servers: &Servers, history: &[(String, i32)], cc
     for (txid, height) in history {
         let tx = &txs[txid];
         let received: u64 = tx.output.iter().filter(|o| ours(&o.script_pubkey)).map(|o| o.value.to_sat()).sum();
-        let mut spent = 0u64; let mut all_ours = !tx.input.is_empty();
+        let mut spent = 0u64; let mut all_ours = !tx.input.is_empty(); let mut ins = Vec::new();
         for i in &tx.input {
             match txs.get(&i.previous_output.txid.to_string()).and_then(|p| p.output.get(i.previous_output.vout as usize)).filter(|o| ours(&o.script_pubkey)) {
-                Some(o) => spent += o.value.to_sat(), None => all_ours = false }
+                Some(o) => { spent += o.value.to_sat(); ins.push((i.previous_output.to_string(), o.value.to_sat())); } None => all_ours = false }
         }
+        let outs: Vec<(u32, u64)> = tx.output.iter().enumerate().filter(|(_, o)| ours(&o.script_pubkey)).map(|(n, o)| (n as u32, o.value.to_sat())).collect();
         let fee = if all_ours { Some(spent.saturating_sub(tx.output.iter().map(|o| o.value.to_sat()).sum())) } else { None };
         let time = if *height > 0 {
             let key = format!("{}:{height}", v.network);
@@ -94,7 +99,7 @@ pub fn build(v: &wallet::Vault, servers: &Servers, history: &[(String, i32)], cc
                 match cache.prices.get(&key) { Some(q) => Some(q.clone()), None => { let q = fetch(&http, prices_url, ccy, &day, Some(hour)); match &q { Some(q) => { cache.prices.insert(key, q.clone()); dirty = true; } None => price_failed = true } q } } }
             _ => None,
         };
-        rows.push(Row { txid: txid.clone(), time, net: Some(received as i64 - spent as i64), fee, quote });
+        rows.push(Row { txid: txid.clone(), time, net: Some(received as i64 - spent as i64), fee, quote, ins, outs });
     }
     let now = if fiat { let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as u32).unwrap_or(0); let (day, hour) = day_hour(t);
         let q = fetch(&http, prices_url, ccy, &day, Some(hour)); if q.is_none() { price_failed = true; } q } else { None };
@@ -393,5 +398,48 @@ mod series_tests {
     }
     fn chrono_days(d: &str) -> i64 { let t = |s: &str, a, b| s[a..b].parse::<i64>().unwrap(); let (y, m, dd) = (t(d, 0, 4), t(d, 5, 7), t(d, 8, 10));
         let y = if m <= 2 { y - 1 } else { y }; let era = y.div_euclid(400); let yoe = y - era * 400; let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + dd - 1; era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy }
+}
+
+#[cfg(test)]
+mod lineage_tests {
+    /// Writes a real wallet's rows, with prices, to ROWS_OUT — for checking the cost engine on real history.
+    /// `EXT_DESC='…' ROWS_OUT=/tmp/x.json cargo test rows_dump -- --ignored`. Never committed: it is someone's wallet.
+    #[test]
+    #[ignore]
+    fn rows_dump() {
+        let info = crate::wallet::ext_parse(&std::env::var("EXT_DESC").unwrap()).unwrap().unwrap();
+        let v = crate::wallet::Vault { name: "real".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
+            chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(),
+            files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: Some(info.descriptor), cost_method: None };
+        let servers = crate::chain::Servers { electrum: "ssl://electrum.mineracks.com:50002".into(), explorer: String::new() };
+        let sc = crate::wallet::scan(&v, &servers, 20).unwrap();
+        let mut hist: Vec<(String, i32)> = sc.history.iter().map(|h| (h.0.clone(), h.1)).collect(); hist.sort(); hist.dedup();
+        let a = super::build(&v, &servers, &hist, "AUD", super::PRICES).unwrap();
+        std::fs::write(std::env::var("ROWS_OUT").unwrap(), serde_json::to_string(&serde_json::json!({ "rows": a.rows, "now": a.now, "balance": sc.coins.iter().map(|c| c.value).sum::<u64>() })).unwrap()).unwrap();
+    }
+    /// A real wallet's coin lineage, checked for the two things a cost engine rests on: each transaction's coins in and
+    /// out add up to its net, and every coin spent was made by an earlier transaction of the same wallet — so nothing
+    /// arrives from nowhere. `EXT_DESC='…' cargo test lineage_live -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn lineage_live_closes_on_a_real_wallet() {
+        let info = crate::wallet::ext_parse(&std::env::var("EXT_DESC").unwrap()).unwrap().unwrap();
+        let v = crate::wallet::Vault { name: "x".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
+            chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(),
+            files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: Some(info.descriptor), cost_method: None };
+        let servers = crate::chain::Servers { electrum: "ssl://electrum.mineracks.com:50002".into(), explorer: String::new() };
+        let sc = crate::wallet::scan(&v, &servers, 20).unwrap();
+        let mut hist: Vec<(String, i32)> = sc.history.iter().map(|h| (h.0.clone(), h.1)).collect(); hist.sort(); hist.dedup();
+        let a = super::build(&v, &servers, &hist, "", "").unwrap();
+        let made: std::collections::HashSet<String> = a.rows.iter().flat_map(|r| r.outs.iter().map(move |(n, _)| format!("{}:{n}", r.txid))).collect();
+        let (mut ok, mut orphan) = (0, 0);
+        for r in &a.rows {
+            let (i, o): (u64, u64) = (r.ins.iter().map(|x| x.1).sum(), r.outs.iter().map(|x| x.1).sum());
+            assert_eq!(o as i64 - i as i64, r.net.unwrap(), "{}: coins in and out do not add to the net", &r.txid[..8]);
+            for (op, _) in &r.ins { if made.contains(op) { ok += 1 } else { orphan += 1; println!("ORPHAN {op}") } }
+        }
+        println!("LINEAGE rows={} coins spent={} all made by an earlier row of this wallet: {}", a.rows.len(), ok + orphan, orphan == 0);
+        assert_eq!(orphan, 0);
+    }
 }
 
