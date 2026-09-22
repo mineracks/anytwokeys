@@ -1277,6 +1277,16 @@ pub(crate) fn file_blocks(v: &wallet::Vault, key: &str, with_pictures: bool) -> 
     blocks
 }
 
+/// An address's balance over time, as the flow of each transaction that touched it (see activity::address_flow).
+#[tauri::command]
+async fn address_flow(name: String, index: u32, history: Vec<(String, i32)>) -> R<Vec<activity::Flow>> {
+    block(move || {
+        let s = wallet::load()?;
+        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+        activity::address_flow(&v, &wallet::servers_for(&s, &v.network), &history, index)
+    }).await
+}
+
 #[derive(Deserialize)]
 struct SeriesIn { name: String, color: String, pts: Vec<(f64, f64)> }
 #[derive(Deserialize)]
@@ -1286,14 +1296,14 @@ struct ChartIn { title: String, series: Vec<SeriesIn>, lo: f64, hi: f64, lo_labe
 /// so the sheet says exactly what the screen says), its chart, and everything kept with it: label, note, pictures,
 /// files. `key` is the record's own key ("output:txid:vout" or "addr:…").
 #[tauri::command]
-async fn record_pdf(name: String, key: String, title: String, subtitle: String, facts: Vec<(String, String)>, sections: Vec<(String, Vec<(String, String)>)>, chart: Option<ChartIn>, file: String) -> R<String> {
+async fn record_pdf(name: String, key: String, title: String, subtitle: String, facts: Vec<(String, String)>, sections: Vec<(String, Vec<(String, String)>)>, charts: Vec<ChartIn>, file: String) -> R<String> {
     if !(key.starts_with("output:") || key.starts_with("addr:")) { return Err("that is not a coin or an address".into()); }
     let bytes = block(move || -> R<Vec<u8>> {
         use export::Block;
         let s = wallet::load()?;
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
         let mut blocks = vec![Block::Facts(facts)];
-        if let Some(c) = chart {
+        for c in charts {
             let series = c.series.into_iter().map(|s| (s.name, if s.color == "cost" { export::COST_RGB } else { export::VALUE_RGB }, s.pts)).collect();
             blocks.push(Block::Chart { title: c.title, series, lo: c.lo, hi: c.hi, lo_label: c.lo_label, hi_label: c.hi_label, from_label: c.from_label, to_label: c.to_label });
         }
@@ -1943,7 +1953,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])

@@ -934,6 +934,11 @@ function recPageOpen(kind, id) {
   // the record card (label, note, files) is ONE element that moves from page to page: rebuilding a page while it is
   // inside would destroy it — as stepping ‹ › from one coin to the next did — so it goes home first
   if (box.contains($('#tx-notes'))) recHome.appendChild($('#tx-notes'));
+  // one page at a time: the other kind's page is emptied, so its buttons and charts (same ids) cannot be the ones
+  // this page's handlers find — an address's "Save as PDF" was wiring up the hidden coin page's button
+  const other = kind === 'coin' ? $('#addr-detail') : $('#coins-detail');
+  if (other.contains($('#tx-notes'))) recHome.appendChild($('#tx-notes'));
+  other.innerHTML = ''; other.hidden = true;
   box.hidden = false;
   const l = recPageList(kind), i = l.indexOf(id), words = kind === 'coin' ? ['‹ Larger', 'Smaller ›', 'coin'] : ['‹ Previous', 'Next ›', 'address'];
   const H = recHoldings(kind, id), held = H.reduce((a, h) => a + h.c.value, 0), f = txFacts[vault.name], ccy = f && f.ccy, now = f && f.now;
@@ -956,7 +961,7 @@ function recPageOpen(kind, id) {
   const txs = kind === 'addr' ? [...new Set((vault._history || []).filter(x => x.index === row.index).map(x => x.txid))] : [];
   if (txs.length) chain.push(['Transactions', txs.map(t => `<a href="#" class="mono" data-go-tx="${t}">${t.slice(0, 10)}\u2026</a>`).join(', ')]);
   box.innerHTML = `<div class="txnav"><button class="btn small" type="button" data-rec-step="-1"${i > 0 ? '' : ' disabled'}>${words[0]}</button><span class="muted">${i >= 0 ? `${i + 1} of ${l.length}` : ''}</span><button class="btn small" type="button" data-rec-step="1"${i >= 0 && i < l.length - 1 ? '' : ' disabled'}>${words[1]}</button></div>
-    <div class="chart rec-strip" id="rec-chart"></div>
+    <div class="chart rec-strip" id="rec-chart"></div>${kind === 'addr' ? '<div class="chart rec-strip" id="rec-bal"></div>' : ''}
     <dl class="tx-dl">${[...money_, ...chain].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
     <div class="row">${kind === 'coin' ? '<button class="btn small" type="button" id="coin-spend">Spend this coin</button>' : '<button class="btn small" type="button" id="addr-show">Show it on Receive</button><button class="btn small" type="button" id="addr-copy">Copy it</button>'}<button class="btn small" type="button" id="rec-pdf">Save as PDF</button></div>
     ${kind === 'addr' ? `<div class="muted" style="font-size:13px">${(vault._history || []).some(x => x.index === row.index) ? 'An address that has been used is public: whoever you gave it to can see everything it has ever held.' : 'Labelling an address before you hand it out is the point: when a deposit arrives you already know who it was from.'}</div>` : ''}
@@ -969,8 +974,25 @@ function recPageOpen(kind, id) {
   const series = recSeries(H, ccy, now);
   recPage.pdf = { held, cost, value, since, ccy, series: null, facts: [...money_, ...chain] };
   series.then(S => { if (recPage.id !== id) return; recPage.pdf.series = S; recChart($('#rec-chart'), S, ccy, kind); });
+  if (kind === 'addr') addrBalance(row, id);
   $('#rec-pdf').onclick = () => recPdf(kind, id);
   box.scrollIntoView({ block: 'nearest' });
+}
+/// An address's balance in sats, from the first time it received to now: each transaction that touched it steps the
+/// line up (paid to it) or down (spent from it). Worked out in Rust from the cached transactions, not fetched again.
+async function addrBalance(row, id) {
+  const el = $('#rec-bal'); if (!el) return;
+  const hist = [...new Map((vault._history || []).filter(x => x.index === row.index).map(x => [x.txid, [x.txid, x.height]])).values()];
+  if (!hist.length) { el.innerHTML = '<div class="sum-empty">Nothing has ever arrived here, so there is no balance to draw.</div>'; recPage.pdf.balance = null; return; }
+  let flow; try { flow = await invoke('address_flow', { name: vault.name, index: row.index, history: hist }); } catch (e) { el.innerHTML = `<div class="sum-empty">The balance could not be worked out just now (${esc(String(e))}).</div>`; return; }
+  if (recPage.id !== id) return;
+  const nowT = Math.floor(Date.now() / 1000), ev = flow.map(f => [f.time || nowT, f.delta]).sort((a, b) => a[0] - b[0]);
+  if (!ev.length) { el.innerHTML = '<div class="sum-empty">Nothing has ever arrived here, so there is no balance to draw.</div>'; return; }
+  let bal = 0; const pts = [[ev[0][0] - 1, 0]]; for (const [t, d] of ev) { bal += d; pts.push([t, bal]); } pts.push([nowT, bal]);
+  const from = pts[0][0], to = Math.max(nowT, from + 3600);
+  recPage.pdf.balance = { pts, from, to };
+  lineChart(el, { title: 'Balance, in sats', sub: `It changes only when something arrives or leaves: ${ev.length} transaction${ev.length === 1 ? '' : 's'} here.`, from, to,
+    series: [{ name: 'Balance', color: 'var(--series-value)', pts, step: true, area: true }], fmt: (v) => sats(Math.round(v)) + ' sats', fmtAxis: (v) => csats(v) });
 }
 /// Worth and cost of what is held, day by day since the first of it arrived: worth counts each coin from the day it
 /// came (so an address's line steps up as its coins arrive), cost likewise.
@@ -996,6 +1018,12 @@ function recChart(el, S, ccy, kind) {
 }
 async function recPdf(kind, id) {
   const P = recPage.pdf, strip = (h) => { const d = document.createElement('div'); d.innerHTML = h; return d.textContent.trim(); };
+  const charts = [];
+  if (P.balance) {
+    const hi = Math.max(...P.balance.pts.map(p => p[1])) * 1.05 || 1;
+    charts.push({ title: 'Balance, in sats', lo: 0, hi, lo_label: '0 sats', hi_label: sats(Math.round(hi)) + ' sats', from_label: new Date(P.balance.from * 1000).toLocaleDateString(), to_label: new Date(P.balance.to * 1000).toLocaleDateString(),
+      series: [{ name: 'Balance', color: 'value', pts: P.balance.pts }] });
+  }
   let chart = null;
   if (P.series && P.ccy) {
     const all = [...P.series.val.map(p => p[1]), ...(P.series.cost || []).map(p => p[1])], lo = Math.min(0, ...all), hi = Math.max(...all) * 1.05 || 1;
@@ -1008,7 +1036,7 @@ async function recPdf(kind, id) {
   try {
     const path = await invoke('record_pdf', { name: vault.name, key: kind === 'coin' ? 'output:' + id : 'addr:' + id,
       title: label || (kind === 'coin' ? 'Coin ' + recPage.leaf : 'Address ' + id), subtitle: `${vault.name} \u00b7 ${vault.network} \u00b7 printed ${new Date().toLocaleDateString()}`,
-      facts: P.facts.map(([k, v]) => [k, strip(v)]), sections: P.ccy ? [['Where its cost comes from', lots]] : [], chart, file: `${vault.name}-${kind}-${id.slice(0, 12)}` });
+      facts: P.facts.map(([k, v]) => [k, strip(v)]), sections: P.ccy ? [['Where its cost comes from', lots]] : [], charts: [...(chart ? [chart] : []), ...charts], file: `${vault.name}-${kind}-${id.slice(0, 12)}` });
     toast('Saved ' + path, 5000);
   } catch (e) { if (!/cancelled/.test(String(e))) fail(e); }
 }

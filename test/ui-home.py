@@ -27,6 +27,7 @@ const H = {
   attach_bytes: (a) => { window.__pasted = a; V.files = V.files || {}; (V.files[a.key] = V.files[a.key] || []).push({ name: a.filename, mime: 'image/png', size: 20000, sha256: 'c'.repeat(64), t: 1, meta: 'stripped', thumb: 'd'.repeat(64) }); return { store: store(), added: 1, notes: [], errors: [] }; },
   location_status: () => 'off', location_preview: () => null,
   place_search: (a) => { (window.__asked = window.__asked || []).push(a.q); if (/zzzz/.test(a.q)) return []; return [{ label: '445 Upper Edward Street', detail: 'Spring Hill, Brisbane · Queensland 4000 · Australia', lat: -27.4615, lon: 153.0245 }, { label: '445 Upper Roma Street', detail: 'Brisbane City, Brisbane · Queensland 4000 · Australia', lat: -27.4655, lon: 153.0125 }]; },
+  address_flow: (a) => { window.__flowAsked = a; return [{ txid: '%(t0)s', time: 1789627614, delta: 20000 }, { txid: '%(t1)s', time: 1789648528, delta: -20000 }, { txid: '%(t1)s', time: 1789648528, delta: 9430 }]; },
   record_pdf: (a) => { window.__recPdf = a; return '/Users/p/Desktop/anytwokeys-coin.pdf'; },
   tx_pdf: (a) => { window.__pdf = a; if (window.__pdfCancel) throw 'cancelled'; return '/Users/p/Desktop/anytwokeys-demo-vault-758adfd2.pdf'; },
   tx_map: (a) => { window.__mapAsked = a; return window.__noMap ? null : { png: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', metres_per_px: 4.0625, width: 640 }; },
@@ -658,6 +659,10 @@ with sync_playwright() as p:
     check("Save as PDF sends the page's own figures, keyed on the coin", rp.get("key") == "output:%s:0" % T[0] and any(k == "Cost basis" for k, _ in rp.get("facts", [])) and "Saved" in pg.inner_text("#toast"), json.dumps(rp)[:300])
     pg.locator("#coins-detail [data-go-addr]").first.click(); pg.wait_for_timeout(700)
     check("the coin's address is a link to that address's own page", pg.locator("#s-addresses.on").count() == 1 and pg.locator("#addr-detail").is_visible() and "Addresses" in pg.inner_text("#crumbs"), pg.inner_text("#crumbs"))
+    pg.wait_for_timeout(500)
+    check("an address's page also draws its balance in sats over time, from its own transactions", "Balance, in sats" in pg.inner_text("#rec-bal") and pg.locator("#rec-bal svg").count() >= 1 and pg.evaluate("window.__flowAsked && window.__flowAsked.history.length") >= 1, pg.inner_text("#rec-bal")[:160])
+    pg.click("#rec-pdf"); pg.wait_for_timeout(400)
+    check("and its PDF carries that balance chart", any(c["title"] == "Balance, in sats" for c in (pg.evaluate("window.__recPdf") or {}).get("charts", [])), str([c.get("title") for c in (pg.evaluate("window.__recPdf") or {}).get("charts", [])]))
     pg.locator("#addr-detail [data-go-coin]").first.click(); pg.wait_for_timeout(700)
     check("and the address links back to the coin it holds", pg.locator("#s-coins.on").count() == 1 and pg.locator("#coins-detail").is_visible())
     pg.click("#crumbs [data-crumb=coins]"); pg.wait_for_timeout(400)

@@ -159,6 +159,33 @@ pub fn build(v: &wallet::Vault, servers: &Servers, history: &[(String, i32)], cc
     Ok(Activity { ccy: ccy.to_string(), rows, now, note, transfers: HashMap::new() })
 }
 
+/// One address's own flow: for each transaction that touched it, when, and how many sats it gained or lost there —
+/// what was paid TO the address, less what was spent FROM it. Transactions come from the chain cache (the same ones
+/// Activity already fetched), block times from the price cache's times: in the usual case no request at all.
+#[derive(Debug, Serialize)]
+pub struct Flow { pub txid: String, pub time: Option<u32>, pub delta: i64 }
+pub fn address_flow(v: &wallet::Vault, servers: &Servers, history: &[(String, i32)], index: u32) -> Result<Vec<Flow>, String> {
+    let spk = wallet::script_at(v, index)?;
+    let ids = history.iter().map(|(t, _)| Txid::from_str(t).map_err(|e| e.to_string())).collect::<Result<Vec<_>, _>>()?;
+    let confirmed: std::collections::HashSet<Txid> = ids.iter().zip(history).filter(|(_, (_, h))| *h > 0).map(|(i, _)| *i).collect();
+    let txs = crate::chain::transactions_kept(servers, &v.network, &ids, &|i| confirmed.contains(i))?;
+    let cache = load_cache();
+    Ok(flow_of(&spk, history, &txs, |h| if h > 0 { cache.times.get(&format!("{}:{h}", v.network)).copied() } else { None }))
+}
+/// The arithmetic alone: paid to `spk`, less spent from it, per transaction (the spent coin's maker is in `txs` too).
+pub fn flow_of(spk: &bitcoin::ScriptBuf, history: &[(String, i32)], txs: &[Transaction], time_of: impl Fn(i32) -> Option<u32>) -> Vec<Flow> {
+    let by_id: HashMap<Txid, &Transaction> = txs.iter().map(|t| (t.compute_txid(), t)).collect();
+    let mut out = Vec::new();
+    for ((txid, height), tx) in history.iter().zip(txs.iter()) {
+        let gained: u64 = tx.output.iter().filter(|o| &o.script_pubkey == spk).map(|o| o.value.to_sat()).sum();
+        let spent: u64 = tx.input.iter().filter_map(|i| by_id.get(&i.previous_output.txid).and_then(|p| p.output.get(i.previous_output.vout as usize)))
+            .filter(|o| &o.script_pubkey == spk).map(|o| o.value.to_sat()).sum();
+        if gained == 0 && spent == 0 { continue; }
+        out.push(Flow { txid: txid.clone(), time: time_of(*height), delta: gained as i64 - spent as i64 });
+    }
+    out
+}
+
 /// The price at one moment, from the cache when it is there. Used by a sheet that prints one transaction long after
 /// the screen worked the same number out; `None` when there is no price to be had, never a guess.
 pub fn quote_at(prices_url: &str, ccy: &str, t: Option<u32>) -> Option<Quote> {
@@ -502,3 +529,28 @@ mod lineage_tests {
     }
 }
 
+
+#[cfg(test)]
+mod flow_tests {
+    use super::*;
+    use bitcoin::{absolute, transaction, Amount, OutPoint, ScriptBuf, Sequence, TxIn, TxOut, Witness};
+    fn tx(ins: Vec<OutPoint>, outs: Vec<(u64, ScriptBuf)>) -> Transaction {
+        Transaction { version: transaction::Version::TWO, lock_time: absolute::LockTime::ZERO,
+            input: ins.into_iter().map(|o| TxIn { previous_output: o, script_sig: ScriptBuf::new(), sequence: Sequence::MAX, witness: Witness::new() }).collect(),
+            output: outs.into_iter().map(|(v, s)| TxOut { value: Amount::from_sat(v), script_pubkey: s }).collect() }
+    }
+    /// 50,000 arrive at an address; they are spent, 30,000 away and 19,800 back as change to another address: the
+    /// first address goes up 50,000 then down 50,000; the change address up 19,800; a stranger's payment is not ours.
+    #[test]
+    fn an_address_gains_what_is_paid_to_it_and_loses_what_is_spent_from_it() {
+        let (here, change, stranger) = (ScriptBuf::from_bytes(vec![0x00, 0x14, 1]), ScriptBuf::from_bytes(vec![0x00, 0x14, 2]), ScriptBuf::from_bytes(vec![0x00, 0x14, 3]));
+        let t1 = tx(vec![OutPoint::null()], vec![(50_000, here.clone()), (7, stranger.clone())]);
+        let t2 = tx(vec![OutPoint { txid: t1.compute_txid(), vout: 0 }], vec![(30_000, stranger.clone()), (19_800, change.clone())]);
+        let hist = vec![(t1.compute_txid().to_string(), 100), (t2.compute_txid().to_string(), 0)];
+        let txs = vec![t1, t2];
+        let f = flow_of(&here, &hist, &txs, |h| if h > 0 { Some(h as u32 * 600) } else { None });
+        assert_eq!(f.iter().map(|x| x.delta).collect::<Vec<_>>(), vec![50_000, -50_000]);
+        assert_eq!((f[0].time, f[1].time), (Some(60_000), None), "confirmed at its block's time; unconfirmed has none yet");
+        assert_eq!(flow_of(&change, &hist, &txs, |_| None).iter().map(|x| x.delta).collect::<Vec<_>>(), vec![19_800]);
+    }
+}
