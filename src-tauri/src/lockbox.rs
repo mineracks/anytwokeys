@@ -60,7 +60,7 @@ pub fn key() -> Result<[u8; 32], String> {
     Err(LOCKED.into())
 }
 pub fn unlocked() -> bool { key().is_ok() }
-pub fn lock() { if let Ok(mut k) = KEY.write() { if let Some(old) = k.as_mut() { old.fill(0); } *k = None; } crate::attach::clear_opened(); }
+pub fn lock() { if let Ok(mut k) = KEY.write() { if let Some(old) = k.as_mut() { old.fill(0); } *k = None; } crate::attach::clear_opened(); crate::db::close(); }
 fn hold(k: [u8; 32]) { if let Ok(mut g) = KEY.write() { *g = Some(k); } }
 
 // ------------------------------------------------------------------ files --

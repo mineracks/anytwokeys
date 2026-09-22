@@ -4,7 +4,20 @@ const $ = (s) => document.querySelector(s);
 const $$ = (s, root) => Array.from((root || document).querySelectorAll(s));
 const sats = (n) => Number(n).toLocaleString('en-AU');
 let otherDevices = [];
-let store = null, vault = null, cards = [], cardsErr = '', fees = null, feeLevel = 'medium', built = null, camStream = null, camTimer = null;
+// `vault` is the vault on screen. What the window learned about it from the chain (coins, balance, history, the
+// recovery line…) lives in fields starting with "_". The store is re-read after most edits, which hands back a FRESH
+// vault object — and every such re-read used to drop all of that, so the next screen synced the whole vault again.
+// Assigning `vault` now carries those fields to the fresh copy of the SAME vault (same name and descriptor: a vault
+// forgotten and made again under the same name starts clean).
+const LIVE = {};
+const liveKey = (v) => v.name + '|' + (v.ext || v.descriptor || '');
+let vaultNow = null;
+Object.defineProperty(window, 'vault', { configurable: true, get: () => vaultNow, set: (v) => {
+  if (vaultNow && typeof vaultNow === 'object') { const k = LIVE[liveKey(vaultNow)] || (LIVE[liveKey(vaultNow)] = {}); for (const [a, b] of Object.entries(vaultNow)) if (a[0] === '_') k[a] = b; }
+  if (v && typeof v === 'object' && v !== vaultNow) { const k = LIVE[liveKey(v)]; if (k) for (const [a, b] of Object.entries(k)) if (!(a in v)) v[a] = b; }
+  vaultNow = v;
+} });
+let store = null, cards = [], cardsErr = '', fees = null, feeLevel = 'medium', built = null, camStream = null, camTimer = null;
 let setup = { k: 2, n: 3, keys: [], network: null };
 
 const CHANGE = 0x80000000;
@@ -70,7 +83,7 @@ function show(name) {
   if (name !== 'restore') stopCam();
   if (name !== 'sign') stopQr();
   if (name !== 'keys') hideDesc();
-  if (name === 'home') { sync(); labelsSync(); paintDrillNudge(); }
+  if (name === 'home') { syncIfStale(); labelsSync(); paintDrillNudge(); }
   if (name === 'receive') drawAddress();
   if (name === 'activity') { if (vault && !vault._coins) sync(); else paintActivity(); }
   if (name === 'addresses') { $('#addr-detail').hidden = true; renderAddresses(); }
@@ -720,6 +733,20 @@ async function fillActivity(name, s) {
   renderHomeSummary();
   if (a.note && vault.network === 'mainnet') { $('#activity-note').textContent = a.note; $('#activity-note').hidden = false; }
 }
+// A sync younger than this is shown as it is; the background watcher checks every vault each minute and marks a vault
+// stale the moment it sees a change, so a quick return to Home costs nothing and still never shows old news.
+const FRESH_MS = 30000;
+/// Home: what is known, at once; the chain is asked only when that is stale.
+function syncIfStale() {
+  if (!vault) return;
+  // a snapshot is used only for the vault it was taken of — never because it happens to sit on this object
+  if (!(vault._snap && vault._snapFor === liveKey(vault) && !vault._stale && Date.now() - (vault._syncedAt || 0) < FRESH_MS)) return sync();
+  sync.shown = vault.name; paintSnap(vault._snap);
+  // the money column follows the currency setting: a change there is new facts to fetch, not old ones to show
+  const f = txFacts[vault.name], want = vault.network === 'mainnet' ? fiatCcy() : '';
+  if (!f || (f.ccy || '') !== want) return fillActivity(vault.name, vault._snap);
+  repaintFacts(f); vault._now = f.now ? { q: f.now, ccy: f.ccy } : null; paintBalance(); renderHomeSummary();
+}
 async function sync() {
   if (!vault) return;
   $('#vault-kind').textContent = vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
@@ -729,10 +756,19 @@ async function sync() {
   // a vault that has not been drawn yet starts from a blank screen, and an answer that comes back after the person has
   // moved to another vault is for that OTHER vault and is dropped here.
   const me = vault.name;
+  if (sync.shown !== me && vault._snap && vault._snapFor === liveKey(vault)) { sync.shown = me; paintSnap(vault._snap); const f = txFacts[me]; if (f) { repaintFacts(f); vault._now = f.now ? { q: f.now, ccy: f.ccy } : null; paintBalance(); } }   // last known, at once, while the chain is asked
   if (sync.shown !== me) { sync.shown = me; vault._balance = undefined; vault._now = null; $('#balance').innerHTML = '— <small>sats</small>'; $('#balance-fiat').hidden = true; $('#activity').innerHTML = '<tr><td class="muted" colspan="5">syncing…</td></tr>'; $('#activity-note').hidden = true; $('#conn').textContent = ''; }
   try {
     const s = await invoke('vault_sync', { name: me });
     if (!vault || vault.name !== me) return;
+    vault._snap = s; vault._snapFor = liveKey(vault); vault._syncedAt = Date.now(); vault._stale = false;
+    paintSnap(s);
+    fillActivity(vault.name, s);   // dates, amounts and values arrive after the balance; the balance never waits for them
+  } catch (e) { if (!vault || vault.name !== me) return; checkNode(); $('#balance-sub').textContent = 'could not reach the server'; $('#conn').textContent = String(e); }
+}
+/// Draw one vault_sync answer: balance, coins, history, where it came from.
+function paintSnap(s) {
+  {
     vault._coins = s.coins; vault._receive = s.receive; vault._receiveIndex = s.receive_index; vault._rotating = s.rotating; vault._height = s.height; vault._history = s.history; vault._nextChange = s.next_change; vault._gap = s.gap;
     if ($('#s-send').classList.contains('on')) renderCoins();
     if ($('#s-receive').classList.contains('on')) renderAddresses();
@@ -743,9 +779,8 @@ async function sync() {
     $('#activity-note').hidden = true;
     txList[vault.name] = s.history.slice().reverse();
     paintActivity();
-    fillActivity(vault.name, s);   // dates, amounts and values arrive after the balance; the balance never waits for them
     $('#send-have').textContent = `${sats(s.balance)} sats`;
-  } catch (e) { if (!vault || vault.name !== me) return; checkNode(); $('#balance-sub').textContent = 'could not reach the server'; $('#conn').textContent = String(e); }
+  }
 }
 document.addEventListener('click', (e) => { const a = e.target.closest('[data-tx]'); if (a) { e.preventDefault(); const base = ($('#conn').textContent.includes('signet') ? 'https://signet.mineracks.com' : (store.settings.custom && store.settings.explorer) || (netName() === 'mainnet' ? 'https://mempool.mineracks.com' : 'https://signet.mineracks.com')); invoke('open_url', { url: `${base}/tx/${a.dataset.tx}` }).catch(fail); } });
 
@@ -1636,7 +1671,7 @@ $('#broadcast-btn').onclick = async () => {
   $('#broadcast-btn').disabled = true;
   try { // who is being paid is read from the transaction itself, not from what the Send form remembered: a spend loaded from a file, or finished after a relaunch, counts too
     let dests = []; try { dests = (await invoke('spend_ceremony', { name: vault.name })).pays.filter(p => !p.ours).map(p => p.address.toLowerCase()); } catch {}
-    const r = await invoke('spend_broadcast', { name: vault.name }); const paid = bookOf().find(c => dests.includes(c.address.toLowerCase()));
+    const r = await invoke('spend_broadcast', { name: vault.name }); vault._stale = true; const paid = bookOf().find(c => dests.includes(c.address.toLowerCase()));
     if (paid) { try { store = await invoke('contact_used', { address: paid.address, network: vault.network }); if (!labelOf('tx:' + r.txid)) await invoke('label_set', { name: vault.name, key: 'tx:' + r.txid, label: 'to ' + paid.name }); } catch {} }
     built = null; coinPick.clear(); toast('Sent. ' + r.txid.slice(0, 16) + '…', 8000); $('#broadcast-text').innerHTML = `Broadcast. <a href="#" data-tx="${r.txid}">${r.txid}</a>`; setTimeout(() => show('home'), 2500); }
   catch (e) { fail(e); $('#broadcast-btn').disabled = false; }
@@ -2453,7 +2488,9 @@ function notice(ev, stay) {
 window.__TAURI__.event.listen('vault-event', (ev) => notice(ev.payload));
 // the background watcher saw a deposit, a spend or a confirmation: refresh what is on screen
 window.__TAURI__.event.listen('vault-changed', (ev) => {
+  for (const [k, l] of Object.entries(LIVE)) if (k.startsWith(ev.payload + '|')) l._stale = true;
   if (!vault || ev.payload !== vault.name) { return; }
+  vault._stale = true;
   if ($('#s-home').classList.contains('on')) sync();
   if ($('#s-receive').classList.contains('on')) drawAddress();
 });

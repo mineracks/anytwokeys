@@ -4,6 +4,7 @@ mod signers;
 mod attach;
 mod cards;
 mod chain;
+mod db;
 mod context;
 mod export;
 mod hd;
@@ -152,7 +153,7 @@ async fn node_status(network: String) -> R<NodeStatus> {
         let servers = wallet::servers_for(&s, &network);
         let ours = servers.electrum == chain::defaults(wallet::network_of(&network)).electrum;
         let t = std::time::Instant::now();
-        let height = chain::height(&servers)?;
+        let height = chain::height_fresh(&servers)?;
         Ok(NodeStatus { electrum: servers.electrum, height, ms: t.elapsed().as_millis(), ours })
     }).await
 }
@@ -2020,3 +2021,51 @@ mod signers_vault_tests {
     }
 }
 
+
+#[cfg(test)]
+mod perf_probe {
+    use super::*;
+    /// The public "abandon … about" test wallet (BIP 84), which has real history on mainnet: its descriptor was derived
+    /// with embit from the mnemonic, not recalled.
+    const ABANDON: &str = "wpkh([73c5da0a/84h/0h/0h]xpub6CatWdiZiodmUeTDp8LT5or8nmbKNcuyvz7WyksVFkKB4RHwCD3XyuvPEbvqAQY3rAPshWcMLoP2fMFMKHPJ4ZeZXYVUhLv1VMrjPC7PW6V/<0;1>/*)";
+    /// The scan as it was: one history request, and one unspent request per used address, address by address.
+    fn scan_one_by_one(v: &Vault, servers: &chain::Servers, gap: u32) -> wallet::Scanned {
+        let mut coins = Vec::new(); let mut history = Vec::new();
+        let mut chain_ = |base: u32| {
+            let (mut last, mut next, mut i) = (None::<u32>, None::<u32>, 0u32);
+            loop {
+                let spk = wallet::script_of(&wallet::descriptor_at(v, base | i).unwrap()).unwrap();
+                let h = chain::history(servers, &spk).unwrap();
+                if !h.is_empty() { last = Some(i); for it in h { history.push((it.txid, it.height, base | i)); } for c in chain::coins(servers, &spk).unwrap() { coins.push(wallet::CoinAt { txid: c.txid, vout: c.vout, value: c.value, height: c.height, index: base | i }); } }
+                else if next.is_none() { next = Some(i); }
+                if i >= last.map(|u| u + gap).unwrap_or(gap - 1) { break; }
+                i += 1;
+            }
+            (next.unwrap_or(i + 1), i)
+        };
+        let (next, scan_max) = chain_(0); let (next_change, scan_max_change) = chain_(wallet::CHANGE);
+        wallet::Scanned { coins, history, next, scan_max, next_change, scan_max_change }
+    }
+    #[test] #[ignore]
+    fn the_batched_scan_finds_exactly_what_the_one_by_one_scan_found_on_a_real_wallet() {
+        let info = wallet::ext_parse(ABANDON).unwrap().unwrap();
+        let v = ext_vault("abandon".into(), &info, &[]);
+        let servers = chain::defaults(bitcoin::Network::Bitcoin);
+        let t = std::time::Instant::now(); let old = scan_one_by_one(&v, &servers, 20); let t_old = t.elapsed();
+        let t = std::time::Instant::now(); let new = wallet::scan(&v, &servers, 20).unwrap(); let t_new = t.elapsed();
+        let t = std::time::Instant::now(); let again = wallet::scan(&v, &servers, 20).unwrap(); let t_again = t.elapsed();
+        let key = |s: &wallet::Scanned| { let mut c: Vec<_> = s.coins.iter().map(|c| (c.txid.clone(), c.vout, c.value, c.index)).collect(); c.sort(); (s.history.clone(), c, s.next, s.scan_max, s.next_change, s.scan_max_change) };
+        assert_eq!(key(&old), key(&new), "the same addresses, history, coins and next positions");
+        assert_eq!(key(&new), key(&again));
+        let hist: Vec<(String, i32)> = { let mut h: Vec<(String, i32)> = new.history.iter().map(|(t, h, _)| (t.clone(), *h)).collect(); h.sort_by_key(|x| if x.1 <= 0 { i32::MAX } else { x.1 }); h.dedup_by(|a, b| a.0 == b.0); h };
+        // the chain cache, under a throwaway key in a throwaway folder
+        let dir = std::env::temp_dir().join(format!("a2k-perf-{}", std::process::id())); let _ = std::fs::remove_dir_all(&dir);
+        unsafe { std::env::set_var("A2K_DATA_DIR", &dir); std::env::set_var("A2K_STORE_KEY", "11".repeat(32)); }
+        let t = std::time::Instant::now(); let a = activity::build(&v, &servers, &hist, "", "").unwrap(); let t_act = t.elapsed();
+        let t = std::time::Instant::now(); let b = activity::build(&v, &servers, &hist, "", "").unwrap(); let t_warm = t.elapsed();
+        assert_eq!(serde_json::to_string(&a).unwrap(), serde_json::to_string(&b).unwrap(), "the cache answers exactly what the network did");
+        eprintln!("PERF activity cold {t_act:?} · warm (from the chain cache) {t_warm:?} · cache file {} bytes", std::fs::metadata(dir.join("chain.db")).map(|m| m.len()).unwrap_or(0));
+        eprintln!("PERF {} history items, {} coins, recv next {} / change next {} · one-by-one {t_old:?} · batched {t_new:?} · again {t_again:?} · activity of {} txs {t_act:?}",
+            new.history.len(), new.coins.len(), new.next, new.next_change, a.rows.len());
+    }
+}

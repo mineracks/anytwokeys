@@ -66,16 +66,18 @@ fn fetch(http: &reqwest::blocking::Client, base: &str, ccy: &str, day: &str, hou
 }
 
 pub fn build(v: &wallet::Vault, servers: &Servers, history: &[(String, i32)], ccy: &str, prices_url: &str) -> Result<Activity, String> {
-    let client = crate::chain::client(servers)?;
     let mut cache = load_cache();
     let mut dirty = false;
-    // every transaction in the history, fetched once; a spent coin's parent is always in the history too
-    let mut txs: HashMap<String, Transaction> = HashMap::new();
-    for (txid, _) in history {
-        let id = Txid::from_str(txid).map_err(|e| e.to_string())?;
-        txs.insert(txid.clone(), client.transaction_get(&id).map_err(|e| format!("transaction {}: {e}", &txid[..8]))?);
-    }
-    let ours = |spk: &bitcoin::ScriptBuf| wallet::index_of_input(v, spk).ok().flatten().is_some();
+    // every transaction in the history, in one batched request; a spent coin's parent is always in the history too
+    let ids = history.iter().map(|(t, _)| Txid::from_str(t).map_err(|e| e.to_string())).collect::<Result<Vec<_>, _>>()?;
+    // confirmed ones come from the chain cache after the first time; only what is new or unconfirmed goes out
+    let confirmed: std::collections::HashSet<Txid> = ids.iter().zip(history).filter(|(_, (_, h))| *h > 0).map(|(i, _)| *i).collect();
+    let txs: HashMap<String, Transaction> = history.iter().map(|(t, _)| t.clone()).zip(crate::chain::transactions_kept(servers, &v.network, &ids, &|i| confirmed.contains(i))?).collect();
+    // block times not yet known, in one batched request too (a header never changes, so each is asked once, ever)
+    let want: Vec<u32> = { let mut w: Vec<u32> = history.iter().filter(|(_, h)| *h > 0 && !cache.times.contains_key(&format!("{}:{h}", v.network))).map(|(_, h)| *h as u32).collect(); w.sort(); w.dedup(); w };
+    if !want.is_empty() { if let Ok(times) = crate::chain::header_times(servers, &want) { for (h, t) in want.iter().zip(times) { cache.times.insert(format!("{}:{h}", v.network), t); dirty = true; } } }
+    let table = wallet::ours_table(v)?;
+    let ours = |spk: &bitcoin::ScriptBuf| table(spk).is_some();
     let fiat = v.network == "mainnet" && !ccy.is_empty() && !prices_url.is_empty();
     let http = reqwest::blocking::Client::builder().user_agent("anytwokeys/0.1").timeout(std::time::Duration::from_secs(12)).build().map_err(|e| e.to_string())?;
     let mut price_failed = false;
@@ -92,7 +94,7 @@ pub fn build(v: &wallet::Vault, servers: &Servers, history: &[(String, i32)], cc
         let fee = if all_ours { Some(spent.saturating_sub(tx.output.iter().map(|o| o.value.to_sat()).sum())) } else { None };
         let time = if *height > 0 {
             let key = format!("{}:{height}", v.network);
-            match cache.times.get(&key) { Some(t) => Some(*t), None => client.block_header(*height as usize).ok().map(|h| { cache.times.insert(key, h.time); dirty = true; h.time }) }
+            cache.times.get(&key).copied()
         } else { None };
         let quote = match (fiat, time) {
             (true, Some(t)) => { let (day, hour) = day_hour(t); let key = format!("{ccy}:{day}T{hour:02}");
@@ -212,13 +214,20 @@ pub fn detail(v: &wallet::Vault, servers: &Servers, txid: &str, height: i32) -> 
     use bitcoin::consensus::encode::serialize_hex;
     let client = crate::chain::client(servers)?;
     let id = Txid::from_str(txid).map_err(|_| "that is not a transaction id".to_string())?;
-    let tx = client.transaction_get(&id).map_err(|e| format!("transaction {}: {e}", &txid[..8.min(txid.len())]))?;
+    let tx = crate::chain::transactions_kept(servers, &v.network, &[id], &|_| height > 0).map_err(|e| format!("transaction {}: {e}", &txid[..8.min(txid.len())]))?.remove(0);
     let net_kind = wallet::network_of(&v.network);
     let addr = |spk: &bitcoin::ScriptBuf| bitcoin::Address::from_script(spk, net_kind).ok().map(|a| a.to_string());
-    let ours = |spk: &bitcoin::ScriptBuf| wallet::index_of_input(v, spk).ok().flatten();
+    let table = wallet::ours_table(v)?;
+    let ours = |spk: &bitcoin::ScriptBuf| table(spk);
     // what each input spent: its parent has to be fetched. Past 40 inputs the amounts are left out rather than hammering the server.
     let mut parents: HashMap<Txid, Transaction> = HashMap::new();
     let (mut total_in, mut complete) = (0u64, tx.input.len() <= 40 && !tx.is_coinbase());
+    if complete {
+        // every parent in one batched request
+        let mut want: Vec<Txid> = tx.input.iter().map(|i| i.previous_output.txid).collect(); want.sort(); want.dedup();
+        // a confirmed transaction's parents are confirmed too, so they are kept alike
+        if let Ok(got) = crate::chain::transactions_kept(servers, &v.network, &want, &|_| height > 0) { parents.extend(want.into_iter().zip(got)); }
+    }
     let mut inputs = Vec::new();
     for (i, inp) in tx.input.iter().enumerate() {
         let prev = if complete { if !parents.contains_key(&inp.previous_output.txid) { match client.transaction_get(&inp.previous_output.txid) { Ok(p) => { parents.insert(inp.previous_output.txid, p); } Err(_) => complete = false } }

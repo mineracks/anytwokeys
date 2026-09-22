@@ -71,7 +71,7 @@ const H = {
     { txid: '%(t1)s', time: 1789648528, net: -5190, fee: 190, quote: q(107768.03, 'hourly 2026-09-17 12:00 UTC'), ins: [['%(t0)s:0', 20000]], outs: [[1, 14810]] },
     { txid: '%(t2)s', time: 1789699744, net: -5380, fee: 380, quote: null, ins: [['%(t1)s:1', 14810]], outs: [[1, 9430]] },
     { txid: '%(t3)s', time: null, net: 1000, fee: null, quote: null, ins: [], outs: [[0, 1000]] }] }; } };
-window.__TAURI__ = { core: { invoke: async (cmd, args) => { if (!H[cmd]) throw 'unmocked: ' + cmd; if (cmd === 'vault_sync' && window.__hold === (args || {}).name) await new Promise(r => window.__release = r);   // a slow server, on demand
+window.__TAURI__ = { core: { invoke: async (cmd, args) => { (window.__n = window.__n || {})[cmd] = (window.__n[cmd] || 0) + 1; if (!H[cmd]) throw 'unmocked: ' + cmd; if (cmd === 'vault_sync' && window.__hold === (args || {}).name) await new Promise(r => window.__release = r);   // a slow server, on demand
   return H[cmd](args || {}); } }, event: { listen: async (name, fn) => { (window.__listeners = window.__listeners || {})[name] = fn; return () => {}; } } };
 """
 fails = []
@@ -693,6 +693,19 @@ with sync_playwright() as p:
     check("choosing EUR asks for EUR and draws euros", pg.evaluate("__state.asked.ccy") == "EUR" and ("€" in pg.inner_text("#activity") or "EUR" in pg.inner_text("#activity")), pg.inner_text("#activity")[:120])
     pg.evaluate("show('settings')"); pg.select_option("#fiat-pick", ""); pg.wait_for_timeout(300); pg.evaluate("show('home')"); pg.wait_for_timeout(600)
     check("None: no money anywhere, sats lead again", pg.evaluate("__state.asked.ccy") == "" and "EUR" not in pg.inner_text("#s-home") and "$" not in pg.inner_text("#s-home") and "9,430" in pg.inner_text("#balance"))
+    # ---- performance: what is known is shown, not fetched again ----
+    n = lambda c: pg.evaluate(f"(window.__n || {{}})['{c}'] || 0")
+    pg.evaluate("show('home')"); pg.wait_for_timeout(600)          # a sync just happened (or happens now)
+    s0, a0 = n("vault_sync"), n("vault_activity")
+    pg.evaluate("show('send')"); pg.wait_for_timeout(300); pg.evaluate("show('home')"); pg.wait_for_timeout(400)
+    check("back to Home within half a minute: no sync, no activity fetch", n("vault_sync") == s0 and n("vault_activity") == a0, f"{n('vault_sync') - s0} syncs")
+    check("and the balance is drawn from what is known", "9,430" in pg.inner_text("#balance"))
+    pg.evaluate("(async () => { store = await window.__TAURI__.core.invoke('store_get'); vault = store.vaults[0]; show('coins'); })()"); pg.wait_for_timeout(500)
+    check("a store re-read (as after any label or note) keeps the vault's coins: Coins does not sync again", n("vault_sync") == s0 and pg.evaluate("!!vault._coins"), f"{n('vault_sync') - s0} syncs")
+    pg.evaluate("window.__listeners['vault-changed']({ payload: vault.name }); show('send')"); pg.wait_for_timeout(200); pg.evaluate("show('home')"); pg.wait_for_timeout(500)
+    check("the watcher saw a change while away: the next Home syncs", n("vault_sync") == s0 + 1, f"{n('vault_sync') - s0} syncs")
+    s1 = n("vault_sync"); pg.evaluate("vault._syncedAt = Date.now() - 31000; show('home')"); pg.wait_for_timeout(500)
+    check("after half a minute Home syncs again", n("vault_sync") == s1 + 1)
     check("no page errors", not pg.errs, "; ".join(pg.errs)); pg.context.close()
     pg = page(b, "en-AU", "Australia/Brisbane", net="signet"); 
     check("a signet vault asks about the SIGNET server", 'signet' in pg.evaluate("window.__nodeAsked || []"))

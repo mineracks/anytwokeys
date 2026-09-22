@@ -1,4 +1,5 @@
 //! Vaults: fixed-key descriptors over card keys, the store, building and finalising spends.
+use std::collections::HashMap;
 use bitcoin::hashes::Hash;
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{ecdsa, PublicKey, Secp256k1};
@@ -290,6 +291,42 @@ pub fn keys_at(v: &Vault, index: u32) -> Result<Vec<String>, String> {
     }
 }
 
+// ---------- addresses, derived once ----------
+// Deriving an address from descriptor TEXT costs ~10 ms (the text is parsed, every xpub base58-decoded and
+// checksummed, then printed and parsed again). Every scan, every "is this output ours?" and every address list did
+// that afresh, in loops. A vault's scripts never change, so each is derived once per run and kept both ways.
+#[derive(Default)]
+struct Derived { fwd: HashMap<u32, ScriptBuf>, rev: HashMap<ScriptBuf, u32> }
+static DERIVED: std::sync::Mutex<Option<HashMap<String, Derived>>> = std::sync::Mutex::new(None);
+static CHAINS: std::sync::Mutex<Option<HashMap<String, Vec<Descriptor<DescriptorPublicKey>>>>> = std::sync::Mutex::new(None);
+/// What a vault's scripts depend on, and nothing else: the same text always derives the same scripts.
+fn identity(v: &Vault) -> String {
+    match &v.ext { Some(e) => format!("x|{e}"), None => format!("c|{}|{}|{}", v.threshold, v.chain_code.as_deref().unwrap_or(""), v.keys.iter().map(|k| k.pubkey.as_str()).collect::<Vec<_>>().join(",")) }
+}
+/// The receive and change chains of an extended-key descriptor, parsed once.
+fn ext_chains(ext: &str) -> Result<Vec<Descriptor<DescriptorPublicKey>>, String> {
+    if let Some(c) = CHAINS.lock().map_err(|_| "derivation cache poisoned")?.as_ref().and_then(|m| m.get(ext)) { return Ok(c.clone()); }
+    let singles = ext_desc(ext)?.into_single_descriptors().map_err(|e| e.to_string())?;
+    CHAINS.lock().map_err(|_| "derivation cache poisoned")?.get_or_insert_with(HashMap::new).insert(ext.to_string(), singles.clone());
+    Ok(singles)
+}
+/// The script at an address index, derived at most once per run.
+pub fn script_at(v: &Vault, index: u32) -> Result<ScriptBuf, String> {
+    let id = identity(v);
+    if let Some(s) = DERIVED.lock().map_err(|_| "derivation cache poisoned")?.as_ref().and_then(|m| m.get(&id)).and_then(|d| d.fwd.get(&index)) { return Ok(s.clone()); }
+    let spk = match &v.ext {
+        Some(_) => ext_definite_of(v, index)?.script_pubkey(),
+        None => script_of(&descriptor_for(v.threshold, &keys_at(v, index)?)?)?,
+    };
+    let mut g = DERIVED.lock().map_err(|_| "derivation cache poisoned")?;
+    let d = g.get_or_insert_with(HashMap::new).entry(id).or_default();
+    d.fwd.insert(index, spk.clone()); d.rev.insert(spk.clone(), index);
+    Ok(spk)
+}
+fn ext_definite_of(v: &Vault, index: u32) -> Result<Descriptor<miniscript::DefiniteDescriptorKey>, String> {
+    ext_definite(v.ext.as_deref().ok_or("not a vault of extended keys")?, index)
+}
+
 pub fn descriptor_at(v: &Vault, index: u32) -> Result<String, String> {
     // an extended-key vault is read AS WRITTEN — never rebuilt through descriptor_for, which only makes sortedmulti
     if let Some(ext) = &v.ext { return ext_definite(ext, index).map(|d| d.to_string()); }
@@ -367,7 +404,7 @@ fn sorted_threshold(d: &Descriptor<DescriptorPublicKey>) -> Result<usize, String
 
 /// The concrete descriptor at an address index: receive `pos`, or change `CHANGE | pos`.
 fn ext_definite(ext: &str, index: u32) -> Result<Descriptor<miniscript::DefiniteDescriptorKey>, String> {
-    let singles = ext_desc(ext)?.into_single_descriptors().map_err(|e| e.to_string())?;
+    let singles = ext_chains(ext)?;
     let chain = singles.get(if is_change(index) { 1 } else { 0 }).ok_or("the descriptor has no change chain")?;
     chain.at_derivation_index(position(index)).map_err(|e| e.to_string())
 }
@@ -382,7 +419,7 @@ fn ext_keys_at(ext: &str, index: u32) -> Result<Vec<String>, String> {
 }
 
 pub fn address_at(v: &Vault, index: u32) -> Result<String, String> {
-    Ok(address_of(&descriptor_at(v, index)?, network_of(&v.network))?.to_string())
+    Ok(Address::from_script(&script_at(v, index)?, network_of(&v.network)).map_err(|e| e.to_string())?.to_string())
 }
 
 /// The recovery line: the base descriptor, plus the chain code when addresses rotate.
@@ -419,42 +456,62 @@ pub fn scan(v: &Vault, servers: &Servers, gap: u32) -> Result<Scanned, String> {
     let rotating = rotates(v);
     let mut coins = Vec::new();
     let mut history = Vec::new();
+    // Each chain is asked in batches: the next window of unasked addresses in one request, until `gap` unused ones
+    // follow the last used. The same addresses, in the same order, as one request per address used to ask.
     let mut chain = |base: u32| -> Result<(u32, u32), String> {
         let mut last_used: Option<u32> = None;
         let mut next: Option<u32> = None;
+        let mut used: Vec<(u32, ScriptBuf)> = Vec::new();
         let mut i = 0u32;
         loop {
-            let spk = script_of(&descriptor_at(v, base | i)?)?;
+            let end = if !rotating { 1 } else { last_used.map(|u| u + gap + 1).unwrap_or(gap) };
+            if i >= end { break; }
+            let idx: Vec<u32> = (i..end).collect();
+            let spks = idx.iter().map(|&p| script_at(v, base | p)).collect::<Result<Vec<_>, _>>()?;
             // a failed query is a failed scan, never "no history": an empty answer resets the next address and the watcher's memory
-            let h = chain::history(servers, &spk)?;
-            if !h.is_empty() {
-                last_used = Some(i);
-                for item in h { history.push((item.txid, item.height, base | i)); }
-                for c in chain::coins(servers, &spk)? { coins.push(CoinAt { txid: c.txid, vout: c.vout, value: c.value, height: c.height, index: base | i }); }
-            } else if next.is_none() {
-                next = Some(i);
+            let answers = chain::histories(servers, &spks)?;
+            for ((p, spk), h) in idx.iter().zip(spks).zip(answers) {
+                if !h.is_empty() {
+                    last_used = Some(*p);
+                    for item in h { history.push((item.txid, item.height, base | p)); }
+                    used.push((base | p, spk));
+                } else if next.is_none() { next = Some(*p); }
             }
-            if !rotating { break; }
-            if i >= last_used.map(|u| u + gap).unwrap_or(gap - 1) { break; }
-            i += 1;
+            i = end;
         }
-        Ok((next.unwrap_or(i + 1), i))
+        let spks: Vec<ScriptBuf> = used.iter().map(|(_, s)| s.clone()).collect();
+        for ((index, _), list) in used.iter().zip(chain::unspents(servers, &spks)?) {
+            for c in list { coins.push(CoinAt { txid: c.txid, vout: c.vout, value: c.value, height: c.height, index: *index }); }
+        }
+        let last = i.saturating_sub(1);
+        Ok((next.unwrap_or(last + 1), last))
     };
     let (next, scan_max) = chain(0)?;
     let (next_change, scan_max_change) = if rotating { chain(CHANGE)? } else { (0, 0) };
     Ok(Scanned { coins, history, next, scan_max, next_change, scan_max_change })
 }
 
+/// "Is this script ours, and at which index?" for a loop over many outputs: the range is derived once and the answer
+/// is one lookup in a table taken once, instead of a lock and a range check per output.
+pub fn ours_table(v: &Vault) -> Result<impl Fn(&ScriptBuf) -> Option<u32>, String> {
+    let (recv, chg, rotating) = (v.scan_max.max(v.next) + GAP, v.scan_max_change.max(v.next_change) + GAP, rotates(v));
+    let mut table: HashMap<ScriptBuf, u32> = HashMap::new();
+    if !rotating { table.insert(script_at(v, 0)?, 0); } else {
+        for i in 0..=recv { table.insert(script_at(v, i)?, i); }
+        for i in 0..=chg { table.insert(script_at(v, CHANGE | i)?, CHANGE | i); }
+    }
+    Ok(move |spk: &ScriptBuf| table.get(spk).copied())
+}
+
 /// Which index a PSBT input pays to, by matching its script against the vault's.
 pub fn index_of_input(v: &Vault, spk: &ScriptBuf) -> Result<Option<u32>, String> {
-    if !rotates(v) { return Ok(if &script_of(&descriptor_at(v, 0)?)? == spk { Some(0) } else { None }); }
-    for i in 0..=v.scan_max.max(v.next) + GAP {
-        if &script_of(&descriptor_at(v, i)?)? == spk { return Ok(Some(i)); }
-    }
-    for i in 0..=v.scan_max_change.max(v.next_change) + GAP {
-        if &script_of(&descriptor_at(v, CHANGE | i)?)? == spk { return Ok(Some(CHANGE | i)); }
-    }
-    Ok(None)
+    if !rotates(v) { return Ok(if &script_at(v, 0)? == spk { Some(0) } else { None }); }
+    let (recv, chg) = (v.scan_max.max(v.next) + GAP, v.scan_max_change.max(v.next_change) + GAP);
+    // derive the range once (a no-op after the first call), then one lookup — but only inside that range, as before
+    for i in 0..=recv { script_at(v, i)?; }
+    for i in 0..=chg { script_at(v, CHANGE | i)?; }
+    let hit = DERIVED.lock().map_err(|_| "derivation cache poisoned")?.as_ref().and_then(|m| m.get(&identity(v))).and_then(|d| d.rev.get(spk).copied());
+    Ok(hit.filter(|&i| if is_change(i) { position(i) <= chg } else { i <= recv }))
 }
 
 fn in_vbytes(threshold: usize, n: usize) -> u64 {
