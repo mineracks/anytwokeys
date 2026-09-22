@@ -2150,6 +2150,8 @@ function scanBar(note, p) {
 /// Everything is in: the camera stops, and in its place the full ring with a tick — never a black box.
 function scanDone(note, of, what) {
   const cam = note.parentElement && note.parentElement.querySelector('.cam'); if (!cam) return;
+  // whatever the picture was like before, it read: no hint about it may outlive the success
+  note.parentElement.querySelectorAll('.scanhint').forEach(h => { h.hidden = true; });
   cam.classList.add('done');
   let st = cam.querySelector('.scanstate'); if (!st) { st = document.createElement('div'); st.className = 'scanstate'; st.setAttribute('role', 'status'); cam.appendChild(st); }
   st.innerHTML = `<div class="complete"><svg class="ring big ready" viewBox="0 0 120 120" aria-hidden="true">${ringMarkup(of || 1, of || 1, TICK)}</svg><div class="flash-text">${esc(what)}</div><button class="btn small again" type="button">Scan another</button></div>`;
@@ -2157,7 +2159,7 @@ function scanDone(note, of, what) {
   st.setAttribute('aria-label', what);
 }
 /// A fresh scan: the camera shows again, with nothing left over from the last one.
-function scanReset(note) { const cam = note && note.parentElement && note.parentElement.querySelector('.cam'); if (!cam) return; cam.classList.remove('done'); const st = cam.querySelector('.scanstate'); if (st) st.remove(); }
+function scanReset(note) { if (note && note.parentElement) note.parentElement.querySelectorAll('.scanhint').forEach(h => { h.hidden = true; }); const cam = note && note.parentElement && note.parentElement.querySelector('.cam'); if (!cam) return; cam.classList.remove('done'); const st = cam.querySelector('.scanstate'); if (st) st.remove(); }
 function scanShow(note, e) { const p = scanProgress(e); if (!p) return false; note.textContent = p.text; scanBar(note, p); return true; }
 /// A device's export read: choose its multisig key, check it belongs in THIS vault, and let it be named.
 function devGot(r) {

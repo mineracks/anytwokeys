@@ -240,7 +240,12 @@ with sync_playwright() as p:
     n0 = len(pg.evaluate("window.__parsed"))
     pg.wait_for_timeout(1200)
     check("the same plate held there is not read again and again", len(pg.evaluate("window.__parsed")) == n0)
-    pg.evaluate("window.__plate = 'UR:CRYPTO-OUTPUT/1-2/LPADAOCSFGYYFHKG'"); pg.wait_for_timeout(1200)
+    # a gap before the last plate, long enough for a hint about the picture to appear…
+    pg.evaluate("window.__plate = null"); pg.wait_for_timeout(3200)
+    check("while nothing reads for a while, a hint about the picture appears", pg.locator("#tab-scan .scanhint:not([hidden])").count() == 1, str(pg.locator("#tab-scan .scanhint").count()))
+    # the last plate completes the scan by a path that does not pass through the frame reader's own clearing
+    pg.evaluate("restoreCode('UR:CRYPTO-OUTPUT/1-2/LPADAOCSFGYYFHKG')"); pg.wait_for_timeout(1200)
+    check("…and once everything has read, no hint about the picture is left under the finished ring", pg.locator("#tab-scan .scanhint:not([hidden])").count() == 0)
     rcard = pg.inner_text("#restore-card")
     check("the second plate completes it: the vault is read", "2 of 3" in rcard, rcard[:160])
     check("and the camera's place shows the full ring with a tick — not a black box", pg.locator("#tab-scan .cam.done .complete .tick").count() == 1 and "All 2 parts read" in pg.inner_text("#tab-scan .complete") and pg.locator("#tab-scan .corner").count() == 0)
