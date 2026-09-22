@@ -2058,19 +2058,20 @@ function devShow(id) {
   const usbNote = d.group === 'usb' ? `<div class="muted" style="font-size:13px">A direct ${d.offers.includes('ble') ? 'USB or Bluetooth ' : 'USB '}connection comes later. For now the key can come from the device’s own app, or from Sparrow with the device plugged in: copy its <b>multisig</b> key, <span class="mono">[fingerprint/48h/0h/0h/2h]xpub…</span>, and paste it below.</div>` : '';
   $('#dev-one').innerHTML = head + (d.how ? `<div>${esc(d.how)}</div>` : '') + usbNote
     + `<div class="row">${qr ? '<button class="btn" id="dev-scan" type="button">Scan its code</button>' : ''}${sd ? '<button class="btn" id="dev-file" type="button">Open a file…</button>' : ''}</div>
+      <div class="field" hidden><div class="cap">Camera</div><div class="camrow" id="dev-pick-cam" role="radiogroup" aria-label="Which camera"></div></div>
       <div class="cam" id="dev-cam" hidden><video id="cam3" autoplay playsinline muted></video><div class="frame"></div></div><div class="muted" style="font-size:13px" id="dev-cam-note" hidden></div>
       <div class="field"><div class="label">Or paste it</div><textarea id="dev-text" class="mono" rows="3" spellcheck="false" placeholder="[a1b2c3d4/48h/0h/0h/2h]xpub…  ·  a Coldcard JSON  ·  ur:crypto-account/…"></textarea></div>
       <div class="row"><button class="btn" id="dev-read" type="button">Read it</button></div>
       <div id="dev-got"></div>`;
-  if ($('#dev-scan')) $('#dev-scan').onclick = devScan;
+  if ($('#dev-scan')) $('#dev-scan').onclick = () => devScan();
   if ($('#dev-file')) $('#dev-file').onclick = async () => { try { devGot(await invoke('device_key_file')); } catch (e) { if (String(e) !== 'cancelled') devSay(e); } };
   $('#dev-read').onclick = async () => { try { devGot(await invoke('device_key_read', { text: $('#dev-text').value })); } catch (e) { devSay(e); } };
 }
 function devSay(e) { $('#dev-got').innerHTML = `<div class="warnbox">${esc(String(e && e.message || e))}</div>`; }
-async function devScan() {
-  devStop();
+async function devScan(deviceId) {
+  const parts = devSt.parts; devStop(); if (typeof deviceId === 'string') devSt.parts = parts;   // switching camera keeps the parts already read
   const note = $('#dev-cam-note'); note.hidden = false; $('#dev-cam').hidden = false;
-  try { devSt.stream = await camOpen(); $('#cam3').srcObject = devSt.stream; } catch (e) { note.textContent = 'No camera available. Open its file, or paste the key instead.'; $('#dev-cam').hidden = true; return; }
+  try { devSt.stream = await camOpen(typeof deviceId === 'string' ? deviceId : undefined); $('#cam3').srcObject = devSt.stream; camChooser($('#dev-pick-cam'), devSt.stream, devScan); } catch (e) { note.textContent = 'No camera available. Open its file, or paste the key instead.'; $('#dev-cam').hidden = true; return; }
   note.textContent = 'Hold the device’s code in the frame.';
   const cv = document.createElement('canvas'), ctx = cv.getContext('2d', { willReadFrequently: true });
   let busy = false;
@@ -2487,6 +2488,8 @@ function notice(ev, stay) {
 }
 window.__TAURI__.event.listen('vault-event', (ev) => notice(ev.payload));
 // the background watcher saw a deposit, a spend or a confirmation: refresh what is on screen
+// past prices arrived in the background: redraw the money column from what is now kept (no chain request)
+window.__TAURI__.event.listen('prices-filled', (ev) => { if (vault && ev.payload === vault.name && vault._snap) fillActivity(vault.name, vault._snap); });
 window.__TAURI__.event.listen('vault-changed', (ev) => {
   for (const [k, l] of Object.entries(LIVE)) if (k.startsWith(ev.payload + '|')) l._stale = true;
   if (!vault || ev.payload !== vault.name) { return; }

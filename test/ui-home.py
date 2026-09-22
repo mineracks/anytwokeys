@@ -706,6 +706,11 @@ with sync_playwright() as p:
     check("the watcher saw a change while away: the next Home syncs", n("vault_sync") == s0 + 1, f"{n('vault_sync') - s0} syncs")
     s1 = n("vault_sync"); pg.evaluate("vault._syncedAt = Date.now() - 31000; show('home')"); pg.wait_for_timeout(500)
     check("after half a minute Home syncs again", n("vault_sync") == s1 + 1)
+    s2, a2 = n("vault_sync"), n("vault_activity")
+    pg.evaluate("window.__listeners['prices-filled']({ payload: vault.name })"); pg.wait_for_timeout(400)
+    check("prices arriving in the background redraw the money column, without asking the chain again", n("vault_activity") == a2 + 1 and n("vault_sync") == s2)
+    pg.evaluate("window.__listeners['prices-filled']({ payload: 'some other vault' })"); pg.wait_for_timeout(300)
+    check("and another vault's prices do not touch this screen", n("vault_activity") == a2 + 1)
     check("no page errors", not pg.errs, "; ".join(pg.errs)); pg.context.close()
     pg = page(b, "en-AU", "Australia/Brisbane", net="signet"); 
     check("a signet vault asks about the SIGNET server", 'signet' in pg.evaluate("window.__nodeAsked || []"))

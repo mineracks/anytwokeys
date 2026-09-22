@@ -2064,6 +2064,15 @@ mod perf_probe {
         let t = std::time::Instant::now(); let a = activity::build(&v, &servers, &hist, "", "").unwrap(); let t_act = t.elapsed();
         let t = std::time::Instant::now(); let b = activity::build(&v, &servers, &hist, "", "").unwrap(); let t_warm = t.elapsed();
         assert_eq!(serde_json::to_string(&a).unwrap(), serde_json::to_string(&b).unwrap(), "the cache answers exactly what the network did");
+        // with money: hourly prices for every transaction, and today's
+        let t = std::time::Instant::now(); let f1 = activity::build(&v, &servers, &hist, "AUD", activity::PRICES).unwrap(); let t_f1 = t.elapsed();
+        // the background fill works at the service's pace; wait for it, then open again
+        let t = std::time::Instant::now(); let mut filled = 0;
+        while t.elapsed() < std::time::Duration::from_secs(240) { std::thread::sleep(std::time::Duration::from_secs(5)); let n = activity::build(&v, &servers, &hist, "AUD", activity::PRICES).unwrap(); filled = n.rows.iter().filter(|r| r.quote.is_some()).count(); if n.note.as_deref().map_or(true, |x| !x.contains("background")) { break; } }
+        eprintln!("PERF background fill done in {:?} ({filled} priced)", t.elapsed());
+        let t = std::time::Instant::now(); let f2 = activity::build(&v, &servers, &hist, "AUD", activity::PRICES).unwrap(); let t_f2 = t.elapsed();
+        let priced = |a: &activity::Activity| a.rows.iter().filter(|r| r.quote.is_some()).count();
+        eprintln!("PERF with AUD: cold {t_f1:?} ({} of {} priced, note {:?}) · again {t_f2:?} ({} priced, note {:?})", priced(&f1), f1.rows.len(), f1.note, priced(&f2), f2.note);
         eprintln!("PERF activity cold {t_act:?} · warm (from the chain cache) {t_warm:?} · cache file {} bytes", std::fs::metadata(dir.join("chain.db")).map(|m| m.len()).unwrap_or(0));
         eprintln!("PERF {} history items, {} coins, recv next {} / change next {} · one-by-one {t_old:?} · batched {t_new:?} · again {t_again:?} · activity of {} txs {t_act:?}",
             new.history.len(), new.coins.len(), new.next, new.next_change, a.rows.len());

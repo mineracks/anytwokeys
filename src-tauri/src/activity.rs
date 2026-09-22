@@ -37,6 +37,50 @@ fn save_cache(c: &Cache) {
     if crate::lockbox::sealed_mode() { let _ = crate::lockbox::write_sealed(&cache_path().with_extension("enc"), "cache", &b); } else { let _ = std::fs::write(cache_path(), b); }
 }
 
+// The cache is one sealed file, read, changed and written whole. The background price fill and a screen building
+// its activity both change it; without this, the later write would erase what the earlier one added.
+static CACHE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn change_cache(f: impl FnOnce(&mut Cache)) { let _g = CACHE_LOCK.lock(); let mut c = load_cache(); f(&mut c); save_cache(&c); }
+
+/// One kept connection to the price service (a new TLS handshake per price was most of each request's time).
+fn http() -> &'static reqwest::blocking::Client {
+    static H: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
+    H.get_or_init(|| reqwest::blocking::Client::builder().user_agent("anytwokeys/0.1").timeout(std::time::Duration::from_secs(20)).build().expect("an HTTP client"))
+}
+
+/// Today's price, kept five minutes: every screen that shows money asked for it afresh.
+fn now_quote(base: &str, ccy: &str) -> Option<Quote> {
+    static NOW: std::sync::Mutex<Option<HashMap<String, (std::time::Instant, Quote)>>> = std::sync::Mutex::new(None);
+    let key = format!("{base}|{ccy}");
+    if let Some((at, q)) = NOW.lock().ok()?.as_ref().and_then(|m| m.get(&key)).cloned() { if at.elapsed() < std::time::Duration::from_secs(300) { return Some(q); } }
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as u32).unwrap_or(0); let (day, hour) = day_hour(t);
+    let q = fetch(http(), base, ccy, &day, Some(hour))?;
+    NOW.lock().ok()?.get_or_insert_with(HashMap::new).insert(key, (std::time::Instant::now(), q.clone()));
+    Some(q)
+}
+
+/// Prices not yet kept, fetched in the background at the pace the price service allows (5 a second, burst 10), each
+/// kept as it arrives; the window is told when there are new ones. One fill per vault and currency at a time.
+fn fill_later(vault: &str, base: &str, ccy: &str, wanted: Vec<(String, u32)>) {
+    static FILLING: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+    let tag = format!("{vault}|{ccy}");
+    { let Ok(mut g) = FILLING.lock() else { return }; if !g.get_or_insert_with(Default::default).insert(tag.clone()) { return; } }
+    let (vault, base, ccy) = (vault.to_string(), base.to_string(), ccy.to_string());
+    std::thread::spawn(move || {
+        let mut got = 0usize;
+        for (i, (day, hour)) in wanted.iter().enumerate() {
+            if i > 0 { std::thread::sleep(std::time::Duration::from_millis(250)); }   // under the service's 5 a second
+            let mut q = fetch(http(), &base, &ccy, day, Some(*hour));
+            if q.is_none() { std::thread::sleep(std::time::Duration::from_millis(1200)); q = fetch(http(), &base, &ccy, day, Some(*hour)); }   // refused for pace: once more
+            if let Some(q) = q { change_cache(|c| { c.prices.insert(format!("{ccy}:{day}T{hour:02}"), q); }); got += 1; }
+            // tell the window every so often, so the column fills in as it goes rather than all at the end
+            if got > 0 && (i + 1) % 20 == 0 { crate::net::emit("prices-filled", vault.clone()); }
+        }
+        if got > 0 { crate::net::emit("prices-filled", vault.clone()); }
+        if let Ok(mut g) = FILLING.lock() { if let Some(s) = g.as_mut() { s.remove(&tag); } }
+    });
+}
+
 /// (day, hour) in UTC for a Unix time.
 fn day_hour(t: u32) -> (String, u32) { (crate::export::ymd(t as u64), (t % 86_400) / 3_600) }
 
@@ -79,8 +123,8 @@ pub fn build(v: &wallet::Vault, servers: &Servers, history: &[(String, i32)], cc
     let table = wallet::ours_table(v)?;
     let ours = |spk: &bitcoin::ScriptBuf| table(spk).is_some();
     let fiat = v.network == "mainnet" && !ccy.is_empty() && !prices_url.is_empty();
-    let http = reqwest::blocking::Client::builder().user_agent("anytwokeys/0.1").timeout(std::time::Duration::from_secs(12)).build().map_err(|e| e.to_string())?;
-    let mut price_failed = false;
+    // prices not kept yet are NOT waited for: the screen opens with what is known and the rest arrive in the background
+    let mut wanted: Vec<(String, u32)> = Vec::new();
     let mut rows = Vec::new();
     for (txid, height) in history {
         let tx = &txs[txid];
@@ -98,15 +142,18 @@ pub fn build(v: &wallet::Vault, servers: &Servers, history: &[(String, i32)], cc
         } else { None };
         let quote = match (fiat, time) {
             (true, Some(t)) => { let (day, hour) = day_hour(t); let key = format!("{ccy}:{day}T{hour:02}");
-                match cache.prices.get(&key) { Some(q) => Some(q.clone()), None => { let q = fetch(&http, prices_url, ccy, &day, Some(hour)); match &q { Some(q) => { cache.prices.insert(key, q.clone()); dirty = true; } None => price_failed = true } q } } }
+                match cache.prices.get(&key) { Some(q) => Some(q.clone()), None => { if !wanted.contains(&(day.clone(), hour)) { wanted.push((day, hour)); } None } } }
             _ => None,
         };
         rows.push(Row { txid: txid.clone(), time, net: Some(received as i64 - spent as i64), fee, quote, ins, outs });
     }
-    let now = if fiat { let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as u32).unwrap_or(0); let (day, hour) = day_hour(t);
-        let q = fetch(&http, prices_url, ccy, &day, Some(hour)); if q.is_none() { price_failed = true; } q } else { None };
-    if dirty { save_cache(&cache); }
-    let note = if v.network != "mainnet" { Some("Test coins have no price.".into()) } else if !fiat { None } else if price_failed { Some("Some prices could not be fetched; they are left blank rather than guessed.".into()) } else { None };
+    let now = if fiat { now_quote(prices_url, ccy) } else { None };
+    if dirty { let times = cache.times.clone(); change_cache(|c| c.times.extend(times)); }
+    let pending = wanted.len();
+    if fiat && pending > 0 { fill_later(&v.name, prices_url, ccy, wanted); }
+    let note = if v.network != "mainnet" { Some("Test coins have no price.".into()) } else if !fiat { None }
+        else if pending > 0 { Some(format!("Fetching {pending} past price{} in the background; they fill in as they arrive, and are kept.", if pending == 1 { "" } else { "s" })) }
+        else if now.is_none() { Some("Today's price could not be fetched; values are left blank rather than guessed.".into()) } else { None };
     Ok(Activity { ccy: ccy.to_string(), rows, now, note })
 }
 
@@ -117,12 +164,9 @@ pub fn quote_at(prices_url: &str, ccy: &str, t: Option<u32>) -> Option<Quote> {
     let t = t.or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs() as u32))?;
     let (day, hour) = day_hour(t);
     let key = format!("{ccy}:{day}T{hour:02}");
-    let mut cache = load_cache();
-    if let Some(q) = cache.prices.get(&key) { return Some(q.clone()); }
-    let http = reqwest::blocking::Client::builder().user_agent("anytwokeys/0.1").timeout(std::time::Duration::from_secs(12)).build().ok()?;
-    let q = fetch(&http, prices_url, ccy, &day, Some(hour))?;
-    cache.prices.insert(key, q.clone());
-    save_cache(&cache);
+    if let Some(q) = load_cache().prices.get(&key) { return Some(q.clone()); }
+    let q = fetch(http(), prices_url, ccy, &day, Some(hour))?;
+    let keep = q.clone(); change_cache(|c| { c.prices.insert(key, keep); });
     Some(q)
 }
 
@@ -144,15 +188,14 @@ pub fn series_every(from: &str, to: &str) -> u32 {
 /// kept, the day has not closed. A day with no price is a hole, `None`, never filled from its neighbour.
 pub fn price_series(prices_url: &str, ccy: &str, from: &str, to: &str, every: u32) -> Result<Vec<(String, Option<Quote>)>, String> {
     let today = crate::export::ymd(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
-    let mut cache = load_cache();
-    // the cache answers when it holds every closed day the service would return
+    let cache = load_cache();
     let cached = |c: &Cache, d: &str| c.prices.get(&format!("{ccy}:{d}")).cloned();
     let url = format!("{}/v1/series?from={from}&to={to}&every={every}&ccy={ccy}", prices_url.trim_end_matches('/'));
-    let http = reqwest::blocking::Client::builder().user_agent("anytwokeys/0.1").timeout(std::time::Duration::from_secs(60)).build().map_err(|e| e.to_string())?;
+    let http = http();
     let mut body = None;
     for attempt in 0..2 {   // one request a second at the front: a second chart drawn a moment later waits, then asks
         crate::net::out("prices")?;
-        let r = http.get(&url).send().map_err(|_| "the price service could not be reached".to_string())?;
+        let r = http.get(&url).timeout(std::time::Duration::from_secs(60)).send().map_err(|_| "the price service could not be reached".to_string())?;   // a year of days can take a while
         if r.status().as_u16() == 429 && attempt == 0 { std::thread::sleep(std::time::Duration::from_millis(1100)); continue; }
         if !r.status().is_success() { return Err(format!("the price service said {}", r.status())); }
         body = Some(r.json::<serde_json::Value>().map_err(|_| "the price service's answer was not readable".to_string())?);
@@ -160,9 +203,8 @@ pub fn price_series(prices_url: &str, ccy: &str, from: &str, to: &str, every: u3
     }
     let body = body.ok_or("the price service is busy; try again in a moment")?;
     let points = read_series(&body, ccy);
-    let mut dirty = false;
-    for (d, q) in &points { if let (Some(q), true) = (q, d.as_str() < today.as_str()) { if cached(&cache, d).is_none() { cache.prices.insert(format!("{ccy}:{d}"), q.clone()); dirty = true; } } }
-    if dirty { save_cache(&cache); }
+    let new: Vec<(String, Quote)> = points.iter().filter_map(|(d, q)| match q { Some(q) if d.as_str() < today.as_str() && cached(&cache, d).is_none() => Some((format!("{ccy}:{d}"), q.clone())), _ => None }).collect();
+    if !new.is_empty() { change_cache(|c| c.prices.extend(new)); }
     Ok(points)
 }
 

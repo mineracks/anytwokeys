@@ -30,6 +30,9 @@ pub fn out(what: &'static str) -> Result<(), String> {
     Ok(())
 }
 
+/// Tell the window something changed behind its back (prices arrived). Nothing depends on it being heard.
+pub fn emit<S: serde::Serialize + Clone>(event: &str, payload: S) { if let Some(app) = APP.get() { use tauri::Emitter; let _ = app.emit(event, payload); } }
+
 #[cfg(test)]
 mod tests {
     use super::*;

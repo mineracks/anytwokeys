@@ -66,6 +66,24 @@ with sync_playwright() as p:
     check("its Bluetooth is shown as the device's, not something the app does yet", pg.locator("#dev-one .chip:not(.on)").count() >= 1)
     pg.click("#dev-back"); pg.click("[data-dev=nitrokey3]"); pg.wait_for_timeout(100)
     check("the Nitrokey is honest that it is not yet read", "Not yet" in pg.inner_text("#dev-one") and pg.locator("#dev-read").count() == 0)
+    # every scanning screen offers the same camera picker: three cameras, as on Piers's desk
+    pg.evaluate("""() => { const cv = document.createElement('canvas'); cv.width = 64; cv.height = 48; cv.getContext('2d').fillRect(0, 0, 64, 48);
+      window.__asked = [];
+      const cams = [['a', 'IPEVO VZ-X'], ['b', 'Studio Display Camera'], ['c', "Piers' iPhone Camera"]].map(([deviceId, label]) => ({ deviceId, label, kind: 'videoinput' }));
+      Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { enumerateDevices: async () => cams,
+        getUserMedia: async (c) => { window.__asked.push(c.video && c.video.deviceId ? c.video.deviceId.exact : 'any'); const st = cv.captureStream(5); const tr = st.getVideoTracks()[0]; const id = c.video && c.video.deviceId ? c.video.deviceId.exact : 'b'; tr.getSettings = () => ({ deviceId: id }); return st; } } }); }""")
+    pg.click("#dev-back"); pg.click("[data-dev=seedsigner]"); pg.click("#dev-scan"); pg.wait_for_timeout(500)
+    check("scanning a device's code offers every camera, drawn as in Take a picture", pg.locator("#dev-pick-cam .camopt").count() == 3 and pg.is_visible("#dev-pick-cam") and pg.locator("#dev-pick-cam .camopt svg").count() == 3)
+    pg.locator("#dev-pick-cam .camopt").first.click(); pg.wait_for_timeout(400)
+    check("choosing the IPEVO opens that camera and marks it chosen", pg.evaluate("__asked[__asked.length - 1]") == "a" and pg.get_attribute("#dev-pick-cam .camopt[data-id=a]", "aria-checked") == "true", str(pg.evaluate("__asked")))
+    pg.click("#dev-close"); pg.wait_for_timeout(100)
+    pg.click("#add-device"); pg.click("[data-dev=seedsigner]"); pg.click("#dev-scan"); pg.wait_for_timeout(400)
+    check("and it is remembered next time", pg.evaluate("__asked[__asked.length - 1]") == "a")
+    pg.evaluate("pscanOpen()"); pg.wait_for_timeout(400)
+    check("scanning a signed code back offers the same picker", pg.locator("#pscan-pick .camopt").count() == 3 and pg.is_visible("#pscan-pick"))
+    pg.evaluate("pscanClose(); openScan()"); pg.wait_for_timeout(400)
+    check("so does scanning an address", pg.locator("#scan-pick .camopt").count() == 3 and pg.is_visible("#scan-pick"))
+    pg.evaluate("closeScan()"); pg.evaluate("delete navigator.mediaDevices")
     pg.click("#dev-back"); pg.click("[data-dev=seedsigner]"); pg.wait_for_timeout(100)
     check("a SeedSigner is scanned: camera, no file", pg.locator("#dev-scan").count() == 1 and pg.locator("#dev-file").count() == 0)
     check("with where to find its key", "Export Xpub" in pg.inner_text("#dev-one"))
