@@ -900,6 +900,65 @@ function renderCoins2() {
   $('#coin-count').textContent = `${sats(hits.length)} coin${hits.length === 1 ? '' : 's'} · ${sats(tot)} sats`;
 }
 $('#coin-find').addEventListener('input', renderCoins2);
+// ---------- a report of the whole vault, to print or keep ----------
+// The same figures as the screen: its ledger, the Home summary's series, its coins, every transaction. The recovery
+// line is left off on purpose — that is the recovery sheet, kept apart; a report is shared more freely.
+async function vaultReport() {
+  if (!vault) return;
+  const name = vault.name;
+  try {
+    if (!vault._snap) await sync();
+    if (!txFacts[name]) await fillActivity(name, vault._snap);
+    const f = txFacts[name] || { rows: {}, ccy: '' }, L = vaultLedger(name), m = methodFor(vault), ccy = f.ccy, now = f.now;
+    const priced = vault.network === 'mainnet' && ccy && now && L;
+    const dateOf = (t) => new Date(t * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+    const last = L && L.timeline.length ? L.timeline[L.timeline.length - 1] : { sats: vault._balance || 0, basis: 0 };
+    const held = vault._balance !== undefined ? vault._balance : last.sats, value = priced ? held / 1e8 * now.price : null;
+    const facts = [['Vault', `${vault.threshold} of ${vault.keys.length} · ${vault.network}${vault.ext ? ' · keys held on signing devices' : ''}`],
+      ['Created', vault.created ? dateOf(vault.created) : '—'], ['Holding', `${sats(held)} sats in ${sats((vault._coins || []).length)} coin${(vault._coins || []).length === 1 ? '' : 's'}`]];
+    if (priced) {
+      facts.push(['Worth now', `${money(value, ccy)}  (1 BTC = ${money(now.price, ccy)})`], ['Cost basis', `${money(last.basis, ccy)}  (${COST_METHODS[m].name})`]);
+      const g = value - last.basis; facts.push(['Unrealised', `${g >= 0 ? '+' : '−'}${money(Math.abs(g), ccy)}${last.basis > 0 ? `  (${(g >= 0 ? '+' : '−') + Math.abs(g / last.basis * 100).toFixed(1)}% on cost)` : ''}`]);
+      const rz = Object.values(L.realised), known = rz.filter(x => x.gain !== null), rg = known.reduce((a, x) => a + x.gain, 0);
+      facts.push(['Realised', rz.length ? `${rg >= 0 ? '+' : '−'}${money(Math.abs(rg), ccy)} over ${rz.length} disposal${rz.length === 1 ? '' : 's'}${known.length < rz.length ? ` (${rz.length - known.length} of unknown cost)` : ''}` : 'nothing yet']);
+    }
+    const blocks = [{ kind: 'facts', rows: facts }];
+    // the two charts from Home, over the vault's whole life
+    if (L && L.timeline.length) {
+      const first = L.timeline[0].t, to = Math.floor(Date.now() / 1000), from = Math.max(0, first - 3600);
+      const run = priced ? await pricesRange(ccy, first, to) : { prices: {} };
+      const S = sumSeries(L, from, to, run.prices || {}, now);
+      const lbl = (t) => new Date(t * 1000).toLocaleDateString();
+      const hiB = Math.max(1, ...S.bal.map(p => p[1])) * 1.05;
+      blocks.push({ kind: 'chart', chart: { title: 'Balance, in sats', lo: 0, hi: hiB, lo_label: '0 sats', hi_label: sats(Math.round(hiB)) + ' sats', from_label: lbl(from), to_label: lbl(to), series: [{ name: 'Balance', color: 'value', pts: S.bal, step: true }] } });
+      if (priced && S.val.length) {
+        const all = [...S.val, ...S.cost].map(p => p[1]), hi = Math.max(1, ...all) * 1.05;
+        blocks.push({ kind: 'chart', chart: { title: `Worth and cost basis, in ${ccy}`, lo: 0, hi, lo_label: money(0, ccy), hi_label: money(hi, ccy), from_label: lbl(from), to_label: lbl(to), series: [{ name: 'Worth', color: 'value', pts: S.val }, { name: 'Cost basis', color: 'cost', pts: S.cost, step: true }] } });
+      }
+    }
+    blocks.push({ kind: 'heading', text: 'Keys' });
+    blocks.push({ kind: 'facts', rows: vault.keys.map(k => { const x = /^\[([0-9a-f]{8})\/([^\]]+)\]/.exec(k.pubkey); const d = k.device && typeof deviceOf === 'function' && k.device !== 'card' ? deviceOf(k.device).name : 'YubiKey';
+      return [k.name, x ? `${d} · fingerprint ${x[1]} · m/${x[2]}` : `${d}${k.serial ? ' · serial ' + k.serial : ''}${vault.ext ? ' · a fixed key' : ''}`]; }) });
+    const coins = (vault._coins || []).slice().sort((a, b) => b.value - a.value);
+    if (coins.length) {
+      blocks.push({ kind: 'heading', text: `Coins held (${coins.length})` });
+      blocks.push({ kind: 'facts', rows: coins.map(c => { const k = 'output:' + c.txid + ':' + c.vout, lab = labelOf(k);
+        return [`${c.txid.slice(0, 8)}…:${c.vout}`, `${sats(c.value)} sats${priced ? ' · ' + money(c.value / 1e8 * now.price, ccy) : ''} · ${c.height > 0 ? 'block ' + sats(c.height) : 'unconfirmed'}${lab ? ' · ' + lab : ''}`]; }) });
+    }
+    const rows = Object.values(f.rows).sort((a, b) => (b.time || 9e9) - (a.time || 9e9));
+    if (rows.length) {
+      blocks.push({ kind: 'heading', text: `Transactions (${rows.length})` });
+      blocks.push({ kind: 'facts', rows: rows.map(r => { const lab = labelOf('tx:' + r.txid), rz = L && L.realised[r.txid], xf = (f.transfers || {})[r.txid];
+        const worth = r.quote && ccy ? ' · ' + money(Math.abs(r.net) / 1e8 * r.quote.price, ccy) + (r.time ? ' then' : ' now') : '';
+        return [r.time ? dateOf(r.time) : 'unconfirmed', `${r.net > 0 ? '+' : r.net < 0 ? '−' : ''}${sats(Math.abs(r.net || 0))} sats${worth}${rz && rz.gain !== null ? ' · realised ' + (rz.gain >= 0 ? '+' : '−') + money(Math.abs(rz.gain), ccy) : ''}${xf ? ' · transfer ' + (r.net < 0 ? 'to ' : 'from ') + xf.join(', ') : ''}${lab ? ' · ' + lab : ''} · ${r.txid.slice(0, 12)}…`]; }) });
+    }
+    blocks.push({ kind: 'para', text: `The recovery line is not in this report: it is on the recovery sheet (Vault settings › Save the recovery sheet), which should be kept apart from anything shared. ${priced ? 'Figures in ' + ccy + ' use ' + COST_METHODS[m].name.toLowerCase() + ' for cost; they are facts about the coins, not a tax position.' : ''}` });
+    const path = await invoke('report_pdf', { title: name, subtitle: `Vault report · ${vault.network} · printed ${new Date().toLocaleDateString()}`, blocks, file: `${name}-report` });
+    toast('Saved ' + path, 5000);
+  } catch (e) { if (!/cancelled/.test(String(e))) fail(e); }
+}
+document.addEventListener('click', (e) => { if (e.target.closest('[data-vault-report]')) vaultReport(); });
+
 // ---------- one coin, or one address, as a page: vault › Coins › this coin ----------
 // The list steps aside for the page; ‹ › and the arrow keys walk the list in its order; the strip at the top is what
 // it cost against what it has been worth since it arrived; the record (label, note, files) sits below; and the whole
@@ -1022,14 +1081,14 @@ async function recPdf(kind, id) {
   if (P.balance) {
     const hi = Math.max(...P.balance.pts.map(p => p[1])) * 1.05 || 1;
     charts.push({ title: 'Balance, in sats', lo: 0, hi, lo_label: '0 sats', hi_label: sats(Math.round(hi)) + ' sats', from_label: new Date(P.balance.from * 1000).toLocaleDateString(), to_label: new Date(P.balance.to * 1000).toLocaleDateString(),
-      series: [{ name: 'Balance', color: 'value', pts: P.balance.pts }] });
+      series: [{ name: 'Balance', color: 'value', pts: P.balance.pts, step: true }] });
   }
   let chart = null;
   if (P.series && P.ccy) {
     const all = [...P.series.val.map(p => p[1]), ...(P.series.cost || []).map(p => p[1])], lo = Math.min(0, ...all), hi = Math.max(...all) * 1.05 || 1;
     chart = { title: `Worth and cost basis, in ${P.ccy}`, lo, hi, lo_label: money(lo, P.ccy), hi_label: money(hi, P.ccy),
       from_label: new Date(P.series.from * 1000).toLocaleDateString(), to_label: new Date(P.series.to * 1000).toLocaleDateString(),
-      series: [{ name: 'Worth', color: 'value', pts: P.series.val }, ...(P.series.cost ? [{ name: 'Cost basis', color: 'cost', pts: P.series.cost }] : [])] };
+      series: [{ name: 'Worth', color: 'value', pts: P.series.val }, ...(P.series.cost ? [{ name: 'Cost basis', color: 'cost', pts: P.series.cost, step: true }] : [])] };
   }
   const H = recHoldings(kind, id), lots = H.flatMap(h => (h.lots || []).map(l => [new Date((l.t || 0) * 1000).toLocaleDateString(), `${sats(Math.round(l.sats))} sats \u00b7 ${l.cost === null ? 'cost not known' : money(l.cost, P.ccy || 'USD')}`]));
   const label = labelOf(kind === 'coin' ? 'output:' + id : 'addr:' + id);

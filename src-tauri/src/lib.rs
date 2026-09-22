@@ -1069,8 +1069,14 @@ struct Here { lat: f64, lon: f64, acc: f64, name: Option<String> }
 #[tauri::command]
 async fn location_now(app: tauri::AppHandle) -> R<Here> {
     let following = wallet::load()?.settings.location;
+    // Places on and listening: its last fix is right to within 200 m however old (it reports on movement), so it
+    // answers at once. Waiting for a NEW one, as this did, waited for a report that comes only after moving.
+    if following && location::state() == "allowed" { if let Some(f) = location::last() {
+        let _ = app.run_on_main_thread(location::nudge_main);   // and freshen it for next time
+        return Ok(Here { lat: f.lat, lon: f.lon, acc: f.acc, name: context::place(f.lat, f.lon) });
+    } }
     let started = location::fresh(now(), 120).is_none() && location::state() == "off";
-    if started { location_follow(&app, true); }
+    if started { location_follow(&app, true); } else { let _ = app.run_on_main_thread(location::nudge_main); }   // one reading now, not after 200 m
     // the system answers on the main thread; this waits for it off the main thread
     let fix = block(move || -> R<Option<context::Fix>> {
         let t = std::time::Instant::now();
@@ -1277,6 +1283,31 @@ pub(crate) fn file_blocks(v: &wallet::Vault, key: &str, with_pictures: bool) -> 
     blocks
 }
 
+/// One block of a report the window lays out: facts, a heading, a paragraph, or a chart.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum BlockIn { Facts { rows: Vec<(String, String)> }, Heading { text: String }, Para { text: String }, Chart { chart: ChartIn } }
+
+/// A printable report of a whole vault: what the screen worked out (its figures, charts, coins and every
+/// transaction, passed in so the sheet says what the screen says), laid out as a PDF. The recovery line is not on
+/// it — that is the recovery sheet's job, and a report is shared more freely.
+#[tauri::command]
+async fn report_pdf(title: String, subtitle: String, blocks: Vec<BlockIn>, file: String) -> R<String> {
+    let bytes = block(move || -> R<Vec<u8>> {
+        use export::Block;
+        let out: Vec<Block> = blocks.into_iter().map(|b| match b {
+            BlockIn::Facts { rows } => Block::Facts(rows), BlockIn::Heading { text } => Block::Heading(text), BlockIn::Para { text } => Block::Para(text),
+            BlockIn::Chart { chart: c } => Block::Chart { title: c.title, series: c.series.into_iter().map(|s| (s.name, if s.color == "cost" { export::COST_RGB } else { export::VALUE_RGB }, s.pts, s.step)).collect(),
+                lo: c.lo, hi: c.hi, lo_label: c.lo_label, hi_label: c.hi_label, from_label: c.from_label, to_label: c.to_label },
+        }).collect();
+        export::doc(&title, &subtitle, &out)
+    }).await?;
+    let safe: String = file.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '-' }).collect();
+    let path = rfd::FileDialog::new().set_title("Save the report").set_file_name(format!("anytwokeys-{safe}.pdf")).add_filter("PDF", &["pdf"]).save_file().ok_or("cancelled")?;
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
+}
+
 /// An address's balance over time, as the flow of each transaction that touched it (see activity::address_flow).
 #[tauri::command]
 async fn address_flow(name: String, index: u32, history: Vec<(String, i32)>) -> R<Vec<activity::Flow>> {
@@ -1288,7 +1319,7 @@ async fn address_flow(name: String, index: u32, history: Vec<(String, i32)>) -> 
 }
 
 #[derive(Deserialize)]
-struct SeriesIn { name: String, color: String, pts: Vec<(f64, f64)> }
+struct SeriesIn { name: String, color: String, pts: Vec<(f64, f64)>, #[serde(default)] step: bool }
 #[derive(Deserialize)]
 struct ChartIn { title: String, series: Vec<SeriesIn>, lo: f64, hi: f64, lo_label: String, hi_label: String, from_label: String, to_label: String }
 
@@ -1304,7 +1335,7 @@ async fn record_pdf(name: String, key: String, title: String, subtitle: String, 
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
         let mut blocks = vec![Block::Facts(facts)];
         for c in charts {
-            let series = c.series.into_iter().map(|s| (s.name, if s.color == "cost" { export::COST_RGB } else { export::VALUE_RGB }, s.pts)).collect();
+            let series = c.series.into_iter().map(|s| (s.name, if s.color == "cost" { export::COST_RGB } else { export::VALUE_RGB }, s.pts, s.step)).collect();
             blocks.push(Block::Chart { title: c.title, series, lo: c.lo, hi: c.hi, lo_label: c.lo_label, hi_label: c.hi_label, from_label: c.from_label, to_label: c.to_label });
         }
         for (h, kv) in sections { if !kv.is_empty() { blocks.push(Block::Heading(h)); blocks.push(Block::Facts(kv)); } }
@@ -1953,7 +1984,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
@@ -2261,7 +2292,7 @@ mod record_sheet_tests {
     fn a_record_sheet_with_a_chart_is_a_pdf_that_carries_its_figures() {
         use export::Block;
         let blocks = vec![Block::Facts(vec![("Cost basis".into(), "$10.00".into()), ("Worth now".into(), "$12.00".into())]),
-            Block::Chart { title: "Worth and cost basis, in AUD".into(), series: vec![("Worth".into(), export::VALUE_RGB, vec![(0.0, 10.0), (86400.0, 11.0), (172800.0, 12.0)]), ("Cost basis".into(), export::COST_RGB, vec![(0.0, 10.0), (172800.0, 10.0)])],
+            Block::Chart { title: "Worth and cost basis, in AUD".into(), series: vec![("Worth".into(), export::VALUE_RGB, vec![(0.0, 10.0), (86400.0, 11.0), (172800.0, 12.0)], false), ("Cost basis".into(), export::COST_RGB, vec![(0.0, 10.0), (172800.0, 10.0)], true)],
                 lo: 0.0, hi: 13.0, lo_label: "$0".into(), hi_label: "$13".into(), from_label: "1 Jan".into(), to_label: "3 Jan".into() },
             Block::Heading("Your note".into()), Block::Para("change from the car".into())];
         let pdf = export::doc("Coin 758adfd2…:0", "demo vault · mainnet", &blocks).unwrap();
@@ -2299,5 +2330,27 @@ mod transfer_tests {
         let mut d2 = d; d2.peers.clear(); for o in d2.outputs.iter_mut() { o.peer = None; }
         mark_peers(&s, &a, &mut d2);
         assert_eq!(d2.peers, vec!["savings vault".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+    /// The blocks the window sends, as JSON, become a PDF: facts, a heading, a paragraph, a chart.
+    #[test]
+    fn a_report_laid_out_by_the_window_prints() {
+        let blocks: Vec<BlockIn> = serde_json::from_value(serde_json::json!([
+            { "kind": "facts", "rows": [["Holding", "9,430 sats in 1 coin"], ["Worth now", "$10.77"]] },
+            { "kind": "chart", "chart": { "title": "Balance, in sats", "lo": 0.0, "hi": 21000.0, "lo_label": "0 sats", "hi_label": "21,000 sats", "from_label": "17/09/2026", "to_label": "22/09/2026",
+                "series": [{ "name": "Balance", "color": "value", "step": true, "pts": [[1.0, 0.0], [2.0, 20000.0], [3.0, 9430.0]] }] } },
+            { "kind": "heading", "text": "Transactions (4)" },
+            { "kind": "para", "text": "The recovery line is not in this report." }])).unwrap();
+        let out: Vec<export::Block> = blocks.into_iter().map(|b| match b {
+            BlockIn::Facts { rows } => export::Block::Facts(rows), BlockIn::Heading { text } => export::Block::Heading(text), BlockIn::Para { text } => export::Block::Para(text),
+            BlockIn::Chart { chart: c } => export::Block::Chart { title: c.title, series: c.series.into_iter().map(|s| (s.name, export::VALUE_RGB, s.pts, s.step)).collect(), lo: c.lo, hi: c.hi, lo_label: c.lo_label, hi_label: c.hi_label, from_label: c.from_label, to_label: c.to_label } }).collect();
+        let pdf = export::doc("demo vault", "Vault report", &out).unwrap();
+        if let Ok(o) = std::env::var("A2K_REPORT_OUT") { std::fs::write(o, &pdf).unwrap(); }   // to look at it
+        let text = String::from_utf8_lossy(&pdf);
+        for want in ["(HOLDING)", "(9,430 sats in 1 coin)", "(BALANCE, IN SATS)", "(TRANSACTIONS \\(4\\))", "(The recovery line is not in this report.)"] { assert!(text.contains(want), "{want}"); }
     }
 }

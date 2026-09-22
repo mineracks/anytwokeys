@@ -16,8 +16,13 @@ pub fn last_error() -> Option<isize> { LAST_ERR.lock().ok().and_then(|g| *g) }
 pub fn state() -> String { STATE.lock().map(|s| s.to_string()).unwrap_or_else(|_| "off".into()) }
 fn set_state(s: &'static str) { if let Ok(mut g) = STATE.lock() { *g = s; } }
 
+/// The last fix, however old: while the manager runs it reports every 200 m of movement, so its last fix is still
+/// right to within 200 m whenever it was taken.
+pub fn last() -> Option<Fix> { LAST.lock().ok().and_then(|g| *g) }
 /// A fix no older than `max_age` seconds.
 pub fn fresh(now: u64, max_age: u64) -> Option<Fix> { LAST.lock().ok().and_then(|g| *g).filter(|f| now.saturating_sub(f.t) <= max_age) }
+/// One reading now, from the main thread (see imp::nudge).
+pub fn nudge_main() { imp::nudge(); }
 pub fn forget() { if let Ok(mut g) = LAST.lock() { *g = None; } set_state("off"); }
 
 #[cfg(target_os = "macos")]
@@ -84,6 +89,9 @@ mod imp {
             *k.borrow_mut() = Some((m, delegate));
         });
     }
+    /// Main thread only: ask the running manager for one reading now (it otherwise reports only after 200 m of movement).
+    pub fn nudge() { KEEP.with(|k| if let Some((m, _)) = k.borrow().as_ref() { unsafe { m.requestLocation(); } }); }
+    pub fn running() -> bool { KEEP.with(|k| k.borrow().is_some()) }
     pub fn stop() {
         KEEP.with(|k| { if let Some((m, _)) = k.borrow_mut().take() { unsafe { m.stopUpdatingLocation(); m.setDelegate(None); } } });
         super::forget();
@@ -91,6 +99,6 @@ mod imp {
 }
 
 #[cfg(not(target_os = "macos"))]
-mod imp { pub fn start() { *super::STATE.lock().unwrap() = "unavailable: no location service on this platform yet"; } pub fn stop() { super::forget(); } }
+mod imp { pub fn start() { *super::STATE.lock().unwrap() = "unavailable: no location service on this platform yet"; } pub fn stop() { super::forget(); } pub fn nudge() {} }
 
 pub use imp::{start, stop};

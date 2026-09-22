@@ -28,6 +28,7 @@ const H = {
   location_status: () => 'off', location_preview: () => null,
   place_search: (a) => { (window.__asked = window.__asked || []).push(a.q); if (/zzzz/.test(a.q)) return []; return [{ label: '445 Upper Edward Street', detail: 'Spring Hill, Brisbane · Queensland 4000 · Australia', lat: -27.4615, lon: 153.0245 }, { label: '445 Upper Roma Street', detail: 'Brisbane City, Brisbane · Queensland 4000 · Australia', lat: -27.4655, lon: 153.0125 }]; },
   address_flow: (a) => { window.__flowAsked = a; return [{ txid: '%(t0)s', time: 1789627614, delta: 20000 }, { txid: '%(t1)s', time: 1789648528, delta: -20000 }, { txid: '%(t1)s', time: 1789648528, delta: 9430 }]; },
+  report_pdf: (a) => { window.__report = a; return '/Users/p/Desktop/anytwokeys-demo-vault-report.pdf'; },
   record_pdf: (a) => { window.__recPdf = a; return '/Users/p/Desktop/anytwokeys-coin.pdf'; },
   tx_pdf: (a) => { window.__pdf = a; if (window.__pdfCancel) throw 'cancelled'; return '/Users/p/Desktop/anytwokeys-demo-vault-758adfd2.pdf'; },
   tx_map: (a) => { window.__mapAsked = a; return window.__noMap ? null : { png: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', metres_per_px: 4.0625, width: 640 }; },
@@ -747,6 +748,20 @@ with sync_playwright() as p:
     check("this vault's own address on it is a link to that address's page", pg.locator("#tx-dl a[data-go-addr='bc1qvaultchange']").count() == 1)
     pg.locator("#tx-dl a[data-go-vault-tx='savings vault']").first.click(); pg.wait_for_timeout(900)
     check("following it opens the same transaction in the other vault, lit in the menu", pg.evaluate("vault.name") == "savings vault" and pg.locator("#s-tx.on").count() == 1 and pg.evaluate("txView.txid") == "%s" % T[1] and pg.locator("#vault-tabs .nav.on").inner_text().startswith("savings vault") and "savings vault" in pg.inner_text("#crumbs"), pg.inner_text("#crumbs"))
+    # ---- a report of the whole vault ----
+    # (the Settings checks above left the currency on None: back to Australian dollars, as this vault's owner uses)
+    pg.evaluate("(async () => { __state.fiat = 'AUD'; store = await window.__TAURI__.core.invoke('store_get'); vault = store.vaults.find(v => v.name !== 'savings vault'); await sync(); show('home'); })()"); pg.wait_for_timeout(1500)
+    pg.click("#s-home [data-vault-report]"); pg.wait_for_timeout(900)
+    rp = pg.evaluate("window.__report") or {}
+    flat = json.dumps(rp)
+    heads = [b.get("text") for b in rp.get("blocks", []) if b.get("kind") == "heading"]
+    check("Home has Save as PDF: a report of the whole vault, titled with its name", rp.get("title") == pg.evaluate("vault.name") and "Saved" in pg.inner_text("#toast"), str(rp.get("title")))
+    check("with its figures: holding, worth, cost basis (and the method), unrealised, realised", all(k in flat for k in ("Holding", "Worth now", "Cost basis", "Unrealised", "Realised", "The coins actually spent")), flat[:300])
+    check("the two charts from Home", [b["chart"]["title"] for b in rp.get("blocks", []) if b.get("kind") == "chart"][:2] == ["Balance, in sats", "Worth and cost basis, in AUD"], str([b["chart"]["title"] for b in rp.get("blocks", []) if b.get("kind") == "chart"]))
+    check("its keys, its coins and every transaction", "Keys" in heads and any(h.startswith("Coins held") for h in heads) and any(h.startswith("Transactions (") for h in heads), str(heads))
+    check("a transfer between vaults is said on its line", "transfer to savings vault" in flat)
+    check("and never the recovery line: that is the recovery sheet's, kept apart", "wsh(" not in flat and "sortedmulti" not in flat and "recovery sheet" in flat)
+    pg.evaluate("(async () => { __state.fiat = ''; store = await window.__TAURI__.core.invoke('store_get'); vault = store.vaults.find(v => v.name !== 'savings vault'); await sync(); })()"); pg.wait_for_timeout(1200)   # as the Settings checks left it
     pg.evaluate("""() => { window.__peer = false; window.__xfers = {}; __extra = []; }""")
     pg.evaluate("(async () => { store = await window.__TAURI__.core.invoke('store_get'); vault = store.vaults[0]; show('home'); })()"); pg.wait_for_timeout(600)
 
