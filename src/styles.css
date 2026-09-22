@@ -595,3 +595,7 @@ details.card.quiet > *:not(summary){margin-top:12px}
 /* the key tiles on Sign are choices: which key signs next */
 .ckey[data-pick-key]{cursor:pointer} .ckey[data-pick-key]:hover{border-color:var(--line)} .ckey[data-pick-key]:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
 .ckey.chosen{border-color:var(--gold);background:var(--gold-soft)}
+
+/* links between pages: this vault's addresses and coins, and the other end of a transfer between vaults */
+a.tag{text-decoration:none;cursor:pointer} a.tag:hover{text-decoration:underline}
+.tag.peer{border-style:dashed}

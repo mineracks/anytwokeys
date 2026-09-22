@@ -332,11 +332,18 @@ async function renderTx() {
   st.className = 'state ' + (conf ? 'ok' : 'here'); st.querySelector('span').textContent = conf ? `confirmed · ${sats(conf)} block${conf === 1 ? '' : 's'} deep` : 'in the mempool';
   if (!f) { amt.className = 'tx-amt' + (d.net > 0 ? ' in' : ''); amt.innerHTML = `${d.net > 0 ? '+' : d.net < 0 ? '−' : ''}${sats(Math.abs(d.net))} <small>sats</small>`; }
   const book = bookOf(), who = (a) => { const c = a && book.find(c => c.address.toLowerCase() === a.toLowerCase()); return c ? `<span class="tag who">${esc(c.name)}</span>` : ''; };
-  const place = (i) => `<span class="tag ours">${esc(vault.name)} · ${i >= CHANGE ? 'change #' + (i - CHANGE) : 'receive #' + i}</span>`;
-  const outLine = (o) => `<div><span class="mono">${esc(o.address || o.kind)}</span>${o.ours !== null ? place(o.ours) : who(o.address)}<small>${sats(o.sats)} sats</small></div>`;
+  const pos = (i) => i >= CHANGE ? 'change #' + (i - CHANGE) : 'receive #' + i;
+  // this vault's address: a link to its page; an unspent output of ours: a link to the coin; another of this
+  // person's vaults: a link to the same transaction there
+  const place = (i, a) => a ? `<a href="#" class="tag ours" data-go-addr="${esc(a)}" title="Open this address">${esc(vault.name)} · ${pos(i)}</a>` : `<span class="tag ours">${esc(vault.name)} · ${pos(i)}</span>`;
+  const peerTag = (p) => p ? `<a href="#" class="tag peer" data-go-vault-tx="${esc(p[0])}" data-txid="${d.txid}" title="Open this transaction in ${esc(p[0])}">\u21c4 ${esc(p[0])} · ${pos(p[1])}</a>` : '';
+  const coinTag = (o) => o.ours !== null && (vault._coins || []).some(c => c.txid === d.txid && c.vout === o.n) ? `<a href="#" class="tag" data-go-coin="${d.txid}:${o.n}" title="Open this coin">coin \u203a</a>` : '';
+  const outLine = (o) => `<div><span class="mono">${esc(o.address || o.kind)}</span>${o.ours !== null ? place(o.ours, o.address) + coinTag(o) : o.peer ? peerTag(o.peer) : who(o.address)}<small>${sats(o.sats)} sats</small></div>`;
   const oursIn = d.inputs.filter(i => i.ours !== null), foreignOut = d.outputs.filter(o => o.ours === null), oursOut = d.outputs.filter(o => o.ours !== null);
   const signers = [...new Set(oursIn.flatMap(i => i.signers))];
   const rows = [];
+  // between two of this person's vaults: said first, with the way to the other end
+  if ((d.peers || []).length) rows.push(['Transfer', `${d.net < 0 ? 'to' : d.net > 0 ? 'from' : 'with'} ` + d.peers.map(n => `<a href="#" data-go-vault-tx="${esc(n)}" data-txid="${d.txid}">${esc(n)} \u203a</a>`).join(', ') + '<small>the same transaction, seen from the other vault</small>']);
   if (oursIn.length) {            // a spend from this vault
     rows.push(['To', foreignOut.length ? foreignOut.map(outLine).join('') : 'Nowhere outside this vault: the coins moved between its own addresses.']);
     if (oursOut.length) rows.push(['Change', oursOut.map(outLine).join('')]);
@@ -344,7 +351,8 @@ async function renderTx() {
     rows.push(['Signed by', signers.length ? signers.map(esc).join(' and ') + `<small>read from the signatures on the transaction</small>` : 'could not be read from the witness']);
     const rl = realisedRow(name, txid); if (rl) rows.push(['Realised', rl]);
   } else {                        // a deposit
-    rows.push(['From', `outside this vault · ${d.inputs.length} input${d.inputs.length === 1 ? '' : 's'}`]);
+    const fromPeer = [...new Set(d.inputs.filter(i => i.peer).map(i => i.peer[0]))];
+    rows.push(['From', fromPeer.length ? fromPeer.map(n => `<a href="#" class="tag peer" data-go-vault-tx="${esc(n)}" data-txid="${d.txid}">\u21c4 ${esc(n)}</a>`).join(' ') : `outside this vault · ${d.inputs.length} input${d.inputs.length === 1 ? '' : 's'}`]);
     rows.push(['To', oursOut.map(outLine).join('') || '—']);
     rows.push(['Fee', d.fee !== null ? `${sats(d.fee)} sats, paid by the sender` : 'paid by the sender']);
     const facts = txFacts[name], q = facts && facts.rows[txid] && facts.rows[txid].quote;
@@ -357,8 +365,8 @@ async function renderTx() {
     ['Replaceable (RBF)', d.rbf ? 'signalled' : 'not signalled'], ['Block', d.block ? `${sats(d.height)} · ${d.block}` : '—'], ['Position in block', d.position !== null ? String(d.position) : '—'],
     ['Block time', d.time ? new Date(d.time * 1000).toISOString().replace('.000Z', ' UTC').replace('T', ' ') : '—'], ['Inclusion', d.proof === 'proved' ? 'proved: the server\'s merkle path hashes up to the root in that block\'s header' : d.proof]];
   $('#tx-chain-body').innerHTML = `<dl class="chain-kv">${kv.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('')}</dl>`
-    + `<table class="chain-t"><thead><tr><th>Input</th><th>Address</th><th class="r">Sats</th><th>Sequence</th><th>Witness</th></tr></thead><tbody>${d.inputs.map(i => `<tr><td class="mono">${esc(i.outpoint.slice(0, 12))}…:${esc(i.outpoint.split(':')[1])}</td><td class="mono">${esc(i.address || '—')}${i.ours !== null ? place(i.ours) : ''}</td><td class="r">${i.sats !== null ? sats(i.sats) : '—'}</td><td class="mono">${i.sequence.toString(16)}</td><td>${i.witness} item${i.witness === 1 ? '' : 's'}${i.signers.length ? ' · ' + i.signers.map(esc).join(', ') : ''}</td></tr>`).join('')}</tbody></table>`
-    + `<table class="chain-t"><thead><tr><th>Output</th><th>Address</th><th class="r">Sats</th><th>Script</th><th></th></tr></thead><tbody>${d.outputs.map(o => { const unspent = o.ours !== null && (vault._coins || []).some(c => c.txid === d.txid && c.vout === o.n); return `<tr><td>#${o.n}</td><td class="mono">${esc(o.address || '—')}${o.ours !== null ? place(o.ours) : who(o.address)}</td><td class="r">${sats(o.sats)}</td><td>${esc(o.kind)}</td><td class="muted">${o.ours !== null ? (unspent ? 'unspent' : 'spent') : ''}</td></tr>`; }).join('')}</tbody></table>`
+    + `<table class="chain-t"><thead><tr><th>Input</th><th>Address</th><th class="r">Sats</th><th>Sequence</th><th>Witness</th></tr></thead><tbody>${d.inputs.map(i => `<tr><td class="mono">${esc(i.outpoint.slice(0, 12))}…:${esc(i.outpoint.split(':')[1])}</td><td class="mono">${esc(i.address || '—')}${i.ours !== null ? place(i.ours, i.address) : peerTag(i.peer)}</td><td class="r">${i.sats !== null ? sats(i.sats) : '—'}</td><td class="mono">${i.sequence.toString(16)}</td><td>${i.witness} item${i.witness === 1 ? '' : 's'}${i.signers.length ? ' · ' + i.signers.map(esc).join(', ') : ''}</td></tr>`).join('')}</tbody></table>`
+    + `<table class="chain-t"><thead><tr><th>Output</th><th>Address</th><th class="r">Sats</th><th>Script</th><th></th></tr></thead><tbody>${d.outputs.map(o => { const unspent = o.ours !== null && (vault._coins || []).some(c => c.txid === d.txid && c.vout === o.n); return `<tr><td>#${o.n}</td><td class="mono">${esc(o.address || '—')}${o.ours !== null ? place(o.ours, o.address) : o.peer ? peerTag(o.peer) : who(o.address)}</td><td class="r">${sats(o.sats)}</td><td>${esc(o.kind)}</td><td class="muted">${o.ours !== null ? (unspent ? 'unspent' : 'spent') : ''}</td></tr>`; }).join('')}</tbody></table>`
     + `<div class="row" style="justify-content:space-between;margin-bottom:var(--s2)"><div class="label">Raw transaction</div><button class="btn small" id="tx-copyhex">Copy hex</button></div><div class="chain-hex" id="tx-hex">${esc(d.hex)}</div>`;
   $('#tx-copyhex').onclick = () => navigator.clipboard.writeText(d.hex).then(() => toast('Raw transaction copied'));
 }
@@ -746,7 +754,7 @@ async function fillActivity(name, s) {
   let a; try { a = await invoke('vault_activity', { name, history: s.history.map(h => [h.txid, h.height]), ccy }); }
   catch (e) { clearTimeout(fillLater.t); if (vault && vault.name === name) { $$('#activity .when, #activity .amt, #act-all .when, #act-all .amt').forEach(td => { if (td.textContent === '…') td.textContent = '—'; }); $('#activity-note').textContent = 'Dates and amounts could not be fetched: ' + e; $('#activity-note').hidden = false; } return; }
   if (!vault || vault.name !== name) return;
-  txFacts[name] = { rows: Object.fromEntries(a.rows.map(r => [r.txid, r])), now: a.now, ccy: a.ccy };   // kept by vault NAME and txid, never on the vault object, which is replaced on every store re-read
+  txFacts[name] = { rows: Object.fromEntries(a.rows.map(r => [r.txid, r])), now: a.now, ccy: a.ccy, transfers: a.transfers || {} };   // kept by vault NAME and txid, never on the vault object, which is replaced on every store re-read
   if ($('#s-tx').classList.contains('on')) renderTx();
   repaintFacts(txFacts[name]);
   vault._now = a.now ? { q: a.now, ccy: a.ccy } : null; paintBalance();
@@ -808,7 +816,7 @@ document.addEventListener('click', (e) => { const a = e.target.closest('[data-tx
 // One row builder for both, so a transaction reads the same wherever it is seen, and fillActivity fills both tables.
 const HOME_ACT = 10, ACT_PAGE = 60;
 function actRowHtml(h) {
-  return `<td class="when muted">${h.height > 0 ? '…' : 'pending'}</td><td><span class="mono">${h.txid.slice(0, 10)}…${h.txid.slice(-6)}</span>${vault._rotating ? ' <span class="muted">· ' + fmtIndex(h.index) + '</span>' : ''}</td><td>${lblHtml('tx:' + h.txid)}</td><td class="r amt muted">…</td><td class="r ${h.height > 0 ? 'ok' : 'muted'}">${h.height > 0 ? 'confirmed · ' + sats(h.height) : 'unconfirmed'}</td>`;
+  return `<td class="when muted">${h.height > 0 ? '…' : 'pending'}</td><td><span class="mono">${h.txid.slice(0, 10)}…${h.txid.slice(-6)}</span>${vault._rotating ? ' <span class="muted">· ' + fmtIndex(h.index) + '</span>' : ''}</td><td>${lblHtml('tx:' + h.txid)}<span class="xfer" data-xfer="${h.txid}"></span></td><td class="r amt muted">…</td><td class="r ${h.height > 0 ? 'ok' : 'muted'}">${h.height > 0 ? 'confirmed · ' + sats(h.height) : 'unconfirmed'}</td>`;
 }
 function actFill(tb, list) {
   tb.innerHTML = '';
@@ -846,6 +854,10 @@ const fillLater = () => { clearTimeout(fillLater.t); fillLater.t = setTimeout(()
 // the amounts already fetched are put back into whichever rows have just been drawn
 function repaintFacts(facts) {
   if (!facts) return;
+  for (const el of $$('[data-xfer]')) {
+    const peers = (facts.transfers || {})[el.dataset.xfer], r = (facts.rows || {})[el.dataset.xfer];
+    el.innerHTML = peers ? peers.map(n => ` <a href="#" class="tag peer" data-go-vault-tx="${esc(n)}" data-txid="${el.dataset.xfer}" title="A transfer: open it in ${esc(n)}">${r && r.net < 0 ? '\u2192' : r && r.net > 0 ? '\u2190' : '\u21c4'} ${esc(n)}</a>`).join('') : '';
+  }
   for (const [txid, r] of Object.entries(facts.rows || {})) paintFactRow(txid, r, facts);
 }
 function paintFactRow(txid, r, facts) {
@@ -1000,6 +1012,14 @@ async function recPdf(kind, id) {
     toast('Saved ' + path, 5000);
   } catch (e) { if (!/cancelled/.test(String(e))) fail(e); }
 }
+async function goVaultTx(name, txid) {
+  const v = store.vaults.find(x => x.name === name); if (!v) return toast(`${name} is not on this computer any more`);
+  vault = v; rememberVault(v); paintNet();
+  if (!vault._snap) { try { await sync(); } catch {} }
+  if (!txOrder().some(x => x.txid === txid)) { await sync(); }
+  openTx(txid);
+}
+document.addEventListener('click', (e) => { const g = e.target.closest('[data-go-vault-tx]'); if (!g) return; e.preventDefault(); e.stopPropagation(); goVaultTx(g.dataset.goVaultTx, g.dataset.txid); }, true);
 // cross-links on a page: a transaction, an address, a coin — each opens its own page
 document.addEventListener('click', (e) => {
   const t = e.target.closest('[data-go-tx]'), a = e.target.closest('[data-go-addr]'), c = e.target.closest('[data-go-coin]');

@@ -50,7 +50,8 @@ const H = {
     return { txid: a.txid, wtxid: 'ff'.repeat(32), version: 2, locktime: 0, size: 380, vsize: 189, weight: 756, rbf: true, net: spend ? -5190 : 20000, fee: spend ? 190 : 642, fee_rate: spend ? 1.005 : 2.77, height: a.height, tip: 967685,
       block: a.height ? '00000000000000000001' + 'ab'.repeat(22) : null, time: a.height ? 1789648528 : null, proof: a.height ? (window.__badProof ? "the server's proof does NOT lead to that block's root" : 'proved') : 'unconfirmed', position: a.height ? 1757 : null, hex: '0200000001' + 'cd'.repeat(180),
       inputs: spend ? [{ outpoint: '%(t0)s:1', address: 'bc1qvaultaddr', sats: 20000, ours: 0, sequence: 4294967293, witness: 4, signers: ['laptop', 'off-site'] }] : [{ outpoint: 'ee'.repeat(32) + ':0', address: 'bc1psender', sats: 723914, ours: null, sequence: 4294967295, witness: 1, signers: [] }],
-      outputs: spend ? [{ n: 0, address: 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4', sats: 5000, kind: 'P2WPKH', ours: null }, { n: 1, address: 'bc1qvaultchange', sats: 14810, kind: 'P2WSH', ours: 2147483648 }] : [{ n: 0, address: 'bc1pother', sats: 703272, kind: 'P2TR', ours: null }, { n: 1, address: 'bc1qvaultaddr', sats: 20000, kind: 'P2WSH', ours: 0 }] }; },
+      outputs: spend ? [{ n: 0, address: 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4', sats: 5000, kind: 'P2WPKH', ours: null, peer: window.__peer ? ['savings vault', 3] : null }, { n: 1, address: 'bc1qvaultchange', sats: 14810, kind: 'P2WSH', ours: 2147483648 }] : [{ n: 0, address: 'bc1pother', sats: 703272, kind: 'P2TR', ours: null }, { n: 1, address: 'bc1qvaultaddr', sats: 20000, kind: 'P2WSH', ours: 0 }],
+      peers: spend && window.__peer ? ['savings vault'] : [] }; },
   store_get: store, node_status: (a) => { (window.__nodeAsked = window.__nodeAsked || []).push(a.network); if (window.__nodeDown) throw 'electrum ssl://electrum.mineracks.com:50002: connection refused'; return { electrum: 'ssl://electrum.mineracks.com:50002', height: 967686, ms: 84, ours: true }; },
   contact_save: (a) => { if (!/^(bc1|tb1)/.test(a.address)) throw 'that is not a Bitcoin address'; const c = __contacts.find(c => c.address === a.address); if (c) c.name = a.name; else __contacts.push({ name: a.name, address: a.address, network: a.network, added: 1, used: 0, last_used: 0 }); return store(); },
   contact_delete: (a) => { __contacts = __contacts.filter(c => c.address !== a.address); return store(); }, contact_used: (a) => { __contacts.find(c => c.address === a.address).used += 1; return store(); },
@@ -67,7 +68,7 @@ const H = {
   prices_series: (a) => { window.__seriesAsked = (window.__seriesAsked || []).concat([a.from + '..' + a.to]);
     const out = []; for (let t = Date.parse(a.from + 'T00:00:00Z'); t <= Date.parse(a.to + 'T00:00:00Z'); t += 86400000) { const d = new Date(t).toISOString().slice(0, 10); out.push([d, window.__holeDay === d ? null : { price: 110000, basis: 'daily ' + d }]); }
     return { every: 1, points: out }; },
-  vault_activity: (a) => { __state.asked = a; if (__state.fail) throw 'electrum: connection refused'; const q = (p, b) => a.ccy ? { price: p, basis: b } : null; return { ccy: a.ccy, note: null, now: q(114209.6, 'daily 2026-09-19'), rows: [
+  vault_activity: (a) => { __state.asked = a; if (__state.fail) throw 'electrum: connection refused'; const q = (p, b) => a.ccy ? { price: p, basis: b } : null; return { ccy: a.ccy, note: null, transfers: window.__xfers || {}, now: q(114209.6, 'daily 2026-09-19'), rows: [
     // one coin spent down: 20,000 in; spent, 14,810 change; spent, 9,430 change; and 1,000 not yet in a block
     { txid: '%(t0)s', time: 1789627614, net: 20000, fee: null, quote: q(107389.64, 'hourly 2026-09-17 06:00 UTC'), ins: [], outs: [[0, 20000]] },
     { txid: '%(t1)s', time: 1789648528, net: -5190, fee: 190, quote: q(107768.03, 'hourly 2026-09-17 12:00 UTC'), ins: [['%(t0)s:0', 20000]], outs: [[1, 14810]] },
@@ -290,7 +291,10 @@ with sync_playwright() as p:
     pg.locator("#activity tr").nth(2).click(); pg.wait_for_timeout(600)
     check("coming back, the attachments are still on that transaction (two files and the photo from the camera)", pg.locator("#tx-files .att").count() == 3)
     pg.evaluate("window.__badProof = true"); pg.click("#crumbs [data-crumb=home]"); pg.wait_for_timeout(500)
-    check("the breadcrumb walks back to Home, where the row now shows its label", pg.locator("#s-home.on").count() == 1 and "laptop stand" in pg.inner_text("#activity"))
+    check("the vault's crumb walks back to its Home, where the row now shows its label", pg.locator("#s-home.on").count() == 1 and "laptop stand" in pg.inner_text("#activity"))
+    pg.locator("#activity tr").nth(2).click(); pg.wait_for_timeout(500); pg.click("#crumbs [data-crumb=activity]"); pg.wait_for_timeout(500)
+    check("and the Activity crumb walks back to Activity", pg.locator("#s-activity.on").count() == 1 and "laptop stand" in pg.inner_text("#act-all"))
+    pg.evaluate("show('home')"); pg.wait_for_timeout(300)
     pg.locator("#activity tr").nth(3).click(); pg.wait_for_timeout(600)
     facts = pg.inner_text("#tx-facts")
     check("a deposit reads the other way round, and a proof that does not check out is said in red", "+20,000" in facts and "outside this vault" in facts and "receive #0" in facts and "paid by the sender" in facts and "does NOT lead" in pg.inner_text("#tx-proof") and "warn" in pg.get_attribute("#tx-proof", "class"), facts[:200])
@@ -728,6 +732,19 @@ with sync_playwright() as p:
     check("choosing EUR asks for EUR and draws euros", pg.evaluate("__state.asked.ccy") == "EUR" and ("€" in pg.inner_text("#activity") or "EUR" in pg.inner_text("#activity")), pg.inner_text("#activity")[:120])
     pg.evaluate("show('settings')"); pg.select_option("#fiat-pick", ""); pg.wait_for_timeout(300); pg.evaluate("show('home')"); pg.wait_for_timeout(600)
     check("None: no money anywhere, sats lead again", pg.evaluate("__state.asked.ccy") == "" and "EUR" not in pg.inner_text("#s-home") and "$" not in pg.inner_text("#s-home") and "9,430" in pg.inner_text("#balance"))
+    # ---- everything cross-links; a transfer between two of this person's vaults is said, and leads to the other end ----
+    pg.evaluate("""() => { __extra = [Object.assign({}, V, { name: 'savings vault' })]; window.__peer = true; window.__xfers = { '%s': ['savings vault'] }; }""" % T[1])
+    pg.evaluate("(async () => { store = await window.__TAURI__.core.invoke('store_get'); vault = store.vaults[0]; vault._syncedAt = 0; show('home'); })()"); pg.wait_for_timeout(900)
+    check("an activity row of a transfer says so, with the other vault's name", "savings vault" in pg.inner_text("#activity") and pg.locator("#activity [data-go-vault-tx='savings vault']").count() == 1, pg.inner_text("#activity")[:300])
+    pg.evaluate("openTx('%s')" % T[1]); pg.wait_for_timeout(700)
+    dl = pg.inner_text("#tx-dl")
+    check("the transaction says it is a transfer to the other vault, as a link", "Transfer" in dl.replace("TRANSFER", "Transfer") and pg.locator("#tx-dl a[data-go-vault-tx='savings vault']").count() >= 1, dl[:200])
+    check("this vault's own address on it is a link to that address's page", pg.locator("#tx-dl a[data-go-addr='bc1qvaultchange']").count() == 1)
+    pg.locator("#tx-dl a[data-go-vault-tx='savings vault']").first.click(); pg.wait_for_timeout(900)
+    check("following it opens the same transaction in the other vault, lit in the menu", pg.evaluate("vault.name") == "savings vault" and pg.locator("#s-tx.on").count() == 1 and pg.evaluate("txView.txid") == "%s" % T[1] and pg.locator("#vault-tabs .nav.on").inner_text().startswith("savings vault") and "savings vault" in pg.inner_text("#crumbs"), pg.inner_text("#crumbs"))
+    pg.evaluate("""() => { window.__peer = false; window.__xfers = {}; __extra = []; }""")
+    pg.evaluate("(async () => { store = await window.__TAURI__.core.invoke('store_get'); vault = store.vaults[0]; show('home'); })()"); pg.wait_for_timeout(600)
+
     # ---- performance: what is known is shown, not fetched again ----
     n = lambda c: pg.evaluate(f"(window.__n || {{}})['{c}'] || 0")
     pg.evaluate("show('home')"); pg.wait_for_timeout(600)          # a sync just happened (or happens now)

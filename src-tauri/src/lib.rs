@@ -107,7 +107,14 @@ async fn vault_activity(name: String, history: Vec<(String, i32)>, ccy: String) 
         let prices = if s.settings.custom { s.settings.prices.clone() } else { activity::PRICES.to_string() };
         // `ccy` is what the screen resolved the setting to ("auto" is worked out from the device there); empty = no fiat
         if !(ccy.is_empty() || (ccy.len() == 3 && ccy.chars().all(|c| c.is_ascii_uppercase()))) { return Err("the currency is a three-letter code".into()); }
-        activity::build(&v, &servers, &history, &ccy, &prices)
+        let mut a = activity::build(&v, &servers, &history, &ccy, &prices)?;
+        // a transaction this person's other vault also holds is a transfer between the two (the watcher records every
+        // vault's transactions each minute, so this needs no request of its own)
+        for (txid, _) in &history {
+            let peers: Vec<String> = s.seen.iter().filter(|(n, seen)| *n != &v.name && seen.txs.contains_key(txid) && s.vaults.iter().any(|o| &o.name == *n && o.network == v.network)).map(|(n, _)| n.clone()).collect();
+            if !peers.is_empty() { a.transfers.insert(txid.clone(), peers); }
+        }
+        Ok(a)
     }).await
 }
 
@@ -170,8 +177,31 @@ async fn tx_detail(name: String, txid: String, height: i32) -> R<activity::Detai
     block(move || {
         let s = wallet::load()?;
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
-        activity::detail(&v, &wallet::servers_for(&s, &v.network), &txid, height)
+        let mut d = activity::detail(&v, &wallet::servers_for(&s, &v.network), &txid, height)?;
+        mark_peers(&s, &v, &mut d);
+        Ok(d)
     }).await
+}
+
+/// This person's OTHER vaults on the same network, by name: an address of theirs → (vault, position there).
+/// Used to say that a transaction is a transfer between two of their vaults, and to link each end to the other.
+fn peer_tables(s: &wallet::Store, v: &Vault) -> Vec<(String, Box<dyn Fn(&bitcoin::ScriptBuf) -> Option<u32>>)> {
+    s.vaults.iter().filter(|o| o.name != v.name && o.network == v.network)
+        .filter_map(|o| wallet::ours_table(o).ok().map(|f| (o.name.clone(), Box::new(f) as Box<dyn Fn(&bitcoin::ScriptBuf) -> Option<u32>>))).collect()
+}
+fn mark_peers(s: &wallet::Store, v: &Vault, d: &mut activity::Detail) {
+    use std::str::FromStr;
+    let tables = peer_tables(s, v);
+    let owner = |a: &Option<String>| -> Option<(String, u32)> {
+        let spk = bitcoin::Address::from_str(a.as_deref()?).ok()?.assume_checked().script_pubkey();
+        tables.iter().find_map(|(n, f)| f(&spk).map(|i| (n.clone(), i)))
+    };
+    for i in d.inputs.iter_mut().filter(|i| i.ours.is_none()) { i.peer = owner(&i.address); }
+    for o in d.outputs.iter_mut().filter(|o| o.ours.is_none()) { o.peer = owner(&o.address); }
+    let mut peers: Vec<String> = d.inputs.iter().filter_map(|i| i.peer.as_ref().map(|p| p.0.clone())).chain(d.outputs.iter().filter_map(|o| o.peer.as_ref().map(|p| p.0.clone()))).collect();
+    // and any other vault whose own record already holds this transaction
+    for (n, seen) in &s.seen { if n != &v.name && seen.txs.contains_key(&d.txid) && s.vaults.iter().any(|o| &o.name == n && o.network == v.network) { peers.push(n.clone()); } }
+    peers.sort(); peers.dedup(); d.peers = peers;
 }
 
 #[tauri::command]
@@ -2231,5 +2261,33 @@ mod record_sheet_tests {
         for want in ["(COST BASIS)", "($10.00)", "(WORTH NOW)", "($12.00)", "(Worth)", "($13)", "(change from the car)", "RG"] { assert!(text.contains(want), "{want}"); }
         // the worth line is drawn as a path: a move and at least two lines
         assert!(text.contains(" m ") && text.matches(" l ").count() >= 3);
+    }
+}
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::*;
+    /// A payment from one of this person's vaults to another is recognised from either end: the output is marked as
+    /// the other vault's (with its address position), and the transaction names that vault as its other end.
+    #[test]
+    fn a_payment_into_another_of_this_persons_vaults_is_marked_as_a_transfer() {
+        let f: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!("{}/tests/fixtures/ext-descriptors.json", env!("CARGO_MANIFEST_DIR"))).unwrap()).unwrap();
+        let mk = |k: &str, n: &str| { let i = wallet::ext_parse(f[k]["descriptor"].as_str().unwrap()).unwrap().unwrap(); ext_vault(n.into(), &i, &[]) };
+        let (a, b) = (mk("sortedmulti", "spending vault"), mk("multi", "savings vault"));
+        let mut s = wallet::Store::default(); s.vaults = vec![a.clone(), b.clone()];
+        let to_b = f["multi"]["recv"][0].as_str().unwrap();
+        let mut d: activity::Detail = serde_json::from_value(serde_json::json!({ "txid": "ab".repeat(32), "wtxid": "ab".repeat(32), "version": 2, "locktime": 0, "size": 1, "vsize": 1, "weight": 4, "rbf": false,
+            "net": -30000, "fee": 200, "fee_rate": 1.0, "height": 1, "tip": 1, "block": null, "time": null, "proof": "unconfirmed", "position": null, "hex": "",
+            "inputs": [{ "outpoint": "cd".repeat(32) + ":0", "address": f["sortedmulti"]["recv"][0], "sats": 30200, "ours": 0, "sequence": 0, "witness": 4, "signers": [] }],
+            "outputs": [{ "n": 0, "address": to_b, "sats": 30000, "kind": "P2WSH", "ours": null }, { "n": 1, "address": "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", "sats": 1, "kind": "P2WPKH", "ours": null }] })).unwrap();
+        mark_peers(&s, &a, &mut d);
+        assert_eq!(d.outputs[0].peer, Some(("savings vault".to_string(), 0)), "the other vault's address, at its position");
+        assert_eq!(d.outputs[1].peer, None, "a stranger's address is nobody's vault");
+        assert_eq!(d.peers, vec!["savings vault".to_string()]);
+        // a vault on another network is never a transfer partner, even with the same keys
+        let mut c = b.clone(); c.name = "signet twin".into(); c.network = "signet".into(); s.vaults.push(c);
+        let mut d2 = d; d2.peers.clear(); for o in d2.outputs.iter_mut() { o.peer = None; }
+        mark_peers(&s, &a, &mut d2);
+        assert_eq!(d2.peers, vec!["savings vault".to_string()]);
     }
 }

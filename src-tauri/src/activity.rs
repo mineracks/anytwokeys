@@ -24,7 +24,9 @@ pub struct Row { pub txid: String, pub time: Option<u32>, pub net: Option<i64>, 
     /// day it left — so a gain is measured against the coins actually spent, which the chain itself records.
     #[serde(default)] pub ins: Vec<(String, u64)>, #[serde(default)] pub outs: Vec<(u32, u64)> }
 #[derive(Debug, Serialize)]
-pub struct Activity { pub ccy: String, pub rows: Vec<Row>, pub now: Option<Quote>, pub note: Option<String> }
+pub struct Activity { pub ccy: String, pub rows: Vec<Row>, pub now: Option<Quote>, pub note: Option<String>,
+    /// txid → this person's other vaults the same transaction belongs to (transfers between vaults)
+    #[serde(default)] pub transfers: HashMap<String, Vec<String>> }
 
 fn cache_path() -> std::path::PathBuf { wallet::store_path().with_file_name("cache.json") }
 // a cache that cannot be read is an empty cache: everything in it can be asked for again
@@ -154,7 +156,7 @@ pub fn build(v: &wallet::Vault, servers: &Servers, history: &[(String, i32)], cc
     let note = if v.network != "mainnet" { Some("Test coins have no price.".into()) } else if !fiat { None }
         else if pending > 0 { Some(format!("Fetching {pending} past price{} in the background; they fill in as they arrive, and are kept.", if pending == 1 { "" } else { "s" })) }
         else if now.is_none() { Some("Today's price could not be fetched; values are left blank rather than guessed.".into()) } else { None };
-    Ok(Activity { ccy: ccy.to_string(), rows, now, note })
+    Ok(Activity { ccy: ccy.to_string(), rows, now, note, transfers: HashMap::new() })
 }
 
 /// The price at one moment, from the cache when it is there. Used by a sheet that prints one transaction long after
@@ -219,14 +221,20 @@ pub fn read_series(body: &serde_json::Value, ccy: &str) -> Vec<(String, Option<Q
 
 // ---------- one transaction, in full ----------
 #[derive(Debug, Serialize, serde::Deserialize)]
-pub struct TxInput { pub outpoint: String, pub address: Option<String>, pub sats: Option<u64>, pub ours: Option<u32>, pub sequence: u32, pub witness: usize, pub signers: Vec<String> }
+pub struct TxInput { pub outpoint: String, pub address: Option<String>, pub sats: Option<u64>, pub ours: Option<u32>, pub sequence: u32, pub witness: usize, pub signers: Vec<String>,
+    /// another of this person's vaults this input's coin was, and its address position there
+    #[serde(default)] pub peer: Option<(String, u32)> }
 #[derive(Debug, Serialize, serde::Deserialize)]
-pub struct TxOutput { pub n: usize, pub address: Option<String>, pub sats: u64, pub kind: String, pub ours: Option<u32> }
+pub struct TxOutput { pub n: usize, pub address: Option<String>, pub sats: u64, pub kind: String, pub ours: Option<u32>,
+    /// another of this person's vaults this output pays, and its address position there
+    #[serde(default)] pub peer: Option<(String, u32)> }
 #[derive(Debug, Serialize, serde::Deserialize)]
 pub struct Detail { pub txid: String, pub wtxid: String, pub version: i32, pub locktime: u32, pub size: usize, pub vsize: usize, pub weight: u64, pub rbf: bool,
     pub net: i64, pub fee: Option<u64>, pub fee_rate: Option<f64>, pub height: i32, pub tip: u32, pub block: Option<String>, pub time: Option<u32>,
     /// "proved" — the server's merkle path hashes up to the root in the block header; "unconfirmed"; or why it could not be shown
-    pub proof: String, pub position: Option<usize>, pub inputs: Vec<TxInput>, pub outputs: Vec<TxOutput>, pub hex: String }
+    pub proof: String, pub position: Option<usize>, pub inputs: Vec<TxInput>, pub outputs: Vec<TxOutput>, pub hex: String,
+    /// this person's other vaults the same transaction belongs to: a transfer between them
+    #[serde(default)] pub peers: Vec<String> }
 
 fn kind_of(spk: &bitcoin::ScriptBuf) -> &'static str {
     if spk.is_p2wpkh() { "P2WPKH" } else if spk.is_p2wsh() { "P2WSH" } else if spk.is_p2tr() { "P2TR" } else if spk.is_p2pkh() { "P2PKH" } else if spk.is_p2sh() { "P2SH" } else if spk.is_op_return() { "OP_RETURN" } else { "other" }
@@ -279,9 +287,9 @@ pub fn detail(v: &wallet::Vault, servers: &Servers, txid: &str, height: i32) -> 
         if let Some(o) = &prev { total_in += o.value.to_sat(); }
         let signers = match (&prev, mine) { (Some(o), Some(index)) => signers_of(v, &tx, i, index, o.value), _ => vec![] };
         inputs.push(TxInput { outpoint: inp.previous_output.to_string(), address: prev.as_ref().and_then(|o| addr(&o.script_pubkey)), sats: prev.as_ref().map(|o| o.value.to_sat()),
-            ours: mine, sequence: inp.sequence.0, witness: inp.witness.len(), signers });
+            ours: mine, sequence: inp.sequence.0, witness: inp.witness.len(), signers, peer: None });
     }
-    let outputs: Vec<TxOutput> = tx.output.iter().enumerate().map(|(n, o)| TxOutput { n, address: addr(&o.script_pubkey), sats: o.value.to_sat(), kind: kind_of(&o.script_pubkey).into(), ours: ours(&o.script_pubkey) }).collect();
+    let outputs: Vec<TxOutput> = tx.output.iter().enumerate().map(|(n, o)| TxOutput { n, address: addr(&o.script_pubkey), sats: o.value.to_sat(), kind: kind_of(&o.script_pubkey).into(), ours: ours(&o.script_pubkey), peer: None }).collect();
     let total_out: u64 = outputs.iter().map(|o| o.sats).sum();
     let net = outputs.iter().filter(|o| o.ours.is_some()).map(|o| o.sats as i64).sum::<i64>() - inputs.iter().filter(|i| i.ours.is_some()).map(|i| i.sats.unwrap_or(0) as i64).sum::<i64>();
     let fee = if complete { Some(total_in.saturating_sub(total_out)) } else { None };
@@ -298,7 +306,7 @@ pub fn detail(v: &wallet::Vault, servers: &Servers, txid: &str, height: i32) -> 
         };
     }
     Ok(Detail { txid: id.to_string(), wtxid: tx.compute_wtxid().to_string(), version: tx.version.0, locktime: tx.lock_time.to_consensus_u32(), size: tx.total_size(), vsize, weight,
-        rbf: tx.input.iter().any(|i| i.sequence.is_rbf()), net, fee, fee_rate: fee.map(|f| f as f64 / vsize.max(1) as f64), height, tip, block, time, proof, position, inputs, outputs, hex: serialize_hex(&tx) })
+        rbf: tx.input.iter().any(|i| i.sequence.is_rbf()), net, fee, fee_rate: fee.map(|f| f as f64 / vsize.max(1) as f64), height, tip, block, time, proof, position, inputs, outputs, hex: serialize_hex(&tx), peers: vec![] })
 }
 
 /// What the operating system says about where this person is: the Region setting, which does not move when they
