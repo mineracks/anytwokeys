@@ -1396,8 +1396,8 @@ const openScan = async (deviceId) => {
     cam2Stream = await camOpen(deviceId);
     $('#cam2').srcObject = cam2Stream;
     camChooser($('#scan-pick'), cam2Stream, openScan);
-    const cv = document.createElement('canvas'); const ctx = cv.getContext('2d', { willReadFrequently: true });
-    cam2Timer = setInterval(() => { const v = $('#cam2'); if (!v.videoWidth) return; cv.width = v.videoWidth; cv.height = v.videoHeight; ctx.drawImage(v, 0, 0); const img = ctx.getImageData(0, 0, cv.width, cv.height); const code = jsQR(img.data, cv.width, cv.height); if (code && code.data && /^(bitcoin:|bc1|tb1|[13mn2])/i.test(code.data.trim())) { fillDestination(code.data); closeScan(); } }, 350);
+    const reader = makeQrReader($('#cam2-note'));
+    cam2Timer = setInterval(() => { const v = $('#cam2'); if (!v.videoWidth) return; const data = reader.read(v); if (data && /^(bitcoin:|bc1|tb1|[13mn2])/i.test(data.trim())) { fillDestination(data); closeScan(); } }, 350);
   } catch { $('#cam2-note').textContent = 'No camera available on this computer. Paste the address instead.'; }
 };
 $('#scan-to').onclick = () => openScan('');
@@ -1464,15 +1464,28 @@ const keyGlyph = (pub) => isNano(pub)
   ? '<svg viewBox="0 0 44 84" width="34" height="65" aria-hidden="true"><circle class="khalo" cx="22" cy="65" r="15"/><rect class="kplug" x="13" y="38" width="18" height="14" rx="2"/><rect class="kbody" x="7" y="50" width="30" height="30" rx="7"/><circle class="kring" cx="22" cy="65" r="7"/><circle class="kdot" cx="22" cy="65" r="2"/></svg>'
   : '<svg viewBox="0 0 44 84" width="34" height="65" aria-hidden="true"><circle class="khalo" cx="22" cy="40" r="17"/><rect class="kplug" x="13" y="2" width="18" height="14" rx="2"/><rect class="kbody" x="5" y="14" width="34" height="66" rx="8"/><circle class="kring" cx="22" cy="40" r="9"/><circle class="kdot" cx="22" cy="40" r="2.5"/></svg>';
 // the ring: one arc per signature the vault needs, filled as they arrive; the centre turns green when it can be sent
-function drawRing(have, need, ready) {
-  const R = 44, C = 2 * Math.PI * R, gap = need > 1 ? 7 : 0, seg = C / need - gap;
+/// The ceremony's ring: `need` segments round a centre, `have` of them filled. Signing draws it, and so does every
+/// scanner (plates, shares, animated codes) — one picture for "this many of that many are in". Past 24 segments it
+/// is one arc that fills, since a long animated code has too many pieces to show each.
+function ringMarkup(have, need, centre) {
+  const R = 44, C = 2 * Math.PI * R;
   let g = `<circle class="halo" cx="60" cy="60" r="56"/>`;
-  for (let i = 0; i < need; i++) {
-    const rot = -90 + i * 360 / need + (gap / 2) / C * 360;
-    g += `<circle class="track" cx="60" cy="60" r="${R}" stroke-dasharray="${seg} ${C - seg}" transform="rotate(${rot} 60 60)"/>`;
-    g += `<circle class="arc" cx="60" cy="60" r="${R}" stroke-dasharray="${seg} ${C - seg}" stroke-dashoffset="${i < have ? 0 : seg}" stroke-linecap="butt" transform="rotate(${rot} 60 60)" style="${i < have ? '' : 'opacity:0'}"/>`;
+  if (need > 24) {
+    const f = Math.max(0, Math.min(1, have / need)) * C;
+    g += `<circle class="track" cx="60" cy="60" r="${R}"/><circle class="arc" cx="60" cy="60" r="${R}" stroke-dasharray="${f} ${C - f}" transform="rotate(-90 60 60)"/>`;
+  } else {
+    const gap = need > 1 ? 7 : 0, seg = C / need - gap;
+    for (let i = 0; i < need; i++) {
+      const rot = -90 + i * 360 / need + (gap / 2) / C * 360;
+      g += `<circle class="track" cx="60" cy="60" r="${R}" stroke-dasharray="${seg} ${C - seg}" transform="rotate(${rot} 60 60)"/>`;
+      g += `<circle class="arc" cx="60" cy="60" r="${R}" stroke-dasharray="${seg} ${C - seg}" stroke-dashoffset="${i < have ? 0 : seg}" stroke-linecap="butt" transform="rotate(${rot} 60 60)" style="${i < have ? '' : 'opacity:0'}"/>`;
+    }
   }
-  g += `<circle class="dot" cx="60" cy="60" r="11"/>`;
+  return g + (centre || `<circle class="dot" cx="60" cy="60" r="11"/>`);
+}
+const TICK = '<path class="tick" d="M42 61l12 12 25-27"/>';
+function drawRing(have, need, ready) {
+  const g = ringMarkup(have, need);
   const el = $('#cer-ring'), sig = `${have}/${need}/${ready}`;
   if (drawRing.sig === sig && el.firstChild) return;   // the 2 s card poll must not restart the drawing
   const was = drawRing.need === need ? (drawRing.have || 0) : have; drawRing.sig = sig; drawRing.have = have; drawRing.need = need;
@@ -1651,13 +1664,12 @@ async function pscanOpen(deviceId) {
   const note = $('#pscan-note');
   try { pscan.stream = await camOpen(deviceId); $('#cam4').srcObject = pscan.stream; camChooser($('#pscan-pick'), pscan.stream, pscanOpen); }
   catch { note.textContent = 'No camera available on this computer. Save the PSBT and open the signed file instead.'; return; }
-  const cv = document.createElement('canvas'), ctx = cv.getContext('2d', { willReadFrequently: true });
+  const reader = makeQrReader(note);
   let busy = false;
   pscan.timer = setInterval(async () => {
     const v = $('#cam4'); if (busy || !v || !v.videoWidth) return;
-    cv.width = v.videoWidth; cv.height = v.videoHeight; ctx.drawImage(v, 0, 0);
-    const code = jsQR(ctx.getImageData(0, 0, cv.width, cv.height).data, cv.width, cv.height); if (!code || !code.data) return;
-    const t = code.data.trim(), multi = /^ur:/i.test(t) || t.startsWith('B$');
+    const data = reader.read(v); if (!data) return;
+    const t = data.trim(), multi = /^ur:/i.test(t) || t.startsWith('B$');
     if (multi) { const n = pscan.parts.size; pscan.parts.add(/^ur:/i.test(t) ? t.toLowerCase() : t); if (pscan.parts.size === n) return; }
     busy = true;
     try {
@@ -2086,21 +2098,21 @@ function devShow(id) {
 }
 function devSay(e) { $('#dev-got').innerHTML = `<div class="warnbox">${esc(String(e && e.message || e))}</div>`; }
 async function devScan(deviceId) {
+  if (typeof deviceId !== 'string') { scanReset($('#dev-cam-note')); devSt.partsSeen = 0; }
   const parts = devSt.parts; devStop(); if (typeof deviceId === 'string') devSt.parts = parts;   // switching camera keeps the parts already read
   const note = $('#dev-cam-note'); note.hidden = false; $('#dev-cam').hidden = false;
   try { devSt.stream = await camOpen(typeof deviceId === 'string' ? deviceId : undefined); $('#cam3').srcObject = devSt.stream; camChooser($('#dev-pick-cam'), devSt.stream, devScan); } catch (e) { note.textContent = 'No camera available. Open its file, or paste the key instead.'; $('#dev-cam').hidden = true; return; }
   note.textContent = 'Hold the device’s code in the frame.';
-  const cv = document.createElement('canvas'), ctx = cv.getContext('2d', { willReadFrequently: true });
+  const reader = makeQrReader(note);
   let busy = false;
   devSt.timer = setInterval(async () => {
     const v = $('#cam3'); if (busy || !v || !v.videoWidth) return;
-    cv.width = v.videoWidth; cv.height = v.videoHeight; ctx.drawImage(v, 0, 0);
-    const code = jsQR(ctx.getImageData(0, 0, cv.width, cv.height).data, cv.width, cv.height); if (!code || !code.data) return;
-    const t = code.data.trim();
+    const data = reader.read(v); if (!data) return;
+    const t = data.trim();
     // an animated UR arrives a part at a time, in any order; a plain code is the whole thing
-    if (/^ur:/i.test(t)) { const before = devSt.parts.size; devSt.parts.add(t.toLowerCase()); if (devSt.parts.size === before) return; }
+    if (/^ur:/i.test(t)) { const before = devSt.parts.size; devSt.parts.add(t.toLowerCase()); if (devSt.parts.size === before) return; devSt.partsSeen = devSt.parts.size; }
     busy = true;
-    try { const r = await invoke('device_key_read', { text: /^ur:/i.test(t) ? [...devSt.parts].join(' ') : t }); devStop(); $('#dev-cam').hidden = true; note.textContent = 'Read.'; scanBar(note, null); devGot(r); }
+    try { const r = await invoke('device_key_read', { text: /^ur:/i.test(t) ? [...devSt.parts].join(' ') : t }); devStop(); note.textContent = 'Read its key. Check it below.'; scanDone(note, Math.max(1, devSt.partsSeen || 1), 'Read its key'); devGot(r); }
     catch (e) { if (!scanShow(note, e)) { note.textContent = String(e); scanBar(note, null); } }
     busy = false;
   }, 250);
@@ -2109,23 +2121,43 @@ async function devScan(deviceId) {
 /// is a MIXTURE numbered above the total ("7-4"), so counting frames against that total reads "7 of 4" and means
 /// nothing. What the decoder has recovered (UR), or which parts it holds (BBQr, which does cycle), can be trusted.
 function scanProgress(e) {
-  const m = /(\d+) of (\d+) (pieces recovered|\))/.exec(String(e)) || /missing \((\d+) of (\d+)\)/.exec(String(e));
+  const m = /(\d+) of (\d+) (pieces recovered|shares read|\))/.exec(String(e)) || /missing \((\d+) of (\d+)\)/.exec(String(e));
   if (!/missing/i.test(String(e))) return null;
   if (!m) return { have: 0, of: 0, text: 'Reading an animated code. Keep it in the frame.' };
   const have = +m[1], of = +m[2], left = of - have;
-  return { have, of, text: `${have} of ${of} pieces read — ${left} more to go. Keep it in the frame, or show the next part.` };
+  const shares = m[3] === 'shares read';
+  if (shares) return { have, of, shares, text: `${have} of ${of} shares read — put the next share in front of the camera (any order).` };
+  return { have, of, shares, text: `${have} of ${of} pieces read — ${left} more to go. Keep it in the frame, or show the next part.` };
 }
-/// A bar of `of` segments, `have` of them filled, drawn just above the scanner's note. A code in a handful of parts
-/// (one per metal plate, say) shows each part as its own segment; a long animated one, as one bar that fills.
+/// Progress drawn ON the camera: the ceremony's ring in its corner, a segment per plate, share or piece, and a big
+/// tick each time one more is read — so the moment a plate registers is unmissable. `p` null clears it.
 function scanBar(note, p) {
-  let bar = note.previousElementSibling && note.previousElementSibling.classList.contains('sbar') ? note.previousElementSibling : null;
-  if (!p || !p.of) { if (bar) bar.remove(); return; }
-  if (!bar) { bar = document.createElement('div'); bar.className = 'sbar'; bar.setAttribute('role', 'progressbar'); note.parentNode.insertBefore(bar, note); }
-  bar.setAttribute('aria-valuemin', '0'); bar.setAttribute('aria-valuemax', String(p.of)); bar.setAttribute('aria-valuenow', String(p.have));
-  bar.setAttribute('aria-label', `${p.have} of ${p.of} pieces read`);
-  bar.classList.toggle('long', p.of > 24);
-  bar.innerHTML = p.of > 24 ? `<i class="fill" style="width:${Math.round(100 * p.have / p.of)}%"></i>` : Array.from({ length: p.of }, (_, i) => `<i class="${i < p.have ? 'on' : ''}"></i>`).join('');
+  const cam = note.parentElement && note.parentElement.querySelector('.cam'); if (!cam) return;
+  let st = cam.querySelector('.scanstate');
+  if (!p || !p.of) { if (st && !cam.classList.contains('done')) st.remove(); return; }
+  if (!st) { st = document.createElement('div'); st.className = 'scanstate'; st.setAttribute('role', 'status'); st.innerHTML = '<svg class="ring corner" viewBox="0 0 120 120" aria-hidden="true"></svg><div class="flash" hidden><svg class="ring big" viewBox="0 0 120 120" aria-hidden="true"></svg><div class="flash-text"></div></div>'; cam.appendChild(st); }
+  const word = p.shares ? 'share' : 'piece', was = +(st.dataset.have || 0);
+  st.dataset.have = p.have; st.setAttribute('aria-label', `${p.have} of ${p.of} ${word}s read`);
+  st.querySelector('.corner').innerHTML = ringMarkup(p.have, p.of, `<text x="60" y="68" text-anchor="middle" class="count">${p.have}/${p.of}</text>`);
+  if (p.have > was) {
+    const f = st.querySelector('.flash');
+    f.querySelector('.big').innerHTML = ringMarkup(p.have, p.of, TICK);
+    f.querySelector('.flash-text').textContent = `${p.shares ? 'Share' : 'Part'} read · ${p.have} of ${p.of}`;
+    f.hidden = false; f.classList.remove('go'); void f.offsetWidth; f.classList.add('go');
+    clearTimeout(f._t); f._t = setTimeout(() => { f.hidden = true; }, 1600);
+  }
 }
+/// Everything is in: the camera stops, and in its place the full ring with a tick — never a black box.
+function scanDone(note, of, what) {
+  const cam = note.parentElement && note.parentElement.querySelector('.cam'); if (!cam) return;
+  cam.classList.add('done');
+  let st = cam.querySelector('.scanstate'); if (!st) { st = document.createElement('div'); st.className = 'scanstate'; st.setAttribute('role', 'status'); cam.appendChild(st); }
+  st.innerHTML = `<div class="complete"><svg class="ring big ready" viewBox="0 0 120 120" aria-hidden="true">${ringMarkup(of || 1, of || 1, TICK)}</svg><div class="flash-text">${esc(what)}</div><button class="btn small again" type="button">Scan another</button></div>`;
+  st.querySelector('.again').onclick = () => { scanReset(note); note.textContent = 'Hold the code in the frame.'; if (st.closest('#tab-scan')) startCam(); else if (st.closest('#dev-one')) devScan(); };
+  st.setAttribute('aria-label', what);
+}
+/// A fresh scan: the camera shows again, with nothing left over from the last one.
+function scanReset(note) { const cam = note && note.parentElement && note.parentElement.querySelector('.cam'); if (!cam) return; cam.classList.remove('done'); const st = cam.querySelector('.scanstate'); if (st) st.remove(); }
 function scanShow(note, e) { const p = scanProgress(e); if (!p) return false; note.textContent = p.text; scanBar(note, p); return true; }
 /// A device's export read: choose its multisig key, check it belongs in THIS vault, and let it be named.
 function devGot(r) {
@@ -2261,22 +2293,25 @@ function restoreTab(name) { restoreTab.now = name; $$('.tabs div').forEach(x => 
 $$('.tabs div').forEach(t => t.onclick = () => restoreTab(t.dataset.tab));
 async function startCam(deviceId) {
   if (camStream && !deviceId) return;
+  if (!deviceId) scanReset($('#cam-note'));   // a fresh scan starts clean; switching camera keeps what is read
   if (camTimer) { clearInterval(camTimer); camTimer = null; }
   if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
-  try { camStream = await camOpen(deviceId); $('#cam').srcObject = camStream; camChooser($('#scan-pick2'), camStream, startCam); const cv = document.createElement('canvas'); const ctx = cv.getContext('2d', { willReadFrequently: true });
-    camTimer = setInterval(() => { const v = $('#cam'); if (!v.videoWidth) return; cv.width = v.videoWidth; cv.height = v.videoHeight; ctx.drawImage(v, 0, 0); const img = ctx.getImageData(0, 0, cv.width, cv.height); const code = jsQR(img.data, cv.width, cv.height); if (code && code.data) restoreCode(code.data.trim()); }, 400);
+  try { camStream = await camOpen(deviceId); $('#cam').srcObject = camStream; camChooser($('#scan-pick2'), camStream, startCam); const reader = makeQrReader($('#cam-note'));
+    camTimer = setInterval(() => { const v = $('#cam'); if (!v.videoWidth) return; const data = reader.read(v); if (data) restoreCode(data.trim()); }, 400);
   } catch (e) { $('#cam-note').textContent = 'No camera available. Paste the line instead.'; }
 }
 // what the restore camera has read: a descriptor as text, or a UR one in parts gathered until it is whole
 const restoreParts = new Set(); let restoreBusy = false;
 async function restoreCode(t) {
   const note = $('#cam-note');
-  if (/^(wsh|wpkh|sh|tr)\(/.test(t)) { note.textContent = 'Read a descriptor from the code.'; scanBar(note, null); return readDescriptor(t); }
-  if (!/^ur:(crypto-output|output-descriptor)\//i.test(t)) return;
+  if (/^(wsh|wpkh|sh|tr)\(/.test(t)) { stopCam(); note.textContent = 'Read the descriptor. Check it on the right.'; scanDone(note, 1, 'Read the descriptor'); return readDescriptor(t); }
+  if (!/^ur:(crypto-output|output-descriptor|envelope)\//i.test(t)) return;
   const n = restoreParts.size; restoreParts.add(t.toLowerCase()); if (restoreParts.size === n || restoreBusy) return;
   restoreBusy = true;
   // whole: the camera's work is done — stopped, so a plate still in view does not start a second reading
-  try { const all = [...restoreParts].join('\n'); await invoke('descriptor_parse', { text: all }); stopCam(); restoreParts.clear(); note.textContent = 'Read the whole descriptor.'; scanBar(note, null); readDescriptor(all); }
+  try { const all = [...restoreParts].join('\n'), n = restoreParts.size, shares = /^ur:envelope\//i.test(t); await invoke('descriptor_parse', { text: all }); stopCam(); restoreParts.clear();
+    const what = shares ? `All ${n} shares read — the recovery line is rebuilt` : n > 1 ? `All ${n} parts read — the whole descriptor` : 'Read the whole descriptor';
+    note.textContent = what + '. Check it on the right.'; scanDone(note, n, what); readDescriptor(all); }
   catch (e) { if (!scanShow(note, e)) { note.textContent = String(e); scanBar(note, null); restoreParts.clear(); } }
   restoreBusy = false;
 }
@@ -2363,6 +2398,7 @@ function paintDrillNudge() {
 }
 $('#drill-nudge-hide').onclick = () => { paintDrillNudge.hidden = vault && vault.name; paintDrillNudge(); };
 function renderVaultSettings() {
+  paintShares();
   if (!vault) return;
   $('#vs-method').value = vault.cost_method || '';
   const own = vault.cost_method, app = store.settings.cost_method || 'utxo';
@@ -2445,6 +2481,20 @@ async function runDrill() {
 }
 $('#vs-drill').onclick = () => { drillFound = []; runDrill(); };
 $('#vs-desc-reveal').onclick = () => { renderVaultSettings.shown = vault.name; renderVaultSettings(); };
+// the recovery line as SSKR shares: any k of n, one printable sheet each
+function paintShares() {
+  const kSel = $('#vs-shares-k'), nSel = $('#vs-shares-n');
+  const n = +nSel.value || 3, k = Math.min(+kSel.value || 2, n);
+  nSel.innerHTML = Array.from({ length: 15 }, (_, i) => i + 2).map(x => `<option value="${x}"${x === n ? ' selected' : ''}>${x}</option>`).join('');
+  kSel.innerHTML = Array.from({ length: n - 1 }, (_, i) => i + 2).map(x => `<option value="${x}"${x === Math.max(2, k) ? ' selected' : ''}>${x}</option>`).join('');
+  const kk = +kSel.value;
+  $('#vs-shares-note').textContent = `${n} sheets, each with one share as a code and as text. Any ${kk} of them rebuild the recovery line; ${kk - 1 === 1 ? 'one alone reveals' : kk - 1 + ' together reveal'} nothing. ${kk === n ? 'Every share is needed: losing one loses the line.' : `Up to ${n - kk} can be lost.`}`;
+}
+$('#vs-shares-n').onchange = paintShares; $('#vs-shares-k').onchange = paintShares;
+$('#vs-shares-go').onclick = async () => {
+  try { const dir = await invoke('vault_shares_pdf', { name: vault.name, k: +$('#vs-shares-k').value, n: +$('#vs-shares-n').value }); toast(`Share sheets saved in ${dir}`, 6000); }
+  catch (e) { if (!/cancelled/.test(String(e))) fail(e); }
+};
 $('#vs-copy-desc').onclick = () => navigator.clipboard.writeText(vault.ext || vault._recovery || vault.descriptor || '').then(() => toast('Recovery line copied'));
 $('#vs-rewrite-go').onclick = async () => { const text = $('#vs-rewrite-in').value.trim(), name = vault.name; if (!text) return toast('Paste the other wallet\u2019s version first');
   try { store = await invoke('vault_ext_rewrite', { name, text }); vault = store.vaults.find(v => v.name === name) || vault; $('#vs-rewrite-in').value = ''; renderVaultSettings.shown = name; renderVaultSettings(); toast('Same wallet \u2014 its recovery line now reads as your other wallet writes it'); }

@@ -560,3 +560,31 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .sbar{display:flex;gap:var(--s1);margin:var(--s2) 0 var(--s1)} .sbar i{flex:1;height:5px;border-radius:3px;background:var(--line);transition:background .25s}
 .sbar i.on{background:var(--gold)} .sbar.long{background:var(--line);height:5px;border-radius:3px;overflow:hidden} .sbar.long i.fill{flex:none;background:var(--gold);transition:width .25s}
 @media (prefers-reduced-motion:reduce){.sbar i{transition:none}}
+#vs-shares select{padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font:inherit;min-height:38px}
+
+/* the ceremony's ring, anywhere: signing, and every scanner */
+.ring .track{fill:none;stroke:var(--line);stroke-width:10}
+.ring .arc{fill:none;stroke:var(--gold);stroke-width:10;transition:stroke-dashoffset .5s ease}
+.ring .halo{fill:none;stroke:var(--gold);stroke-width:1.5;opacity:.45}
+.ring .dot{fill:var(--line)}
+.ring .tick{fill:none;stroke:var(--signal);stroke-width:9;stroke-linecap:round;stroke-linejoin:round}
+.ring .count{font:700 22px var(--display);fill:var(--ink)}
+/* on the camera: the ring in a corner; a big tick for each piece read; the full ring when all are in */
+.cam{position:relative}
+.scanstate{position:absolute;inset:0;pointer-events:none}
+.scanstate .corner{position:absolute;top:10px;right:10px;width:70px;height:70px;background:var(--panel);border-radius:50%;box-shadow:0 2px 12px rgba(0,0,0,.25)}
+.scanstate .flash{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--s2);background:color-mix(in srgb,var(--panel) 72%,transparent)}
+.scanstate .flash[hidden]{display:none}
+.scanstate .flash.go{animation:scan-pop 1.6s ease forwards}
+.scanstate .big{width:128px;height:128px}
+.scanstate .flash-text{font:700 17px var(--display);color:var(--ink);text-align:center;padding:0 var(--s3)}
+@keyframes scan-pop{0%{opacity:0;transform:scale(.85)}12%{opacity:1;transform:scale(1.04)}22%{transform:scale(1)}80%{opacity:1}100%{opacity:0}}
+.cam.done video,.cam.done .frame{visibility:hidden}
+.cam.done{background:var(--ground)}
+.cam.done .scanstate{pointer-events:auto}
+.scanstate .complete{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--s3)}
+@media (prefers-reduced-motion:reduce){.scanstate .flash.go{animation:none}.ring .arc{transition:none}}
+
+/* why a code is not reading, and what would help — shown after a couple of seconds without a read */
+.scanhint{margin-top:var(--s2);padding:var(--s3) 14px;border:1px solid var(--line);border-left:3px solid var(--gold);border-radius:6px;background:var(--gold-soft);font-size:14px;color:var(--ink)}
+.scanhint[hidden]{display:none}

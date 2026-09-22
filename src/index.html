@@ -159,6 +159,13 @@
           <div class="card"><div class="label">The recovery line</div><div class="muted" style="font-size:13px" id="vs-desc-what">The descriptor that rebuilds this vault's addresses. It can watch, and it cannot spend — but it shows whoever reads it everything this vault holds and has done, so it stays hidden until you ask.</div>
             <div class="secret" id="vs-desc-wrap" data-hidden="1"><div class="mono" id="vs-desc" aria-hidden="true" style="padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--ground);word-break:break-all;font-size:12px;-webkit-user-select:text;user-select:text"></div><button type="button" class="reveal" id="vs-desc-reveal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>Reveal the recovery line</button></div>
             <div class="row" style="gap:10px"><button class="btn small" id="vs-copy-desc">Copy it</button><button class="btn small" id="vs-pdf">Save the recovery sheet</button></div>
+            <div id="vs-shares" class="stack tight" style="border-top:1px solid var(--line);padding-top:var(--s3)">
+              <div class="label">Split it into shares</div>
+              <div class="muted" style="font-size:13px">For metal plates or paper kept apart: the recovery line split so that any few of the shares rebuild it, and fewer say nothing about this vault. SSKR, the Blockchain Commons standard.</div>
+              <div class="row"><label class="cap" for="vs-shares-k">Any</label><select id="vs-shares-k"></select><label class="cap" for="vs-shares-n">of</label><select id="vs-shares-n"></select><span class="muted" style="font-size:13px">shares rebuild it</span></div>
+              <div class="row"><button class="btn small" id="vs-shares-go">Save the share sheets…</button></div>
+              <div class="muted" style="font-size:13px" id="vs-shares-note"></div>
+            </div>
             <div id="vs-rewrite" hidden style="display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--line);padding-top:12px;margin-top:4px"><div class="muted" style="font-size:13px">Written differently in your other wallet? Some wallets write <span class="mono">48h</span>, others <span class="mono">48'</span>, and the checksum at the end covers the text, so the same wallet can carry two different checksums. Paste the other wallet's version, checksum and all: if it is the same wallet, it takes this one's place.</div><textarea id="vs-rewrite-in" class="mono" rows="3" spellcheck="false" placeholder="wsh(sortedmulti(2,[…]xpub…/&lt;0;1&gt;/*,…))#checksum"></textarea><div class="row"><button class="btn small" id="vs-rewrite-go">Use this wording</button></div></div></div>
         </div>
       </div>
@@ -444,6 +451,7 @@
 <script src="vendor/jsQR.js"></script>
 <script src="vendor/qrcode.js"></script>
 <script src="devices.js"></script>
+<script src="scan.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

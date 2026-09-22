@@ -6,6 +6,7 @@ mod cards;
 mod chain;
 mod db;
 mod urdesc;
+mod sskrdesc;
 mod context;
 mod export;
 mod hd;
@@ -271,6 +272,8 @@ fn ext_for_this_network(text: &str, network: &str) -> R<wallet::ExtInfo> {
 fn descriptor_parse(text: String) -> R<Parsed> {
     let s = wallet::load()?;
     // a descriptor backed up as UR (Sparrow's QR, a metal plate): decoded to its text, then checked like any other
+    // shares of a split recovery line (SSKR): rebuilt first, when enough are in; what they rebuild is then read as any line is
+    let text = if sskrdesc::is_share(&text) { sskrdesc::join(&text)?.text } else { text };
     let (text, ur_name) = if urdesc::is_ur(&text) { let d = urdesc::decode(&text)?; (urdesc::as_wallet(&d.descriptor), d.name) } else { (text, None) };
     if names_extended_keys(&text) {
         let info = ext_for_this_network(&text, &s.settings.network)?;
@@ -650,6 +653,30 @@ fn spend_pdf(name: String) -> R<String> {
     let path = rfd::FileDialog::new().set_title("Save the PSBT as a PDF").set_file_name(format!("anytwokeys-{}.pdf", &c.txid[..12])).add_filter("PDF", &["pdf"]).save_file().ok_or("cancelled")?;
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path.display().to_string())
+}
+
+/// The vault's recovery line split into `n` shares, any `k` of which rebuild it (SSKR, in Gordian Envelopes): one
+/// printable sheet per share, into a folder the person picks. A share names only its split and its place in it —
+/// never the vault, its keys or its network — because one share alone must say nothing to whoever finds it.
+#[tauri::command]
+fn vault_shares_pdf(name: String, k: usize, n: usize) -> R<String> {
+    let s = wallet::load()?;
+    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
+    let shares = sskrdesc::split(&wallet::recovery_line(v), k, n)?;
+    let dir = rfd::FileDialog::new().set_title(format!("Choose a folder for the {n} share sheets")).pick_folder().ok_or("cancelled")?;
+    for (i, sh) in shares.iter().enumerate() {
+        let id = sskrdesc::set_of(sh).unwrap_or_default();
+        let sheet = export::Sheet {
+            title: format!("Recovery share {} of {n} \u{b7} any {k} rebuild the recovery line", i + 1),
+            facts: vec![("Share".into(), format!("{} of {n}", i + 1)), ("Needed".into(), format!("any {k} of the {n}")), ("Set".into(), format!("{id} \u{2014} only shares of the same set fit together")), ("Made".into(), export::ymd(now()))],
+            rows: vec![], codes: vec![sh.to_uppercase()], sturdy: true,
+            code_hint: format!("To restore: Any Two Keys \u{203a} Restore \u{203a} Scan the sheet, and show it {k} shares, one after another, in any order."),
+            text_heading: "The same share as text (for engraving; either is enough)".into(), text: sh.to_uppercase(),
+            note: format!("SSKR share (Blockchain Commons), in a Gordian Envelope. On its own this share reveals nothing about the vault; any {k} together rebuild its recovery line, which shows every address and balance but cannot spend. Keep the shares in different places.") };
+        let path = dir.join(format!("anytwokeys-share-{id}-{}-of-{n}.pdf", i + 1));
+        std::fs::write(&path, export::pdf(&sheet)?).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    Ok(dir.display().to_string())
 }
 
 /// The vault's recovery sheet: its descriptor (and chain code) as a code the Restore screen scans, its keys, and the line as text.
@@ -1840,7 +1867,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
@@ -2107,5 +2134,36 @@ mod perf_probe {
         eprintln!("PERF activity cold {t_act:?} · warm (from the chain cache) {t_warm:?} · cache file {} bytes", std::fs::metadata(dir.join("chain.db")).map(|m| m.len()).unwrap_or(0));
         eprintln!("PERF {} history items, {} coins, recv next {} / change next {} · one-by-one {t_old:?} · batched {t_new:?} · again {t_again:?} · activity of {} txs {t_act:?}",
             new.history.len(), new.coins.len(), new.next, new.next_change, a.rows.len());
+    }
+}
+
+#[cfg(test)]
+mod shares_tests {
+    use super::*;
+    /// A vault's recovery line → shares → any two of them through Restore's own parser → the same vault: its kind,
+    /// its keys, its first address. For a vault of extended keys, and for a card vault, whose line carries cc=.
+    #[test]
+    fn a_split_recovery_line_restores_the_same_vault_from_any_two_shares() {
+        let f: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!("{}/tests/fixtures/ext-descriptors.json", env!("CARGO_MANIFEST_DIR"))).unwrap()).unwrap();
+        let info = wallet::ext_parse(f["sortedmulti"]["descriptor"].as_str().unwrap()).unwrap().unwrap();
+        let mut ext = ext_vault("x".into(), &info, &[]); ext.address = wallet::address_at(&ext, 0).unwrap();
+        let cards = ["03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2", "032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe", "038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47"];
+        let d = wallet::descriptor_for(2, &cards.iter().map(|c| c.to_string()).collect::<Vec<_>>()).unwrap();
+        let card = Vault { name: "c".into(), network: "mainnet".into(), threshold: 2, keys: cards.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.to_string(), device: None }).collect(),
+            descriptor: d, address: String::new(), created: 0, chain_code: Some("ab".repeat(32)), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None };
+        let dir = std::env::temp_dir().join(format!("a2k-shares-{}", std::process::id())); let _ = std::fs::remove_dir_all(&dir);
+        unsafe { std::env::set_var("A2K_DATA_DIR", &dir); }
+        let mut s = wallet::Store::default(); s.settings.network = "mainnet".into(); wallet::save(&s).unwrap();
+        for v in [&ext, &card] {
+            let line = wallet::recovery_line(v);
+            let sh = sskrdesc::split(&line, 2, 3).unwrap();
+            let p = descriptor_parse(format!("{}\n{}", sh[2], sh[0])).unwrap();
+            assert_eq!(p.address, wallet::address_at(v, 0).unwrap(), "{}", v.name);
+            assert_eq!(p.threshold, 2);
+            assert!(descriptor_parse(sh[1].clone()).err().unwrap().contains("1 of 2 shares"));
+            // the sheet builds, its code dense but within what a sturdy QR holds
+            let sheet = export::Sheet { title: "t".into(), facts: vec![], rows: vec![], codes: vec![sh[0].to_uppercase()], sturdy: true, code_hint: String::new(), text_heading: String::new(), text: sh[0].to_uppercase(), note: String::new() };
+            assert!(export::pdf(&sheet).is_ok(), "a share's sheet with its QR");
+        }
     }
 }

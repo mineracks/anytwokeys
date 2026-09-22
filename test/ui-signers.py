@@ -30,9 +30,12 @@ const H = {
   spend_qr: () => ({ parts: ['UR:CRYPTO-PSBT/1-2/AAA', 'UR:CRYPTO-PSBT/2-2/BBB', 'UR:CRYPTO-PSBT/3-2/CCC', 'UR:CRYPTO-PSBT/4-2/DDD'], single: null, bytes: 600, bbqr: ['B$2P0200AAAA', 'B$2P0201BBBB'] }),
   spend_import: (a) => { (window.__imports = window.__imports || []).push(a.text); const n = (a.text || '').split('\\n').length; if (n < 2) throw 'some QR parts are missing: 1 of 2 pieces recovered so far; keep the code in the frame until it completes'; window.__cer = Object.assign({}, window.__cer, { have: 1, keys: window.__cer.keys.map(k => k.name === 'SeedSigner' ? Object.assign({}, k, { signed: 1 }) : k) }); return window.__cer; },
   descriptor_parse: (a) => { (window.__parsed = window.__parsed || []).push(a.text); const t = a.text.trim();
-    if (/^ur:/i.test(t)) { const n = new Set(t.split(/\s+/).map(x => x.toLowerCase())).size; if (n < 2) throw 'some QR parts are missing: 1 of 2 pieces recovered so far; keep the code in the frame until it completes'; }
+    if (/^ur:envelope/i.test(t)) { const n = new Set(t.split(/\s+/).map(x => x.toLowerCase())).size; if (n < 2) throw 'some shares are missing: 1 of 2 shares read so far; show the next one'; }
+    else if (/^ur:/i.test(t)) { const n = new Set(t.split(/\s+/).map(x => x.toLowerCase())).size; if (n < 2) throw 'some QR parts are missing: 1 of 2 pieces recovered so far; keep the code in the frame until it completes'; }
     return { threshold: 2, keys: ['a', 'b', 'c'], descriptor: 'wsh(sortedmulti(2,[c9ad277c/48h/0h/0h/2h]xpub6EAC…/<0;1>/*,…))#abcd1234', address: 'bc1qplate', rotating: true, kind: 'sortedmulti', name: 'Plate backup',
       ext: [{ fingerprint: 'c9ad277c', path: 'm/48h/0h/0h/2h', xpub: 'xpub6EAC4GduaPj3E', fixed: false }, { fingerprint: 'fbdb4a1e', path: 'm/48h/0h/0h/2h', xpub: 'xpub6Eb', fixed: false }, { fingerprint: '2b94355d', path: 'm/48h/0h/0h/2h', xpub: 'xpub6Ec', fixed: false }] }; },
+  seal_read: () => ({ cards: 0, foreign: [], found: [] }),
+  vault_shares_pdf: (a) => { window.__sharesAsked = a; return '/Users/p/Desktop/shares'; },
   vault_create: (a) => { __created = { cmd: 'cards', a }; throw 'stop here'; },
 };
 window.__TAURI__ = { core: { invoke: async (cmd, args) => { __calls.push(cmd); if (!H[cmd]) { __unmocked.push(cmd); return null; } return H[cmd](args || {}); } }, event: { listen: async () => () => {} } };
@@ -184,27 +187,88 @@ with sync_playwright() as p:
     pg.evaluate(f"__cards = [{json.dumps(card(C1, 111))}]"); pg.wait_for_timeout(2600)
     check("a plugged-in card of this vault gets the PIN path", pg.is_visible("#pin-field") and not pg.is_visible("#dev-sign-row"), pg.inner_text("#sign-title"))
 
+    # ---- reading a code in poor light: several ways per frame, and a hint that says what is wrong ----
+    pg.add_script_tag(path=str(src / "vendor" / "jsQR.js"))   # the real decoder back (earlier checks stood in for it)
+    res = pg.evaluate("""() => {
+      const q = qrcode(0, 'M'); q.addData('UR:CRYPTO-OUTPUT/1-2/LPADAOCSFGYYFHKGAEAEAEAEAEAEAEAEAEAEAEAEAEAEAEAEAEAE', 'Alphanumeric'); q.make();
+      const n = q.getModuleCount();
+      const frame = (paint) => { const c = document.createElement('canvas'); c.width = 1280; c.height = 720; const x = c.getContext('2d');
+        x.fillStyle = '#9a948a'; x.fillRect(0, 0, 1280, 720);                       // a plate's grey steel around the code
+        const m = 9, s = (n + 8) * m, ox = (1280 - s) / 2, oy = (720 - s) / 2;
+        x.fillStyle = '#d8d4cc'; x.fillRect(ox, oy, s, s); x.fillStyle = '#2b2824';
+        for (let r = 0; r < n; r++) for (let k = 0; k < n; k++) if (q.isDark(r, k)) x.fillRect(ox + (k + 4) * m, oy + (r + 4) * m, m, m);
+        paint(x, c); return c; };
+      const cases = {
+        clean: frame(() => {}),
+        dark: frame((x) => { x.fillStyle = 'rgba(0,0,0,0.86)'; x.fillRect(0, 0, 1280, 720); }),
+        glare: frame((x) => { const g = x.createRadialGradient(560, 330, 10, 560, 330, 170); g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(0.55, 'rgba(255,255,255,1)'); g.addColorStop(1, 'rgba(255,255,255,0)'); x.fillStyle = g; x.fillRect(0, 0, 1280, 720); }),
+        faint: frame((x) => { x.fillStyle = 'rgba(170,165,158,0.9)'; x.fillRect(0, 0, 1280, 720); }),
+        // (WebKit's canvas has no filter: blur by shrinking and scaling back up, smoothed)
+        blur: (() => { const c0 = frame(() => {}); const t = document.createElement('canvas'); t.width = 107; t.height = 60; const tx = t.getContext('2d'); tx.imageSmoothingQuality = 'high'; tx.drawImage(c0, 0, 0, 107, 60);
+          const c = document.createElement('canvas'); c.width = 1280; c.height = 720; const x = c.getContext('2d'); x.imageSmoothingEnabled = true; x.imageSmoothingQuality = 'high'; x.drawImage(t, 0, 0, 1280, 720); return c; })(),
+      };
+      const out = {};
+      for (const [k, c] of Object.entries(cases)) {
+        const r = makeQrReader(null); let got = null;
+        for (let i = 0; i < 3 && !got; i++) got = r.read(c);                        // three frames: every way gets a turn
+        const raw = jsQR(c.getContext('2d').getImageData(0, 0, 1280, 720).data, 1280, 720);
+        out[k] = { why: r.last && r.last.why, reads: !!got, way: r.way || null, raw: !!(raw && raw.data), m: r.last };
+      }
+      return out; }""")
+    print("  reader:", {k: (v["why"], "reads" if v["reads"] else "-", v["way"], "raw" if v["raw"] else "raw-fails") for k, v in res.items()})
+    check("a clean code reads at once and draws no hint", res["clean"]["reads"] and res["clean"]["why"] is None, str(res["clean"]))
+    for k in ("dark", "glare", "faint", "blur"):
+        check(f"a {k} frame is recognised as {k}", res[k]["why"] == k, str(res[k]["m"]))
+    check("the reader never does worse than one plain attempt", all(v["reads"] or not v["raw"] for v in res.values()), str({k: (v["reads"], v["raw"]) for k, v in res.items()}))
+    check("and reads at least one frame a plain attempt cannot", any(v["reads"] and not v["raw"] for v in res.values()), str({k: (v["reads"], v["raw"]) for k, v in res.items()}))
+    # the hint itself: under the scanner's note, after a couple of seconds without a read
+    pg.evaluate("""() => { const d = document.createElement('div'); d.innerHTML = '<div id=hn>note</div>'; document.body.appendChild(d); }""")
+    hint = pg.evaluate("""() => { const c = document.createElement('canvas'); c.width = 640; c.height = 480; const x = c.getContext('2d'); x.fillStyle = '#111'; x.fillRect(0, 0, 640, 480);
+      const r = makeQrReader(document.getElementById('hn')); r.read(c); const early = document.querySelector('#hn + .scanhint'); r.age(3000); r.read(c); const h = document.querySelector('#hn + .scanhint');
+      return { early: !!(early && !early.hidden), text: h && !h.hidden ? h.textContent : null }; }""")
+    check("no hint in the first moments; after a while without a read, it says what is wrong and what to do", not hint["early"] and hint["text"] and "Too dark" in hint["text"], str(hint))
+
     # ---- restoring from a descriptor backed up as UR on metal plates: one plate per part, read in any order ----
     pg.evaluate("""() => { const cv = document.createElement('canvas'); cv.width = 64; cv.height = 48; const x = cv.getContext('2d'); setInterval(() => { x.fillStyle = '#' + Math.floor(Math.random() * 999); x.fillRect(0, 0, 64, 48); }, 50);
       window.camOpen = async () => cv.captureStream(10);
       window.__plate = null; window.jsQR = () => (window.__plate ? { data: window.__plate } : null); }""")
     pg.evaluate("show('restore'); restoreTab('scan')"); pg.wait_for_timeout(500)
     pg.evaluate("window.__plate = 'UR:CRYPTO-OUTPUT/2-2/LPAOAOCSFGYYFHKG'"); pg.wait_for_timeout(1200)   # the SECOND plate first, in capitals as engraved
-    segs = pg.locator("#tab-scan .sbar i")
-    check("one plate of two: a bar of two segments, one filled, and how many more", segs.count() == 2 and pg.locator("#tab-scan .sbar i.on").count() == 1 and "1 more to go" in pg.inner_text("#cam-note"), pg.inner_text("#cam-note"))
+    check("one plate of two: the ceremony ring on the camera, two segments, one filled", pg.locator("#tab-scan .scanstate .corner .arc").count() == 2 and pg.locator("#tab-scan .scanstate .corner .arc:not([style*='opacity:0'])").count() == 1, pg.inner_text("#cam-note"))
+    check("and a big tick says the plate registered", "Part read · 1 of 2" in pg.inner_text("#tab-scan .scanstate .flash") and "1 more to go" in pg.inner_text("#cam-note"), pg.inner_text("#cam-note"))
     pg.locator("#tab-scan").screenshot(path=str(out / "restore-ur-one-plate.png"))
     n0 = len(pg.evaluate("window.__parsed"))
     pg.wait_for_timeout(1200)
     check("the same plate held there is not read again and again", len(pg.evaluate("window.__parsed")) == n0)
     pg.evaluate("window.__plate = 'UR:CRYPTO-OUTPUT/1-2/LPADAOCSFGYYFHKG'"); pg.wait_for_timeout(1200)
-    card = pg.inner_text("#restore-card")
-    check("the second plate completes it: the vault is read, and the bar goes", "2 of 3" in card and pg.locator("#tab-scan .sbar").count() == 0, card[:160])
+    rcard = pg.inner_text("#restore-card")
+    check("the second plate completes it: the vault is read", "2 of 3" in rcard, rcard[:160])
+    check("and the camera's place shows the full ring with a tick — not a black box", pg.locator("#tab-scan .cam.done .complete .tick").count() == 1 and "All 2 parts read" in pg.inner_text("#tab-scan .complete") and pg.locator("#tab-scan .corner").count() == 0)
+    pg.locator("#tab-scan").screenshot(path=str(out / "restore-ur-done.png"))
     check("the backup's own name is offered for the vault", pg.input_value("#restore-name") == "Plate backup")
     pg.evaluate("window.__plate = null; restoreTab('paste')"); pg.wait_for_timeout(200)
     pg.fill("#desc-in", "UR:CRYPTO-OUTPUT/1-2/LPADAOCSFGYYFHKG\nUR:CRYPTO-OUTPUT/2-2/LPAOAOCSFGYYFHKG"); pg.click("#desc-read"); pg.wait_for_timeout(400)
     check("or the plates' text, typed in, one part to a line", "2 of 3" in pg.inner_text("#restore-card") and "UR:CRYPTO-OUTPUT/2-2" in pg.evaluate("window.__parsed[window.__parsed.length - 1]"))
     pg.locator("#s-restore").screenshot(path=str(out / "restore-ur-plates.png"))
     pg.evaluate("stopCam()")
+
+    # ---- the same from SSKR shares: any 2 of 3, each its own code, in any order ----
+    pg.evaluate("window.__plate = null; restoreTab('scan')"); pg.wait_for_timeout(500)
+    pg.evaluate("window.__plate = 'UR:ENVELOPE/LFTANSFWLRHKADEHFTHTJOWPSHARETHREE'"); pg.wait_for_timeout(1200)
+    check("a fresh scan starts clean, then one share of two: ring half full, a tick, and 'put the next share in front of the camera'", pg.locator("#tab-scan .cam.done").count() == 0 and pg.locator("#tab-scan .scanstate .corner .arc:not([style*='opacity:0'])").count() == 1 and "Share read · 1 of 2" in pg.inner_text("#tab-scan .scanstate .flash") and "next share in front of the camera" in pg.inner_text("#cam-note"), pg.inner_text("#cam-note"))
+    pg.locator("#tab-scan").screenshot(path=str(out / "restore-share-one.png"))
+    pg.evaluate("window.__plate = 'ur:envelope/lftansfwlrhkadehfthtjowpshareone'"); pg.wait_for_timeout(1200)
+    check("the second share rebuilds the recovery line and reads the vault", "2 of 3" in pg.inner_text("#restore-card") and "All 2 shares read" in pg.inner_text("#tab-scan .complete") and pg.evaluate("window.__parsed[window.__parsed.length - 1]").count("ur:envelope") == 2)
+    pg.evaluate("window.__plate = null; stopCam()")
+
+    # ---- splitting a vault's recovery line into shares, in Vault settings ----
+    pg.evaluate("vault = store.vaults[0]; show('vault')"); pg.wait_for_timeout(500)
+    check("Vault settings offers to split the recovery line: 2 of 3 to begin with, and says what that means", pg.input_value("#vs-shares-k") == "2" and pg.input_value("#vs-shares-n") == "3" and "Up to 1 can be lost" in pg.inner_text("#vs-shares-note"), pg.inner_text("#vs-shares-note"))
+    pg.select_option("#vs-shares-n", "5"); pg.select_option("#vs-shares-k", "3"); pg.wait_for_timeout(100)
+    check("3 of 5 says two can be lost", "Up to 2 can be lost" in pg.inner_text("#vs-shares-note"))
+    pg.click("#vs-shares-go"); pg.wait_for_timeout(300)
+    check("saving asks for exactly that split, and says where the sheets went", pg.evaluate("window.__sharesAsked") == {"name": pg.evaluate("vault.name"), "k": 3, "n": 5} and "Desktop/shares" in pg.inner_text("#toast"), str(pg.evaluate("window.__sharesAsked")))
+    pg.locator("#vs-shares").screenshot(path=str(out / "vault-shares.png"))
 
     # ---- removing a key, and cards alone keep the card path ----
     pg.evaluate(f"__cards = [{json.dumps(card(C1, 111))}, {json.dumps(card(C2, 222))}]; setup = {{ k: 2, n: 2, keys: [], network: 'mainnet' }}; show('setup')"); pg.wait_for_timeout(300)

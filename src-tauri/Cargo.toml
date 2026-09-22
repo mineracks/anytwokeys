@@ -42,6 +42,9 @@ sha2 = "0.10"
 # the little map on a transaction (map.rs): tiles are gzip, drawing is done here so the window never touches tile data
 flate2 = "1"
 # the chain cache (db.rs): SQLite, encrypted whole-file by SQLCipher with a key derived from the store key
+# descriptor shares (sskrdesc.rs): Blockchain Commons' reference Gordian Envelope + SSKR — the descriptor encrypted, its key split
+bc-envelope = "0.43"
+bc-components = "0.31"
 rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
 tiny-skia = { version = "0.11", default-features = false, features = ["std", "png-format", "simd"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
