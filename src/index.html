@@ -172,7 +172,7 @@
             <div class="field"><div class="label">Amount, sats</div><input id="send-amount" inputmode="numeric" placeholder="5000"><label class="muted" style="display:flex;gap:8px;align-items:center;font-size:13px"><input type="checkbox" id="send-all" style="width:auto;min-height:0"> send everything</label></div>
             <div class="field"><div class="label">Vault holds</div><div id="send-have" style="padding:11px 0;font-variant-numeric:tabular-nums">—</div></div>
           </div>
-          <div class="card" id="ext-send" hidden style="border-color:var(--gold)"><div class="label">Signed on other devices</div><div style="font-size:14px">This vault's keys live on other devices — a SeedSigner, or any wallet that signs a PSBT. Spending from it will work like this: the transaction is built here, shown as an animated QR, signed on the devices, scanned back, and sent from here. That is the next step and is not built yet, so nothing can be sent from this vault today. Everything else — its balance, activity, coins and addresses — is watched as usual.</div></div>
+          <div class="card" id="ext-send" hidden><div class="label">How this vault signs</div><div style="font-size:14px" id="ext-send-text"></div></div>
           <div class="field"><div class="label">Fee</div><div class="pick" id="fee-pick">
             <div class="opt" data-fee="slow">Slow<small>—</small></div><div class="opt on" data-fee="medium">Medium<small>—</small></div><div class="opt" data-fee="fast">Fast<small>—</small></div><div class="opt" data-fee="custom">Custom<small>—</small></div>
           </div></div>

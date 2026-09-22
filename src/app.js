@@ -2291,10 +2291,18 @@ function readExtended(p) {
   };
 }
 
+/// A vault with signing devices: say, for THIS vault's keys, how a spend gets signed after it is built.
 function paintExtSend() {
   const ext = !!(vault && vault.ext);
   $('#ext-send').hidden = !ext;
-  $('#build-btn').disabled = ext;
+  if (!ext) return;
+  const cardsIn = vault.keys.filter(k => /^0[23][0-9a-f]{64}$/i.test(k.pubkey)), devs = vault.keys.filter(k => k.pubkey.startsWith('['));
+  const names = (ks) => ks.map(k => `‘${esc(k.name)}’`).join(ks.length === 2 ? ' and ' : ', ');
+  $('#ext-send-text').innerHTML = `Build it here, then sign it with any ${vault.threshold} of the keys on the next screen: `
+    + (devs.length ? `${names(devs)} by scanning the code shown there, then showing it the signed code${devs.length > 1 ? 's' : ''} back` : '')
+    + (devs.length && cardsIn.length ? '; ' : '')
+    + (cardsIn.length ? `${names(cardsIn)} by plugging ${cardsIn.length > 1 ? 'them' : 'it'} in, with ${cardsIn.length > 1 ? 'their PINs' : 'its PIN'} and a touch` : '')
+    + '. Nothing is sent until every signature needed is on and you press Send.';
 }
 
 // ---------- settings ----------

@@ -538,8 +538,8 @@ with sync_playwright() as p:
     check("the recovery line on Keys is described as what it is — a standard wallet descriptor — with no word of seals, cc= or PINs",
           "wallet descriptor" in kd and "seed words" in kd and not pg.locator("#keys-desc-cards").is_visible(), kd[:160])
     pg.evaluate("show('send')"); pg.wait_for_timeout(500)
-    check("Send says plainly that spending is not built yet for this vault, and the build button cannot be pressed",
-          pg.locator("#ext-send").is_visible() and "not built yet" in pg.inner_text("#ext-send") and pg.locator("#build-btn").is_disabled())
+    check("Send can build a spend from this vault of devices, and says it is signed by scanning codes — nothing about cards or 'not built'",
+          pg.locator("#ext-send").is_visible() and "scanning the code" in pg.inner_text("#ext-send") and "PIN" not in pg.inner_text("#ext-send") and "not built" not in pg.inner_text("#ext-send") and not pg.locator("#build-btn").is_disabled(), pg.inner_text("#ext-send"))
     pg.evaluate("renderVaultSettings.shown = null; show('vault')"); pg.wait_for_timeout(400)
     real = pg.evaluate("vault.ext")
     # what the person SEES, not what the text is: the first version scrambled it but left it unblurred (Piers, 21:27)

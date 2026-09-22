@@ -130,6 +130,11 @@ with sync_playwright() as p:
     ks = c["a"]["keys"] if c else []
     check("cards go as cards, the device as its expression", sorted(k.get("card") or "" for k in ks) == sorted(["", C1, C2]) and sum(1 for k in ks if k.get("expression")) == 1 and all(k.get("device") for k in ks), json.dumps(ks)[:300])
 
+    # ---- Send: a vault with devices can build a spend, and is told how it will be signed ----
+    pg.evaluate("vault = store.vaults[0]; show('send')"); pg.wait_for_timeout(400)
+    st = pg.inner_text("#ext-send-text")
+    check("Send can build a spend from a vault with signing devices", not pg.is_disabled("#build-btn"), "build disabled")
+    check("and says how THIS vault signs: its devices by code, its cards by PIN and touch", "SeedSigner" in st and "scanning the code" in st and "laptop" in st and "PIN" in st and "not built" not in st, st)
     # ---- the Keys screen of the vault just made ----
     pg.wait_for_timeout(300)
     pg.evaluate("vault = store.vaults[0]; show('keys')"); pg.wait_for_timeout(500)
