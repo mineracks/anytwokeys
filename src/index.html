@@ -219,6 +219,18 @@
                   <div class="muted" id="sign-text">Any of the vault's keys that has not signed yet.</div>
                   <div class="hold" id="sign-warn" hidden>Wait for the touch prompt before touching your key. <details class="why"><summary>Why?</summary>A key with Yubico OTP switched on types a one-time code into whatever has the focus when it is brushed. The app refuses such a code as a PIN, but it is tidier not to touch early.</details></div>
                   <div class="row act-row" id="act-row" style="align-items:flex-end"><div class="field" id="pin-field" hidden style="flex:0 1 200px"><div class="label">Key PIN</div><input type="password" id="pin" autocomplete="off"></div><button class="btn primary" id="sign-btn" disabled>Sign with this key</button></div><div class="waiting" id="sign-waiting" hidden><i></i>Waiting for your touch…</div>
+                  <div id="dev-cer" hidden>
+                    <ol class="gsteps" id="dev-steps" aria-label="The steps of signing on a device"></ol>
+                    <div class="guide-row">
+                      <div class="guide" id="dev-guide" aria-hidden="true"></div>
+                      <div class="guide-body">
+                        <div class="cer-act-title" id="dev-cer-title"></div>
+                        <div class="muted" id="dev-cer-text"></div>
+                        <div id="dev-stage"></div>
+                        <div class="row act-row"><button class="btn" id="dev-cer-back" type="button">‹ Back</button><button class="btn primary" id="dev-cer-next" type="button">Next ›</button></div>
+                      </div>
+                    </div>
+                  </div>
                   <div class="row" id="dev-sign-row" hidden><button class="btn primary" id="dev-sign-show" type="button">Show the code</button><button class="btn" id="dev-sign-scan" type="button">Scan its signed code</button><button class="btn" id="dev-sign-save" type="button">Save the PSBT…</button><button class="btn" id="dev-sign-file" type="button">Open a signed file…</button></div>
                   <div class="act-foot"><button class="linkish" id="guide-toggle" type="button"></button><button class="linkish" id="sign-cancel" type="button">Cancel this spend</button></div>
                 </div>

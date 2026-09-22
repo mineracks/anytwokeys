@@ -161,15 +161,29 @@ with sync_playwright() as p:
                pays=[dict(address="bc1q08zdgswgey4kqeau8af0v7ak8e72aqdpnhhsc45uqdush8qs44zs4zwyh7", sats=30000, ours=False), dict(address="bc1qchange", sats=69718, ours=True)],
                keys=[dict(name=k["name"], pubkey=k["pubkey"], signed=0) for k in MIXED["keys"]])
     pg.evaluate(f"__cards = []; window.__cer = {json.dumps(cer)}; show('sign')"); pg.wait_for_timeout(2600)
-    check("with no card in, the Sign screen turns to the device", pg.is_visible("#dev-sign-row") and not pg.is_visible("#act-row"), pg.inner_text("#sign-title"))
-    check("it names the device and says change shows as change", "SeedSigner" in pg.inner_text("#sign-title") and "change should show as change" in pg.inner_text("#sign-text"), pg.inner_text("#sign-text"))
-    check("and that a card would do too", "Or plug in" in pg.inner_text("#sign-text"))
+    # ---- signing on a device that reads codes: scan · check · change · show it back ----
+    check("with no card in, the Sign screen runs the device's ceremony", pg.is_visible("#dev-cer") and not pg.is_visible("#act-row"), pg.inner_text("#dev-cer-title"))
+    check("its steps are named, the first one now", [li.inner_text().lower() for li in pg.locator("#dev-steps li").all()] == ["scan", "check", "change", "show it back"] and pg.locator("#dev-steps li.now").inner_text().lower() == "scan", str([li.inner_text() for li in pg.locator("#dev-steps li").all()]))
+    check("step 1 shows the transaction as an animated code, with a picture of holding the device to it", "SeedSigner" in pg.inner_text("#dev-cer-title") and pg.locator("#dev-qr").count() == 1 and pg.locator("#dev-guide svg").count() >= 1 and " of 4 " in pg.inner_text("#dev-qr-note"), pg.inner_text("#dev-qr-note")[:120])
     check("the device's tile carries its drawing", pg.locator("#cer-keys .devart svg").count() == 1)
-    check("the guide shows the device, not a key to plug in", pg.locator("#guide .devguide svg").count() == 1)
-    pg.click("#dev-sign-show"); pg.wait_for_timeout(300)
-    check("Show the code opens the animated UR code", pg.is_visible("#qr-panel") and pg.evaluate("qrShow.fmt") == "ur" and "frame" in pg.inner_text("#qr-title").lower())   # the label is uppercased by CSS
-    pg.click("#qr-format"); pg.wait_for_timeout(200)
-    check("it can switch to BBQr for a Coldcard Q", pg.evaluate("qrShow.fmt") == "bbqr" and "BBQr" in pg.inner_text("#qr-note"), pg.inner_text("#qr-note"))
+    pg.locator("#dev-qr").screenshot(path=str(out / "sign-step-scan.png"))
+    pg.click("#dev-cer-next"); pg.wait_for_timeout(400)
+    dl = pg.inner_text("#dev-stage")
+    check("step 2 lists what the device will show — every payment, the change, the fee — to compare against it",
+          "bc1q08zdgswgey4kqeau8af0v7ak8e72aqdpnhhsc45uqdush8qs44zs4zwyh7" in dl and "30,000 sats" in dl and "69,718 sats" in dl and "282 sats" in dl and "do not approve it" in pg.inner_text("#dev-cer-text"), dl[:200])
+    pg.locator("#dev-cer").screenshot(path=str(out / "sign-step-review.png"))
+    pg.click("#dev-cer-next"); pg.wait_for_timeout(400)
+    check("step 3 offers the wallet's own line as a code, for the device to check the change against", pg.locator("#dev-desc-qr").count() == 1 and "change" in pg.inner_text("#dev-cer-title").lower() and "cannot spend" in pg.inner_text("#dev-cer-text"), pg.inner_text("#dev-cer-title"))
+    pg.locator("#dev-cer").screenshot(path=str(out / "sign-step-change.png"))
+    pg.click("#dev-cer-next"); pg.wait_for_timeout(400)
+    check("step 4 asks for the signed code to be turned around to the camera", "signed code back" in pg.inner_text("#dev-cer-title") and "turn it around" in pg.inner_text("#dev-cer-text").lower() and pg.inner_text("#dev-cer-next") == "Open the camera", pg.inner_text("#dev-cer-title"))
+    pg.click("#dev-cer-back"); pg.wait_for_timeout(300)
+    check("and the steps walk backwards too", pg.locator("#dev-steps li.now").inner_text().lower() == "change")
+    # a spend with nothing coming back says so, rather than leaving the device's warning unexplained
+    nochange = json.dumps({**cer, "pays": [dict(address="bc1q08zdgswgey4kqeau8af0v7ak8e72aqdpnhhsc45uqdush8qs44zs4zwyh7", sats=99718, ours=False)]})
+    pg.evaluate(f"window.__cer = {nochange}; devCer.i = 2; devCer.sig = ''; renderSign()"); pg.wait_for_timeout(400)
+    check("with no change, the step says so plainly, so the device's 'no change' is expected", pg.locator("#dev-steps li").nth(2).inner_text().lower() == "no change" and "leaves no change" in pg.inner_text("#dev-cer-title") and "not a warning about it" in pg.inner_text("#dev-cer-text"), pg.inner_text("#dev-cer-text")[:160])
+    pg.evaluate(f"window.__cer = {json.dumps(cer)}; devCer.i = 3; devCer.sig = ''; renderSign()"); pg.wait_for_timeout(400)
     pg.screenshot(path=str(out / "signers-sign.png"), full_page=True)
     # the signed code comes back animated: a fake camera, and the decoder fed the device's parts in turn
     pg.evaluate("""() => { const cv = document.createElement('canvas'); cv.width = 64; cv.height = 48; const x = cv.getContext('2d'); setInterval(() => { x.fillStyle = '#' + Math.floor(Math.random() * 999); x.fillRect(0, 0, 64, 48); }, 50);
@@ -178,7 +192,7 @@ with sync_playwright() as p:
       const seq = ['ur:crypto-psbt/7-2/aaa', 'ur:crypto-psbt/7-2/aaa', 'ur:crypto-psbt/9-2/bbb']; let i = 0;
       window.__notes = []; new MutationObserver(() => __notes.push(document.querySelector('#pscan-note').textContent)).observe(document.querySelector('#pscan-note'), { childList: true, characterData: true, subtree: true });
       window.jsQR = () => (i < seq.length ? { data: seq[i++] } : null); }""")
-    pg.click("#dev-sign-scan"); pg.wait_for_timeout(1800)
+    pg.click("#dev-cer-next"); pg.wait_for_timeout(1800)   # "Open the camera", the last step
     imports = pg.evaluate("window.__imports || []")
     check("each new part is tried once, a repeated part is not", len(imports) == 2 and imports[1].count("\n") == 1, json.dumps(imports))
     notes = pg.evaluate("__notes")
@@ -192,9 +206,9 @@ with sync_playwright() as p:
     pg.evaluate(f"window.__cer = {json.dumps(cer)}; renderSign.tiles = null; renderSign()"); pg.wait_for_timeout(400)   # a fresh spend: nobody has signed
     check("with keys still to sign, the screen says any of them can be chosen", pg.is_visible("#sign-choose"))
     pg.click("#cer-keys [data-pick-key^='[']"); pg.wait_for_timeout(300)
-    check("choosing the SeedSigner signs with it, though a card is plugged in", pg.is_visible("#dev-sign-row") and not pg.is_visible("#pin-field") and "SeedSigner" in pg.inner_text("#sign-title") and pg.locator("#cer-keys .ckey.chosen").count() == 1, pg.inner_text("#sign-title"))
+    check("choosing the SeedSigner signs with it, though a card is plugged in", pg.is_visible("#dev-cer") and not pg.is_visible("#pin-field") and "SeedSigner" in pg.inner_text("#dev-cer-title") and pg.locator("#cer-keys .ckey.chosen").count() == 1, pg.inner_text("#dev-cer-title"))
     pg.wait_for_timeout(2600)
-    check("and the choice holds through a card poll", pg.is_visible("#dev-sign-row"))
+    check("and the choice holds through a card poll", pg.is_visible("#dev-cer"))
     pg.click("#cer-keys [data-pick-key='%s']" % C2); pg.wait_for_timeout(300)
     check("choosing a card that is not plugged in asks for it by name", "Plug in" in pg.inner_text("#sign-title") and "keyring" in pg.inner_text("#sign-title") and not pg.is_visible("#pin-field"), pg.inner_text("#sign-title"))
     pg.click("#cer-keys [data-pick-key='%s']" % C1); pg.wait_for_timeout(300)

@@ -1790,6 +1790,7 @@ async function renderSign() {
   $('#sign-choose').hidden = st.ready || st.keys.filter(k => !full(k)).length < 2;
   const q = (n) => `‘${n}’`, list = (ks) => ks.map(k => q(k.name)).join(ks.length === 2 ? ' or ' : ', ');
   $('#gsteps').hidden = false; $('#act-row').hidden = false; $('#sign-waiting').hidden = true; $('#sign-cancel').hidden = false; $('#dev-sign-row').hidden = true;
+  if (!$('#dev-cer').hidden) { $('#dev-cer').hidden = true; stopDevQr(); devCer.sig = ''; }
   let openDev = vault.ext ? st.keys.filter(k => !full(k) && k.pubkey.startsWith('[')) : [];
   const chosen = st.keys.find(k => k.pubkey === renderSign.chosen && !full(k));
   if (renderSign.chosen && !chosen) renderSign.chosen = null;   // it signed, or is not this vault's: back to the default
@@ -1811,9 +1812,11 @@ async function renderSign() {
       : sd ? `Save the PSBT to its SD card, sign on the ${d.name}, and open the signed file it writes.`
       : `It signs over USB, which this app does not do yet: save the PSBT, sign it in the ${d.name}\u2019s own app or in Sparrow, and open the signed file here.`)
       + (cardsOpen.length ? ` Or plug in ${list(cardsOpen)}.` : '');
-    $('#act-row').hidden = true; $('#gsteps').hidden = true; $('#sign-warn').hidden = true; $('#dev-sign-row').hidden = false;
-    $('#dev-sign-show').hidden = !qr; $('#dev-sign-scan').hidden = !qr; $('#dev-sign-save').classList.toggle('primary', !qr);
+    $('#sign-warn').hidden = true;
     renderSign.devFormat = d.id === 'coldcard-q' ? 'bbqr' : 'ur';
+    if (qr) { devCeremony(st, k); return; }   // a device that reads codes: the guided ceremony
+    $('#act-row').hidden = true; $('#gsteps').hidden = true; $('#dev-cer').hidden = true; $('#dev-sign-row').hidden = false;
+    $('#dev-sign-show').hidden = true; $('#dev-sign-scan').hidden = true; $('#dev-sign-save').classList.toggle('primary', true);
     const g = $('#guide'), sig = 'dev:' + d.id; g.hidden = false; if (g._sig !== sig) { g._sig = sig; g.innerHTML = `<div class="devguide">${d.svg}</div>`; }
     renderSign.focusedFor = null; return;
   }
@@ -1857,9 +1860,10 @@ $('#export-card').addEventListener('toggle', () => { try { localStorage.setItem(
 $('#export-pdf').onclick = async () => { try { $('#export-note').textContent = 'Saved ' + await invoke('spend_pdf', { name: vault.name }) + ' — the codes and the text on it are the same PSBT.'; } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
 // QR: UR crypto-psbt. A looping set of parts (plain ones, then fountain mixtures so a late camera still completes), or one still code when it fits.
 const qrShow = { timer: null, parts: [], single: null, still: false, i: 0, bbqr: [], fmt: 'ur' };
-function drawQr(text) {
-  const qr = qrcode(0, 'L'); qr.addData(text, 'Alphanumeric'); qr.make();
-  const n = qr.getModuleCount(), cv = $('#qr-canvas'), ctx = cv.getContext('2d'), m = Math.floor(cv.width / (n + 8)), off = Math.floor((cv.width - m * n) / 2);
+function drawQr(text, canvas) {
+  const alnum = /^[0-9A-Z $%*+\-./:]*$/.test(text);
+  const qr = qrcode(0, 'L'); qr.addData(text, alnum ? 'Alphanumeric' : 'Byte'); qr.make();
+  const n = qr.getModuleCount(), cv = canvas || $('#qr-canvas'), ctx = cv.getContext('2d'), m = Math.floor(cv.width / (n + 8)), off = Math.floor((cv.width - m * n) / 2);
   ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height); ctx.fillStyle = '#000';
   for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) ctx.fillRect(off + c * m, off + r * m, m, m);
 }
@@ -2374,6 +2378,103 @@ function scanProgress(e) {
   if (shares) return { have, of, shares, text: `${have} of ${of} shares read — put the next share in front of the camera (any order).` };
   return { have, of, shares, text: `${have} of ${of} pieces read — ${left} more to go. Keep it in the frame, or show the next part.` };
 }
+// ---------- signing on a device that reads codes: scan, check, change, show it back ----------
+// The same shape as signing with a card (plug in · PIN · touch): numbered steps, a picture of what to do, and one
+// thing on screen at a time. Written with a SeedSigner in hand, but any QR signer follows these beats — the words
+// name whichever device is signing, and nothing here is particular to one maker.
+const devCer = { key: null, i: 0, sig: '', steps: [] };
+function devScene(kind, deviceId) {
+  const d = deviceOf(deviceId);
+  const dev = (x, y, w) => `<svg x="${x}" y="${y}" width="${w}" height="${Math.round(w * 56 / 72)}" viewBox="0 0 72 56">${d.art}</svg>`;
+  const lines = (x, y, n) => Array.from({ length: n }, (_, i) => `<rect x="${x}" y="${y + i * 9}" width="${i === n - 1 ? 26 : 44}" height="3" rx="1.5" fill="currentColor" opacity=".45"/>`).join('');
+  // a code, drawn as a code is: three corners and a scatter that does not change between redraws
+  const code = (x, y, s) => { let g = `<rect class="g-cap" x="${x}" y="${y}" width="${s}" height="${s}" rx="2"/>`;
+    const u = s / 11, fin = (fx, fy) => `<rect class="g-ink" x="${fx}" y="${fy}" width="${u * 2.4}" height="${u * 2.4}" rx="1"/><rect class="g-cap" x="${fx + u * 0.72}" y="${fy + u * 0.72}" width="${u}" height="${u}"/>`;
+    g += fin(x + u * 0.8, y + u * 0.8) + fin(x + s - u * 3.2, y + u * 0.8) + fin(x + u * 0.8, y + s - u * 3.2);
+    let seed = 7;
+    for (let r = 0; r < 11; r++) for (let c = 0; c < 11; c++) { seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      if ((seed >> 16) % 3 === 0 && !(r < 4 && c < 4) && !(r < 4 && c > 7) && !(r > 7 && c < 4)) g += `<rect class="g-ink" x="${x + u * (c + 0.4)}" y="${y + u * (r + 0.4)}" width="${u * 0.8}" height="${u * 0.8}"/>`; }
+    return g; };
+  const beam = (x1, y1, x2, y2) => `<path class="c-beam g-blink" d="M${x1} ${y1}L${x2} ${y2}"/>`;
+  const screen = (inner) => `<rect class="g-lap" x="10" y="16" width="124" height="96" rx="9"/><rect class="g-cap" x="18" y="24" width="108" height="72" rx="3"/>${inner}<path class="g-line" d="M44 112h56"/>`;
+  switch (kind) {
+    // this screen shows the code; the device is held up to it and reads
+    case 'scan':   return `<svg viewBox="0 0 250 132" role="img">${screen(code(40, 30, 64))}${dev(152, 32, 84)}${beam(196, 72, 130, 64)}</svg>`;
+    // the device shows what it is about to sign; the person compares it with this screen
+    case 'review': return `<svg viewBox="0 0 250 132" role="img"><g transform="translate(8,14)"><svg width="118" height="92" viewBox="0 0 72 56">${d.art}</svg></g><g transform="translate(150,30)" color="var(--muted)">${lines(0, 0, 4)}</g><path class="g-tick" fill="none" d="M150 78l9 10 20-22"/></svg>`;
+    // the same, with the wallet's own line on screen, which is what lets it prove the change is yours
+    case 'change': return `<svg viewBox="0 0 250 132" role="img">${screen(code(40, 34, 64))}<text x="24" y="21" style="font:700 8px var(--display);fill:var(--muted)">WALLET DESCRIPTOR</text>${dev(152, 32, 84)}${beam(196, 72, 130, 68)}</svg>`;
+    // turned around: now the device shows its signature and this computer's camera reads it
+    default:       return `<svg viewBox="0 0 250 132" role="img">${screen(`<circle class="g-ink" cx="72" cy="31" r="3.4"/><g color="var(--muted)">${lines(46, 46, 3)}</g>`)}<g transform="translate(152,32)"><svg width="84" height="65" viewBox="0 0 72 56">${d.art}</svg>${code(20, 12, 34)}</g>${beam(152, 56, 84, 40)}</svg>`;
+  }
+}
+/// Which steps this spend needs, in order: a spend with nothing coming back says so rather than skipping it.
+function devStepsFor(st) {
+  const change = (st.pays || []).filter(p => p.ours);
+  return [{ id: 'scan', word: 'Scan' }, { id: 'review', word: 'Check' }, { id: 'change', word: change.length ? 'Change' : 'No change' }, { id: 'back', word: 'Show it back' }];
+}
+/// The ceremony for one device key of this vault, at its current step.
+function devCeremony(st, k) {
+  const q = (n) => `\u2018${n}\u2019`;
+  const d = deviceOf((vault.keys.find(x => x.pubkey === k.pubkey) || {}).device), steps = devStepsFor(st);
+  devCer.steps = steps;
+  if (devCer.key !== k.pubkey) { devCer.key = k.pubkey; devCer.i = 0; }
+  const i = Math.min(devCer.i, steps.length - 1);
+  const ccy = (txFacts[vault.name] || {}).ccy, now = vault._now && vault._now.q;
+  const out = (st.pays || []).filter(p => !p.ours), change = (st.pays || []).filter(p => p.ours);
+  const worth = (n) => now && ccy ? ` <span class="muted">· ${money(n / 1e8 * now.price, ccy)}</span>` : '';
+  $('#dev-cer').hidden = false; $('#dev-sign-row').hidden = true; $('#act-row').hidden = true; $('#gsteps').hidden = true; $('#guide').hidden = true;
+  $('#dev-steps').innerHTML = steps.map((s, n) => `<li class="${n === i ? 'now' : n < i ? 'done' : ''}">${esc(s.word)}</li>`).join('');
+  $('#dev-cer-back').disabled = i === 0; $('#dev-cer-next').textContent = i === steps.length - 1 ? 'Open the camera' : 'Next ›';
+  const sig = [k.pubkey, i, st.txid, st.pays.length].join('|');
+  if (devCer.sig === sig) return;   // the 2 s card poll must not restart the code's animation
+  devCer.sig = sig;
+  $('#dev-guide').hidden = false; $('#dev-guide').innerHTML = devScene(steps[i].id, d.id);
+  const T = $('#dev-cer-title'), X = $('#dev-cer-text'), S = $('#dev-stage');
+  stopDevQr();
+  if (steps[i].id === 'scan') {
+    T.textContent = `Show ${q(k.name)} the transaction`;
+    X.textContent = `On the ${d.name}: choose to scan, and hold it to this code. It reads the frames as they go by — keep it there until it has them all.`;
+    S.innerHTML = '<div class="qr-box small"><canvas id="dev-qr" width="520" height="520"></canvas></div><div class="muted" id="dev-qr-note" style="font-size:13px"></div>';
+    playDevQr();
+  } else if (steps[i].id === 'review') {
+    T.textContent = `Check what ${q(k.name)} shows`;
+    X.textContent = `The ${d.name} now lists what this spend pays before it will sign. It should say exactly this. If anything differs — an address, an amount, the fee — do not approve it.`;
+    S.innerHTML = `<dl class="tx-dl">${out.map(p => `<dt>Pays</dt><dd><span class="mono" style="word-break:break-all">${esc(p.address)}</span><br>${sats(p.sats)} sats${worth(p.sats)}</dd>`).join('')}
+      ${change.map(p => `<dt>Change</dt><dd><span class="mono" style="word-break:break-all">${esc(p.address)}</span><br>${sats(p.sats)} sats${worth(p.sats)} <span class="tag ours">back to ${esc(vault.name)}</span></dd>`).join('')}
+      <dt>Fee</dt><dd>${sats(st.fee)} sats${worth(st.fee)}</dd></dl>`;
+  } else if (steps[i].id === 'change') {
+    if (change.length) {
+      T.textContent = 'If it asks about the change';
+      X.textContent = `${sats(change[0].sats)} sats come back to this vault. A device can only prove that address is yours from the wallet's own line, so when the ${d.name} asks, show it this code. It cannot spend anything.`;
+      S.innerHTML = '<div class="qr-box small"><canvas id="dev-desc-qr" width="520" height="520"></canvas></div><div class="muted" style="font-size:13px">The same line is in Vault settings › Save the recovery sheet, if it will not scan here.</div>';
+      const line = vault.ext || vault._recovery || vault.descriptor || '';
+      if (line) drawQr(line, $('#dev-desc-qr')); else $('#dev-stage').innerHTML = '<div class="muted" style="font-size:13px">Reveal the recovery line on the Keys screen first, then come back.</div>';
+    } else {
+      T.textContent = 'This spend leaves no change';
+      X.textContent = `Everything these coins hold is going out, so nothing comes back to this vault. The ${d.name} may say it has no change to check, or show none — that is right for this spend, not a warning about it.`;
+      S.innerHTML = '';
+    }
+  } else {
+    T.textContent = `Show ${q(k.name)}'s signed code back`;
+    X.textContent = `Once it has signed, the ${d.name} shows the signed transaction as a code. Turn it around to face this computer's camera, then open the camera here.`;
+    S.innerHTML = '<div class="row"><button class="btn" id="dev-file-alt" type="button">Or open a signed file…</button></div>';
+    $('#dev-file-alt').onclick = () => loadPsbt(null);
+  }
+}
+const devQr = { timer: null, parts: [], i: 0 };
+function stopDevQr() { clearInterval(devQr.timer); devQr.timer = null; }
+async function playDevQr() {
+  stopDevQr();
+  try { const r = await invoke('spend_qr'); devQr.parts = (renderSign.devFormat === 'bbqr' ? r.bbqr : null) || r.parts; devQr.i = 0; } catch (e) { return fail(e); }
+  const note = $('#dev-qr-note'), plain = Math.round(devQr.parts.length / 2);
+  const tick = () => { const cv = $('#dev-qr'); if (!cv) return stopDevQr(); const n = devQr.i++ % devQr.parts.length; drawQr(devQr.parts[n], cv);
+    if (note) note.textContent = devQr.parts.length > 1 ? `Frame ${n + 1} of ${devQr.parts.length} · the later frames are spares, so a camera that starts late still finishes.` : 'One code.'; };
+  tick(); if (devQr.parts.length > 1) devQr.timer = setInterval(tick, 260);
+}
+$('#dev-cer-next').onclick = () => { if (devCer.i >= devCer.steps.length - 1) { stopDevQr(); return pscanOpen(); } devCer.i++; devCer.sig = ''; renderSign(); };
+$('#dev-cer-back').onclick = () => { if (devCer.i > 0) { devCer.i--; devCer.sig = ''; renderSign(); } };
+
 /// Progress drawn ON the camera: the ceremony's ring in its corner, a segment per plate, share or piece, and a big
 /// tick each time one more is read — so the moment a plate registers is unmissable. `p` null clears it.
 function scanBar(note, p) {

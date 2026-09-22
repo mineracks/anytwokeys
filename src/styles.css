@@ -599,3 +599,8 @@ details.card.quiet > *:not(summary){margin-top:12px}
 /* links between pages: this vault's addresses and coins, and the other end of a transfer between vaults */
 a.tag{text-decoration:none;cursor:pointer} a.tag:hover{text-decoration:underline}
 .tag.peer{border-style:dashed}
+/* the code shown to a signing device during its ceremony: smaller than the export panel's, beside the words */
+.qr-box.small{width:230px;max-width:100%} .qr-box.small canvas{width:100%;height:auto}
+#dev-stage{display:flex;flex-direction:column;gap:var(--s2)}
+#dev-stage .tx-dl{margin:0}
+#dev-cer{display:flex;flex-direction:column;gap:var(--s3)} #dev-cer .guide-row{align-items:flex-start}
