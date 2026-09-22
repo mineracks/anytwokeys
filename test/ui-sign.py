@@ -28,6 +28,7 @@ fails = []
 def check(name, ok, detail=""):
     print(("ok   " if ok else "FAIL ") + name + (f" — {detail}" if detail and not ok else ""))
     if not ok: fails.append(name)
+import sys as _s; _s.path.insert(0, str(pathlib.Path(__file__).parent)); import audit; audit.install(globals())
 with sync_playwright() as p:
     b = p.webkit.launch(); pg = b.new_page(viewport=dict(width=1500, height=1000)); errs = []
     pg.on("pageerror", lambda e: errs.append(str(e)))
@@ -189,4 +190,5 @@ with sync_playwright() as p:
     check("both in: nothing left to teach", not pg.locator("#gsteps").is_visible() and not pg.locator("#guide").is_visible() and pg.inner_text("#sign-title") == "All signatures in")
     check("no page errors", not errs, "; ".join(errs))
     b.close()
+audit.finish()
 sys.exit(1 if fails else 0)

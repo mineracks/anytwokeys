@@ -41,6 +41,7 @@ const H = {
   vault_ext_rewrite: (a) => { window.__rewrite = a; const v = __extra.find(v => v.name === a.name); if (v) { v.ext = a.text; v.descriptor = a.text; } return store(); },
   cost_method_set: (a) => { window.__method = a.method; return store(); },
   vault_cost_method: (a) => { const v = store().vaults.find(v => v.name === a.name); window.__vaultMethod = a; V.cost_method = a.method; return store(); },
+  location_now: () => { if (window.__locDenied) throw 'Location Services are off for Any Two Keys. Turn them on in System Settings › Privacy & Security › Location Services, then try again.'; return { lat: -27.4598, lon: 153.0301, acc: 30, name: 'Brisbane, Australia' }; },
   ctx_set: (a) => { window.__ctxSet = a; V.more = V.more || {}; const r = V.more['tx:' + a.txid] = V.more['tx:' + a.txid] || {}; if (a.remove) r.ctx = { removed: true, t: 9 }; else { r.ctx = Object.assign({ t: 9, how: 'noted', device: { name: 'Test Mac' } }, r.ctx || {}, { place: a.place, named: true }); delete r.ctx.geo; delete r.ctx.picked; if (a.lat !== null && a.lat !== undefined) { r.ctx.geo = { lat: a.lat, lon: a.lon, acc: 0 }; r.ctx.picked = true; } } return store(); },
   label_set: (a) => { V.labels = V.labels || {}; if (a.label) V.labels[a.key] = a.label; else delete V.labels[a.key]; return store(); },
   note_set: (a) => { window.__noteCalls = (window.__noteCalls || 0) + 1; V.notes = V.notes || {}; if (a.note.trim()) V.notes[a.key] = a.note; else delete V.notes[a.key]; return store(); },
@@ -78,6 +79,7 @@ fails = []
 def check(name, ok, detail=""):
     print(("ok   " if ok else "FAIL ") + name + (f" — {detail}" if detail and not ok else ""))
     if not ok: fails.append(name)
+import sys as _s; _s.path.insert(0, str(pathlib.Path(__file__).parent)); import audit; audit.install(globals())
 def page(b, locale, zone, net="mainnet", fiat="auto", os=None):
     ctx = b.new_context(locale=locale, timezone_id=zone, viewport=dict(width=1300, height=900)); pg = ctx.new_page(); pg.errs = []
     pg.on("pageerror", lambda e: pg.errs.append(str(e)))
@@ -184,7 +186,7 @@ with sync_playwright() as p:
     pg.keyboard.press("ArrowLeft"); pg.wait_for_timeout(300)
     check("and the arrow keys move between them — without stepping to another transaction underneath", pg.evaluate("__camAsked[__camAsked.length - 1]") == "builtin" and pg.evaluate("txView.txid") == at)
     pg.evaluate("localStorage.setItem('a2k-camera', 'phone')"); pg.evaluate("shotClose()"); pg.click("#tx-camera"); pg.wait_for_timeout(400)
-    check("the camera you chose last time is the one that opens", pg.evaluate("__camAsked[__camAsked.length - 1]") == "phone")
+    check("the camera you chose last time is the one that opens", pg.evaluate("__camAsked[__camAsked.length - 1]") == "phone", pg.evaluate("JSON.stringify({asked: __camAsked, stored: localStorage.getItem('a2k-camera'), on: document.querySelector('#shot-modal').className})"))
     pg.evaluate("localStorage.setItem('a2k-camera', 'gone-since'); window.__camAsked = []"); pg.evaluate("shotClose()"); pg.click("#tx-camera"); pg.wait_for_timeout(400)
     check("a camera that has been unplugged since is not asked for", "gone-since" not in pg.evaluate("JSON.stringify(__camAsked)"), pg.evaluate("JSON.stringify(__camAsked)"))
     pg.evaluate("localStorage.removeItem('a2k-camera')")
@@ -254,6 +256,16 @@ with sync_playwright() as p:
     check("pressing Save on the place you chose KEEPS the position it came with, and the map with it",
           pg.evaluate("__ctxSet.lat") == -27.4615 and "chose it from the search" in pg.inner_text("#tx-ctx-dl") and pg.locator("#tx-map img").count() == 1 and pg.locator("#ctx-find").count() == 0,
           pg.inner_text("#tx-ctx-dl")[:120])
+    # the crosshair inside the place box: where this Mac is now
+    here = pg.locator("#tx-place-here").bounding_box(); box = pg.locator("#tx-place").bounding_box()
+    check("text in the place box stops short of the button, never running under it", pg.evaluate("parseFloat(getComputedStyle(document.querySelector('#tx-place')).paddingRight)") >= here["width"] + 6, pg.evaluate("getComputedStyle(document.querySelector('#tx-place')).paddingRight"))
+    check("the current-location button sits inside the right-hand end of the place box", here and box and here["x"] > box["x"] + box["width"] - 50 and here["x"] + here["width"] <= box["x"] + box["width"] and box["y"] <= here["y"] and here["y"] + here["height"] <= box["y"] + box["height"], f"{here} in {box}")
+    pg.locator("#tx-ctx-acts").screenshot(path=str(out / "tx-place-here.png"))
+    pg.click("#tx-place-here"); pg.wait_for_timeout(400)
+    check("one tap names where this Mac is and keeps its position for the map", pg.input_value("#tx-place") == "Brisbane, Australia" and pg.evaluate("__ctxSet.place") == "Brisbane, Australia" and pg.evaluate("__ctxSet.lat") == -27.4598, str(pg.evaluate("__ctxSet")))
+    pg.evaluate("window.__locDenied = true"); pg.click("#tx-place-here"); pg.wait_for_timeout(300)
+    check("with Location Services off, it says where to turn them on", "Privacy & Security" in pg.inner_text("#toast") and pg.get_attribute("#tx-place-here", "aria-busy") is None)
+    pg.evaluate("window.__locDenied = false")
     pg.fill("#tx-place", "the office upstairs"); pg.click("#tx-place-form button[type=submit]"); pg.wait_for_timeout(300)
     check("but words you have actually changed are your own, and give the position up", pg.evaluate("__ctxSet.lat") is None and "as you named it" in pg.inner_text("#tx-ctx-dl"))
     pg.evaluate("document.querySelector('#tx-map').dataset.for = ''; window.__asked = []; V.more['tx:' + txView.txid] = { ctx: { t: 9, how: 'noted', named: true, place: 'The Astor Centre, 445 Upper Edward Street', device: { name: 'Test Mac' } } }; vault = V; renderCtx()"); pg.wait_for_timeout(300)
@@ -716,4 +728,5 @@ with sync_playwright() as p:
     check("a signet vault asks about the SIGNET server", 'signet' in pg.evaluate("window.__nodeAsked || []"))
     check("signet: dates and amounts, never a value", pg.evaluate("__state.asked.ccy") == "" and "+20,000 sats" in pg.inner_text("#activity") and "$" not in pg.inner_text("#s-home"))
     b.close()
+audit.finish()
 sys.exit(1 if fails else 0)

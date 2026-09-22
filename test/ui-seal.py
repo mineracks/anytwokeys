@@ -36,6 +36,7 @@ def check(name, ok, detail=""):
     print(("ok   " if ok else "FAIL ") + name + (f" — {detail}" if detail and not ok else "")); 
     if not ok: fails.append(name)
 
+import sys as _s; _s.path.insert(0, str(pathlib.Path(__file__).parent)); import audit; audit.install(globals())
 with sync_playwright() as p:
     b = p.webkit.launch()
     # ---- Keys screen: seal one card ----
@@ -207,4 +208,5 @@ with sync_playwright() as p:
     check("Lock it with the PIN: the row becomes PIN-locked and the count of open ones drops", "PIN-locked" in r4.nth(0).inner_text() and pg4.evaluate("__state.open.length") == 2 and pg4.evaluate("__state.lastWrite.replace") is False, r4.nth(0).inner_text())
     check("no page errors on Restore", not errs2, "; ".join(errs2))
     b.close()
+audit.finish()
 sys.exit(1 if fails else 0)

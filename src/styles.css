@@ -22,6 +22,13 @@ input,textarea{-webkit-user-select:text;user-select:text}
 .content{flex-grow:1;padding:28px 32px;overflow:auto;display:flex;flex-direction:column;gap:20px}
 .screen{display:none;flex-direction:column;gap:20px}
 .screen.on{display:flex}
+/* spacing, one scale for the whole app: s1 4 · s2 8 · s3 12 · s4 16 · s5 24. A label sits s1+2 (6px) over ITS
+   control — closer than one field to the next — so it reads as belonging to it; controls never touch each other or
+   a box's edge. A container the app fills with blocks is a .stack, so what is put in it is spaced by the container,
+   not by whoever wrote the block. (test/layout-audit.js measures every screen the harnesses reach against this.) */
+:root{--s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px}
+.stack{display:flex;flex-direction:column;gap:var(--s4)}
+.stack.tight{gap:var(--s3)}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:22px;display:flex;flex-direction:column;gap:12px}
 .card.hot{border-color:var(--gold)}
 .grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px}
@@ -290,22 +297,22 @@ details.card.quiet > *:not(summary){margin-top:12px}
 /* the address book, under the To field */
 .to-who{font-size:14px;color:var(--muted);display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
 .to-who b{font-family:var(--display);font-weight:600;color:var(--ink)}
-.book{border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:6px;display:flex;flex-direction:column;gap:2px;max-height:340px;overflow:auto}
-.book h4{font-family:var(--display);font-weight:600;font-size:11.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:10px 10px 4px}
+.book{border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:var(--s2);display:flex;flex-direction:column;gap:2px;max-height:340px;overflow:auto}
+.book h4{font-family:var(--display);font-weight:600;font-size:11.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:var(--s3) 10px var(--s2)}
 .book .entry{display:flex;align-items:center;gap:12px;padding:9px 10px;border-radius:6px;cursor:pointer;min-width:0;background:none;border:0;font:inherit;color:inherit;text-align:left;width:100%}
 .book .entry:hover,.book .entry:focus-visible{background:var(--gold-soft);outline:none}
 .book .entry .nm{font-family:var(--display);font-weight:600;font-size:14px;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .book .entry .ad{font-family:var(--mono);font-size:12.5px;color:var(--muted);flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .book .entry .ct{font-size:12.5px;color:var(--muted);white-space:nowrap;flex:0 0 auto}
-.book .rowwrap{display:flex;align-items:center;gap:2px}
+.book .rowwrap{display:flex;align-items:center;gap:var(--s2)}
 .book .del{flex:0 0 auto;background:none;border:0;color:var(--muted);cursor:pointer;padding:8px;border-radius:6px;font-family:var(--display);font-size:12px}
 .book .del:hover{color:var(--no)} .book .del.armed,.book .del.armed:hover{background:var(--no);color:#fff}
 .book .empty{padding:10px;font-size:14px;color:var(--muted)}
 .savebar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .savebar input{flex:1 1 180px;min-width:0;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font:inherit;font-size:14px}
-.asknote{display:flex;gap:14px;align-items:baseline;flex-wrap:wrap;font-size:14px;color:var(--ink);background:var(--gold-soft);border:1px solid var(--line);border-radius:6px;padding:10px 14px}
+.asknote{display:flex;gap:14px;align-items:baseline;flex-wrap:wrap;font-size:14px;color:var(--ink);background:var(--gold-soft);border:1px solid var(--line);border-radius:6px;padding:var(--s3) 14px}
 #staged-bar + .asknote{border-radius:0;border-width:0 0 1px;padding-inline:32px}
-.book .asknote{margin:2px 6px 6px}
+.book .asknote{margin:var(--s2) 6px 6px}
 
 /* money moved: a notice in the window as well as the system notification, which a Focus can silence */
 #notices{position:fixed;top:96px;right:22px;display:flex;flex-direction:column;gap:10px;z-index:21;width:min(380px,calc(100vw - 44px));pointer-events:none}
@@ -439,7 +446,7 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .lock-key.off{grid-template-columns:1fr;opacity:.7}
 .lock-none{font-size:14px;color:var(--muted);text-align:center}
 #lock-slots{display:flex;flex-direction:column;gap:8px}
-.slot{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 12px;border:1px solid var(--line);border-radius:8px;flex-wrap:wrap} .slot b{font-family:var(--display);font-weight:600;font-size:14px} .slot small{color:var(--muted);font-size:12.5px;margin-left:8px}
+.slot{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:var(--s3) 14px;border:1px solid var(--line);border-radius:8px;flex-wrap:wrap} .slot b{font-family:var(--display);font-weight:600;font-size:14px} .slot small{color:var(--muted);font-size:12.5px;margin-left:8px}
 .slot.add{border-style:dashed} .slot.add input{padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);width:120px;min-height:38px}
 .slot .asknote{flex-basis:100%}
 
@@ -452,11 +459,17 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .ctx-map .zone{position:absolute;left:50%;top:50%;border-radius:50%;background:color-mix(in srgb,var(--gold) 18%,transparent);border:1px solid color-mix(in srgb,var(--gold) 55%,transparent);transform:translate(-50%,-50%)}
 .ctx-map small{position:absolute;right:6px;bottom:4px;font-family:var(--display);font-size:10px;color:var(--muted);background:color-mix(in srgb,var(--panel) 80%,transparent);padding:1px 5px;border-radius:4px}
 .ctx-facts{flex:1 1 320px;min-width:0;display:flex;flex-direction:column;gap:14px}
-#tx-place-form{flex:1 1 300px} #tx-place{flex:1 1 200px;min-width:0;padding:8px 12px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font-family:var(--serif);font-size:14px;min-height:38px}
+#tx-place-form{flex:1 1 300px} #tx-place{flex:1 1 200px;min-width:0;padding:8px 44px 8px 12px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font-family:var(--serif);font-size:14px;min-height:38px}
 #tx-place:focus{outline:3px solid var(--gold-soft);border-color:var(--gold)}
 
 /* search-as-you-type for a place */
 .combo{position:relative;flex:1 1 200px;min-width:0;display:flex} .combo input{flex:1}
+/* "where this Mac is now", inside the right-hand end of the place box */
+.here-btn{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:32px;height:32px;display:flex;align-items:center;justify-content:center;border:0;border-radius:6px;background:none;color:var(--muted);cursor:pointer}
+.here-btn:hover,.here-btn:focus-visible{color:var(--ink);background:var(--gold-soft);outline:none}
+.here-btn[aria-busy="true"]{color:var(--gold);animation:here-pulse 1s ease-in-out infinite}
+@keyframes here-pulse{50%{opacity:.35}}
+@media (prefers-reduced-motion:reduce){.here-btn[aria-busy="true"]{animation:none}}
 #tx-place-list{position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:20;margin:0;padding:4px;list-style:none;background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.14);max-height:300px;overflow:auto}
 #tx-place-list li{padding:8px 10px;border-radius:6px;cursor:pointer} #tx-place-list li[aria-selected="true"],#tx-place-list li:hover{background:var(--gold-soft)}
 #tx-place-list b{display:block;font-family:var(--display);font-weight:600;font-size:14px} #tx-place-list small{display:block;color:var(--muted);font-size:12.5px}
@@ -539,6 +552,6 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 .chip{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
 .chip.on{border-color:var(--gold);color:var(--ink)}
-.warnbox{border:1px solid var(--line);border-left:3px solid var(--gold);border-radius:6px;padding:10px 12px;font-size:13px}
+.warnbox{border:1px solid var(--line);border-left:3px solid var(--gold);border-radius:6px;padding:var(--s3) 14px;font-size:13px}
 .devguide{display:flex;align-items:center;justify-content:center;height:100%;color:var(--ink)} .devguide svg{width:150px;height:118px}
 .ckey .devart{width:44px;height:34px} .ckey .devart svg{width:44px;height:34px}

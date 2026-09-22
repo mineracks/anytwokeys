@@ -113,7 +113,7 @@ pub fn parse(input: &[u8]) -> Result<Psbt, String> {
         } else {
             let mut d = ur::Decoder::default();
             for p in &parts { d.receive(p).map_err(|e| e.to_string())?; }
-            d.message().map_err(|e| e.to_string())?.ok_or("some QR parts are missing; scan until the code completes")?
+            d.message().map_err(|e| e.to_string())?.ok_or_else(|| format!("some QR parts are missing: {} of {} pieces recovered so far; keep the code in the frame until it completes", d.resolved_fragment_count().unwrap_or(0), d.fragment_count()))?
         };
         return Psbt::deserialize(cbor_unwrap(&cbor)?).map_err(|e| format!("not a valid PSBT: {e}"));
     }

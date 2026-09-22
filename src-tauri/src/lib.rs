@@ -1000,6 +1000,34 @@ fn location_status(app: tauri::AppHandle) -> R<String> {
     Ok(if on { location::state() } else { "off".into() })
 }
 
+#[derive(Serialize)]
+struct Here { lat: f64, lon: f64, acc: f64, name: Option<String> }
+
+/// Where this Mac is now, for the one transaction the person is looking at — asked for by a tap, so it asks Location
+/// Services once even when places are not recorded automatically, and stops listening again straight after. The
+/// name is worked out here from the built-in list of towns: nothing goes to any server.
+#[tauri::command]
+async fn location_now(app: tauri::AppHandle) -> R<Here> {
+    let following = wallet::load()?.settings.location;
+    let started = location::fresh(now(), 120).is_none() && location::state() == "off";
+    if started { location_follow(&app, true); }
+    // the system answers on the main thread; this waits for it off the main thread
+    let fix = block(move || -> R<Option<context::Fix>> {
+        let t = std::time::Instant::now();
+        Ok(loop {
+            if let Some(f) = location::fresh(now(), 120) { break Some(f); }
+            let st = location::state();
+            if st == "denied" || st.starts_with("unavailable") || t.elapsed() > std::time::Duration::from_secs(15) { break None; }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        })
+    }).await?;
+    let st = location::state();
+    if started && !following { location_follow(&app, false); }
+    let f = fix.ok_or_else(|| if st == "denied" { "Location Services are off for Any Two Keys. Turn them on in System Settings › Privacy & Security › Location Services, then try again.".to_string() }
+        else if st.starts_with("unavailable") { "This computer cannot say where it is.".to_string() } else { "This Mac could not tell where it is just now. Try again in a moment, or type the place.".to_string() })?;
+    Ok(Here { lat: f.lat, lon: f.lon, acc: f.acc, name: context::place(f.lat, f.lon) })
+}
+
 /// What this computer would record now, for the screen that asks whether to keep places: the NAME only.
 #[tauri::command]
 fn location_preview() -> R<Option<String>> { Ok(location::fresh(now(), 1800).and_then(|f| context::place(f.lat, f.lon))) }
@@ -1809,7 +1837,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])

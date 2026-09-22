@@ -28,7 +28,7 @@ const H = {
   vault_create_signers: (a) => { __created = { cmd: 'signers', a }; window.__vaults = [%(mixed)s]; return window.__vaults[0]; },
   spend_ceremony: (a) => { if (!window.__cer) throw 'no spend in progress'; return window.__cer; },
   spend_qr: () => ({ parts: ['UR:CRYPTO-PSBT/1-2/AAA', 'UR:CRYPTO-PSBT/2-2/BBB', 'UR:CRYPTO-PSBT/3-2/CCC', 'UR:CRYPTO-PSBT/4-2/DDD'], single: null, bytes: 600, bbqr: ['B$2P0200AAAA', 'B$2P0201BBBB'] }),
-  spend_import: (a) => { (window.__imports = window.__imports || []).push(a.text); const n = (a.text || '').split('\\n').length; if (n < 2) throw 'some QR parts are missing; scan until the code completes'; window.__cer = Object.assign({}, window.__cer, { have: 1, keys: window.__cer.keys.map(k => k.name === 'SeedSigner' ? Object.assign({}, k, { signed: 1 }) : k) }); return window.__cer; },
+  spend_import: (a) => { (window.__imports = window.__imports || []).push(a.text); const n = (a.text || '').split('\\n').length; if (n < 2) throw 'some QR parts are missing: 1 of 2 pieces recovered so far; keep the code in the frame until it completes'; window.__cer = Object.assign({}, window.__cer, { have: 1, keys: window.__cer.keys.map(k => k.name === 'SeedSigner' ? Object.assign({}, k, { signed: 1 }) : k) }); return window.__cer; },
   vault_create: (a) => { __created = { cmd: 'cards', a }; throw 'stop here'; },
 };
 window.__TAURI__ = { core: { invoke: async (cmd, args) => { __calls.push(cmd); if (!H[cmd]) { __unmocked.push(cmd); return null; } return H[cmd](args || {}); } }, event: { listen: async () => () => {} } };
@@ -39,6 +39,7 @@ def check(name, ok, detail=""):
     print(("ok   " if ok else "FAIL ") + name + (f" — {detail}" if detail and not ok else ""))
     if not ok: fails.append(name)
 
+import sys as _s; _s.path.insert(0, str(pathlib.Path(__file__).parent)); import audit; audit.install(globals())
 with sync_playwright() as p:
     b = p.webkit.launch()
     pg = b.new_page(viewport=dict(width=1180, height=900)); errs = []
@@ -70,10 +71,15 @@ with sync_playwright() as p:
     pg.evaluate("""() => { const cv = document.createElement('canvas'); cv.width = 64; cv.height = 48; cv.getContext('2d').fillRect(0, 0, 64, 48);
       window.__asked = [];
       const cams = [['a', 'IPEVO VZ-X'], ['b', 'Studio Display Camera'], ['c', "Piers' iPhone Camera"]].map(([deviceId, label]) => ({ deviceId, label, kind: 'videoinput' }));
-      Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { enumerateDevices: async () => cams,
-        getUserMedia: async (c) => { window.__asked.push(c.video && c.video.deviceId ? c.video.deviceId.exact : 'any'); const st = cv.captureStream(5); const tr = st.getVideoTracks()[0]; const id = c.video && c.video.deviceId ? c.video.deviceId.exact : 'b'; tr.getSettings = () => ({ deviceId: id }); return st; } } }); }""")
+      window.__mru = cams.slice();
+      Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { enumerateDevices: async () => window.__mru.slice(),
+        getUserMedia: async (c) => { window.__asked.push(c.video && c.video.deviceId ? c.video.deviceId.exact : 'any'); if (c.video && c.video.deviceId) { const i = window.__mru.findIndex(d => d.deviceId === c.video.deviceId.exact); if (i > 0) window.__mru.unshift(window.__mru.splice(i, 1)[0]); } const st = cv.captureStream(5); const tr = st.getVideoTracks()[0]; const id = c.video && c.video.deviceId ? c.video.deviceId.exact : 'b'; tr.getSettings = () => ({ deviceId: id }); return st; } } }); }""")
     pg.click("#dev-back"); pg.click("[data-dev=seedsigner]"); pg.click("#dev-scan"); pg.wait_for_timeout(500)
     check("scanning a device's code offers every camera, drawn as in Take a picture", pg.locator("#dev-pick-cam .camopt").count() == 3 and pg.is_visible("#dev-pick-cam") and pg.locator("#dev-pick-cam .camopt svg").count() == 3)
+    pg.locator("#dev-pick-cam .camopt").first.click(); pg.wait_for_timeout(400)
+    order0 = pg.evaluate("[...document.querySelectorAll('#dev-pick-cam .camopt')].map(b => b.dataset.id).join()")
+    pg.locator("#dev-pick-cam .camopt").nth(2).click(); pg.wait_for_timeout(400)
+    check("the cameras keep their places when another is chosen (macOS lists the last used first)", pg.evaluate("[...document.querySelectorAll('#dev-pick-cam .camopt')].map(b => b.dataset.id).join()") == order0 and pg.evaluate("__mru[0].deviceId") == "c", order0)
     pg.locator("#dev-pick-cam .camopt").first.click(); pg.wait_for_timeout(400)
     check("choosing the IPEVO opens that camera and marks it chosen", pg.evaluate("__asked[__asked.length - 1]") == "a" and pg.get_attribute("#dev-pick-cam .camopt[data-id=a]", "aria-checked") == "true", str(pg.evaluate("__asked")))
     pg.click("#dev-close"); pg.wait_for_timeout(100)
@@ -96,6 +102,7 @@ with sync_playwright() as p:
     pg.fill("#dev-text", f"[{SS['fingerprint']}/48h/0h/0h/2h]{SS['xpub']}"); pg.click("#dev-read"); pg.wait_for_timeout(200)
     check("its key is found, fingerprint shown", SS["fingerprint"] in pg.inner_text("#dev-got") and pg.locator("#dev-add").count() == 1)
     check("the usual multisig path draws no warning", pg.locator("#dev-got .warnbox").count() == 0)
+    pg.locator("#dev-modal .box").screenshot(path=str(out / "signers-device-found.png"))
     pg.click("#dev-add"); pg.wait_for_timeout(200)
     check("the modal closes", not pg.is_visible("#dev-modal"))
     check("the device row carries its drawing", pg.locator("#setup-done .keyrow").count() == 2 and pg.locator("#setup-done .devart svg").count() == 1)
@@ -152,11 +159,15 @@ with sync_playwright() as p:
     # the signed code comes back animated: a fake camera, and the decoder fed the device's parts in turn
     pg.evaluate("""() => { const cv = document.createElement('canvas'); cv.width = 64; cv.height = 48; const x = cv.getContext('2d'); setInterval(() => { x.fillStyle = '#' + Math.floor(Math.random() * 999); x.fillRect(0, 0, 64, 48); }, 50);
       window.camOpen = async () => cv.captureStream(10);
-      const seq = ['ur:crypto-psbt/1-2/aaa', 'ur:crypto-psbt/1-2/aaa', 'ur:crypto-psbt/2-2/bbb']; let i = 0;
+      // a late camera: only fountain mixtures, numbered above the total
+      const seq = ['ur:crypto-psbt/7-2/aaa', 'ur:crypto-psbt/7-2/aaa', 'ur:crypto-psbt/9-2/bbb']; let i = 0;
+      window.__notes = []; new MutationObserver(() => __notes.push(document.querySelector('#pscan-note').textContent)).observe(document.querySelector('#pscan-note'), { childList: true, characterData: true, subtree: true });
       window.jsQR = () => (i < seq.length ? { data: seq[i++] } : null); }""")
     pg.click("#dev-sign-scan"); pg.wait_for_timeout(1800)
     imports = pg.evaluate("window.__imports || []")
     check("each new part is tried once, a repeated part is not", len(imports) == 2 and imports[1].count("\n") == 1, json.dumps(imports))
+    notes = pg.evaluate("__notes")
+    check("while reading, progress is the pieces the decoder recovered — never frames against the total ('7 of 2')", any("1 of 2 pieces" in x for x in notes) and not any(" of 2 so far" in x and "pieces" not in x for x in notes), json.dumps(notes))
     check("once complete the scanner closes and the signature counts", not pg.is_visible("#pscan-modal") and "1 of 2 signatures" in pg.inner_text("#toast"), pg.inner_text("#toast"))
     pg.wait_for_timeout(300)
     check("the device's tile then reads signed", "signed" in pg.inner_text("#cer-keys"), pg.inner_text("#cer-keys"))
@@ -182,4 +193,5 @@ with sync_playwright() as p:
     print("unmocked:", sorted(set(pg.evaluate("__unmocked"))))
     b.close()
 print(f"\n{len(fails)} failed" if fails else "\nall passed")
+audit.finish()
 sys.exit(1 if fails else 0)

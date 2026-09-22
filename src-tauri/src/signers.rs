@@ -143,7 +143,7 @@ fn parse_ur(t: &str) -> Result<Vec<DeviceKey>, String> {
     let cbor = if parts.len() == 1 && parts[0].matches('/').count() == 1 { ur::ur::decode(&parts[0]).map_err(|e| e.to_string())?.1 } else {
         let mut d = ur::Decoder::default();
         for p in &parts { d.receive(p).map_err(|e| e.to_string())?; }
-        d.message().map_err(|e| e.to_string())?.ok_or("some QR parts are missing; scan until the code completes")?
+        d.message().map_err(|e| e.to_string())?.ok_or_else(|| format!("some QR parts are missing: {} of {} pieces recovered so far; keep the code in the frame until it completes", d.resolved_fragment_count().unwrap_or(0), d.fragment_count()))?
     };
     let v: C = ciborium::from_reader(cbor.as_slice()).map_err(|e| format!("the code's contents are not readable: {e}"))?;
     match kind.as_str() {
@@ -175,6 +175,26 @@ mod tests {
     use super::*;
     fn fx() -> serde_json::Value { serde_json::from_str(&std::fs::read_to_string(format!("{}/tests/fixtures/device-keys.json", env!("CARGO_MANIFEST_DIR"))).unwrap()).unwrap() }
 
+    /// UR is a fountain code: a camera that starts late sees only mixtures, numbered above the total ("7-4"). The
+    /// account must still assemble from those alone, as it would from a SeedSigner already animating.
+    #[test]
+    fn an_animated_account_assembles_from_fountain_mixtures_alone_with_the_first_lap_missed() {
+        let single = fx()["bcr015_ur"].as_str().unwrap().to_string();
+        let want = parse(&single).unwrap();
+        let (_, cbor) = ur::ur::decode(&single.to_lowercase()).unwrap();
+        let mut enc = ur::Encoder::new(&cbor, 60, "crypto-account").unwrap();
+        let n = enc.fragment_count(); assert!(n >= 3, "enough parts to be animated: {n}");
+        let all: Vec<String> = (0..n * 4).map(|_| enc.next_part().unwrap()).collect();
+        let late: Vec<&String> = all.iter().skip(n).collect();   // the first lap — every plain part — never seen
+        let mut got = None;
+        for k in 1..=late.len() {
+            let text = late[..k].iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ");
+            match parse(&text) { Ok(keys) => { got = Some((k, keys)); break; } Err(e) => assert!(e.contains("missing"), "part {k}: {e}") }
+        }
+        let (k, keys) = got.expect("it never assembled from mixtures");
+        assert_eq!(keys.len(), want.len()); assert_eq!(keys[0].xpub, want[0].xpub);
+        eprintln!("assembled from {k} mixtures of a {n}-part account");
+    }
     #[test]
     fn the_official_crypto_account_vector_reads_to_the_keys_decoded_independently() {
         let f = fx(); let keys = parse(f["bcr015_ur"].as_str().unwrap()).unwrap();

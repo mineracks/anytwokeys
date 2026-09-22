@@ -35,6 +35,7 @@ def check(name, ok, detail=""):
     global fails
     print(("ok   " if ok else "FAIL ") + name + ("" if ok else f" — {detail}"))
     if not ok: fails += 1
+import sys as _s; _s.path.insert(0, str(pathlib.Path(__file__).parent)); import audit; audit.install(globals())
 def page(b, **kw):
     pg = b.new_page(viewport=dict(width=1180, height=820))
     pg.add_init_script(MOCK % dict(k0=K[0], k1=K[1], status=json.dumps(kw.get("status", {})), cards=json.dumps(kw.get("cards", [])), macfails=json.dumps(kw.get("macfails", False))))
@@ -79,4 +80,5 @@ with sync_playwright() as p:
     # ---- no keys added, Touch ID refused ----
     pg4 = page(b, macfails=True, status=dict(cards=[])); check("locked with no key added: says so plainly", "No key has been added yet" in pg4.inner_text("#lock-keys"))
     b.close()
+audit.finish()
 print(f"{fails} failed"); sys.exit(1 if fails else 0)

@@ -358,7 +358,7 @@ async function renderTx() {
   $('#tx-chain-body').innerHTML = `<dl class="chain-kv">${kv.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('')}</dl>`
     + `<table class="chain-t"><thead><tr><th>Input</th><th>Address</th><th class="r">Sats</th><th>Sequence</th><th>Witness</th></tr></thead><tbody>${d.inputs.map(i => `<tr><td class="mono">${esc(i.outpoint.slice(0, 12))}…:${esc(i.outpoint.split(':')[1])}</td><td class="mono">${esc(i.address || '—')}${i.ours !== null ? place(i.ours) : ''}</td><td class="r">${i.sats !== null ? sats(i.sats) : '—'}</td><td class="mono">${i.sequence.toString(16)}</td><td>${i.witness} item${i.witness === 1 ? '' : 's'}${i.signers.length ? ' · ' + i.signers.map(esc).join(', ') : ''}</td></tr>`).join('')}</tbody></table>`
     + `<table class="chain-t"><thead><tr><th>Output</th><th>Address</th><th class="r">Sats</th><th>Script</th><th></th></tr></thead><tbody>${d.outputs.map(o => { const unspent = o.ours !== null && (vault._coins || []).some(c => c.txid === d.txid && c.vout === o.n); return `<tr><td>#${o.n}</td><td class="mono">${esc(o.address || '—')}${o.ours !== null ? place(o.ours) : who(o.address)}</td><td class="r">${sats(o.sats)}</td><td>${esc(o.kind)}</td><td class="muted">${o.ours !== null ? (unspent ? 'unspent' : 'spent') : ''}</td></tr>`; }).join('')}</tbody></table>`
-    + `<div class="row" style="justify-content:space-between"><div class="label">Raw transaction</div><button class="btn small" id="tx-copyhex">Copy hex</button></div><div class="chain-hex" id="tx-hex">${esc(d.hex)}</div>`;
+    + `<div class="row" style="justify-content:space-between;margin-bottom:var(--s2)"><div class="label">Raw transaction</div><button class="btn small" id="tx-copyhex">Copy hex</button></div><div class="chain-hex" id="tx-hex">${esc(d.hex)}</div>`;
   $('#tx-copyhex').onclick = () => navigator.clipboard.writeText(d.hex).then(() => toast('Raw transaction copied'));
 }
 // ---------- attachments on the transaction ----------
@@ -484,6 +484,18 @@ function placeList(hits, note) {
   if (!ul.hidden) { ul.classList.remove('up'); const r = $('#tx-place').getBoundingClientRect(); if (innerHeight - r.bottom < Math.min(300, ul.scrollHeight) + 12 && r.top > innerHeight - r.bottom) ul.classList.add('up'); }
 }
 const placeMark = (i) => { placeUI.at = i; $$('#tx-place-list li[role=option]').forEach((li, k) => { li.setAttribute('aria-selected', k === i ? 'true' : 'false'); if (k === i) li.scrollIntoView({ block: 'nearest' }); }); $('#tx-place').setAttribute('aria-activedescendant', i >= 0 ? 'tx-place-opt-' + i : ''); };
+// the crosshair in the place box: where this Mac is now, named from the built-in list of towns, kept with its position
+$('#tx-place-here').onclick = async () => {
+  const b = $('#tx-place-here'); if (b.getAttribute('aria-busy') === 'true') return;
+  b.setAttribute('aria-busy', 'true'); b.title = 'Finding where this Mac is…';
+  try {
+    const r = await invoke('location_now');
+    const name = r.name || `${r.lat.toFixed(4)}, ${r.lon.toFixed(4)}`;
+    placeList([]); $('#tx-place').value = name;
+    await ctxSave({ place: name, lat: r.lat, lon: r.lon });
+  } catch (e) { fail(e); }
+  b.removeAttribute('aria-busy'); b.title = 'Where this Mac is now';
+};
 const placeChoose = (h) => { clearTimeout(placeUI.t); placeUI.seq++; placeList([]); const full = [h.label, h.detail.replace(/ · /g, ', ')].filter(Boolean).join(', ').slice(0, 160); $('#tx-place').value = full; ctxSave({ place: full, lat: h.lat, lon: h.lon }); };   // the whole address goes in the box and the record, not just its first line
 $('#tx-place').addEventListener('input', () => {
   clearTimeout(placeUI.t); const q = $('#tx-place').value.trim(), mine = ++placeUI.seq;
@@ -559,11 +571,18 @@ async function camChooser(row, stream, pick) {
   const had = row.contains(document.activeElement);
   let cams = [];
   try { cams = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput'); } catch {}
+  // macOS lists the camera used most recently FIRST, so choosing one moved it to the front and every tile jumped.
+  // The row keeps the order each camera was first seen in; a new one joins at the end.
+  let order = []; try { order = JSON.parse(localStorage.getItem('a2k-camera-order') || '[]'); } catch {}
+  for (const d of cams) if (!order.includes(d.deviceId)) order.push(d.deviceId);
+  try { localStorage.setItem('a2k-camera-order', JSON.stringify(order.slice(-24))); } catch {}
+  cams.sort((x, y) => order.indexOf(x.deviceId) - order.indexOf(y.deviceId));
   const live = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
   const using = live && live.getSettings ? live.getSettings().deviceId : '';
   row.innerHTML = cams.map((d, i) => { const k = camKind(d.label), on = d.deviceId === using;
     return `<button type="button" class="camopt" role="radio" data-id="${esc(d.deviceId)}" data-kind="${k}" title="${esc(d.label || '')}" aria-checked="${on ? 'true' : 'false'}" tabindex="${on ? '0' : '-1'}">${camArt(k)}<span>${esc(camName(d.label, i))}</span></button>`; }).join('');
-  $$('.camopt', row).forEach(b => { b.onclick = () => { try { localStorage.setItem('a2k-camera', b.dataset.id); } catch {} pick(b.dataset.id); }; });
+  // WebKit does not give a clicked button the focus; this one takes it, so the arrow keys carry on from the camera chosen
+  $$('.camopt', row).forEach(b => { b.onclick = () => { b.focus(); try { localStorage.setItem('a2k-camera', b.dataset.id); } catch {} pick(b.dataset.id); }; });
   // the row is drawn again on every switch, so the button that is now chosen takes the focus the old one had
   if (had) { const now = $('.camopt[aria-checked="true"]', row); if (now) now.focus(); }
   row.onkeydown = (e) => {
@@ -1268,7 +1287,7 @@ function renderOverview() {
   const main = store.vaults.filter(v => v.network === 'mainnet'), test = store.vaults.filter(v => v.network !== 'mainnet');
   let off = []; try { off = JSON.parse(sumPref('off', '[]')); } catch {}
   const names = main.map(v => v.name).filter(n => !off.includes(n));
-  const chips = document.createElement('div'); chips.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap';
+  const chips = document.createElement('div'); chips.style.cssText = 'display:flex;gap:var(--s2);flex-wrap:wrap';
   for (const v of main) { const b = document.createElement('button'); b.type = 'button'; b.className = 'vchip'; b.setAttribute('aria-pressed', off.includes(v.name) ? 'false' : 'true'); b.textContent = v.name;
     b.onclick = () => { const set = new Set(off); set.has(v.name) ? set.delete(v.name) : set.add(v.name); sumSave('off', JSON.stringify([...set])); renderOverview(); }; chips.appendChild(b); }
   $('#ov-note').textContent = test.length ? `Not counted: ${test.map(v => '“' + v.name + '”').join(', ')} — on a test network, whose coins are worth nothing and must never be added to real ones.` : '';
@@ -1645,9 +1664,8 @@ async function pscanOpen(deviceId) {
       const c = await invoke('spend_import', { name: vault.name, text: multi ? [...pscan.parts].join('\n') : t });
       pscanClose(); toast(`Signed code read: ${c.have} of ${c.need} signatures on it, every one checked`, 5000); renderSign.tiles = null; renderSign();
     } catch (e) {
-      const m = /\/(\d+)-(\d+)\//.exec(t) || (t.startsWith('B$') ? [0, 0, parseInt(t.slice(4, 6), 36)] : null);
-      if (/missing/i.test(String(e)) && m) note.textContent = `Reading an animated code: ${pscan.parts.size} part${pscan.parts.size === 1 ? '' : 's'}${m[2] ? ' of ' + m[2] : ''} so far. Keep it in the frame.`;
-      else { note.textContent = String(e && e.message || e); pscan.parts = new Set(); }
+      const p = scanProgress(e);
+      if (p) note.textContent = p; else { note.textContent = String(e && e.message || e); pscan.parts = new Set(); }
     }
     busy = false;
   }, 250);
@@ -2062,7 +2080,7 @@ function devShow(id) {
       <div class="cam" id="dev-cam" hidden><video id="cam3" autoplay playsinline muted></video><div class="frame"></div></div><div class="muted" style="font-size:13px" id="dev-cam-note" hidden></div>
       <div class="field"><div class="label">Or paste it</div><textarea id="dev-text" class="mono" rows="3" spellcheck="false" placeholder="[a1b2c3d4/48h/0h/0h/2h]xpub…  ·  a Coldcard JSON  ·  ur:crypto-account/…"></textarea></div>
       <div class="row"><button class="btn" id="dev-read" type="button">Read it</button></div>
-      <div id="dev-got"></div>`;
+      <div id="dev-got" class="stack tight"></div>`;
   if ($('#dev-scan')) $('#dev-scan').onclick = () => devScan();
   if ($('#dev-file')) $('#dev-file').onclick = async () => { try { devGot(await invoke('device_key_file')); } catch (e) { if (String(e) !== 'cancelled') devSay(e); } };
   $('#dev-read').onclick = async () => { try { devGot(await invoke('device_key_read', { text: $('#dev-text').value })); } catch (e) { devSay(e); } };
@@ -2084,9 +2102,17 @@ async function devScan(deviceId) {
     if (/^ur:/i.test(t)) { const before = devSt.parts.size; devSt.parts.add(t.toLowerCase()); if (devSt.parts.size === before) return; }
     busy = true;
     try { const r = await invoke('device_key_read', { text: /^ur:/i.test(t) ? [...devSt.parts].join(' ') : t }); devStop(); $('#dev-cam').hidden = true; note.textContent = 'Read.'; devGot(r); }
-    catch (e) { const m = /\/(\d+)-(\d+)\//.exec(t); if (/missing/i.test(String(e)) && m) note.textContent = `Reading an animated code: ${devSt.parts.size} part${devSt.parts.size === 1 ? '' : 's'} of ${m[2]} so far. Keep it in the frame.`; else { note.textContent = String(e); } }
+    catch (e) { note.textContent = scanProgress(e) || String(e); }
     busy = false;
   }, 250);
+}
+/// "Still reading" from the decoder's own count. An animated UR is a fountain code: after its first lap every frame
+/// is a MIXTURE numbered above the total ("7-4"), so counting frames against that total reads "7 of 4" and means
+/// nothing. What the decoder has recovered (UR), or which parts it holds (BBQr, which does cycle), can be trusted.
+function scanProgress(e) {
+  const m = /(\d+) of (\d+) (pieces recovered|\))/.exec(String(e)) || /missing \((\d+) of (\d+)\)/.exec(String(e));
+  if (!/missing/i.test(String(e))) return null;
+  return m ? `Reading an animated code: ${m[1]} of ${m[2]} pieces so far. Keep it in the frame.` : 'Reading an animated code. Keep it in the frame.';
 }
 /// A device's export read: choose its multisig key, check it belongs in THIS vault, and let it be named.
 function devGot(r) {
