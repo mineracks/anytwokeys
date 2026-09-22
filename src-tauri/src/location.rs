@@ -8,6 +8,9 @@ use std::sync::Mutex;
 
 static LAST: Mutex<Option<Fix>> = Mutex::new(None);
 static STATE: Mutex<&'static str> = Mutex::new("off");
+/// The last error Location Services gave that was not a refusal (kCLErrorLocationUnknown and the like), for saying why.
+static LAST_ERR: Mutex<Option<isize>> = Mutex::new(None);
+pub fn last_error() -> Option<isize> { LAST_ERR.lock().ok().and_then(|g| *g) }
 
 /// "off" | "asking" | "allowed" | "denied" | "unavailable: …" (never a coordinate: this goes to the log and the screen)
 pub fn state() -> String { STATE.lock().map(|s| s.to_string()).unwrap_or_else(|_| "off".into()) }
@@ -49,7 +52,7 @@ mod imp {
             #[unsafe(method(locationManager:didFailWithError:))]
             fn did_fail(&self, _m: &CLLocationManager, err: &NSError) {
                 // kCLErrorDenied = 1; anything else is "could not tell just now" and the next update may succeed
-                if err.code() == 1 { set_state("denied"); }
+                if err.code() == 1 { set_state("denied"); } else if let Ok(mut g) = LAST_ERR.lock() { *g = Some(err.code()); }
             }
             #[unsafe(method(locationManagerDidChangeAuthorization:))]
             fn auth_changed(&self, m: &CLLocationManager) {

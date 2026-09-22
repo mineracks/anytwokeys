@@ -588,3 +588,10 @@ details.card.quiet > *:not(summary){margin-top:12px}
 /* why a code is not reading, and what would help — shown after a couple of seconds without a read */
 .scanhint{margin-top:var(--s2);padding:var(--s3) 14px;border:1px solid var(--line);border-left:3px solid var(--gold);border-radius:6px;background:var(--gold-soft);font-size:14px;color:var(--ink)}
 .scanhint[hidden]{display:none}
+/* a coin's or an address's page: its gain, signed and arrowed as well as coloured; the strip of its worth and cost */
+.tx-dl .up{color:var(--signal);font-weight:600} .tx-dl .down{color:var(--no);font-weight:600}
+.rec-strip{margin:var(--s2) 0 var(--s4)}
+
+/* the key tiles on Sign are choices: which key signs next */
+.ckey[data-pick-key]{cursor:pointer} .ckey[data-pick-key]:hover{border-color:var(--line)} .ckey[data-pick-key]:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+.ckey.chosen{border-color:var(--gold);background:var(--gold-soft)}

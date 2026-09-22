@@ -295,7 +295,13 @@ pub fn pdf(s: &Sheet) -> Result<Vec<u8>, String> {
 // A printable record of one transaction: facts, where and on what (with the map), the note, and the pictures.
 
 #[derive(Debug)]
-pub enum Block { Heading(String), Facts(Vec<(String, String)>), Para(String), Mono(String), Jpeg { data: Vec<u8>, w: u32, h: u32, caption: String, wide: bool }, Rule }
+pub enum Block { Heading(String), Facts(Vec<(String, String)>), Para(String), Mono(String), Jpeg { data: Vec<u8>, w: u32, h: u32, caption: String, wide: bool }, Rule,
+    /// Lines over time, as on screen: each series (name, colour, points of (unix time, value)), the value range with
+    /// its two labels already written in the person's money, and the first and last dates.
+    Chart { title: String, series: Vec<(String, [f32; 3], Vec<(f64, f64)>)>, lo: f64, hi: f64, lo_label: String, hi_label: String, from_label: String, to_label: String } }
+/// The app's two chart colours (styles.css --series-value and --series-cost, light), as PDF RGB.
+pub const VALUE_RGB: [f32; 3] = [0.690, 0.518, 0.125];
+pub const COST_RGB: [f32; 3] = [0.231, 0.431, 0.659];
 
 /// Any picture the `image` crate reads → a JPEG no wider than `max_w` pixels, with its size. Metadata does not survive.
 pub fn jpeg_for_print(bytes: &[u8], max_w: u32) -> Result<(Vec<u8>, u32, u32), String> {
@@ -320,6 +326,34 @@ pub fn doc(title: &str, subtitle: &str, blocks: &[Block]) -> Result<Vec<u8>, Str
     for b in blocks {
         match b {
             Block::Rule => { need!(16.0); y -= 4.0; page!().rule(y); y -= 16.0; }
+            Block::Chart { title, series, lo, hi, lo_label, hi_label, from_label, to_label } => {
+                let (ch, x0, x1) = (130.0f32, M, W - M);
+                need!(ch + 70.0);
+                y -= 4.0; page!().text(2, 9.0, M, y, &title.to_uppercase()); y -= 14.0;
+                let (top, bottom) = (y, y - ch);
+                let (tmin, tmax) = series.iter().flat_map(|s| s.2.iter().map(|p| p.0)).fold((f64::MAX, f64::MIN), |a, t| (a.0.min(t), a.1.max(t)));
+                let span = (hi - lo).max(1e-9); let tspan = (tmax - tmin).max(1.0);
+                let px = |t: f64| x0 + ((t - tmin) / tspan) as f32 * (x1 - x0);
+                let py = |v: f64| bottom + ((v - lo) / span) as f32 * (top - bottom);
+                // the range's two lines, faint, with their values
+                page!().0.extend(format!("0.85 G 0.4 w {x0} {top:.1} m {x1} {top:.1} l S {x0} {bottom:.1} m {x1} {bottom:.1} l S 0 G\n").bytes());
+                page!().text(1, 8.0, x0, top + 3.0, hi_label); page!().text(1, 8.0, x0, bottom + 3.0, lo_label);
+                for (_, rgb, pts) in series {
+                    if pts.len() < 2 { continue; }
+                    let mut d = format!("{:.3} {:.3} {:.3} RG 1.6 w 1 j ", rgb[0], rgb[1], rgb[2]);
+                    for (i, (t, v)) in pts.iter().enumerate() { d.push_str(&format!("{:.1} {:.1} {} ", px(*t), py(*v), if i == 0 { "m" } else { "l" })); }
+                    d.push_str("S 0 G\n"); page!().0.extend(d.bytes());
+                }
+                y = bottom - 12.0;
+                page!().text(1, 8.0, x0, y, from_label); page!().text(1, 8.0, x1 - 5.0 * to_label.chars().count() as f32, y, to_label); y -= 14.0;
+                // a key for each line: a short stroke in its colour, then its name
+                let mut lx = x0;
+                for (name, rgb, _) in series {
+                    page!().0.extend(format!("{:.3} {:.3} {:.3} RG 2 w {lx:.1} {:.1} m {:.1} {:.1} l S 0 G\n", rgb[0], rgb[1], rgb[2], y + 3.0, lx + 16.0, y + 3.0).bytes());
+                    page!().text(1, 9.0, lx + 21.0, y, name); lx += 36.0 + 5.2 * name.chars().count() as f32;
+                }
+                y -= 18.0;
+            }
             Block::Heading(h) => { need!(30.0); y -= 4.0; page!().text(2, 9.0, M, y, &h.to_uppercase()); y -= 15.0; }
             Block::Facts(kv) => for (k, v) in kv {
                 let lines = wrap(v, 78); need!(14.0 * lines.len() as f32 + 3.0);

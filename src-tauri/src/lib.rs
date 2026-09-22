@@ -1052,9 +1052,15 @@ async fn location_now(app: tauri::AppHandle) -> R<Here> {
         })
     }).await?;
     let st = location::state();
-    if started && !following { location_follow(&app, false); }
-    let f = fix.ok_or_else(|| if st == "denied" { "Location Services are off for Any Two Keys. Turn them on in System Settings › Privacy & Security › Location Services, then try again.".to_string() }
-        else if st.starts_with("unavailable") { "This computer cannot say where it is.".to_string() } else { "This Mac could not tell where it is just now. Try again in a moment, or type the place.".to_string() })?;
+    // while macOS is still asking the person, keep listening: stopping now would lose their answer
+    if started && !following && st != "asking" { location_follow(&app, false); }
+    let f = fix.ok_or_else(|| match st.as_str() {
+        "denied" => "Location Services are off for Any Two Keys. Turn them on in System Settings › Privacy & Security › Location Services, then try again.".to_string(),
+        "asking" => "macOS is asking whether Any Two Keys may use your location. Answer its prompt (it may be behind this window), then tap the button again.".to_string(),
+        s if s.starts_with("unavailable") => "This computer cannot say where it is.".to_string(),
+        _ => format!("Location Services let Any Two Keys ask, but no position came within 15 seconds{}. Check that Location Services are on for this Mac (the switch at the top of System Settings › Privacy & Security › Location Services) and that Wi-Fi is on — a Mac finds itself from nearby networks — then try again.",
+            location::last_error().map(|c| format!(" (Core Location error {c})")).unwrap_or_default()),
+    })?;
     Ok(Here { lat: f.lat, lon: f.lon, acc: f.acc, name: context::place(f.lat, f.lon) })
 }
 
@@ -1198,23 +1204,8 @@ pub(crate) fn tx_blocks(v: &wallet::Vault, d: &activity::Detail, contacts: &[wal
         } }
     }
 
-    // the pictures themselves, and a line for anything that is not one
-    let files = v.files.get(&key).cloned().unwrap_or_default();
-    let (mut shown, mut listed) = (false, Vec::new());
-    for e in &files {
-        let (nm, mime, hash) = (e.get("name").and_then(|x| x.as_str()).unwrap_or("file").to_string(), e.get("mime").and_then(|x| x.as_str()).unwrap_or("").to_string(), e.get("sha256").and_then(|x| x.as_str()).unwrap_or("").to_string());
-        let size = e.get("size").and_then(|x| x.as_u64()).unwrap_or(0);
-        let here = with_pictures && attach::have(&hash);
-        if mime.starts_with("image/") && here {
-            if let Ok(bytes) = attach::read(&hash) { if let Ok((j, w, h)) = export::jpeg_for_print(&bytes, 1400) {
-                if !shown { blocks.push(Block::Heading("Pictures".into())); shown = true; }
-                blocks.push(Block::Jpeg { data: j, w, h, caption: nm.clone(), wide: true });
-                continue;
-            } }
-        }
-        listed.push(format!("{nm} · {} KB{}", size / 1024, if here || !with_pictures { "" } else { " · not on this computer" }));
-    }
-    if !listed.is_empty() { blocks.push(Block::Heading("Other files kept with this".into())); blocks.push(Block::Para(listed.join("\n"))); }
+    blocks.extend(file_blocks(v, &key, with_pictures));
+
 
     blocks.push(Block::Rule);
     blocks.push(Block::Heading("The chain's own facts".into()));
@@ -1231,6 +1222,61 @@ pub(crate) fn tx_blocks(v: &wallet::Vault, d: &activity::Detail, contacts: &[wal
     blocks.push(Block::Para("Anyone can check this record: the transaction above is the one the chain holds, and its id is printed with it.".into()));
 
     (title, format!("{} · printed {}", v.name, export::ymd(now())), blocks)
+}
+
+/// The pictures kept with a record, printed, and a line for every other file — for any record's sheet.
+pub(crate) fn file_blocks(v: &wallet::Vault, key: &str, with_pictures: bool) -> Vec<export::Block> {
+    use export::Block;
+    let mut blocks = Vec::new();
+    let files = v.files.get(key).cloned().unwrap_or_default();
+    let (mut shown, mut listed) = (false, Vec::new());
+    for e in &files {
+        let (nm, mime, hash) = (e.get("name").and_then(|x| x.as_str()).unwrap_or("file").to_string(), e.get("mime").and_then(|x| x.as_str()).unwrap_or("").to_string(), e.get("sha256").and_then(|x| x.as_str()).unwrap_or("").to_string());
+        let size = e.get("size").and_then(|x| x.as_u64()).unwrap_or(0);
+        let here = with_pictures && attach::have(&hash);
+        if mime.starts_with("image/") && here {
+            if let Ok(bytes) = attach::read(&hash) { if let Ok((j, w, h)) = export::jpeg_for_print(&bytes, 1400) {
+                if !shown { blocks.push(Block::Heading("Pictures".into())); shown = true; }
+                blocks.push(Block::Jpeg { data: j, w, h, caption: nm.clone(), wide: true });
+                continue;
+            } }
+        }
+        listed.push(format!("{nm} · {} KB{}", size / 1024, if here || !with_pictures { "" } else { " · not on this computer" }));
+    }
+    if !listed.is_empty() { blocks.push(Block::Heading("Other files kept with this".into())); blocks.push(Block::Para(listed.join("\n"))); }
+    blocks
+}
+
+#[derive(Deserialize)]
+struct SeriesIn { name: String, color: String, pts: Vec<(f64, f64)> }
+#[derive(Deserialize)]
+struct ChartIn { title: String, series: Vec<SeriesIn>, lo: f64, hi: f64, lo_label: String, hi_label: String, from_label: String, to_label: String }
+
+/// A printable record of one coin or one address: the figures the screen worked out (cost, worth, gain — passed in,
+/// so the sheet says exactly what the screen says), its chart, and everything kept with it: label, note, pictures,
+/// files. `key` is the record's own key ("output:txid:vout" or "addr:…").
+#[tauri::command]
+async fn record_pdf(name: String, key: String, title: String, subtitle: String, facts: Vec<(String, String)>, sections: Vec<(String, Vec<(String, String)>)>, chart: Option<ChartIn>, file: String) -> R<String> {
+    if !(key.starts_with("output:") || key.starts_with("addr:")) { return Err("that is not a coin or an address".into()); }
+    let bytes = block(move || -> R<Vec<u8>> {
+        use export::Block;
+        let s = wallet::load()?;
+        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+        let mut blocks = vec![Block::Facts(facts)];
+        if let Some(c) = chart {
+            let series = c.series.into_iter().map(|s| (s.name, if s.color == "cost" { export::COST_RGB } else { export::VALUE_RGB }, s.pts)).collect();
+            blocks.push(Block::Chart { title: c.title, series, lo: c.lo, hi: c.hi, lo_label: c.lo_label, hi_label: c.hi_label, from_label: c.from_label, to_label: c.to_label });
+        }
+        for (h, kv) in sections { if !kv.is_empty() { blocks.push(Block::Heading(h)); blocks.push(Block::Facts(kv)); } }
+        let note = v.notes.get(&key).cloned().unwrap_or_default();
+        if !note.trim().is_empty() { blocks.push(Block::Heading("Your note".into())); blocks.push(Block::Para(note)); }
+        blocks.extend(file_blocks(&v, &key, true));
+        export::doc(&title, &subtitle, &blocks)
+    }).await?;
+    let safe: String = file.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '-' }).collect();
+    let path = rfd::FileDialog::new().set_title("Save this record").set_file_name(format!("anytwokeys-{safe}.pdf")).add_filter("PDF", &["pdf"]).save_file().ok_or("cancelled")?;
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
 }
 
 /// "Thu 18 Sep 2026, 18:26" for a Unix time, UTC. Enough for a printed record; no date crate for one line.
@@ -1867,7 +1913,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
+        .invoke_handler(tauri::generate_handler![device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
@@ -1931,7 +1977,7 @@ mod sheet_tests {
         let flat = format!("{:?}", blocks.iter().map(|b| match b {
             export::Block::Facts(kv) => kv.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("|"),
             export::Block::Heading(h) => format!("#{h}"), export::Block::Para(p) => p.clone(), export::Block::Mono(m) => format!("hex:{}", m.len()),
-            export::Block::Jpeg { caption, .. } => format!("img:{caption}"), export::Block::Rule => "---".into() }).collect::<Vec<_>>());
+            export::Block::Jpeg { caption, .. } => format!("img:{caption}"), export::Block::Rule => "---".into(), export::Block::Chart { title, .. } => format!("chart:{title}") }).collect::<Vec<_>>());
         for want in [
             "Amount=−5,190 sats", "Worth then=−8.54 AUD  (hourly 2026-09-18 08:00 UTC)",   // 5,190 sats at 164,500/BTC
             "To=bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4  (hardware shop)",        // the address book names it
@@ -2165,5 +2211,25 @@ mod shares_tests {
             let sheet = export::Sheet { title: "t".into(), facts: vec![], rows: vec![], codes: vec![sh[0].to_uppercase()], sturdy: true, code_hint: String::new(), text_heading: String::new(), text: sh[0].to_uppercase(), note: String::new() };
             assert!(export::pdf(&sheet).is_ok(), "a share's sheet with its QR");
         }
+    }
+}
+
+#[cfg(test)]
+mod record_sheet_tests {
+    use super::*;
+    #[test]
+    fn a_record_sheet_with_a_chart_is_a_pdf_that_carries_its_figures() {
+        use export::Block;
+        let blocks = vec![Block::Facts(vec![("Cost basis".into(), "$10.00".into()), ("Worth now".into(), "$12.00".into())]),
+            Block::Chart { title: "Worth and cost basis, in AUD".into(), series: vec![("Worth".into(), export::VALUE_RGB, vec![(0.0, 10.0), (86400.0, 11.0), (172800.0, 12.0)]), ("Cost basis".into(), export::COST_RGB, vec![(0.0, 10.0), (172800.0, 10.0)])],
+                lo: 0.0, hi: 13.0, lo_label: "$0".into(), hi_label: "$13".into(), from_label: "1 Jan".into(), to_label: "3 Jan".into() },
+            Block::Heading("Your note".into()), Block::Para("change from the car".into())];
+        let pdf = export::doc("Coin 758adfd2…:0", "demo vault · mainnet", &blocks).unwrap();
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(pdf.starts_with(b"%PDF-1.4") && text.contains("%%EOF"));
+        // fact labels print in capitals
+        for want in ["(COST BASIS)", "($10.00)", "(WORTH NOW)", "($12.00)", "(Worth)", "($13)", "(change from the car)", "RG"] { assert!(text.contains(want), "{want}"); }
+        // the worth line is drawn as a path: a move and at least two lines
+        assert!(text.contains(" m ") && text.matches(" l ").count() >= 3);
     }
 }

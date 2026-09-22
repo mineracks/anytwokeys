@@ -56,6 +56,9 @@ with sync_playwright() as p:
     if errs: print("load errors:", errs[:3])
     pg.evaluate("setup = { k: 2, n: 3, keys: [], network: 'mainnet' }; show('setup')"); pg.wait_for_timeout(400)
     check("the setup screen offers a signing device", pg.is_visible("#add-device"))
+    pg.click("#enrol-name"); pg.keyboard.press("Meta+a"); pg.keyboard.type("my keyring", delay=40); pg.wait_for_timeout(2600)   # a card poll happens meanwhile
+    pg.keyboard.type(" two", delay=40)
+    check("typing a key's name survives the card poll: the text stays, and so does the focus", pg.input_value("#enrol-name") == "my keyring two" and pg.evaluate("document.activeElement.id") == "enrol-name", pg.input_value("#enrol-name"))
     pg.click("#use-btn"); pg.wait_for_timeout(200)
     check("the plugged-in card enrols, remembered as a YubiKey", pg.evaluate("setup.keys.length === 1 && setup.keys[0].device === 'yubikey'"))
 
@@ -186,6 +189,17 @@ with sync_playwright() as p:
     # a card of the vault plugged in takes over: the card path, with its PIN
     pg.evaluate(f"__cards = [{json.dumps(card(C1, 111))}]"); pg.wait_for_timeout(2600)
     check("a plugged-in card of this vault gets the PIN path", pg.is_visible("#pin-field") and not pg.is_visible("#dev-sign-row"), pg.inner_text("#sign-title"))
+    pg.evaluate(f"window.__cer = {json.dumps(cer)}; renderSign.tiles = null; renderSign()"); pg.wait_for_timeout(400)   # a fresh spend: nobody has signed
+    check("with keys still to sign, the screen says any of them can be chosen", pg.is_visible("#sign-choose"))
+    pg.click("#cer-keys [data-pick-key^='[']"); pg.wait_for_timeout(300)
+    check("choosing the SeedSigner signs with it, though a card is plugged in", pg.is_visible("#dev-sign-row") and not pg.is_visible("#pin-field") and "SeedSigner" in pg.inner_text("#sign-title") and pg.locator("#cer-keys .ckey.chosen").count() == 1, pg.inner_text("#sign-title"))
+    pg.wait_for_timeout(2600)
+    check("and the choice holds through a card poll", pg.is_visible("#dev-sign-row"))
+    pg.click("#cer-keys [data-pick-key='%s']" % C2); pg.wait_for_timeout(300)
+    check("choosing a card that is not plugged in asks for it by name", "Plug in" in pg.inner_text("#sign-title") and "keyring" in pg.inner_text("#sign-title") and not pg.is_visible("#pin-field"), pg.inner_text("#sign-title"))
+    pg.click("#cer-keys [data-pick-key='%s']" % C1); pg.wait_for_timeout(300)
+    check("choosing the plugged-in card gives its PIN", pg.is_visible("#pin-field") and "laptop" in pg.inner_text("#sign-title"), pg.inner_text("#sign-title"))
+    pg.screenshot(path=str(out / "sign-choose.png"))
 
     # ---- reading a code in poor light: several ways per frame, and a hint that says what is wrong ----
     pg.add_script_tag(path=str(src / "vendor" / "jsQR.js"))   # the real decoder back (earlier checks stood in for it)

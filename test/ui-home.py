@@ -27,6 +27,7 @@ const H = {
   attach_bytes: (a) => { window.__pasted = a; V.files = V.files || {}; (V.files[a.key] = V.files[a.key] || []).push({ name: a.filename, mime: 'image/png', size: 20000, sha256: 'c'.repeat(64), t: 1, meta: 'stripped', thumb: 'd'.repeat(64) }); return { store: store(), added: 1, notes: [], errors: [] }; },
   location_status: () => 'off', location_preview: () => null,
   place_search: (a) => { (window.__asked = window.__asked || []).push(a.q); if (/zzzz/.test(a.q)) return []; return [{ label: '445 Upper Edward Street', detail: 'Spring Hill, Brisbane · Queensland 4000 · Australia', lat: -27.4615, lon: 153.0245 }, { label: '445 Upper Roma Street', detail: 'Brisbane City, Brisbane · Queensland 4000 · Australia', lat: -27.4655, lon: 153.0125 }]; },
+  record_pdf: (a) => { window.__recPdf = a; return '/Users/p/Desktop/anytwokeys-coin.pdf'; },
   tx_pdf: (a) => { window.__pdf = a; if (window.__pdfCancel) throw 'cancelled'; return '/Users/p/Desktop/anytwokeys-demo-vault-758adfd2.pdf'; },
   tx_map: (a) => { window.__mapAsked = a; return window.__noMap ? null : { png: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', metres_per_px: 4.0625, width: 640 }; },
   net_offline: (a) => { window.__offline = a.on; return store(); },
@@ -122,7 +123,7 @@ with sync_playwright() as p:
     check("a click on an activity row opens that transaction, with the way back in the breadcrumb", pg.locator("#s-tx.on").count() == 1 and pg.evaluate("__detailAsked.txid") == T[1] and pg.inner_text("#crumbs").replace("\n", " ").split()[:5] == "demo vault › Activity ›".split(), pg.inner_text("#crumbs"))
     facts = pg.inner_text("#tx-facts")
     check("a spend: amount, value then and now, when, who it paid (from the address book), change, fee, and WHICH KEYS SIGNED", "−5,190" in facts and "then" in facts and "now" in facts and "hardware shop" in facts and "change #0" in facts and "190 sats" in facts and "laptop and off-site" in facts and "blocks deep" in facts, facts[:400])
-    check("the sidebar still says Home, and the title is the date and amount until there is a label", "Home" in [e.inner_text().split("\n")[0] for e in pg.locator(".side .nav.on").all()] and "−5,190 sats" in pg.inner_text("#title"), pg.inner_text("#title"))
+    check("a transaction is Activity's: the sidebar lights Activity, and the title is the date and amount until there is a label", "Activity" in [e.inner_text().split("\n")[0] for e in pg.locator(".side .nav.on").all()] and "−5,190 sats" in pg.inner_text("#title"), pg.inner_text("#title"))
     check("blockchain data is folded away, with the proof in its heading", not pg.locator("#tx-chain-body").is_visible() and "the node proved it is in block" in pg.inner_text("#tx-proof"))
     pg.click("#tx-chain summary"); pg.wait_for_timeout(150); chain = pg.inner_text("#tx-chain-body")
     check("opened: ids, size, RBF, block and position, every input and output marked, the raw hex", all(x in chain for x in ["Witness id", "189 vB", "signalled", "1757", "spent", "P2WSH", "laptop, off-site"]) and pg.locator("#tx-hex").is_visible(), chain[:300])
@@ -636,6 +637,28 @@ with sync_playwright() as p:
     pg.fill("#tx-note", "change from the car"); pg.evaluate("document.querySelector('#tx-note').blur()"); pg.wait_for_timeout(400)
     check("a note on a coin is kept against that one coin", pg.evaluate("V.notes['output:%s:0']" % T[0]) == "change from the car")
     check("while a coin's record is open the card is NOT back home", pg.evaluate("document.querySelector('#tx-notes').parentElement === recHome") is False)
+    # ---- a coin is a page: the list steps aside, crumbs say where, figures and a strip, a PDF, and links onward ----
+    check("the coin opens as a page: the list steps aside", not pg.locator("#coin-rows").is_visible())
+    cr = pg.inner_text("#crumbs")
+    check("the crumbs read vault › Coins › this coin", "Coins" in cr and ("%s…:0" % T[0][:8]) in cr and pg.locator("#crumbs [data-crumb=coins]").count() == 1, cr)
+    dd = pg.inner_text("#coins-detail")
+    ddl = dd.lower()   # the labels are uppercased by CSS
+    check("what it cost, what it is worth, and how long it has been held", "cost basis" in ddl and "worth now" in ddl and "held since" in ddl, dd[:300])
+    pg.wait_for_timeout(600)
+    check("a strip across the top: its worth against its cost, over time", pg.locator("#rec-chart svg").count() >= 1 or "nothing to draw" in pg.inner_text("#rec-chart"), pg.inner_text("#rec-chart")[:120])
+    check("with one coin, ‹ › have nowhere to go", pg.locator("#coins-detail [data-rec-step]:not([disabled])").count() == 0)
+    pg.evaluate("recPageOpen('coin', recPage.id)"); pg.wait_for_timeout(300)   # what ‹ › does: the page rebuilt in place
+    check("rebuilding the page (as ‹ › does) keeps the record card, with its note", pg.evaluate("!!document.querySelector('#coins-detail #tx-notes')") and pg.input_value("#tx-note") == "change from the car")
+    pg.click("#rec-pdf"); pg.wait_for_timeout(400)
+    rp = pg.evaluate("window.__recPdf") or {}
+    check("Save as PDF sends the page's own figures, keyed on the coin", rp.get("key") == "output:%s:0" % T[0] and any(k == "Cost basis" for k, _ in rp.get("facts", [])) and "Saved" in pg.inner_text("#toast"), json.dumps(rp)[:300])
+    pg.locator("#coins-detail [data-go-addr]").first.click(); pg.wait_for_timeout(700)
+    check("the coin's address is a link to that address's own page", pg.locator("#s-addresses.on").count() == 1 and pg.locator("#addr-detail").is_visible() and "Addresses" in pg.inner_text("#crumbs"), pg.inner_text("#crumbs"))
+    pg.locator("#addr-detail [data-go-coin]").first.click(); pg.wait_for_timeout(700)
+    check("and the address links back to the coin it holds", pg.locator("#s-coins.on").count() == 1 and pg.locator("#coins-detail").is_visible())
+    pg.click("#crumbs [data-crumb=coins]"); pg.wait_for_timeout(400)
+    check("Coins in the crumbs goes back to the list", pg.locator("#coin-rows").is_visible() and not pg.locator("#coins-detail").is_visible())
+    pg.locator("#coin-rows tr[data-coin]").first.click(); pg.wait_for_timeout(400)
     pg.evaluate("show('home')"); pg.wait_for_timeout(400)
     check("leaving the record screens puts the one card back where the transaction screen expects it",
           pg.evaluate("document.querySelector('#tx-notes').parentElement === recHome"))
