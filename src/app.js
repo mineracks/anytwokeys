@@ -343,7 +343,7 @@ async function renderTx() {
   const signers = [...new Set(oursIn.flatMap(i => i.signers))];
   const rows = [];
   // between two of this person's vaults: said first, with the way to the other end
-  if ((d.peers || []).length) rows.push(['Transfer', `${d.net < 0 ? 'to' : d.net > 0 ? 'from' : 'with'} ` + d.peers.map(n => `<a href="#" data-go-vault-tx="${esc(n)}" data-txid="${d.txid}">${esc(n)} \u203a</a>`).join(', ') + '<small>the same transaction, seen from the other vault</small>']);
+  if ((d.peers || []).length) rows.push(['Transfer', `${d.net < 0 ? 'to' : d.net > 0 ? 'from' : 'with'} ` + d.peers.map(n => `<a href="#" data-go-vault-tx="${esc(n)}" data-txid="${d.txid}">${esc(n)} \u203a</a>`).join(', ') + `<small>the same transaction, seen from the other vault \u00b7 moving coins between your own vaults is not a disposal${d.fee !== null && d.net < 0 ? `; only the ${sats(d.fee)} sat fee leaves your hands` : ''}</small>`]);
   if (oursIn.length) {            // a spend from this vault
     rows.push(['To', foreignOut.length ? foreignOut.map(outLine).join('') : 'Nowhere outside this vault: the coins moved between its own addresses.']);
     if (oursOut.length) rows.push(['Change', oursOut.map(outLine).join('')]);
@@ -760,6 +760,15 @@ async function fillActivity(name, s) {
   vault._now = a.now ? { q: a.now, ccy: a.ccy } : null; paintBalance();
   renderHomeSummary();
   if (a.note && vault.network === 'mainnet') { $('#activity-note').textContent = a.note; $('#activity-note').hidden = false; }
+  // a transfer's other end, fetched once, so this vault's figures treat the move as a move and not a sale
+  const wanted = [...new Set(Object.values(a.transfers || {}).flat())].filter(n => !txFacts[n] && store.vaults.some(v => v.name === n));
+  if (wanted.length && !fillActivity.fetching) {
+    fillActivity.fetching = true;
+    Promise.all(wanted.map(n => sumInput(n).catch(() => null))).then(() => {
+      fillActivity.fetching = false; vaultLedger.memo = {};
+      if (vault && txFacts[vault.name]) { repaintFacts(txFacts[vault.name]); renderHomeSummary(); if ($('#s-tx').classList.contains('on')) renderTx(); }
+    });
+  }
 }
 // A sync younger than this is shown as it is; the background watcher checks every vault each minute and marks a vault
 // stale the moment it sees a change, so a quick return to Home costs nothing and still never shows old news.
@@ -1246,11 +1255,19 @@ const COST_METHODS = {
   average: { name: 'Average cost', short: 'average cost', note: 'Every coin costs the same average. NOT generally accepted for bitcoin: the ATO accepts it only for units acquired on the same day, and the US not at all. The UK pools instead, with its own same-day and 30-day rules, which this app does not compute. Kept for reference.' },
 };
 const methodFor = (v) => (v && v.cost_method) || (store && store.settings && store.settings.cost_method) || 'utxo';
+// A vault's ledger is built from EVERY vault whose figures are loaded, not this one alone: moving coins to another
+// of your own wallets is not a disposal, and its cost goes with them — which the ledger can only see if it is
+// shown both ends. (Loaded elsewhere: fillActivity fetches a transfer's other vault when it sees one.)
 function vaultLedger(name) {
   const f = txFacts[name], v = store && store.vaults.find(x => x.name === name);
   if (!f || !v) return null;
-  const m = methodFor(v), key = m + ':' + Object.keys(f.rows).length + ':' + (f.now ? f.now.price : 0);
-  if (!vaultLedger.memo[name] || vaultLedger.memo[name].key !== key) vaultLedger.memo[name] = { key, L: buildLedger([{ name, rows: Object.values(f.rows), now: f.now }], m) };
+  // only the vaults this one has actually moved coins with (its transfers), not every vault that happens to be
+  // loaded: another vault's history says nothing about this one unless they share a transaction
+  const peers = [...new Set(Object.values(f.transfers || {}).flat())].filter(n => txFacts[n] && store.vaults.some(x => x.name === n && x.network === v.network));
+  const names = [name, ...peers];
+  const inputs = names.map(n => ({ name: n, rows: Object.values(txFacts[n].rows), now: txFacts[n].now })).filter(i => i.rows.length || i.name === name);
+  const m = methodFor(v), key = m + ':' + inputs.map(i => i.name + ':' + i.rows.length).join(',') + ':' + (f.now ? f.now.price : 0);
+  if (!vaultLedger.memo[name] || vaultLedger.memo[name].key !== key) vaultLedger.memo[name] = { key, L: buildLedger(inputs, m) };
   return vaultLedger.memo[name].L;
 }
 vaultLedger.memo = {};

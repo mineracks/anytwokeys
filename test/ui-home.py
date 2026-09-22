@@ -398,6 +398,29 @@ with sync_playwright() as p:
         { name: 'A', rows: [{ txid: 'd1', time: 1000, net: 100000, quote: { price: 50000 } }, { txid: 'X', time: 3000, net: -60500, quote: { price: 55000 } }] },
         { name: 'B', rows: [{ txid: 'X', time: 3000, net: 60000, quote: { price: 55000 } }] }])""")
     check("a transfer between two of your vaults is RECOGNISED — the same transaction in both histories", L3["internal"] == 1)
+    check("and the coins moved are NOT a disposal: only the 500-sat fee leaves your hands (a fee, which an accountant may treat otherwise)",
+          L3["realised"]["X"]["sats"] == 500, str(L3["realised"]["X"]))
+    # a vault's OWN screen must see it the same way: its ledger takes in every vault whose figures are loaded
+    one = pg.evaluate("""() => {
+      const keep = { facts: JSON.parse(JSON.stringify(txFacts)), vaults: store.vaults.slice(), memo: vaultLedger.memo };
+      store.vaults = [{ name: 'A', network: 'mainnet', keys: [], threshold: 2 }, { name: 'B', network: 'mainnet', keys: [], threshold: 2 }];
+      const rowsA = { d1: { txid: 'd1', time: 1000, net: 100000, quote: { price: 50000 }, ins: [], outs: [[0, 100000]] },
+                      X:  { txid: 'X',  time: 3000, net: -60500, quote: { price: 55000 }, ins: [['d1:0', 100000]], outs: [[1, 39500]] } };
+      const rowsB = { X: { txid: 'X', time: 3000, net: 60000, quote: { price: 55000 }, ins: [], outs: [[0, 60000]] } };
+      for (const k of Object.keys(txFacts)) delete txFacts[k];
+      txFacts['A'] = { rows: rowsA, ccy: 'AUD', now: { price: 60000 }, transfers: { X: ['B'] } };
+      const alone = (() => { vaultLedger.memo = {}; const L = vaultLedger('A'); return L && L.realised.X ? L.realised.X.sats : null; })();
+      txFacts['B'] = { rows: rowsB, ccy: 'AUD', now: { price: 60000 }, transfers: { X: ['A'] } };
+      vaultLedger.memo = {};
+      const L = vaultLedger('A'), LB = vaultLedger('B');
+      const out = { aloneSats: alone, movedSats: L && L.realised.X ? L.realised.X.sats : null, basisB: LB ? LB.perVault.basis.B : null, lotsB: LB ? LB.coins['X:0'] : null };
+      for (const k of Object.keys(txFacts)) delete txFacts[k];
+      Object.assign(txFacts, keep.facts); store.vaults = keep.vaults; vaultLedger.memo = {};
+      return out; }""")
+    check("a vault's own screen counts only the fee as leaving, not the coins moved (seeing one vault, it counted all 60,500)",
+          one["aloneSats"] == 60500 and one["movedSats"] == 500, str(one))
+    check("and the coins arrive in the other vault with the cost and date they were bought at, not the price that day",
+          abs(one["basisB"] - 30) < 0.01 and one["lotsB"] and abs(one["lotsB"][0]["cost"] - 30) < 0.01 and one["lotsB"][0]["t"] == 1000, str(one))
     check("and the coins keep their cost: B gets exactly $30.00 of basis, not 60,000 sats at that day's $55,000 ($33)",
           abs(L3["perVault"]["basis"]["B"] - 30) < 1e-9, L3["perVault"])
     check("only the fee is spent: combined holdings drop by 500 sats and combined cost by the fee's share, $0.25",
@@ -745,6 +768,7 @@ with sync_playwright() as p:
     pg.evaluate("openTx('%s')" % T[1]); pg.wait_for_timeout(700)
     dl = pg.inner_text("#tx-dl")
     check("the transaction says it is a transfer to the other vault, as a link", "Transfer" in dl.replace("TRANSFER", "Transfer") and pg.locator("#tx-dl a[data-go-vault-tx='savings vault']").count() >= 1, dl[:200])
+    check("and says plainly that moving your own coins is not a disposal, only the fee", "not a disposal" in dl and "190 sat fee leaves your hands" in dl, dl[:400])
     check("this vault's own address on it is a link to that address's page", pg.locator("#tx-dl a[data-go-addr='bc1qvaultchange']").count() == 1)
     pg.locator("#tx-dl a[data-go-vault-tx='savings vault']").first.click(); pg.wait_for_timeout(900)
     check("following it opens the same transaction in the other vault, lit in the menu", pg.evaluate("vault.name") == "savings vault" and pg.locator("#s-tx.on").count() == 1 and pg.evaluate("txView.txid") == "%s" % T[1] and pg.locator("#vault-tabs .nav.on").inner_text().startswith("savings vault") and "savings vault" in pg.inner_text("#crumbs"), pg.inner_text("#crumbs"))
