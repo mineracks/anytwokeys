@@ -519,8 +519,8 @@ with sync_playwright() as p:
           "over extended keys held by other signers" in card and "checksum ok" in card and "not a public key" not in card, card[:200])
     check("each key is shown by the fingerprint and path its device recognises, not as a card",
           all(fp in card for fp in ("dc567276", "81ce8a63", "88725028")) and card.count("signs on another device") == 3 and "plugged in" not in card)
-    check("it is offered as something to WATCH, and says spending is the next step rather than pretending it works",
-          pg.inner_text("#restore-go") == "Watch this vault" and "not built yet" in card)
+    check("it is offered to watch, and says a spend is signed on its devices — nothing claims spending is not built",
+          pg.inner_text("#restore-go") == "Watch this vault" and "signed on its devices" in card and "not built" not in card)
     check("the names offered are the keys' own fingerprints, not a card vault's laptop / keyring / off-site",
           pg.input_value('[data-kname="0"]') == "key 1 · dc567276")
     pg.fill("#restore-name", "seedsigner demo"); pg.click("#restore-go"); pg.wait_for_timeout(800)

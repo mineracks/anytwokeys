@@ -1,0 +1,63 @@
+{
+ "sparrow_style": {
+  "cbor": "d90191d90197a201020283d9012fa40358210398ebf431f73b10126932aa501c98a658712e4377bd68128033aa79b693b6c398045820c20e7280ffbc0e0b7e1893b3c77d09da7a32400318db71765bb70c8a41810be406d90130a301881830f500f500f502f5021ac9ad277c0304081a551e7189d9012fa4035821026b4100a03de037d3af398e550bd27edccc9e6211a7c5e70883975d4f1f8687480458205c619ad8a14bd60806675c03e86ef9a29d694b281edabc2f4dc9c7d250fe9d2806d90130a301881830f500f500f502f5021afbdb4a1e0304081a43afec7bd9012fa4035821032663ff490016cd6f39d3829e7c68063c7592b0f7422a8e5213e49f8467fd6efe0458209ced359f087df9a6be781b79cf4957daad2592ddc110439576663de637ffc2f206d90130a301881830f500f500f502f5021a2b94355d0304081a10dfb232",
+  "urtypes_descriptor": "wsh(sortedmulti(2,[c9ad277c/48'/0'/0'/2']xpub6EAC4GduaPj3EpUtjzHbL7gLZ9jNyf4vaVtYSpNRj3KWy2xrg84nRg5ajnnaH3m7sx4VHHCVKThWWtBHUXjrpZCh6dh64X2iA2FaAqc7m6f,[fbdb4a1e/48'/0'/0'/2']xpub6E2m3J5LjcuHcUBHTbZq53tgqe8gW6WEyrjKugx4ASaH9ZgPhhsetXQbA3TmA84dY2KdpybAE1VyCDEwG2m3nMP5KRBWVKVDS1W2qNaJXQa,[2b94355d/48'/0'/0'/2']xpub6Df6dNz8sDNSV6DdnUn2Sr5Hqur25EED192GhHqDtwVfzb5rXRgXvKDTV7yBDSbNtN45GM6UbRhCEo7G5T3Q4ugSwP4Uga16C6Lr3225mNv))#4utnaafe",
+  "fingerprints": [
+   "c9ad277c",
+   "fbdb4a1e",
+   "2b94355d"
+  ]
+ },
+ "official": {
+  "v1": [
+   {
+    "n": 1,
+    "descriptor": "pkh(02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5)",
+    "ur": "ur:crypto-output/taadmutaadeyoyaxhdclaoswaalbmwfpwekijndyfefzjtmdrtketphhktmngrlkwsfnospypsasrhhhjonnvwtsqzwljy"
+   },
+   {
+    "n": 2,
+    "descriptor": "sh(wpkh(03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556))",
+    "ur": "ur:crypto-output/taadmhtaadmwtaadeyoyaxhdclaxzmytkgtlkphywyoxcxfeftbbecgmectelfynfldllpisoyludlahknbbhndtkphfhlehmust"
+   },
+   {
+    "n": 3,
+    "descriptor": "sh(multi(2,022f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01,03acd484e2f0c7f65309ad178a9f559abde09796974c57e714c35f110dfc27ccbe))",
+    "ur": "ur:crypto-output/taadmhtaadmtoeadaoaolftaadeyoyaxhdclaodladvwvyhhsgeccapewflrfhrlbsfndlbkcwutahvwpeloleioksglwfvybkdradtaadeyoyaxhdclaxpstylrvowtstynguaspmchlenegonyryvtmsmtmsgshgvdbbsrhebybtztdisfrnpfadremh"
+   },
+   {
+    "n": 4,
+    "descriptor": "pkh([d34db33f/44'/0'/0']xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL/1/*)",
+    "ur": "ur:crypto-output/taadmutaaddlonaxhdclaotdqdinaeesjzmolfzsbbidlpiyhddlcximhltirfsptlvsmohscsamsgzoaxadwtaahdcxiaksataxbtgotictnybnqdoslsmdbztsmtryatjoialnolweuramsfdtolhtbadtamtaaddyotadlncsdwykaeykaeykaocytegtqdfhaxaaattaaddyoyadlradwklawkaycyksfpdmftkiiozsfd"
+   },
+   {
+    "n": 5,
+    "descriptor": "wsh(multi(1,xpub661MyMwAqRbcFW31YEwpkMuc5THy2PSt5bDMsktWQcFF8syAmRUapSCGu8ED9W6oDMSgv6Zz8idoc4a6mr8BDzTJY47LJhkJ8UB7WEGuduB/1/0/*,xpub69H7F5d8KSRgmmdJg2KhpAK8SR3DjMwAdkxj3ZuxV27CprR9LgpeyGmXUbC6wb7ERfvrnKZjXoUmmDznezpbZb7ap6r1D3tgFxHmwMkQTPH/0/0/*))",
+    "ur": "ur:crypto-output/taadmetaadmtoeadadaolftaaddloxaxhdclaxsbsgptsolkltkndsmskiaelfhhmdimcnmnlgutzotecpsfveylgrbdhptbpsveosaahdcxhnganelacwldjnlschnyfxjyplrllfdrplpswdnbuyctlpwyfmmhgsgtwsrymtldamtaaddyoeadlaaxaeattaaddyoyadlnadwkaewklawktaaddloxaxhdclaoztnnhtwtpslgndfnwpzedrlomnclchrdfsayntlplplojznslfjejecpptlgbgwdaahdcxwtmhnyzmpkkbvdpyvwutglbeahmktyuogusnjonththhdwpsfzvdfpdlcndlkensamtaaddyoeadlfaewkaocyrycmrnvwattaaddyoyadlnaewkaewklawktdbsfttn"
+   }
+  ],
+  "v3": [
+   {
+    "n": 1,
+    "text": "pk(03e220e776d811c44075a4a260734445c8967865f5357ba98ead3bc6a6552c36f2)",
+    "hex": "d99d74a20166706b284030290281d99d72a103582103e220e776d811c44075a4a260734445c8967865f5357ba98ead3bc6a6552c36f2"
+   },
+   {
+    "n": 2,
+    "text": "addr(tb1qfm7nmm28m9n7gy3fsfpze8vymds9qwtjwn4w7y)",
+    "hex": "d99d74a2016861646472284030290281d99d73a301d99d71a10201020203544efd3ded47d967e4122982422c9d84db60503972"
+   },
+   {
+    "n": 3,
+    "text": "pkh(Kxyjdi2KhJMBtPBJia5bmhZFfdMi1YrVYcq41QbnGToa2JXokeAu)",
+    "hex": "d99d74a20167706b68284030290281d99d72a202f5035820347c4acb73f7bf2268b958230e215986eda87a984959c4ddbd4d62c07de6310e"
+   },
+   {
+    "n": 4,
+    "text": "wsh(sortedmulti(2,[dc567276/48'/0'/0'/2']xpub6DiYrfRwNnjeX4vHsWMajJVFKrbEEnu8gAW9vDuQzgTWEsEHE16sGWeXXUV1LBWQE1yCTmeprSNcqZ3W74hqVdgDbtYHUv3eM4W2TEUhpan/<0;1>/*,[f245ae38/48'/0'/0'/2']xpub6DnT4E1fT8VxuAZW29avMjr5i99aYTHBp9d7fiLnpL5t4JEprQqPMbTw7k7rh5tZZ2F5g8PJpssqrZoebzBChaiJrmEvWwUTEMAbHsY39Ge/<0;1>/*,[c5d87297/48'/0'/0'/2']xpub6DjrnfAyuonMaboEb3ZQZzhQ2ZEgaKV2r64BFmqymZqJqviLTe1JzMr2X2RfQF892RH7MyYUbcy77R7pPu1P71xoj8cDUMNhAMGYzKR4noZ/<0;1>/*))",
+    "hex": "d99d74a301781c77736828736f727465646d756c746928322c40302c40312c403229290283d99d6fa5035821021c0b479ecf6e67713ddf0c43b634592f51c037b6f951fb1dc6361a98b1e5735e0458206b3a4cfb6a45f6305efe6e0e976b5d26ba27f7c344d7fc7abef7be2d06d52dfd06d99d70a201881830f500f500f502f5021adc56727607d99d70a101838400f401f480f4081a18f8c2e7d99d6fa50358210397fcf2274abd243d42d42d3c248608c6d1935efca46138afef43af08e9712896045820c887c72d9d8ac29cddd5b2b060e8b0239039a149c784abe6079e24445db4aa8a06d99d70a201881830f500f500f502f5021af245ae3807d99d70a101838400f401f480f4081a221eb5a0d99d6fa5035821028342f5f7773f6fab374e1c2d3ccdba26bc0933fc4f63828b662b4357e4cc37910458205afed56d755c088320ec9bc6acd84d33737b580083759e0a0ff8f26e429e0b7706d99d70a201881830f500f500f502f5021ac5d8729707d99d70a101838400f401f480f4081a1c0ae906036f5361746f7368692773205374617368"
+   }
+  ],
+  "source": "BlockchainCommons/Research papers bcr-2020-010-output-desc.md and bcr-2023-010-output-descriptor.md, fetched 2026-09-22"
+ }
+}

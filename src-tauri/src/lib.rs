@@ -5,6 +5,7 @@ mod attach;
 mod cards;
 mod chain;
 mod db;
+mod urdesc;
 mod context;
 mod export;
 mod hd;
@@ -249,7 +250,7 @@ fn vault_create(name: String, threshold: usize, keys: Vec<NewKey>, rotating: Opt
 #[derive(Serialize)]
 struct Parsed { threshold: usize, keys: Vec<String>, descriptor: String, address: String, rotating: bool,
     /// extended keys held by other signers: each with the fingerprint and path a hardware signer matches on
-    #[serde(default)] ext: Option<Vec<wallet::ExtKey>>, #[serde(default)] kind: String }
+    #[serde(default)] ext: Option<Vec<wallet::ExtKey>>, #[serde(default)] kind: String , #[serde(default)] name: Option<String>}
 
 /// Text that names extended keys goes the faithful way (miniscript, as written); anything else is a card vault's own
 /// line. Decided by what is IN the text, because a card vault's recovery line ends in ` cc=…`, which is not
@@ -269,12 +270,14 @@ fn ext_for_this_network(text: &str, network: &str) -> R<wallet::ExtInfo> {
 #[tauri::command]
 fn descriptor_parse(text: String) -> R<Parsed> {
     let s = wallet::load()?;
+    // a descriptor backed up as UR (Sparrow's QR, a metal plate): decoded to its text, then checked like any other
+    let (text, ur_name) = if urdesc::is_ur(&text) { let d = urdesc::decode(&text)?; (urdesc::as_wallet(&d.descriptor), d.name) } else { (text, None) };
     if names_extended_keys(&text) {
         let info = ext_for_this_network(&text, &s.settings.network)?;
         let mut v = ext_vault(String::new(), &info, &[]);
         v.address = wallet::address_at(&v, 0)?;
         return Ok(Parsed { threshold: info.threshold, keys: info.keys.iter().map(|k| format!("[{}/{}]{}", k.fingerprint, k.path.trim_start_matches("m/"), k.xpub)).collect(),
-            descriptor: info.descriptor.clone(), address: v.address, rotating: true, ext: Some(info.keys.clone()), kind: info.kind.clone() });
+            descriptor: info.descriptor.clone(), address: v.address, rotating: true, ext: Some(info.keys.clone()), kind: info.kind.clone(), name: ur_name });
     }
     let (desc_text, cc) = wallet::split_recovery(&text);
     let (threshold, keys) = wallet::keys_of(&desc_text)?;
@@ -282,7 +285,7 @@ fn descriptor_parse(text: String) -> R<Parsed> {
     let tmp = Vault { name: String::new(), network: s.settings.network.clone(), threshold, keys: keys.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.clone(), device: None }).collect(),
         descriptor: descriptor.clone(), address: String::new(), created: 0, chain_code: cc.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None };
     let address = wallet::address_at(&tmp, 0)?;
-    Ok(Parsed { threshold, keys, descriptor: wallet::recovery_line(&tmp), address, rotating: cc.is_some(), ext: None, kind: "cards".into() })
+    Ok(Parsed { threshold, keys, descriptor: wallet::recovery_line(&tmp), address, rotating: cc.is_some(), ext: None, kind: "cards".into(), name: ur_name })
 }
 
 #[tauri::command]
@@ -384,7 +387,7 @@ fn signers_vault(name: String, threshold: usize, keys: &[SignerIn], network: &st
 
 /// A vault of extended keys held by other signers. Each key is named for the person, and keeps its origin — the
 /// fingerprint and path a hardware signer matches on — as the "pubkey" shown for it; it is never a card's key.
-fn ext_vault(name: String, info: &wallet::ExtInfo, names: &[String]) -> Vault {
+pub(crate) fn ext_vault(name: String, info: &wallet::ExtInfo, names: &[String]) -> Vault {
     Vault { name, network: info.network.clone(), threshold: info.threshold,
         keys: info.keys.iter().enumerate().map(|(i, k)| wallet::KeyRef { name: names.get(i).cloned().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| if k.fixed { format!("key {} · a card", i + 1) } else { format!("key {} · {}", i + 1, k.fingerprint) }),
             // a fixed key is kept as the bare key, so a card plugged in is recognised as this vault's by the key it holds

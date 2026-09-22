@@ -29,6 +29,10 @@ const H = {
   spend_ceremony: (a) => { if (!window.__cer) throw 'no spend in progress'; return window.__cer; },
   spend_qr: () => ({ parts: ['UR:CRYPTO-PSBT/1-2/AAA', 'UR:CRYPTO-PSBT/2-2/BBB', 'UR:CRYPTO-PSBT/3-2/CCC', 'UR:CRYPTO-PSBT/4-2/DDD'], single: null, bytes: 600, bbqr: ['B$2P0200AAAA', 'B$2P0201BBBB'] }),
   spend_import: (a) => { (window.__imports = window.__imports || []).push(a.text); const n = (a.text || '').split('\\n').length; if (n < 2) throw 'some QR parts are missing: 1 of 2 pieces recovered so far; keep the code in the frame until it completes'; window.__cer = Object.assign({}, window.__cer, { have: 1, keys: window.__cer.keys.map(k => k.name === 'SeedSigner' ? Object.assign({}, k, { signed: 1 }) : k) }); return window.__cer; },
+  descriptor_parse: (a) => { (window.__parsed = window.__parsed || []).push(a.text); const t = a.text.trim();
+    if (/^ur:/i.test(t)) { const n = new Set(t.split(/\s+/).map(x => x.toLowerCase())).size; if (n < 2) throw 'some QR parts are missing: 1 of 2 pieces recovered so far; keep the code in the frame until it completes'; }
+    return { threshold: 2, keys: ['a', 'b', 'c'], descriptor: 'wsh(sortedmulti(2,[c9ad277c/48h/0h/0h/2h]xpub6EAC…/<0;1>/*,…))#abcd1234', address: 'bc1qplate', rotating: true, kind: 'sortedmulti', name: 'Plate backup',
+      ext: [{ fingerprint: 'c9ad277c', path: 'm/48h/0h/0h/2h', xpub: 'xpub6EAC4GduaPj3E', fixed: false }, { fingerprint: 'fbdb4a1e', path: 'm/48h/0h/0h/2h', xpub: 'xpub6Eb', fixed: false }, { fingerprint: '2b94355d', path: 'm/48h/0h/0h/2h', xpub: 'xpub6Ec', fixed: false }] }; },
   vault_create: (a) => { __created = { cmd: 'cards', a }; throw 'stop here'; },
 };
 window.__TAURI__ = { core: { invoke: async (cmd, args) => { __calls.push(cmd); if (!H[cmd]) { __unmocked.push(cmd); return null; } return H[cmd](args || {}); } }, event: { listen: async () => () => {} } };
@@ -179,6 +183,28 @@ with sync_playwright() as p:
     # a card of the vault plugged in takes over: the card path, with its PIN
     pg.evaluate(f"__cards = [{json.dumps(card(C1, 111))}]"); pg.wait_for_timeout(2600)
     check("a plugged-in card of this vault gets the PIN path", pg.is_visible("#pin-field") and not pg.is_visible("#dev-sign-row"), pg.inner_text("#sign-title"))
+
+    # ---- restoring from a descriptor backed up as UR on metal plates: one plate per part, read in any order ----
+    pg.evaluate("""() => { const cv = document.createElement('canvas'); cv.width = 64; cv.height = 48; const x = cv.getContext('2d'); setInterval(() => { x.fillStyle = '#' + Math.floor(Math.random() * 999); x.fillRect(0, 0, 64, 48); }, 50);
+      window.camOpen = async () => cv.captureStream(10);
+      window.__plate = null; window.jsQR = () => (window.__plate ? { data: window.__plate } : null); }""")
+    pg.evaluate("show('restore'); restoreTab('scan')"); pg.wait_for_timeout(500)
+    pg.evaluate("window.__plate = 'UR:CRYPTO-OUTPUT/2-2/LPAOAOCSFGYYFHKG'"); pg.wait_for_timeout(1200)   # the SECOND plate first, in capitals as engraved
+    segs = pg.locator("#tab-scan .sbar i")
+    check("one plate of two: a bar of two segments, one filled, and how many more", segs.count() == 2 and pg.locator("#tab-scan .sbar i.on").count() == 1 and "1 more to go" in pg.inner_text("#cam-note"), pg.inner_text("#cam-note"))
+    pg.locator("#tab-scan").screenshot(path=str(out / "restore-ur-one-plate.png"))
+    n0 = len(pg.evaluate("window.__parsed"))
+    pg.wait_for_timeout(1200)
+    check("the same plate held there is not read again and again", len(pg.evaluate("window.__parsed")) == n0)
+    pg.evaluate("window.__plate = 'UR:CRYPTO-OUTPUT/1-2/LPADAOCSFGYYFHKG'"); pg.wait_for_timeout(1200)
+    card = pg.inner_text("#restore-card")
+    check("the second plate completes it: the vault is read, and the bar goes", "2 of 3" in card and pg.locator("#tab-scan .sbar").count() == 0, card[:160])
+    check("the backup's own name is offered for the vault", pg.input_value("#restore-name") == "Plate backup")
+    pg.evaluate("window.__plate = null; restoreTab('paste')"); pg.wait_for_timeout(200)
+    pg.fill("#desc-in", "UR:CRYPTO-OUTPUT/1-2/LPADAOCSFGYYFHKG\nUR:CRYPTO-OUTPUT/2-2/LPAOAOCSFGYYFHKG"); pg.click("#desc-read"); pg.wait_for_timeout(400)
+    check("or the plates' text, typed in, one part to a line", "2 of 3" in pg.inner_text("#restore-card") and "UR:CRYPTO-OUTPUT/2-2" in pg.evaluate("window.__parsed[window.__parsed.length - 1]"))
+    pg.locator("#s-restore").screenshot(path=str(out / "restore-ur-plates.png"))
+    pg.evaluate("stopCam()")
 
     # ---- removing a key, and cards alone keep the card path ----
     pg.evaluate(f"__cards = [{json.dumps(card(C1, 111))}, {json.dumps(card(C2, 222))}]; setup = {{ k: 2, n: 2, keys: [], network: 'mainnet' }}; show('setup')"); pg.wait_for_timeout(300)

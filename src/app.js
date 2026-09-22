@@ -1662,10 +1662,9 @@ async function pscanOpen(deviceId) {
     busy = true;
     try {
       const c = await invoke('spend_import', { name: vault.name, text: multi ? [...pscan.parts].join('\n') : t });
-      pscanClose(); toast(`Signed code read: ${c.have} of ${c.need} signatures on it, every one checked`, 5000); renderSign.tiles = null; renderSign();
+      scanBar($('#pscan-note'), null); pscanClose(); toast(`Signed code read: ${c.have} of ${c.need} signatures on it, every one checked`, 5000); renderSign.tiles = null; renderSign();
     } catch (e) {
-      const p = scanProgress(e);
-      if (p) note.textContent = p; else { note.textContent = String(e && e.message || e); pscan.parts = new Set(); }
+      if (!scanShow(note, e)) { note.textContent = String(e && e.message || e); scanBar(note, null); pscan.parts = new Set(); }
     }
     busy = false;
   }, 250);
@@ -2101,8 +2100,8 @@ async function devScan(deviceId) {
     // an animated UR arrives a part at a time, in any order; a plain code is the whole thing
     if (/^ur:/i.test(t)) { const before = devSt.parts.size; devSt.parts.add(t.toLowerCase()); if (devSt.parts.size === before) return; }
     busy = true;
-    try { const r = await invoke('device_key_read', { text: /^ur:/i.test(t) ? [...devSt.parts].join(' ') : t }); devStop(); $('#dev-cam').hidden = true; note.textContent = 'Read.'; devGot(r); }
-    catch (e) { note.textContent = scanProgress(e) || String(e); }
+    try { const r = await invoke('device_key_read', { text: /^ur:/i.test(t) ? [...devSt.parts].join(' ') : t }); devStop(); $('#dev-cam').hidden = true; note.textContent = 'Read.'; scanBar(note, null); devGot(r); }
+    catch (e) { if (!scanShow(note, e)) { note.textContent = String(e); scanBar(note, null); } }
     busy = false;
   }, 250);
 }
@@ -2112,8 +2111,22 @@ async function devScan(deviceId) {
 function scanProgress(e) {
   const m = /(\d+) of (\d+) (pieces recovered|\))/.exec(String(e)) || /missing \((\d+) of (\d+)\)/.exec(String(e));
   if (!/missing/i.test(String(e))) return null;
-  return m ? `Reading an animated code: ${m[1]} of ${m[2]} pieces so far. Keep it in the frame.` : 'Reading an animated code. Keep it in the frame.';
+  if (!m) return { have: 0, of: 0, text: 'Reading an animated code. Keep it in the frame.' };
+  const have = +m[1], of = +m[2], left = of - have;
+  return { have, of, text: `${have} of ${of} pieces read — ${left} more to go. Keep it in the frame, or show the next part.` };
 }
+/// A bar of `of` segments, `have` of them filled, drawn just above the scanner's note. A code in a handful of parts
+/// (one per metal plate, say) shows each part as its own segment; a long animated one, as one bar that fills.
+function scanBar(note, p) {
+  let bar = note.previousElementSibling && note.previousElementSibling.classList.contains('sbar') ? note.previousElementSibling : null;
+  if (!p || !p.of) { if (bar) bar.remove(); return; }
+  if (!bar) { bar = document.createElement('div'); bar.className = 'sbar'; bar.setAttribute('role', 'progressbar'); note.parentNode.insertBefore(bar, note); }
+  bar.setAttribute('aria-valuemin', '0'); bar.setAttribute('aria-valuemax', String(p.of)); bar.setAttribute('aria-valuenow', String(p.have));
+  bar.setAttribute('aria-label', `${p.have} of ${p.of} pieces read`);
+  bar.classList.toggle('long', p.of > 24);
+  bar.innerHTML = p.of > 24 ? `<i class="fill" style="width:${Math.round(100 * p.have / p.of)}%"></i>` : Array.from({ length: p.of }, (_, i) => `<i class="${i < p.have ? 'on' : ''}"></i>`).join('');
+}
+function scanShow(note, e) { const p = scanProgress(e); if (!p) return false; note.textContent = p.text; scanBar(note, p); return true; }
 /// A device's export read: choose its multisig key, check it belongs in THIS vault, and let it be named.
 function devGot(r) {
   const d = devSt.dev, keys = (r && r.keys) || [];
@@ -2251,8 +2264,21 @@ async function startCam(deviceId) {
   if (camTimer) { clearInterval(camTimer); camTimer = null; }
   if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
   try { camStream = await camOpen(deviceId); $('#cam').srcObject = camStream; camChooser($('#scan-pick2'), camStream, startCam); const cv = document.createElement('canvas'); const ctx = cv.getContext('2d', { willReadFrequently: true });
-    camTimer = setInterval(() => { const v = $('#cam'); if (!v.videoWidth) return; cv.width = v.videoWidth; cv.height = v.videoHeight; ctx.drawImage(v, 0, 0); const img = ctx.getImageData(0, 0, cv.width, cv.height); const code = jsQR(img.data, cv.width, cv.height); if (code && code.data && /^(wsh|wpkh)\(/.test(code.data)) { $('#cam-note').textContent = 'Read a descriptor from the code.'; readDescriptor(code.data); } }, 400);
+    camTimer = setInterval(() => { const v = $('#cam'); if (!v.videoWidth) return; cv.width = v.videoWidth; cv.height = v.videoHeight; ctx.drawImage(v, 0, 0); const img = ctx.getImageData(0, 0, cv.width, cv.height); const code = jsQR(img.data, cv.width, cv.height); if (code && code.data) restoreCode(code.data.trim()); }, 400);
   } catch (e) { $('#cam-note').textContent = 'No camera available. Paste the line instead.'; }
+}
+// what the restore camera has read: a descriptor as text, or a UR one in parts gathered until it is whole
+const restoreParts = new Set(); let restoreBusy = false;
+async function restoreCode(t) {
+  const note = $('#cam-note');
+  if (/^(wsh|wpkh|sh|tr)\(/.test(t)) { note.textContent = 'Read a descriptor from the code.'; scanBar(note, null); return readDescriptor(t); }
+  if (!/^ur:(crypto-output|output-descriptor)\//i.test(t)) return;
+  const n = restoreParts.size; restoreParts.add(t.toLowerCase()); if (restoreParts.size === n || restoreBusy) return;
+  restoreBusy = true;
+  // whole: the camera's work is done — stopped, so a plate still in view does not start a second reading
+  try { const all = [...restoreParts].join('\n'); await invoke('descriptor_parse', { text: all }); stopCam(); restoreParts.clear(); note.textContent = 'Read the whole descriptor.'; scanBar(note, null); readDescriptor(all); }
+  catch (e) { if (!scanShow(note, e)) { note.textContent = String(e); scanBar(note, null); restoreParts.clear(); } }
+  restoreBusy = false;
 }
 function stopCam() { if (camTimer) clearInterval(camTimer); camTimer = null; if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; } }
 $('#desc-read').onclick = () => readDescriptor($('#desc-in').value);
@@ -2282,8 +2308,8 @@ function readExtended(p) {
   $('#restore-card').innerHTML = `<div class="ok">Read: ${p.threshold} of ${p.keys.length}, ${esc(kind)}, over extended keys held by other signers \u2014 checksum ok, a fresh address for every deposit.</div>
     <div class="mono muted" style="background:var(--ground);padding:12px;border-radius:6px;border:1px solid var(--line);word-break:break-all;font-size:12px">${esc(p.descriptor)}</div>
     <div style="display:flex;flex-direction:column;gap:8px">${p.ext.map((k, i) => `<div class="row" style="justify-content:space-between;gap:10px;flex-wrap:wrap"><span><span class="mono">${esc(k.fingerprint)}</span> <span class="muted" style="font-size:12.5px">${esc(k.path)}</span></span><input data-kname="${i}" value="${esc('key ' + (i + 1) + ' \u00b7 ' + k.fingerprint)}" style="max-width:190px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink)"><span class="muted" style="font-size:13px">signs on another device</span></div>`).join('')}</div>
-    <div class="muted" style="font-size:13px">First address on ${netName()}: <span class="mono">${esc(p.address)}</span>. This vault can be watched from now on \u2014 balance, activity, coins, addresses. Spending from it, built here and signed on the signing devices by QR, is the next step and is not built yet.</div>
-    <div class="field"><div class="label">Vault name</div><input id="restore-name" value="multisig"></div>
+    <div class="muted" style="font-size:13px">First address on ${netName()}: <span class="mono">${esc(p.address)}</span>. Check it is the address your other wallet shows first. From now on this vault is watched here \u2014 balance, activity, coins, addresses \u2014 and a spend is built here and signed on its devices, by their codes or files.</div>
+    <div class="field"><div class="label">Vault name</div><input id="restore-name" value="${esc(p.name || 'multisig')}"></div>
     <button class="btn primary" id="restore-go">Watch this vault</button>`;
   $('#restore-go').onclick = async () => {
     try { vault = await invoke('vault_restore', { name: $('#restore-name').value.trim() || 'multisig', text: p.descriptor, names: $$('[data-kname]').map(i => i.value.trim()) }); store = await invoke('store_get'); rememberVault(vault); stopCam(); toast('Watching this vault'); paintNet(); show('home'); }

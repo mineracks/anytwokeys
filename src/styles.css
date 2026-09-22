@@ -555,3 +555,8 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .warnbox{border:1px solid var(--line);border-left:3px solid var(--gold);border-radius:6px;padding:var(--s3) 14px;font-size:13px}
 .devguide{display:flex;align-items:center;justify-content:center;height:100%;color:var(--ink)} .devguide svg{width:150px;height:118px}
 .ckey .devart{width:44px;height:34px} .ckey .devart svg{width:44px;height:34px}
+
+/* how much of a code has been read: a segment per piece (a plate per part, a few QR frames), or one bar when long */
+.sbar{display:flex;gap:var(--s1);margin:var(--s2) 0 var(--s1)} .sbar i{flex:1;height:5px;border-radius:3px;background:var(--line);transition:background .25s}
+.sbar i.on{background:var(--gold)} .sbar.long{background:var(--line);height:5px;border-radius:3px;overflow:hidden} .sbar.long i.fill{flex:none;background:var(--gold);transition:width .25s}
+@media (prefers-reduced-motion:reduce){.sbar i{transition:none}}
