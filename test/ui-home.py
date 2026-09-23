@@ -65,11 +65,22 @@ const H = {
     { chain: 'change', index: 2147483648, position: 0, address: 'bc1qchangeone', current: true, future: false }],
   seal_read: () => (window.__seal || { cards: 0, foreign: [], found: [] }),
   seal_preview: (a) => { window.__previewed = a.found.length; return window.__cands || []; },
-  vault_sync: (a) => ({ coins: [{ txid: '%(t0)s', vout: 0, value: 9430, height: 967374, index: 0 }], balance: a.name === 'other vault' ? 111 : 9430, height: 967685, rotating: !!window.__rotating, receive: 'bc1qexample', receive_index: 0, next_change: 0, gap: 20, servers: { electrum: 'ssl://electrum.mineracks.com:50002', explorer: 'https://mempool.mineracks.com' },
+  vault_sync: (a) => ({ coins: [{ txid: '%(t2)s', vout: 1, value: 9430, height: 967497, index: 0 }], balance: a.name === 'other vault' ? 111 : 9430, height: 967685, rotating: !!window.__rotating, receive: 'bc1qexample', receive_index: 0, next_change: 0, gap: 20, servers: { electrum: 'ssl://electrum.mineracks.com:50002', explorer: 'https://mempool.mineracks.com' },
     history: [{ txid: '%(t0)s', height: 967374, index: 0 }, { txid: '%(t1)s', height: 967410, index: 0 }, { txid: '%(t2)s', height: 967497, index: 0 }, { txid: '%(t3)s', height: 0, index: 0 }] }),
   prices_series: (a) => { window.__seriesAsked = (window.__seriesAsked || []).concat([a.from + '..' + a.to]);
     const out = []; for (let t = Date.parse(a.from + 'T00:00:00Z'); t <= Date.parse(a.to + 'T00:00:00Z'); t += 86400000) { const d = new Date(t).toISOString().slice(0, 10); out.push([d, window.__holeDay === d ? null : { price: 110000, basis: 'daily ' + d }]); }
     return { every: 1, points: out }; },
+  spend_preview: (a) => { window.__prevAsked = a;
+    const all = [{ op: '%(t2)s:1', value: 9430 }];
+    const chosen = (a.coins && a.coins.length ? all.filter(c => a.coins.includes(c.op)) : all);
+    const spending = chosen.reduce((x, c) => x + c.value, 0), fee = 190;
+    const send = a.sendAll ? spending - fee : a.amount;
+    if (send + fee > spending) throw 'the vault holds ' + spending + ' sats; ' + send + ' plus a ' + fee + ' sat fee needs more';
+    const change = spending - send - fee;
+    return { choice: { chosen: chosen.map(c => c.op), spending, send, change, fee, vsize: 190, leaving: spending - change },
+      to_ours: /freshaddressofsavingsvault/.test(a.to) ? { vault: 'savings vault', index: 4, chain: 'receive', this_vault: false } : null,
+      coins: [] }; },
+  disposal_set: (a) => { window.__disposal = a; return store(); },
   vault_activity: (a) => { __state.asked = a; if (__state.fail) throw 'electrum: connection refused'; const q = (p, b) => a.ccy ? { price: p, basis: b } : null; return { ccy: a.ccy, note: null, transfers: window.__xfers || {}, now: q(114209.6, 'daily 2026-09-19'), rows: [
     // one coin spent down: 20,000 in; spent, 14,810 change; spent, 9,430 change; and 1,000 not yet in a block
     { txid: '%(t0)s', time: 1789627614, net: 20000, fee: null, quote: q(107389.64, 'hourly 2026-09-17 06:00 UTC'), ins: [], outs: [[0, 20000]] },
@@ -331,7 +342,35 @@ with sync_playwright() as p:
     check("picking an entry fills the field, closes the book and moves to the amount", pg.input_value("#send-to") == A and not pg.locator("#book").is_visible() and pg.evaluate("document.activeElement.id") == "send-amount")
     pg.click("#book-to"); pg.click("#book [data-own]"); pg.wait_for_timeout(200)
     check("an own vault gives a FRESH address, and says so", pg.input_value("#send-to").startswith("bc1qfreshaddressofsavingsvault") and "has not used before" in pg.inner_text("#to-who"), pg.inner_text("#to-who"))
+    pg.fill("#send-amount", "2000"); pg.wait_for_timeout(700)
+    own = pg.inner_text("#review")
+    check("paying one of your OWN vaults is not a disposal, and the screen says only the fee leaves", "stays with you" in own.lower() and "not a disposal" in own and "190 sat fee leaves" in own and not pg.locator("#disposal-pick").count(), own[:240])
     pg.evaluate("__contacts[0].used = 3"); pg.fill("#send-to", A); pg.wait_for_timeout(100)
+    # ---- what a spend would do, before anything is built: where it goes, and what it would realise ----
+    # Expected figures worked out here, from the mock's own rows, NOT from the app: the one coin held is the change
+    # t2 made, which carried its share of what t0 cost — 20,000 sats at 107,389.64, through 14,810, through 9,430.
+    coin_cost = 20000 / 1e8 * 107389.64 * (14810 / 20000) * (9430 / 14810)
+    leaving = 2190
+    want_cost, want_now = coin_cost * leaving / 9430, leaving / 1e8 * 114209.6
+    pg.fill("#send-to", A); pg.fill("#send-amount", "2000"); pg.wait_for_timeout(700)
+    rev = pg.inner_text("#review")
+    money = lambda v: f"{v:,.2f}"
+    check("Send says the spend leaves the vaults, and what leaves is the payment AND the fee", "leaves your vaults" in rev.lower() and "2,190 sats" in rev and "2,000 paid" in rev and "190 in fee" in rev, rev[:200])
+    check("it shows what those sats cost, what they are worth now, and the gain — the figures worked out here", money(want_cost) in rev and money(want_now) in rev and money(want_now - want_cost) in rev, f"want {money(want_cost)} / {money(want_now)} / {money(want_now - want_cost)} — got {rev[:400]}")
+    check("and it names the method, because only one of them is decided by the coins", "the coins this transaction actually spent" in rev, rev[-260:])
+    check("nothing is built yet, and the screen says so", "Nothing is built yet" in rev and pg.evaluate("built") is None)
+    pg.click("#disposal-pick .opt[data-kind='self']"); pg.wait_for_timeout(250)
+    check("saying it went to a wallet of your own says plainly that no gain is realised", "not a disposal" in pg.inner_text("#disposal-note").lower() and "cost goes with the coins" in pg.inner_text("#disposal-note"), pg.inner_text("#disposal-note"))
+    pg.click("#disposal-pick .opt[data-kind='sold']"); pg.wait_for_timeout(250)
+    check("and a sale says the gain is realised when it confirms", "realised" in pg.inner_text("#disposal-note"), pg.inner_text("#disposal-note"))
+    pg.click("#coins-adv summary"); pg.wait_for_timeout(200)
+    coin = pg.inner_text("#coin-list")
+    check("each coin says what it cost and what spending it would realise", money(coin_cost) in coin and money(9430 / 1e8 * 114209.6) in coin and "if spent" in coin, coin[:200])
+    check("and the note says the pick IS the disposal under this method", "what you tick here is what you dispose of" in pg.inner_text("#coin-method"), pg.inner_text("#coin-method"))
+    pg.click("#coin-plans [data-plan='gain']"); pg.wait_for_timeout(700)
+    check("a picking plan ticks coins to cover the amount and the review follows", pg.evaluate("coinPick.size") == 1 and "chosen by you" in pg.inner_text("#review"), pg.inner_text("#coin-sum"))
+    pg.click("#coins-none"); pg.wait_for_timeout(500)
+
     check("a reused address says how often, and what that costs", "Paid 3 times before" in pg.inner_text("#to-who") and "link these payments" in pg.inner_text("#to-who"))
     pg.click("#book-to"); pg.wait_for_timeout(150); pg.locator("#book").screenshot(path=str(out / "address-book.png"))
     pg.click("#book [data-del]"); pg.wait_for_timeout(150)
@@ -664,15 +703,15 @@ with sync_playwright() as p:
     check("and the address the coin sits on, worked out from its index", "bc1qexample" in pg.inner_text("#coin-rows tr[data-coin]"), pg.inner_text("#coin-rows"))
     pg.locator("#coin-rows tr[data-coin]").first.click(); pg.wait_for_timeout(400)
     check("clicking a coin opens its record, keyed on the output itself",
-          pg.locator("#coins-detail").is_visible() and pg.evaluate("recView.key") == "output:%s:0" % T[0] and pg.evaluate("document.querySelector('#coins-detail').contains(document.querySelector('#tx-notes'))"),
+          pg.locator("#coins-detail").is_visible() and pg.evaluate("recView.key") == "output:%s:1" % T[2] and pg.evaluate("document.querySelector('#coins-detail').contains(document.querySelector('#tx-notes'))"),
           pg.evaluate("recView.key"))
     pg.fill("#tx-note", "change from the car"); pg.evaluate("document.querySelector('#tx-note').blur()"); pg.wait_for_timeout(400)
-    check("a note on a coin is kept against that one coin", pg.evaluate("V.notes['output:%s:0']" % T[0]) == "change from the car")
+    check("a note on a coin is kept against that one coin", pg.evaluate("V.notes['output:%s:1']" % T[2]) == "change from the car")
     check("while a coin's record is open the card is NOT back home", pg.evaluate("document.querySelector('#tx-notes').parentElement === recHome") is False)
     # ---- a coin is a page: the list steps aside, crumbs say where, figures and a strip, a PDF, and links onward ----
     check("the coin opens as a page: the list steps aside", not pg.locator("#coin-rows").is_visible())
     cr = pg.inner_text("#crumbs")
-    check("the crumbs read vault › Coins › this coin", "Coins" in cr and ("%s…:0" % T[0][:8]) in cr and pg.locator("#crumbs [data-crumb=coins]").count() == 1, cr)
+    check("the crumbs read vault › Coins › this coin", "Coins" in cr and ("%s…:1" % T[2][:8]) in cr and pg.locator("#crumbs [data-crumb=coins]").count() == 1, cr)
     dd = pg.inner_text("#coins-detail")
     ddl = dd.lower()   # the labels are uppercased by CSS
     check("what it cost, what it is worth, and how long it has been held", "cost basis" in ddl and "worth now" in ddl and "held since" in ddl, dd[:300])
@@ -683,7 +722,7 @@ with sync_playwright() as p:
     check("rebuilding the page (as ‹ › does) keeps the record card, with its note", pg.evaluate("!!document.querySelector('#coins-detail #tx-notes')") and pg.input_value("#tx-note") == "change from the car")
     pg.click("#rec-pdf"); pg.wait_for_timeout(400)
     rp = pg.evaluate("window.__recPdf") or {}
-    check("Save as PDF sends the page's own figures, keyed on the coin", rp.get("key") == "output:%s:0" % T[0] and any(k == "Cost basis" for k, _ in rp.get("facts", [])) and "Saved" in pg.inner_text("#toast"), json.dumps(rp)[:300])
+    check("Save as PDF sends the page's own figures, keyed on the coin", rp.get("key") == "output:%s:1" % T[2] and any(k == "Cost basis" for k, _ in rp.get("facts", [])) and "Saved" in pg.inner_text("#toast"), json.dumps(rp)[:300])
     pg.locator("#coins-detail [data-go-addr]").first.click(); pg.wait_for_timeout(700)
     check("the coin's address is a link to that address's own page", pg.locator("#s-addresses.on").count() == 1 and pg.locator("#addr-detail").is_visible() and "Addresses" in pg.inner_text("#crumbs"), pg.inner_text("#crumbs"))
     pg.wait_for_timeout(500)

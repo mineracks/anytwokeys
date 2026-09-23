@@ -546,6 +546,40 @@ async fn spend_build(name: String, to: String, amount: u64, rate: f64, send_all:
     }).await
 }
 
+/// An address that belongs to a vault this app holds: the spend stays with the owner, so nothing is disposed of.
+#[derive(Serialize)]
+struct Owned { vault: String, index: u32, chain: String, this_vault: bool }
+
+#[derive(Serialize)]
+struct Preview { choice: wallet::Choice, to_ours: Option<Owned>, coins: Vec<wallet::CoinAt> }
+
+/// What a spend WOULD do, before anything is built: which coins it takes, what leaves, and whether the address is
+/// one of this app's own vaults. Send draws its consequences from this; the cost of those coins is the window's to
+/// work out, from the same ledger every other screen uses, under the method the taxpayer set.
+#[tauri::command]
+async fn spend_preview(name: String, to: String, amount: u64, rate: f64, send_all: bool, coins: Option<Vec<String>>) -> R<Preview> {
+    block(move || {
+        let s = wallet::load()?;
+        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+        let servers = wallet::servers_for(&s, &v.network);
+        let sc = wallet::scan(&v, &servers, s.settings.gap)?;
+        let change_index = if wallet::rotates(&v) { wallet::CHANGE | sc.next_change } else { 0 };
+        let choice = wallet::select(&v, &sc.coins, change_index, &to, amount, rate, send_all, coins.filter(|c| !c.is_empty()).as_deref())?;
+        Ok(Preview { choice, to_ours: owner_of(&s, &v, &to), coins: sc.coins })
+    }).await
+}
+
+/// Which vault an address belongs to, this one or another on the same network — the same tables Activity uses to
+/// recognise a move between your own vaults.
+fn owner_of(s: &wallet::Store, v: &Vault, to: &str) -> Option<Owned> {
+    use std::str::FromStr;
+    let spk = bitcoin::Address::from_str(to.trim()).ok()?.assume_checked().script_pubkey();
+    let named = |o: &Vault, i: u32| Owned { vault: o.name.clone(), index: i & !wallet::CHANGE, chain: if i & wallet::CHANGE != 0 { "change" } else { "receive" }.into(), this_vault: o.name == v.name };
+    if let Some(i) = wallet::ours_table(v).ok().and_then(|f| f(&spk)) { return Some(named(v, i)); }
+    s.vaults.iter().filter(|o| o.name != v.name && o.network == v.network)
+        .find_map(|o| wallet::ours_table(o).ok().and_then(|f| f(&spk)).map(|i| named(o, i)))
+}
+
 #[derive(Serialize)]
 struct Signed { psbt: String, signed_inputs: Vec<usize>, status: wallet::SigStatus, signer: String }
 
@@ -1380,6 +1414,26 @@ async fn place_search(q: String) -> R<Vec<places::Hit>> {
     }).await
 }
 
+/// What a spend OUT of the vaults was: a sale, something bought, a gift, or a move to a wallet of their own that
+/// this app does not hold. Only the last changes the arithmetic — it is not a disposal, so no gain is realised and
+/// the cost leaves the books with the coins. The others are all disposals; they record WHY, which is what an
+/// accountant needs and what this app cannot infer from the chain.
+#[tauri::command]
+async fn disposal_set(name: String, txid: String, kind: String) -> R<Store> {
+    const KINDS: [&str; 5] = ["sold", "spent", "gift", "self", ""];
+    if !KINDS.contains(&kind.as_str()) { return Err(format!("a disposal is one of {}", KINDS[..4].join(", "))); }
+    let t = now();
+    let (nm, id, k) = (name.clone(), txid.clone(), kind.clone());
+    wallet::update(move |s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) {
+        let key = format!("tx:{id}");
+        let rec = v.more.entry(key.clone()).or_default();
+        if k.is_empty() { rec.remove("disposal"); } else { rec.insert("disposal".into(), serde_json::json!({ "kind": k, "t": t })); }
+        v.label_meta.insert(key, t);
+    })?;
+    let _ = labels_sync(name).await;
+    Ok(wallet::load()?)
+}
+
 /// The person's own say over a transaction's place: take it off, name it themselves, or choose it from the search
 /// (which brings its position with it, so the record gets a map).
 #[tauri::command]
@@ -1995,7 +2049,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
-            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget,
+            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget, spend_preview, disposal_set,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
         .build(tauri::generate_context!())
@@ -2267,6 +2321,26 @@ mod signers_vault_tests {
         let same = ext_vault("shown".into(), &back, &[]);
         for i in [0u32, 1, 2, wallet::CHANGE, wallet::CHANGE | 1] {
             assert_eq!(wallet::address_at(&same, i).unwrap(), wallet::address_at(&v, i).unwrap(), "address {i} must not move");
+        }
+    }
+    /// Send shows what a spend would do before anything is built. If it worked that out separately from `build`,
+    /// the two would drift and the screen would describe a different spend from the one signed — so they are the
+    /// same function, and this holds them to it.
+    #[test]
+    fn what_send_shows_is_the_very_choice_that_gets_built() {
+        let v = signers_vault("m".into(), 2, &keys([0, 1, 2]), "mainnet").unwrap();
+        let coins: Vec<wallet::CoinAt> = [(9_430u64, 3u32), (2_000, 4), (50_000, 5)].iter().enumerate()
+            .map(|(i, (value, index))| wallet::CoinAt { txid: format!("{:02x}", i + 0xa0).repeat(32), vout: 1, value: *value, height: 900_000, index: *index }).collect();
+        let to = "bc1q08zdgswgey4kqeau8af0v7ak8e72aqdpnhhsc45uqdush8qs44zs4zwyh7";
+        for (amount, all) in [(2_000u64, false), (30_000, false), (0, true)] {
+            let c = wallet::select(&v, &coins, wallet::CHANGE | 2, to, amount, 2.0, all, None).unwrap();
+            let b = wallet::build(&v, &coins, wallet::CHANGE | 2, to, amount, 2.0, all, None).unwrap();
+            assert_eq!((c.chosen.len(), c.fee, c.change, c.vsize), (b.inputs, b.fee, b.change, b.vsize), "amount {amount}");
+            assert_eq!(c.chosen, b.chosen, "the very same coins, in the same order");
+            // what leaves is the payment and the fee; the change is still yours, so it is not part of it
+            assert_eq!(c.leaving, c.send + c.fee, "amount {amount}");
+            assert_eq!(c.spending, c.leaving + c.change, "every sat of the coins taken is accounted for");
+            if !all { assert_eq!(c.send, amount); }
         }
     }
     #[test]

@@ -389,6 +389,11 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .chain-t{width:100%;font-size:13px;margin-bottom:14px} .chain-t td,.chain-t th{padding:7px 8px;vertical-align:top} .chain-t .mono{font-size:12px;overflow-wrap:anywhere}
 .chain-hex{font-family:var(--mono);font-size:11.5px;line-height:1.45;overflow-wrap:anywhere;background:var(--ground);border:1px solid var(--line);border-radius:6px;padding:10px 12px;max-height:160px;overflow:auto;-webkit-user-select:text;user-select:text}
 .tag{display:inline-block;font-family:var(--display);font-size:11px;font-weight:600;padding:1px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted);margin-left:6px;white-space:nowrap} .tag.ours{border-color:var(--signal);color:var(--signal)} .tag.who{border-color:var(--gold);color:var(--gold)}
+/* a spend that leaves: named, not alarming — it is an ordinary thing to do, with a consequence worth seeing */
+.tag.out{border-color:var(--gold);color:var(--gold);margin-left:0}
+.tag.ours{margin-left:0}
+.pick.tight{flex-wrap:wrap;gap:var(--s2)} .pick.tight .opt{flex:0 1 auto;padding:6px 10px;font-size:13px}
+.coin-tax{display:block;font-size:12px;color:var(--muted);margin-left:26px;font-variant-numeric:tabular-nums}
 
 /* attachments on a record */
 .att-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:10px}

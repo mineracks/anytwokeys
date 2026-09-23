@@ -187,6 +187,14 @@
           <div class="muted" style="font-size:13px" id="fee-note">Rates from the explorer.</div>
           <details id="coins-adv" class="adv"><summary>Advanced · choose the coins to spend</summary>
             <div class="muted" style="font-size:13px;margin:8px 0 10px">Tick coins to spend exactly those, all of them. Leave every box clear and the app picks, largest first. Consolidating joins the ticked coins into one at the vault's own address; only the fee leaves.</div>
+            <div class="muted" style="font-size:13px;margin-bottom:8px" id="coin-method"></div>
+            <div class="row" style="gap:var(--s2);flex-wrap:wrap;margin-bottom:10px" id="coin-plans">
+              <span class="muted" style="font-size:13px;margin-right:2px">Pick for me:</span>
+              <button class="btn small" data-plan="fewest" title="Largest first: the smallest fee">Fewest coins</button>
+              <button class="btn small" data-plan="gain" title="The coins standing at the smallest gain, or at a loss, go first">Least gain</button>
+              <button class="btn small" data-plan="oldest" title="The coins that have been here longest go first">Longest held</button>
+              <button class="btn small" data-plan="private" title="As few of your addresses joined together as possible">Keep addresses apart</button>
+            </div>
             <div id="coin-list" class="coins"></div>
             <div class="row" style="justify-content:space-between;align-items:center;margin-top:10px;gap:10px"><span class="muted" style="font-size:13px" id="coin-sum"></span><div class="row" style="gap:8px"><button class="btn small" id="coins-all">Tick all</button><button class="btn small" id="coins-none">Clear</button><button class="btn small" id="consolidate">Consolidate ticked coins</button></div></div>
           </details>

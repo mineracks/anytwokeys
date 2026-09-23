@@ -90,7 +90,7 @@ function show(name) {
   if (name === 'coins') { recPageClose('coin'); if (vault && !vault._coins) sync().then(() => Promise.resolve(renderAddresses()).then(renderCoins2)); else Promise.resolve(renderAddresses()).then(renderCoins2); }
   if (name === 'vault') renderVaultSettings();
   if (name === 'overview') renderOverview();
-  if (name === 'send') { closeBook(); paintTo(); loadFees(); if (vault && !vault._coins) sync().then(renderCoins); else renderCoins(); paintExtSend(); }
+  if (name === 'send') { closeBook(); paintTo(); loadFees(); if (vault && !vault._coins) sync().then(() => { renderCoins(); sendPreview(); }); else { renderCoins(); sendPreview(); } paintExtSend(); }
   if (name === 'messages') renderMessages();
   if (name === 'keys') renderKeys();
   if (name === 'tx') renderTx();
@@ -444,11 +444,19 @@ function renderCtx() {
 }
 // What a spend realised: what the coins that left had cost, what they were worth as they left, and how long they were
 // held — measured by the vault's method, and saying which. Facts an accountant can use, not a tax position.
+/// "bought 3 Sep 2026 \u00b7 held 20 days" — one wording, used before a spend (Send) and after it (Activity).
+function heldFor(from, to, at) {
+  at = at || Math.floor(Date.now() / 1000);
+  if (!from) return 'bought on a day not known here';
+  const day = (t) => new Date(t * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+  const days = (t) => sats(Math.max(0, Math.floor((at - t) / 86400)));
+  return (from === to ? `bought ${day(from)}` : `bought between ${day(from)} and ${day(to)}`) + ` \u00b7 held ${days(to)}${from !== to ? '\u2013' + days(from) : ''} days`;
+}
 function realisedRow(name, txid) {
   const L = vaultLedger(name), r = L && L.realised[txid], ccy = (txFacts[name] || {}).ccy;
   if (!r || !ccy) return '';
-  const day = (t) => new Date(t * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
-  const held = r.from ? (r.from === r.to ? `bought ${day(r.from)}` : `bought between ${day(r.from)} and ${day(r.to)}`) + ` \u00b7 held ${sats(Math.floor((r.t - r.to) / 86400))}${r.from !== r.to ? '\u2013' + sats(Math.floor((r.t - r.from) / 86400)) : ''} days` : 'bought on a day not known here';
+  const held = heldFor(r.from, r.to, r.t);
+  if (r.moved) return `<span class="muted">not a disposal</span><small>you said these ${sats(Math.round(r.sats))} sats went to a wallet of your own \u00b7 their cost of ${r.cost === null ? 'an unknown amount' : money(r.cost, ccy)} left the books with them \u00b7 ${held}</small>`;
   if (r.gain === null) return `unknown<small>${r.cost === null ? 'some of the coins that left have no known cost' : 'no price for the day they left'} \u00b7 ${held} \u00b7 by ${esc(COST_METHODS[r.method].short)}</small>`;
   return `<span class="${r.gain >= 0 ? 'ok' : 'warn'}">${r.gain >= 0 ? '\u25b2 +' : '\u25bc \u2212'}${money(Math.abs(r.gain), ccy)}</span><small>worth ${money(r.proceeds, ccy)} as ${sats(Math.round(r.sats))} sats left \u00b7 they had cost ${money(r.cost, ccy)} \u00b7 ${held} \u00b7 by ${esc(COST_METHODS[r.method].short)}</small>`;
 }
@@ -1142,8 +1150,9 @@ function renderRecHead() { if (recView.kind === 'coin') renderCoins2(); if (recV
 //
 // It is what each deposit was worth on arrival, which is a cost only if the deposit was a purchase. A deposit from a
 // wallet this app does not hold (an exchange, Sparrow) is counted at that day's price because nothing better is known.
-function buildLedger(inputs, method) {
+function buildLedger(inputs, method, kinds) {
   method = method || 'average';
+  kinds = kinds || {};
   // ---- events: one per transaction, with a leg per vault it touched and the coins it spent and made ----
   const ev = new Map();
   for (const v of inputs) for (const r of v.rows) {
@@ -1240,13 +1249,17 @@ function buildLedger(inputs, method) {
     if (pool && left > 0) {
       const cost = sumCost(pool), proceeds = e.price ? left / 1e8 * e.price : null;
       const dated = pool.filter(l => l.t !== null);
+      // What the person said this spend WAS. Only "my own wallet elsewhere" changes the arithmetic: coins moved
+      // between wallets of the same owner are not disposed of, so nothing is realised and the cost leaves the books
+      // with them. The app cannot tell that from the chain — an address it does not hold looks like anyone's.
       realised[e.txid] = { sats: left, cost, proceeds, gain: cost !== null && proceeds !== null ? proceeds - cost : null, t: e.t,
-        from: dated.length ? Math.min(...dated.map(l => l.t)) : null, to: dated.length ? Math.max(...dated.map(l => l.t)) : null, lots: pool, method };
+        from: dated.length ? Math.min(...dated.map(l => l.t)) : null, to: dated.length ? Math.max(...dated.map(l => l.t)) : null, lots: pool, method, kind: kinds[e.txid] || '' };
+      if (kinds[e.txid] === 'self') { realised[e.txid].moved = true; realised[e.txid].gain = null; realised[e.txid].proceeds = null; }
     }
     timeline.push({ t: e.t, txid: e.txid, price: e.price, before, sats: Object.values(sats).reduce((a, x) => a + x, 0), basis: basisNow(), internal: isInternal });
   }
   // each coin still held, with the lots its sats came from (meaningful under 'utxo', where coins keep their own history)
-  return { coins: Object.fromEntries([...coins].map(([op, c]) => [op, c.lots])), timeline, internal, unpriced, realised, method, perVault: { sats, basis: method === 'average' ? Object.fromEntries(Object.entries(pools).map(([k, p]) => [k, p.basis])) : Object.fromEntries(Object.keys(sats).map(v => [v, (method === 'utxo' ? [...coins.values()].filter(c => c.vault === v).flatMap(c => c.lots) : (queues[v] || [])).reduce((a, l) => a + (l.cost || 0), 0)])) } };
+  return { coins: Object.fromEntries([...coins].map(([op, c]) => [op, c.lots])), queues, pools, timeline, internal, unpriced, realised, method, perVault: { sats, basis: method === 'average' ? Object.fromEntries(Object.entries(pools).map(([k, p]) => [k, p.basis])) : Object.fromEntries(Object.keys(sats).map(v => [v, (method === 'utxo' ? [...coins.values()].filter(c => c.vault === v).flatMap(c => c.lots) : (queues[v] || [])).reduce((a, l) => a + (l.cost || 0), 0)])) } };
 }
 // Which coins a disposal is taken to be — the taxpayer's rule, not the app's. Sources in roadmap/anytwokeys/ACCOUNTING.md.
 const COST_METHODS = {
@@ -1266,12 +1279,41 @@ function vaultLedger(name) {
   const peers = [...new Set(Object.values(f.transfers || {}).flat())].filter(n => txFacts[n] && store.vaults.some(x => x.name === n && x.network === v.network));
   const names = [name, ...peers];
   const inputs = names.map(n => ({ name: n, rows: Object.values(txFacts[n].rows), now: txFacts[n].now })).filter(i => i.rows.length || i.name === name);
-  const m = methodFor(v), key = m + ':' + inputs.map(i => i.name + ':' + i.rows.length).join(',') + ':' + (f.now ? f.now.price : 0);
-  if (!vaultLedger.memo[name] || vaultLedger.memo[name].key !== key) vaultLedger.memo[name] = { key, L: buildLedger(inputs, m) };
+  // what the person said each spend out of these vaults was (Send asks; Activity can change it)
+  const kinds = {};
+  for (const n of names) for (const [k, rec] of Object.entries((store.vaults.find(x => x.name === n) || {}).more || {}))
+    if (k.startsWith('tx:') && rec.disposal && rec.disposal.kind) kinds[k.slice(3)] = rec.disposal.kind;
+  const m = methodFor(v), key = m + ':' + inputs.map(i => i.name + ':' + i.rows.length).join(',') + ':' + (f.now ? f.now.price : 0) + ':' + JSON.stringify(kinds);
+  if (!vaultLedger.memo[name] || vaultLedger.memo[name].key !== key) vaultLedger.memo[name] = { key, L: buildLedger(inputs, m, kinds) };
   return vaultLedger.memo[name].L;
 }
 vaultLedger.memo = {};
 const ledgerAt = (L, t) => { let s = { sats: 0, basis: 0 }; for (const e of L.timeline) { if (e.t > t) break; s = e; } return s; };
+// What a spend WOULD realise, before it is made: the cost of the sats that actually leave (the payment and the fee,
+// never the change), under the method this taxpayer uses. Only 'utxo' answers from the coins picked — under FIFO the
+// oldest lots leave whichever coins the transaction spends, and under average cost every sat costs the same.
+function costOfLeaving(L, vaultName, chosen, spending, leaving) {
+  if (!L || !leaving) return null;
+  const scale = (lots, f) => lots.map(l => ({ sats: l.sats * f, cost: l.cost === null ? null : l.cost * f, t: l.t }));
+  let lots = null;
+  if (L.method === 'utxo') {
+    const have = chosen.map(op => L.coins[op]);
+    if (have.some(x => !x)) return { sats: leaving, cost: null, from: null, to: null, why: 'one of these coins has no history here yet' };
+    // change carries its share back, so only leaving/spending of every lot is realised — as the ledger itself does
+    lots = scale(have.flat(), spending > 0 ? leaving / spending : 0);
+  } else if (L.method === 'fifo') {
+    const q = (L.queues && L.queues[vaultName]) || []; lots = []; let need = leaving;
+    for (const l of q) { if (need <= 1e-9) break; const take = Math.min(l.sats, need); lots.push({ sats: take, cost: l.cost === null ? null : l.cost * (take / l.sats), t: l.t }); need -= take; }
+    if (need > 1e-9) lots.push({ sats: need, cost: null, t: null });
+  } else {
+    const pool = (L.pools && L.pools[vaultName]) || { sats: 0, basis: 0 };
+    lots = [{ sats: leaving, cost: pool.sats > 0 ? pool.basis * Math.min(1, leaving / pool.sats) : null, t: null }];
+  }
+  const dated = lots.filter(l => l.t !== null);
+  return { sats: leaving, cost: lots.some(l => l.cost === null) ? null : lots.reduce((a, l) => a + l.cost, 0),
+    from: dated.length ? Math.min(...dated.map(l => l.t)) : null, to: dated.length ? Math.max(...dated.map(l => l.t)) : null,
+    why: lots.some(l => l.cost === null) ? 'part of what leaves has no known cost' : '' };
+}
 
 // The three series for a range. Balance and basis only change at transactions, so they are steps; value moves with
 // the price, so it is sampled — and it steps at each transaction too, because holdings did.
@@ -1647,6 +1689,91 @@ function paintCustomFee() {
 $('#fee-custom').addEventListener('input', paintCustomFee);
 $('#fee-pick').addEventListener('click', (e) => { const o = e.target.closest('.opt'); if (!o) return; feeLevel = o.dataset.fee; $$('#fee-pick .opt').forEach(x => x.classList.toggle('on', x === o)); paintCustomFee(); if (feeLevel === 'custom') $('#fee-custom').focus(); });
 $('#send-all').onchange = () => { $('#send-amount').disabled = $('#send-all').checked; };
+// ---------- what this spend would do, worked out before anything is built ----------
+// The same choice `build` makes (wallet::select answers both), so what is shown here and what gets signed cannot
+// drift apart. Two questions matter and only one of them is on the chain: where the money goes, and what it cost.
+let sendPrev = null, sendPrevErr = '', disposalKind = '', sendSeq = 0;
+const DISPOSALS = [['sold', 'Sold or converted'], ['spent', 'Spent on something'], ['gift', 'Gift'], ['self', 'My own wallet elsewhere'], ['', 'Not decided yet']];
+
+function sendFields() {
+  const to = $('#send-to').value.trim(), all = $('#send-all').checked;
+  const amount = +($('#send-amount').value.replace(/[^0-9]/g, '') || 0);
+  return { to, all, amount, rate: feeRate() };
+}
+async function sendPreview() {
+  const f = sendFields(), me = ++sendSeq;
+  if (!vault || !f.to || (!f.all && !f.amount) || !f.rate) { sendPrev = null; sendPrevErr = ''; return paintReview(); }
+  try {
+    const p = await invoke('spend_preview', { name: vault.name, to: f.to, amount: f.amount, rate: f.rate, sendAll: f.all, coins: [...coinPick] });
+    if (me !== sendSeq) return;   // a later edit has already asked
+    sendPrev = p; sendPrevErr = '';
+  } catch (e) { if (me !== sendSeq) return; sendPrev = null; sendPrevErr = String(e && e.message ? e.message : e); }
+  paintReview();
+}
+const sendPreviewSoon = () => { clearTimeout(sendPreviewSoon.t); sendPreviewSoon.t = setTimeout(sendPreview, 350); };
+
+/// The cost of what would leave, and what it is worth now — null when there is no price or no history to answer from.
+function leavingCost() {
+  if (!sendPrev || !vault) return null;
+  const L = vaultLedger(vault.name); if (!L) return null;
+  const c = costOfLeaving(L, vault.name, sendPrev.choice.chosen, sendPrev.choice.spending, sendPrev.choice.leaving);
+  if (!c) return null;
+  const f = txFacts[vault.name] || {}, now = f.now, ccy = f.ccy;
+  const value = now && ccy ? c.sats / 1e8 * now.price : null;
+  return { ...c, ccy, value, gain: c.cost !== null && value !== null ? value - c.cost : null, method: L.method };
+}
+
+function paintReview() {
+  const box = $('#review'); if (!box) return;
+  const f = sendFields();
+  if (sendPrevErr) { box.innerHTML = `<div class="warn" style="font-size:14px">${esc(sendPrevErr)}</div>`; return; }
+  if (!sendPrev) { box.innerHTML = '<div class="muted">Fill in the destination and amount to see what this spend would do.</div>'; return; }
+  const ch = sendPrev.choice, ours = sendPrev.to_ours, k = leavingCost();
+  const money_ = (v) => k && k.ccy && v !== null && v !== undefined ? money(v, k.ccy) : null;
+  const row = (a, b) => `<div class="row" style="justify-content:space-between;gap:12px"><span class="muted">${a}</span><span style="text-align:right">${b}</span></div>`;
+  let out = `<div style="display:flex;flex-direction:column;gap:8px;font-size:14px">
+    ${row('To', `<span class="mono">${esc(f.to.slice(0, 10))}…${esc(f.to.slice(-6))}</span>`)}
+    ${row('Amount', f.all ? 'everything' : sats(ch.send) + ' sats')}
+    ${row('Coins', `${ch.chosen.length}${coinPick.size ? ' chosen by you' : ' picked by the app'} · ${sats(ch.spending)} sats`)}
+    ${row('Fee', `${sats(ch.fee)} sats · ${ch.vsize} vB`)}
+    ${row('Change back to vault', sats(ch.change) + ' sats')}`;
+  if (ours) {
+    out += `<div class="ownmove" style="border-top:1px solid var(--line);padding-top:10px">
+      <div><span class="tag ours">stays with you</span> ${ours.this_vault ? 'this vault\u2019s own' : esc(ours.vault)} ${esc(ours.chain)} #${ours.index}</div>
+      <div class="muted" style="font-size:13px;margin-top:4px">Moving coins between your own vaults is not a disposal, so no gain is realised. Only the ${sats(ch.fee)} sat fee leaves your hands.</div></div>`;
+  } else {
+    const held = k && k.from ? heldFor(k.from, k.to) : '';
+    out += `<div style="border-top:1px solid var(--line);padding-top:10px;display:flex;flex-direction:column;gap:6px">
+      <div><span class="tag out">leaves your vaults</span> ${sats(ch.leaving)} sats — ${sats(ch.send)} paid and ${sats(ch.fee)} in fee</div>`;
+    if (!k || !k.ccy) out += `<div class="muted" style="font-size:13px">No price is loaded for this vault, so what it cost and what it is worth cannot be shown here.</div>`;
+    else out += `${row('They cost', k.cost === null ? `<span class="muted">not known — ${esc(k.why)}</span>` : money_(k.cost))}
+      ${row('Worth now', money_(k.value) || '—')}
+      ${row('Gain if this is a disposal', k.gain === null ? '<span class="muted">unknown</span>' : `<span class="${k.gain >= 0 ? 'ok' : 'warn'}">${k.gain >= 0 ? '\u25b2 +' : '\u25bc \u2212'}${money_(Math.abs(k.gain))}</span>`)}
+      <div class="muted" style="font-size:13px">${held ? held + ' · ' : ''}by ${esc(COST_METHODS[k.method].short)}${k.method === 'utxo' ? '' : ' — which coins you pick does not change this'}.</div>`;
+    out += `<div class="field" style="margin-top:4px"><div class="label">What is this?</div><div class="pick tight" id="disposal-pick">
+      ${DISPOSALS.map(([v, n]) => `<div class="opt${v === disposalKind ? ' on' : ''}" data-kind="${v}">${n}</div>`).join('')}</div>
+      <div class="muted" style="font-size:13px;margin-top:6px" id="disposal-note"></div></div>`;
+    out += '</div>';
+  }
+  out += `<div class="muted" style="border-top:1px solid var(--line);padding-top:10px;font-size:13px">${built ? `Next: sign with ${vault.keys.length === 1 ? 'the key' : 'any ' + vault.threshold + ' of your ' + vault.keys.length + ' keys'}. Nothing is sent until you confirm after the last signature.` : 'Nothing is built yet: this is what it would do.'}</div></div>`;
+  box.innerHTML = out;
+  const note = $('#disposal-note');
+  if (note) note.textContent = disposalKind === 'self' ? 'Not a disposal: no gain is realised and the cost goes with the coins. Their holding period is not carried, because this app cannot see the other wallet.'
+    : disposalKind ? 'A disposal. The gain above is realised when this confirms; the reason is kept with the transaction.'
+    : 'Kept with the transaction for your records. You can set or change it later on the transaction itself.';
+}
+$('#review') && ['#send-to', '#send-amount'].forEach(id => $(id).addEventListener('input', sendPreviewSoon));
+$('#send-all').addEventListener('change', sendPreviewSoon);
+$('#fee-pick').addEventListener('click', sendPreviewSoon);
+$('#fee-custom').addEventListener('input', sendPreviewSoon);
+document.addEventListener('click', (e) => {
+  const o = e.target.closest('#disposal-pick .opt'); if (!o) return;
+  disposalKind = o.dataset.kind;
+  $$('#disposal-pick .opt').forEach(x => x.classList.toggle('on', x === o));
+  paintReview();
+  if (built && built.txid) invoke('disposal_set', { name: vault.name, txid: built.txid, kind: disposalKind }).then(st => { store = st; }).catch(fail);
+});
+
 $('#build-btn').onclick = async () => {
   const to = $('#send-to').value.trim(), all = $('#send-all').checked, amount = +($('#send-amount').value.replace(/[^0-9]/g, '') || 0);
   if (!to) return toast('Enter a destination address');
@@ -1655,13 +1782,11 @@ $('#build-btn').onclick = async () => {
   if (!rate) return toast('Give a fee rate in sats per virtual byte, or choose Slow, Medium or Fast');
   try {
     built = await invoke('spend_build', { name: vault.name, to, amount, rate, sendAll: all, coins: [...coinPick] });
-    $('#review').innerHTML = `<div style="display:flex;flex-direction:column;gap:8px;font-size:14px">
-      <div class="row" style="justify-content:space-between"><span class="muted">To</span><span class="mono">${to.slice(0, 10)}…${to.slice(-6)}</span></div>
-      <div class="row" style="justify-content:space-between"><span class="muted">Amount</span><span>${all ? 'everything' : sats(amount) + ' sats'}</span></div>
-      <div class="row" style="justify-content:space-between"><span class="muted">Coins</span><span>${built.inputs}${coinPick.size ? ' chosen by you' : ' picked by the app'}</span></div>
-      <div class="row" style="justify-content:space-between"><span class="muted">Fee</span><span>${sats(built.fee)} sats · ${built.vsize} vB</span></div>
-      <div class="row" style="justify-content:space-between"><span class="muted">Change back to vault</span><span>${sats(built.change)} sats</span></div>
-      <div class="muted" style="border-top:1px solid var(--line);padding-top:10px;font-size:13px">Next: sign with ${vault.keys.length === 1 ? 'the key' : 'any ' + vault.threshold + ' of your ' + vault.keys.length + ' keys'}. Nothing is sent until you confirm after the last signature.</div></div>`;
+    // the review is already showing this very spend (same selection, from wallet::select); keep it and say it is real now
+    await sendPreview();
+    // a segwit transaction's id cannot change when it is signed, so what the person said this spend is can be
+    // recorded against it now, before a single signature
+    if (disposalKind) { try { store = await invoke('disposal_set', { name: vault.name, txid: built.txid, kind: disposalKind }); } catch (e) { fail(e); } }
     $('#build-btn').textContent = 'Sign with keys'; $('#build-btn').onclick = () => show('sign');
   } catch (e) { fail(e); }
 };
@@ -1963,14 +2088,78 @@ function renderCoins() {
   const live = new Set(coins.map(c => c.txid + ':' + c.vout)); for (const op of [...coinPick]) if (!live.has(op)) coinPick.delete(op);
   if (!coins.length) { list.innerHTML = '<div class="muted" style="font-size:13px">the vault holds no coins</div>'; $('#coin-sum').textContent = ''; return; }
   const h = vault._height || 0;
+  const L = vaultLedger(vault.name), f = txFacts[vault.name] || {}, price = f.now && f.ccy ? f.now.price : null;
   list.innerHTML = coins.slice().sort((a, b) => b.value - a.value).map(c => { const op = c.txid + ':' + c.vout; const conf = c.height ? h - c.height + 1 : 0;
-    return `<label class="coin"><input type="checkbox" data-op="${op}" ${coinPick.has(op) ? 'checked' : ''}><span class="mono">${c.txid.slice(0, 10)}…${c.txid.slice(-4)}:${c.vout}${vault._rotating ? ' <span class="muted">· ' + fmtIndex(c.index) + '</span>' : ''}</span>${lblHtml('out:' + op)}<span style="font-variant-numeric:tabular-nums">${sats(c.value)} sats</span><span class="muted">${conf ? conf + ' conf' : 'unconfirmed'}</span></label>`; }).join('');
+    return `<label class="coin"><input type="checkbox" data-op="${op}" ${coinPick.has(op) ? 'checked' : ''}><span class="mono">${c.txid.slice(0, 10)}…${c.txid.slice(-4)}:${c.vout}${vault._rotating ? ' <span class="muted">· ' + fmtIndex(c.index) + '</span>' : ''}</span>${lblHtml('out:' + op)}<span style="font-variant-numeric:tabular-nums">${sats(c.value)} sats</span><span class="muted">${conf ? conf + ' conf' : 'unconfirmed'}</span>${coinTax(L, c, price, f.ccy)}</label>`; }).join('');
+  // Under first-in-first-out or average cost the pick does not decide the cost, so the screen must not imply it does
+  const note = $('#coin-method');
+  if (note) note.textContent = !L ? '' : L.method === 'utxo'
+    ? 'Your method counts the coins a transaction actually spends, so what you tick here is what you dispose of.'
+    : `Your method is ${COST_METHODS[L.method].short}, so which coins you tick does not change what the spend costs — only the fee and what it links together.`;
   coinSum();
 }
+/// One coin's own history: what it cost as it arrived and what it is worth now. Only meaningful under 'utxo' —
+/// under the other methods a coin has no cost of its own, so the line says the part that is still true (how long
+/// it has been here), and nothing that isn't.
+function coinTax(L, c, price, ccy) {
+  const op = c.txid + ':' + c.vout, lots = L && L.coins[op];
+  const value = price !== null ? c.value / 1e8 * price : null;
+  const bits = [];
+  if (L && L.method === 'utxo' && lots && lots.length) {
+    const cost = lots.some(l => l.cost === null) ? null : lots.reduce((a, l) => a + l.cost, 0);
+    const dated = lots.filter(l => l.t !== null), from = dated.length ? Math.min(...dated.map(l => l.t)) : null;
+    if (ccy && cost !== null) {
+      bits.push(`cost ${money(cost, ccy)}`);
+      if (value !== null) { const g = value - cost; bits.push(`now ${money(value, ccy)}`, `<span class="${g >= 0 ? 'ok' : 'warn'}">${g >= 0 ? '+' : '\u2212'}${money(Math.abs(g), ccy)} if spent</span>`); }
+    } else if (ccy) bits.push('cost not known here');
+    if (from) bits.push(heldFor(from, from).split(' \u00b7 ')[1]);
+  } else if (L && lots && lots.length) {
+    const dated = lots.filter(l => l.t !== null), from = dated.length ? Math.min(...dated.map(l => l.t)) : null;
+    if (from) bits.push(heldFor(from, from).split(' \u00b7 ')[1]);
+  }
+  return bits.length ? `<span class="coin-tax">${bits.join(' \u00b7 ')}</span>` : '';
+}
+
+/// Ways to pick coins, each for a reason a person actually has. The app's own default is "fewest coins", which is
+/// the cheapest in fees; the others trade fee for something else and say so.
+const COIN_PLANS = {
+  fewest:  { name: 'Fewest coins', why: 'largest first: the smallest fee, and what the app does on its own', cmp: (a, b) => b.value - a.value },
+  gain:    { name: 'Least gain', why: 'the coins standing at the smallest gain (or a loss) go first', cmp: null },
+  oldest:  { name: 'Longest held', why: 'the coins that have been here longest go first', cmp: null },
+  private: { name: 'Keep addresses apart', why: 'as few of your addresses joined in one transaction as possible', cmp: null },
+};
+function planPick(plan) {
+  const coins = ((vault && vault._coins) || []).slice(); if (!coins.length) return toast('the vault holds no coins');
+  const f = sendFields();
+  if (f.all) return toast('This spend takes everything, so there is nothing to choose');
+  if (!f.amount) return toast('Enter an amount first, so the coins can be chosen to cover it');
+  const L = vaultLedger(vault.name), fx = txFacts[vault.name] || {}, price = fx.now && fx.ccy ? fx.now.price : null;
+  const lotsOf = (c) => (L && L.coins[c.txid + ':' + c.vout]) || [];
+  const gainOf = (c) => { const lots = lotsOf(c); if (!lots.length || price === null || lots.some(l => l.cost === null)) return Infinity;
+    return c.value / 1e8 * price - lots.reduce((a, l) => a + l.cost, 0); };
+  const ageOf = (c) => { const d = lotsOf(c).filter(l => l.t !== null); return d.length ? Math.min(...d.map(l => l.t)) : Infinity; };
+  if (plan === 'gain') coins.sort((a, b) => (gainOf(a) - gainOf(b)) || (b.value - a.value));
+  else if (plan === 'oldest') coins.sort((a, b) => (ageOf(a) - ageOf(b)) || (b.value - a.value));
+  else if (plan === 'private') coins.sort((a, b) => (b.value >= f.amount) - (a.value >= f.amount) || a.value - b.value || 0);
+  else coins.sort(COIN_PLANS.fewest.cmp);
+  // a coin costs roughly one input in fee; the exact figure comes back from the preview, which is the real arithmetic
+  const inVb = (sendPrev && sendPrev.choice.chosen.length ? (sendPrev.choice.vsize - 95) / sendPrev.choice.chosen.length : 0) || 110;
+  const rate = f.rate || 1;
+  coinPick.clear(); let have = 0, n = 0;
+  for (const c of coins) {
+    if (have >= f.amount + Math.ceil(rate * (11 + inVb * n + 90))) break;
+    coinPick.add(c.txid + ':' + c.vout); have += c.value; n++;
+  }
+  if (have < f.amount) { coinPick.clear(); return toast('These coins do not cover that amount'); }
+  renderCoins(); sendPreview();
+  toast(`${n} coin${n === 1 ? '' : 's'} ticked \u00b7 ${COIN_PLANS[plan].why}`, 5000);
+}
+
 function coinSum() { const n = coinPick.size; const tot = ((vault && vault._coins) || []).filter(c => coinPick.has(c.txid + ':' + c.vout)).reduce((a, c) => a + c.value, 0); $('#coin-sum').textContent = n ? `${n} coin${n === 1 ? '' : 's'} ticked · ${sats(tot)} sats` : 'none ticked: the app picks'; }
-$('#coin-list').addEventListener('change', (e) => { const i = e.target.closest('[data-op]'); if (!i) return; if (i.checked) coinPick.add(i.dataset.op); else coinPick.delete(i.dataset.op); coinSum(); });
-$('#coins-all').onclick = () => { ((vault && vault._coins) || []).forEach(c => coinPick.add(c.txid + ':' + c.vout)); renderCoins(); };
-$('#coins-none').onclick = () => { coinPick.clear(); renderCoins(); };
+$('#coin-list').addEventListener('change', (e) => { const i = e.target.closest('[data-op]'); if (!i) return; if (i.checked) coinPick.add(i.dataset.op); else coinPick.delete(i.dataset.op); coinSum(); sendPreview(); });
+$('#coins-all').onclick = () => { ((vault && vault._coins) || []).forEach(c => coinPick.add(c.txid + ':' + c.vout)); renderCoins(); sendPreview(); };
+$('#coins-none').onclick = () => { coinPick.clear(); renderCoins(); sendPreview(); };
+$('#coin-plans') && $('#coin-plans').addEventListener('click', (e) => { const b = e.target.closest('[data-plan]'); if (b) planPick(b.dataset.plan); });
 $('#consolidate').onclick = () => {
   if (!coinPick.size) ((vault && vault._coins) || []).forEach(c => coinPick.add(c.txid + ':' + c.vout));
   renderCoins();
