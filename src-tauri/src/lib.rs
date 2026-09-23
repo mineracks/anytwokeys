@@ -639,7 +639,15 @@ fn spend_export(name: String, what: String) -> R<String> {
 fn spend_ceremony(name: String) -> R<wallet::Ceremony> {
     let s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
-    wallet::ceremony(v, s.last_psbt.as_deref().ok_or("no spend in progress")?)
+    let psbt = s.last_psbt.clone().ok_or("no spend in progress")?;
+    // A spend built before 2026-09-23 still carries the empty-path entries that crash a SeedSigner; repair it where
+    // it lies, so a spend already staged need not be made again. See wallet::strip_pathless.
+    if let Some(fixed) = wallet::without_pathless(&psbt) {
+        let keep = fixed.clone();
+        wallet::update(move |s| { if s.last_psbt.as_deref() == Some(psbt.as_str()) { s.last_psbt = Some(keep); } })?;
+        return wallet::ceremony(v, &fixed);
+    }
+    wallet::ceremony(v, &psbt)
 }
 
 #[derive(Serialize)]
@@ -650,7 +658,9 @@ struct QrOut { parts: Vec<String>, single: Option<String>, bytes: usize, bbqr: V
 fn spend_qr() -> R<QrOut> {
     use std::str::FromStr;
     let s = wallet::load()?;
-    let raw = bitcoin::psbt::Psbt::from_str(s.last_psbt.as_deref().ok_or("no spend in progress")?.trim()).map_err(|e| format!("psbt: {e}"))?.serialize();
+    let mut p = bitcoin::psbt::Psbt::from_str(s.last_psbt.as_deref().ok_or("no spend in progress")?.trim()).map_err(|e| format!("psbt: {e}"))?;
+    wallet::strip_pathless(&mut p);   // what a device reads is never one of the old, crashing copies
+    let raw = p.serialize();
     let single = if raw.len() <= 700 { export::ur_parts(&raw, usize::MAX, false)?.pop() } else { None };
     // BBQr too, for the Coldcard Q, which reads that rather than UR
     Ok(QrOut { parts: export::ur_parts(&raw, 160, true)?, single, bytes: raw.len(), bbqr: export::bbqr_parts(&raw, 'P', 400) })
@@ -2204,6 +2214,34 @@ mod signers_vault_tests {
             }
         }
         assert_eq!(seen, 2, "one derivation on the input and one on change — the device's key, and no other");
+    }
+    /// A spend built before the fix is still in Piers's store, and it is the PSBT the device reads — so it is
+    /// repaired where it lies (`spend_ceremony`, `spend_qr`) rather than rebuilt. The signatures already on it must
+    /// survive that: `bip32_derivation` is covered by no sighash.
+    #[test]
+    fn a_spend_staged_before_the_fix_is_repaired_where_it_lies_and_keeps_its_signatures() {
+        use std::str::FromStr;
+        let f: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!("{}/tests/fixtures/mixed-signed.json", env!("CARGO_MANIFEST_DIR"))).unwrap()).unwrap();
+        let (v, b) = mixed_spend();
+        // put the empty paths back, as the old build wrote them
+        let mut old = bitcoin::psbt::Psbt::from_str(&b.psbt).unwrap();
+        let card = bitcoin::PublicKey::from_str(&v.keys.iter().find(|k| k.serial == 111).unwrap().pubkey).unwrap();
+        let none = (bitcoin::bip32::Fingerprint::from_str("d2e05f32").unwrap(), bitcoin::bip32::DerivationPath::master());
+        old.outputs[1].bip32_derivation.insert(card.inner, none.clone());
+        old.inputs[0].bip32_derivation.insert(card.inner, none);
+        let paths: Vec<String> = old.outputs[1].bip32_derivation.values().map(|(_, p)| p.to_string()).collect();
+        assert!(paths.iter().any(|p| p.is_empty()), "the old shape: an empty path on change — {paths:?}");
+        assert_eq!(paths[0], "", "and it sorts FIRST, which is the one the device reads");
+        let staged = wallet::adopt(&v, export::parse(f["device_minimal"].as_str().unwrap().as_bytes()).unwrap(), Some(&old.to_string())).unwrap();
+        let before = wallet::ceremony(&v, &staged).unwrap();
+        let fixed = wallet::without_pathless(&staged).expect("it had entries to drop");
+        let after = wallet::ceremony(&v, &fixed).unwrap();
+        assert_eq!((before.have, after.have), (1, 1), "the signature already on it survives the repair");
+        let p = bitcoin::psbt::Psbt::from_str(&fixed).unwrap();
+        for d in p.inputs.iter().map(|i| &i.bip32_derivation).chain(p.outputs.iter().map(|o| &o.bip32_derivation)) {
+            for (_, (_, path)) in d { assert!(path.len() >= 2, "{path} would still crash the device"); }
+        }
+        assert!(wallet::without_pathless(&fixed).is_none(), "a clean spend is left alone, so nothing is rewritten on every poll");
     }
     #[test]
     fn it_refuses_what_it_should() {

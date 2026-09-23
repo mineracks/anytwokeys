@@ -530,6 +530,27 @@ pub struct Built {
     pub inputs: usize,
 }
 
+/// A card's key in a mixed vault is a plain key: it is derived from nothing, so miniscript gives it an origin with an
+/// EMPTY path. Such an entry tells a signer nothing — and SeedSigner reads the path of the FIRST key on a change
+/// output two levels from its end (`"m".split("/")[-2]`), which threw `IndexError: list index out of range` and
+/// stopped it before it could show the spend (2026-09-23, on the bench). Keys with no derivation are left out.
+/// Derivations are not covered by any sighash, so removing them never disturbs a signature already on the PSBT.
+pub fn strip_pathless(p: &mut bitcoin::psbt::Psbt) -> bool {
+    let n = |p: &bitcoin::psbt::Psbt| p.inputs.iter().map(|i| i.bip32_derivation.len()).sum::<usize>() + p.outputs.iter().map(|o| o.bip32_derivation.len()).sum::<usize>();
+    let before = n(p);
+    for i in p.inputs.iter_mut() { i.bip32_derivation.retain(|_, (_, path)| !path.is_empty()); }
+    for o in p.outputs.iter_mut() { o.bip32_derivation.retain(|_, (_, path)| !path.is_empty()); }
+    n(p) != before
+}
+
+/// The same for a stored spend — one built before the fix above is repaired where it lies, rather than made again.
+/// `Some` only when something had to go.
+pub fn without_pathless(b64: &str) -> Option<String> {
+    use std::str::FromStr;
+    let mut p = bitcoin::psbt::Psbt::from_str(b64.trim()).ok()?;
+    strip_pathless(&mut p).then(|| p.to_string())
+}
+
 /// Spend `amount` sats to `to` from the vault's coins at `rate` sat/vB; change to a fresh address.
 /// `pick`: `None` lets the builder choose (largest first); `Some(outpoints)` spends exactly those coins.
 pub fn build(vault: &Vault, coins: &[CoinAt], change_index: u32, to: &str, amount: u64, rate: f64, send_all: bool, pick: Option<&[String]>) -> Result<Built, String> {
@@ -594,14 +615,8 @@ pub fn build(vault: &Vault, coins: &[CoinAt], change_index: u32, to: &str, amoun
         use miniscript::psbt::PsbtExt;
         for (i, c) in chosen.iter().enumerate() { psbt.update_input_with_descriptor(i, &ext_definite(ext, c.index)?).map_err(|e| format!("input {}: {e}", i + 1))?; }
         if change > 0 { psbt.update_output_with_descriptor(1, &ext_definite(ext, change_index)?).map_err(|e| format!("change: {e}"))?; }
-        // A card's key in a mixed vault is a plain key: it is derived from nothing, so miniscript gives it an origin
-        // with an EMPTY path. Such an entry says nothing a signer can use — and a SeedSigner reads the path of the
-        // first key on a change output two levels from its end ("m".split("/")[-2]), which threw
-        // `IndexError: list index out of range` and stopped it before it could show the spend (2026-09-23, on the
-        // bench). Keys with no derivation are left out.
-        for i in psbt.inputs.iter_mut() { i.bip32_derivation.retain(|_, (_, path)| !path.is_empty()); }
-        for o in psbt.outputs.iter_mut() { o.bip32_derivation.retain(|_, (_, path)| !path.is_empty()); }
     }
+    strip_pathless(&mut psbt);
     Ok(Built { psbt: psbt.to_string(), fee, vsize, change, inputs: chosen.len() })
 }
 
