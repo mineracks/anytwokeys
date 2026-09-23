@@ -177,6 +177,16 @@ with sync_playwright() as p:
     pg.locator("#dev-cer").screenshot(path=str(out / "sign-step-change.png"))
     pg.click("#dev-cer-next"); pg.wait_for_timeout(400)
     check("step 4 asks for the signed code to be turned around to the camera", "signed code back" in pg.inner_text("#dev-cer-title") and "turn it around" in pg.inner_text("#dev-cer-text").lower() and pg.inner_text("#dev-cer-next") == "Open the camera", pg.inner_text("#dev-cer-title"))
+    # The words sit beside the picture only while there is room for them: the sidebar eats ~250px of every window,
+    # so a window wide enough for a viewport breakpoint can still leave this row far too narrow (Piers, 2026-09-23 —
+    # one word per line). The row wraps on its OWN width, not the window's.
+    for w in (1500, 1180, 1040, 900, 760):
+        pg.set_viewport_size(dict(width=w, height=900)); pg.wait_for_timeout(250)
+        body = pg.locator("#dev-cer .guide-body").bounding_box(); art = pg.locator("#dev-guide").bounding_box()
+        check(f"at a {w}px window the ceremony's words keep a readable column ({round(body['width'])}px)", body["width"] >= 260, f"{body} / {art}")
+        if body["y"] < art["y"] + art["height"] - 4:
+            check(f"at {w}px, beside the picture, neither overflows the card", body["x"] >= art["x"] + art["width"] - 1 and body["x"] + body["width"] <= pg.locator("#dev-cer").bounding_box()["x"] + pg.locator("#dev-cer").bounding_box()["width"] + 1)
+    pg.set_viewport_size(dict(width=1180, height=900)); pg.wait_for_timeout(250)
     pg.click("#dev-cer-back"); pg.wait_for_timeout(300)
     check("and the steps walk backwards too", pg.locator("#dev-steps li.now").inner_text().lower() == "change")
     # a spend with nothing coming back says so, rather than leaving the device's warning unexplained

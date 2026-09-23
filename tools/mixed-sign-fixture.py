@@ -18,6 +18,15 @@ change = [o for o in unsigned.outputs if any(d.fingerprint == root.my_fingerprin
 assert all(mine_in), "the device would not find its key"
 assert len(change) == 1, "the device would not recognise change"
 
+# what the SeedSigner ITSELF does, not a charitable version of it: psbt_parser.py collects a path string for EVERY
+# derivation on a change output, and psbt_views.py:123 reads the FIRST one two levels from its end. A key with no
+# derivation gives "m", and "m".split("/")[-2] raised IndexError on Piers's bench (2026-09-23) before the device
+# could show the spend. The checks above never caught it: they short-circuit on the fingerprint, and the device does not.
+for o in unsigned.outputs:
+    paths = [bip32.path_to_str(d.derivation) for d in o.bip32_derivations.values()]
+    if not paths: continue
+    assert paths[0].split("/")[-2] in ("0", "1"), f"the device reads {paths[0]!r} two levels from its end and crashes"
+
 def minimal(signed):
     # SeedSigner hands back a trimmed PSBT: the transaction and its signatures, nothing else
     t = PSBT(signed.tx)

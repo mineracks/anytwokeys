@@ -2185,6 +2185,26 @@ mod signers_vault_tests {
         let tx = wallet::finalize(&both).unwrap();
         assert_eq!(bitcoin::consensus::encode::serialize_hex(&tx), f["final_tx"].as_str().unwrap_or(""), "the finished transaction is byte-for-byte what embit expects");
     }
+    /// A card's key is derived from nothing, so miniscript gives it an origin with an EMPTY path. A SeedSigner reads
+    /// the path of the FIRST key on a change output two levels from its end — `"m".split("/")[-2]` — and threw
+    /// `IndexError: list index out of range` on Piers's bench (2026-09-23), stopping before it could show the spend.
+    /// Keys with no derivation are left out; every derivation that survives is one a signer can act on.
+    #[test]
+    fn no_key_is_given_a_derivation_it_does_not_have_so_a_device_can_read_every_path_it_finds() {
+        use std::str::FromStr;
+        let p = bitcoin::psbt::Psbt::from_str(&mixed_spend().1.psbt).unwrap();
+        let every = p.inputs.iter().map(|i| &i.bip32_derivation).chain(p.outputs.iter().map(|o| &o.bip32_derivation));
+        let mut seen = 0;
+        for d in every {
+            for (key, (_, path)) in d {
+                assert!(!path.is_empty(), "{key} carries an empty path — the device reads \"m\" and crashes");
+                // what psbt_views.py:123 does with it: the last two levels must be there to read
+                assert!(path.len() >= 2 && matches!(path[path.len() - 2].to_string().as_str(), "0" | "1"), "{key}: {path}");
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, 2, "one derivation on the input and one on change — the device's key, and no other");
+    }
     #[test]
     fn it_refuses_what_it_should() {
         let k = keys([0, 1, 2]);

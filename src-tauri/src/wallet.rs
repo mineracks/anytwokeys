@@ -594,6 +594,13 @@ pub fn build(vault: &Vault, coins: &[CoinAt], change_index: u32, to: &str, amoun
         use miniscript::psbt::PsbtExt;
         for (i, c) in chosen.iter().enumerate() { psbt.update_input_with_descriptor(i, &ext_definite(ext, c.index)?).map_err(|e| format!("input {}: {e}", i + 1))?; }
         if change > 0 { psbt.update_output_with_descriptor(1, &ext_definite(ext, change_index)?).map_err(|e| format!("change: {e}"))?; }
+        // A card's key in a mixed vault is a plain key: it is derived from nothing, so miniscript gives it an origin
+        // with an EMPTY path. Such an entry says nothing a signer can use — and a SeedSigner reads the path of the
+        // first key on a change output two levels from its end ("m".split("/")[-2]), which threw
+        // `IndexError: list index out of range` and stopped it before it could show the spend (2026-09-23, on the
+        // bench). Keys with no derivation are left out.
+        for i in psbt.inputs.iter_mut() { i.bip32_derivation.retain(|_, (_, path)| !path.is_empty()); }
+        for o in psbt.outputs.iter_mut() { o.bip32_derivation.retain(|_, (_, path)| !path.is_empty()); }
     }
     Ok(Built { psbt: psbt.to_string(), fee, vsize, change, inputs: chosen.len() })
 }
