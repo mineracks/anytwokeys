@@ -393,7 +393,9 @@ pub fn ext_parse(text: &str) -> Result<Option<ExtInfo>, String> {
     // shows for the very same wallet (#ewpd0dfe became #h3zcql09). Without a checksum, the canonical form, which has one.
     let trimmed = text.trim();
     let descriptor = if trimmed.contains('#') { trimmed.to_string() } else { d.to_string() };
-    Ok(Some(ExtInfo { descriptor, canonical: d.to_string(), threshold, keys, network, kind: kind.into() }))
+    // origins on FIXED keys are not part of which wallet this is (they say only what the key already says), so the
+    // same wallet written either way compares equal — as `48h` and `48'` already do
+    Ok(Some(ExtInfo { descriptor, canonical: without_key_origins(&d.to_string()), threshold, keys, network, kind: kind.into() }))
 }
 
 fn sorted_threshold(d: &Descriptor<DescriptorPublicKey>) -> Result<usize, String> {
@@ -423,8 +425,60 @@ pub fn address_at(v: &Vault, index: u32) -> Result<String, String> {
 }
 
 /// The recovery line: the base descriptor, plus the chain code when addresses rotate.
+/// A fixed key in a mixed vault is written plainly, with no origin — nothing derived it. That is legal (BIP 380) and
+/// every wallet derives the same addresses from it, but **SeedSigner cannot draw such a wallet**: before it will
+/// verify change it shows the descriptor's cosigner fingerprints, and `hexlify(key.fingerprint)` on a key with no
+/// origin raised `TypeError: a bytes-like object is required, not 'NoneType'` on the bench (2026-09-23,
+/// `seed_views.py:2067`) — so the verification Piers wanted could not even be reached.
+///
+/// So each fixed key is shown with the origin it implies: `[fingerprint]02ab…`, the fingerprint a master holding
+/// exactly that key would have (hash160(key)[..4]), and an empty path, because nothing derived it. Checked against
+/// embit — the library SeedSigner uses: it parses, the addresses are identical, and `descriptor.owns(change)` is
+/// still true. Only the way the line is WRITTEN changes; the wallet does not.
+pub fn with_key_origins(text: &str) -> String {
+    match key_origins(text, true) { Some(s) => s, None => text.to_string() }
+}
+
+/// The same machinery, the other way: origins on fixed keys are dropped before a descriptor is compared, so a line
+/// written either way is recognised as the SAME wallet (as `48h` and `48'` already are).
+pub fn without_key_origins(text: &str) -> String {
+    match key_origins(text, false) { Some(s) => s, None => text.to_string() }
+}
+
+fn key_origins(text: &str, add: bool) -> Option<String> {
+    use miniscript::descriptor::{SinglePub, SinglePubKey};
+    use miniscript::TranslatePk;
+    struct T(bool);
+    impl miniscript::Translator<DescriptorPublicKey, DescriptorPublicKey, ()> for T {
+        fn pk(&mut self, k: &DescriptorPublicKey) -> Result<DescriptorPublicKey, ()> {
+            Ok(match k {
+                DescriptorPublicKey::Single(sk) => {
+                    let origin = if !self.0 { None } else if sk.origin.is_some() { sk.origin.clone() } else {
+                        match &sk.key {
+                            SinglePubKey::FullKey(pk) => {
+                                let h = pk.pubkey_hash();   // hash160 of the key, as a master's fingerprint is
+                                let mut fp = [0u8; 4]; fp.copy_from_slice(&h[..4]);
+                                Some((bitcoin::bip32::Fingerprint::from(fp), bitcoin::bip32::DerivationPath::master()))
+                            }
+                            SinglePubKey::XOnly(_) => sk.origin.clone(),
+                        }
+                    };
+                    DescriptorPublicKey::Single(SinglePub { origin, key: sk.key.clone() })
+                }
+                other => other.clone(),
+            })
+        }
+        miniscript::translate_hash_clone!(DescriptorPublicKey, DescriptorPublicKey, ());
+    }
+    let (body, tail) = match text.trim().split_once('#') { Some((b, _)) => (b, true), None => (text.trim(), false) };
+    let d: Descriptor<DescriptorPublicKey> = body.parse().ok()?;
+    let out = d.translate_pk(&mut T(add)).ok()?.to_string();
+    // miniscript's own text always carries a checksum; a line that came without one keeps none
+    Some(if tail { out } else { out.split('#').next()?.to_string() })
+}
+
 pub fn recovery_line(v: &Vault) -> String {
-    if let Some(ext) = &v.ext { return ext.clone(); }   // the wallet descriptor IS its recovery line, with the seeds
+    if let Some(ext) = &v.ext { return with_key_origins(ext); }   // the wallet descriptor IS its recovery line, with the seeds
     match &v.chain_code {
         Some(cc) => format!("{} cc={cc}", v.descriptor),
         None => v.descriptor.clone(),

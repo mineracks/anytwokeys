@@ -2243,6 +2243,32 @@ mod signers_vault_tests {
         }
         assert!(wallet::without_pathless(&fixed).is_none(), "a clean spend is left alone, so nothing is rewritten on every poll");
     }
+    /// SeedSigner will not verify change until it has shown the wallet's cosigner fingerprints, and a fixed key has
+    /// no origin to take one from: `hexlify(None)` → `TypeError: a bytes-like object is required, not 'NoneType'`
+    /// (`seed_views.py:2067`, on the bench 2026-09-23). The line we SHOW gives each fixed key the origin it implies.
+    /// It must remain the very same wallet: same addresses, same vault when read back.
+    #[test]
+    fn the_line_shown_to_a_device_names_every_key_and_is_still_the_same_wallet() {
+        use std::str::FromStr;
+        let v = signers_vault("m".into(), 2, &keys([0, 1, 2]), "mainnet").unwrap();
+        let stored = v.ext.clone().unwrap();
+        let shown = wallet::recovery_line(&v);
+        assert!(stored.contains(",02") || stored.contains(",03"), "as stored, a card's key is written plainly: {stored}");
+        assert!(!shown.contains(",02") && !shown.contains(",03"), "as shown, every key carries an origin: {shown}");
+        assert_eq!(shown.matches('[').count(), 3, "one origin per key, including both cards: {shown}");
+        // the fingerprint given to a fixed key is the one a master holding exactly that key would have
+        for k in v.keys.iter().filter(|k| k.serial > 0) {
+            let pk = bitcoin::PublicKey::from_str(&k.pubkey).unwrap();
+            let want = format!("[{}]{}", hex::encode(&pk.pubkey_hash()[..4]), k.pubkey);
+            assert!(shown.contains(&want), "{} should appear as {want} in {shown}", k.name);
+        }
+        let back = wallet::ext_parse(&shown).unwrap().unwrap();
+        assert_eq!(back.canonical, wallet::ext_parse(&stored).unwrap().unwrap().canonical, "read back, it is the same vault, not a new one");
+        let same = ext_vault("shown".into(), &back, &[]);
+        for i in [0u32, 1, 2, wallet::CHANGE, wallet::CHANGE | 1] {
+            assert_eq!(wallet::address_at(&same, i).unwrap(), wallet::address_at(&v, i).unwrap(), "address {i} must not move");
+        }
+    }
     #[test]
     fn it_refuses_what_it_should() {
         let k = keys([0, 1, 2]);

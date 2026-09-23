@@ -34,6 +34,7 @@ const H = {
     else if (/^ur:/i.test(t)) { const n = new Set(t.split(/\s+/).map(x => x.toLowerCase())).size; if (n < 2) throw 'some QR parts are missing: 1 of 2 pieces recovered so far; keep the code in the frame until it completes'; }
     return { threshold: 2, keys: ['a', 'b', 'c'], descriptor: 'wsh(sortedmulti(2,[c9ad277c/48h/0h/0h/2h]xpub6EAC…/<0;1>/*,…))#abcd1234', address: 'bc1qplate', rotating: true, kind: 'sortedmulti', name: 'Plate backup',
       ext: [{ fingerprint: 'c9ad277c', path: 'm/48h/0h/0h/2h', xpub: 'xpub6EAC4GduaPj3E', fixed: false }, { fingerprint: 'fbdb4a1e', path: 'm/48h/0h/0h/2h', xpub: 'xpub6Eb', fixed: false }, { fingerprint: '2b94355d', path: 'm/48h/0h/0h/2h', xpub: 'xpub6Ec', fixed: false }] }; },
+  vault_recovery: () => 'wsh(sortedmulti(2,[c9ad277c/48h/0h/0h/2h]xpub6EAC/<0;1>/*,[47a280ae]03c58267,[c65e5ec6]0331794a))#shownline',
   seal_read: () => ({ cards: 0, foreign: [], found: [] }),
   vault_shares_pdf: (a) => { window.__sharesAsked = a; return '/Users/p/Desktop/shares'; },
   vault_create: (a) => { __created = { cmd: 'cards', a }; throw 'stop here'; },
@@ -174,6 +175,11 @@ with sync_playwright() as p:
     pg.locator("#dev-cer").screenshot(path=str(out / "sign-step-review.png"))
     pg.click("#dev-cer-next"); pg.wait_for_timeout(400)
     check("step 3 offers the wallet's own line as a code, for the device to check the change against", pg.locator("#dev-desc-qr").count() == 1 and "change" in pg.inner_text("#dev-cer-title").lower() and "cannot spend" in pg.inner_text("#dev-cer-text"), pg.inner_text("#dev-cer-title"))
+    # A device shows the wallet's cosigner fingerprints before it will verify change, and a fixed key with no origin
+    # crashed SeedSigner there (seed_views.py:2067). The code carries the line the app writes for devices — each key
+    # with an origin — not the stored text.
+    pg.wait_for_timeout(300)
+    check("and that code is the recovery line, which names every key", "vault_recovery" in pg.evaluate("__calls") and pg.evaluate("() => { const c = document.querySelector('#dev-desc-qr'); return c && c.width > 0 && c.getContext('2d').getImageData(0, 0, c.width, c.height).data.some(v => v !== 0); }"))
     pg.locator("#dev-cer").screenshot(path=str(out / "sign-step-change.png"))
     pg.click("#dev-cer-next"); pg.wait_for_timeout(400)
     check("step 4 asks for the signed code to be turned around to the camera", "signed code back" in pg.inner_text("#dev-cer-title") and "turn it around" in pg.inner_text("#dev-cer-text").lower() and pg.inner_text("#dev-cer-next") == "Open the camera", pg.inner_text("#dev-cer-title"))

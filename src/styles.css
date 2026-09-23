@@ -13,7 +13,7 @@ input,textarea{-webkit-user-select:text;user-select:text}
 .nav.on{background:var(--gold-soft);color:var(--ink)}
 .nav svg{width:18px;height:18px;flex:0 0 18px}
 .side .foot{margin-top:auto;padding:6px 10px;font-size:12px;color:var(--muted);font-family:var(--display)}
-.main{flex-grow:1;display:flex;flex-direction:column;min-width:0;container-type:inline-size;container-name:main}
+.main{flex-grow:1;display:flex;flex-direction:column;min-width:0}
 .top{display:flex;align-items:center;justify-content:space-between;padding:18px 32px;border-bottom:1px solid var(--line)}
 .top h1{font-family:var(--display);font-weight:800;font-size:22px;letter-spacing:-.02em;margin:0}
 .net{display:inline-flex;align-items:center;gap:8px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;font-family:var(--display);font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);background:var(--panel)}
@@ -213,7 +213,7 @@ tr:hover .lbl .pencil,.coin:hover .lbl .pencil,.lbl .pencil:focus-visible{color:
 #staged-bar span{flex:1 1 260px;min-width:0}
 .signgrid{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:22px;align-items:start;max-width:1240px}
 .signmain,.signside{display:flex;flex-direction:column;gap:22px;min-width:0}
-@container main (max-width:1000px){.signgrid{grid-template-columns:minmax(0,1fr);max-width:780px}}
+@media (max-width:1240px){.signgrid{grid-template-columns:minmax(0,1fr);max-width:780px}}
 .cer-action{display:flex;flex-direction:column;gap:10px;border-top:1px solid var(--line);padding-top:16px}
 .cer-act-title{font-family:var(--display);font-weight:800;font-size:20px;letter-spacing:-.02em}
 #ceremony.can-sign{border-color:var(--gold)}
@@ -266,7 +266,7 @@ table.act .amt.in{color:var(--signal)}
 .g-blink{animation:gblink 1s steps(2,start) infinite}
 @keyframes gnudge{0%,100%{transform:translateX(0)}50%{transform:translateX(7px)}}
 @keyframes gblink{to{opacity:.15}}
-@container main (max-width:640px){.guide-row{flex-direction:column;align-items:stretch}.guide{flex-basis:auto;max-width:300px}}
+@media (max-width:900px){.guide-row{flex-direction:column;align-items:stretch}.guide{flex-basis:auto;max-width:300px}}
 @media (prefers-reduced-motion: reduce){.g-nudge,.g-pulse,.g-blink{animation:none}}
 
 /* the instruction leads; everything else on the Sign screen steps back */
@@ -377,7 +377,7 @@ details.card.quiet > *:not(summary){margin-top:12px}
 /* one transaction: the facts, your record of it, and the chain's view of it folded away */
 #activity tr[data-txid]{cursor:pointer} #activity tr[data-txid]:hover td{background:var(--ground)}
 .txgrid{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(300px,1fr);gap:22px;align-items:start;max-width:1240px}
-@container main (max-width:860px){.txgrid{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:1100px){.txgrid{grid-template-columns:minmax(0,1fr)}}
 #tx-chain{max-width:1240px}
 .tx-head{display:flex;align-items:baseline;justify-content:space-between;gap:16px;flex-wrap:wrap}
 .tx-amt{font-family:var(--display);font-weight:800;font-size:40px;letter-spacing:-.03em;line-height:1.05;font-variant-numeric:tabular-nums} .tx-amt small{font-size:18px;font-weight:600;letter-spacing:0;color:var(--muted)} .tx-amt.in{color:var(--signal)}

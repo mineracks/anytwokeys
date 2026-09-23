@@ -310,7 +310,10 @@ with sync_playwright() as p:
     check("the slow sync really is still in flight", pg.evaluate("typeof window.__release") == "function")
     pg.evaluate("window.__hold = null; window.__release()"); pg.wait_for_timeout(600)
     asked = pg.evaluate("__state.asked && __state.asked.name")
-    check("a sync that returns after the switch is dropped: the other vault keeps its own balance and no lookup is made for the wrong vault", pg.inner_text("#title") == "other vault" and asked == "other vault" and "111" in pg.inner_text("#balance") and "9,430" not in pg.inner_text("#s-home"), f"title={pg.inner_text('#title')} asked={asked} balance={pg.inner_text('#balance')}")
+    # everything the screen STATES about the vault — not a hover readout, which belongs to whatever the pointer is over
+    stated = pg.evaluate("""() => { const c = document.querySelector('#s-home').cloneNode(true); c.querySelectorAll('.ctip').forEach(e => e.remove()); return c.innerText || c.textContent; }""")
+    check("a sync that returns after the switch is dropped: the other vault keeps its own balance and no lookup is made for the wrong vault", pg.inner_text("#title") == "other vault" and asked == "other vault" and "111" in pg.inner_text("#balance") and "9,430" not in stated, f"title={pg.inner_text('#title')} asked={asked} balance={pg.inner_text('#balance')} stated={stated[:160]!r}")
+    check("and the picture on Home is the one for the vault being shown, not the one left behind", pg.evaluate("document.querySelector('#home-summary').dataset.names") == "other vault", pg.evaluate("document.querySelector('#home-summary').dataset.names"))
     pg.evaluate("vault = store.vaults[0]; show('home')"); pg.wait_for_timeout(600)
     # ---- the address book on Send ----
     A = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"

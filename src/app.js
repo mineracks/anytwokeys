@@ -83,7 +83,7 @@ function show(name) {
   if (name !== 'restore') stopCam();
   if (name !== 'sign') stopQr();
   if (name !== 'keys') hideDesc();
-  if (name === 'home') { syncIfStale(); labelsSync(); paintDrillNudge(); }
+  if (name === 'home') { renderHomeSummary(); syncIfStale(); labelsSync(); paintDrillNudge(); }   // the picture belongs to the vault being shown, not the one left behind
   if (name === 'receive') drawAddress();
   if (name === 'activity') { if (vault && !vault._coins) sync(); else paintActivity(); }
   if (name === 'addresses') { recPageClose('addr'); renderAddresses(); }
@@ -1382,7 +1382,9 @@ function lineChart(el, { title, sub, series, fmt, fmtAxis, from, to }) {
   const nearest = (clientX) => { const r = svg.getBoundingClientRect(), t = from + ((clientX - r.left) / r.width * W - m.l) / pw * span; let bi = 0; xs.forEach((x, i) => { if (Math.abs(x - t) < Math.abs(xs[bi] - t)) bi = i; }); return bi; };
   hit.addEventListener('pointermove', (e) => show(nearest(e.clientX)));
   hit.addEventListener('pointerleave', hide);
-  hit.addEventListener('focus', () => show(at)); hit.addEventListener('blur', hide);
+  // the readout on focus is for the keyboard; focus that lands here by itself (a re-render taking the focused
+  // element away) must not pop a reading of its own
+  hit.addEventListener('focus', () => { if (hit.matches(':focus-visible')) show(at); }); hit.addEventListener('blur', hide);
   hit.addEventListener('keydown', (e) => { if (e.key === 'ArrowLeft') { e.preventDefault(); show(at - 1); } if (e.key === 'ArrowRight') { e.preventDefault(); show(at + 1); } if (e.key === 'Home') { e.preventDefault(); show(0); } if (e.key === 'End') { e.preventDefault(); show(xs.length - 1); } });
   return { xs };
 }
@@ -1418,6 +1420,11 @@ async function sumInput(name) {
 }
 async function renderSummary(box, names, opts = {}) {
   const me = (renderSummary.seq = (renderSummary.seq || 0) + 1);
+  // Keeping the last drawing, dimmed, is right for a REFRESH of the same wallet and wrong for a different one: it
+  // would leave another vault's line on screen, and a stray focus on its plot would read that vault's figures out.
+  const who = names.join('\u0000');
+  if (box.dataset.names !== undefined && box.dataset.names !== who) box.innerHTML = '';
+  box.dataset.names = who;
   box.classList.add('sum-loading');   // refetch keeps the frame: the last drawing stays, dimmed, until the new one is ready
   let inputs = [];
   try { inputs = (await Promise.all(names.map(sumInput))).filter(Boolean); } catch (e) { if (me !== renderSummary.seq) return; box.classList.remove('sum-loading'); box.innerHTML = `<div class="label">Over time</div><div class="sum-empty">The history could not be fetched: ${esc(String(e))}</div>`; return; }
@@ -2448,8 +2455,12 @@ function devCeremony(st, k) {
       T.textContent = 'If it asks about the change';
       X.textContent = `${sats(change[0].sats)} sats come back to this vault. A device can only prove that address is yours from the wallet's own line, so when the ${d.name} asks, show it this code. It cannot spend anything.`;
       S.innerHTML = '<div class="qr-box small"><canvas id="dev-desc-qr" width="520" height="520"></canvas></div><div class="muted" style="font-size:13px">The same line is in Vault settings › Save the recovery sheet, if it will not scan here.</div>';
-      const line = vault.ext || vault._recovery || vault.descriptor || '';
-      if (line) drawQr(line, $('#dev-desc-qr')); else $('#dev-stage').innerHTML = '<div class="muted" style="font-size:13px">Reveal the recovery line on the Keys screen first, then come back.</div>';
+      // the recovery line, not the stored text: it gives each fixed key the origin it implies, which a device needs
+      // before it will show the wallet at all (see wallet::with_key_origins)
+      invoke('vault_recovery', { name: vault.name })
+        .then(line => { const c = $('#dev-desc-qr'); if (c) drawQr(line, c); })
+        .catch(() => { const line = vault.ext || vault._recovery || vault.descriptor || ''; const c = $('#dev-desc-qr');
+          if (line && c) drawQr(line, c); else $('#dev-stage').innerHTML = '<div class="muted" style="font-size:13px">Reveal the recovery line on the Keys screen first, then come back.</div>'; });
     } else {
       T.textContent = 'This spend leaves no change';
       X.textContent = `Everything these coins hold is going out, so nothing comes back to this vault. The ${d.name} may say it has no change to check, or show none — that is right for this spend, not a warning about it.`;
