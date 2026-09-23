@@ -393,7 +393,7 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .tag.out{border-color:var(--gold);color:var(--gold);margin-left:0}
 .tag.ours{margin-left:0}
 .pick.tight{flex-wrap:wrap;gap:var(--s2)} .pick.tight .opt{flex:0 1 auto;padding:6px 10px;font-size:13px}
-.coin-tax{display:block;font-size:12px;color:var(--muted);margin-left:26px;font-variant-numeric:tabular-nums}
+.coin-tax{grid-column:1/-1;font-size:12px;color:var(--muted);margin-left:26px;font-variant-numeric:tabular-nums}
 
 /* attachments on a record */
 .att-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:10px}

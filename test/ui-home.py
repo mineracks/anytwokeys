@@ -366,6 +366,9 @@ with sync_playwright() as p:
     pg.click("#coins-adv summary"); pg.wait_for_timeout(200)
     coin = pg.inner_text("#coin-list")
     check("each coin says what it cost and what spending it would realise", money(coin_cost) in coin and money(9430 / 1e8 * 114209.6) in coin and "if spent" in coin, coin[:200])
+    # the row is a grid of fixed columns: an extra child lands in one of them, and the id wraps a letter at a time
+    w = pg.evaluate("() => { const m = document.querySelector('#coin-list .coin .mono'); return m ? m.getBoundingClientRect() : null; }")
+    check("the coin's id still reads across the row, not a letter at a time", w and w["width"] > 120 and w["height"] < 40, str(w))
     check("and the note says the pick IS the disposal under this method", "what you tick here is what you dispose of" in pg.inner_text("#coin-method"), pg.inner_text("#coin-method"))
     pg.click("#coin-plans [data-plan='gain']"); pg.wait_for_timeout(700)
     check("a picking plan ticks coins to cover the amount and the review follows", pg.evaluate("coinPick.size") == 1 and "chosen by you" in pg.inner_text("#review"), pg.inner_text("#coin-sum"))
