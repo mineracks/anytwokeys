@@ -238,6 +238,9 @@ pub struct Transfer {
     pub kind: u64,
     /// unix seconds, from the transfer's created time
     pub at: i64,
+    /// both parties' identity keys, hex — the other party is who a wallet was paid by, or paid
+    #[serde(default)] pub sender: String,
+    #[serde(default)] pub receiver: String,
 }
 
 /// Every transfer this wallet was part of, newest page first. An empty page means either an empty wallet or a
@@ -264,9 +267,17 @@ pub fn transfers(identity: &[u8], network: &str, limit: u64, offset: u64) -> Res
             }
         }
     }
+    // What a person did, not what the wallet did to itself. A wallet's leaves are re-cut against the service
+    // provider all the time — a swap out and a swap in of the same sats, seconds apart (seen on the probe wallet:
+    // 512 out, 512 in, kinds 4 and 5) — and those are plumbing, not history. Kept: a transfer (2), a Lightning
+    // payment landing (0, a preimage swap), and an exit to the chain (1). Anything not yet completed is marked.
+    list.retain(|t| matches!(t.kind, 0 | 1 | 2));
     list.sort_by(|a, b| b.at.cmp(&a.at));
     Ok((list, next))
 }
+
+/// Status 5 is COMPLETED in their table; everything below it is still in flight, 6 expired, 7 returned.
+pub fn settled(status: u64) -> bool { status == 5 }
 
 fn one_transfer(b: &[u8], me: &[u8]) -> Transfer {
     let mut t = Transfer::default();
@@ -274,8 +285,8 @@ fn one_transfer(b: &[u8], me: &[u8]) -> Transfer {
     while !r.done() {
         match r.field() {
             Some((1, v, _)) => t.id = String::from_utf8_lossy(&v).to_string(),
-            Some((2, v, _)) => t.direction = if v == me { "out".into() } else { t.direction.clone() },
-            Some((3, v, _)) => { if v == me && t.direction.is_empty() { t.direction = "in".into(); } }
+            Some((2, v, _)) => { if v == me { t.direction = "out".into(); } t.sender = hex::encode(&v); }
+            Some((3, v, _)) => { if v == me && t.direction.is_empty() { t.direction = "in".into(); } t.receiver = hex::encode(&v); }
             Some((4, _, v)) => t.status = v,
             Some((5, _, v)) => t.sats = v,
             Some((8, v, _)) => t.at = timestamp(&v),
@@ -362,6 +373,17 @@ mod tests {
         let ssp = hex::decode("023e33e2920326f64ea31058d44777442d97d7d5cbfcf54e3060bc1695e5261c93").unwrap();
         let t = transfers(&ssp, "mainnet", 5, 0);
         println!("SSP transfers: {:?}", t.as_ref().map(|(l, n)| (l.len(), *n, l.iter().map(|x| (x.sats, x.direction.clone(), x.at)).collect::<Vec<_>>())));
+    }
+    /// A wallet of our own, funded by a real payment: the positive control. Prints what this client sees for it,
+    /// including who sent each transfer — which is how a wallet that shows no Spark address gives its identity up.
+    #[test] #[ignore]
+    fn probe_identity_from_env() {
+        let id = match std::env::var("SPARK_IDENTITY") { Ok(h) => hex::decode(h).unwrap(), Err(_) => return };
+        println!("balance: {:?}", balance(&id, "mainnet"));
+        match transfers(&id, "mainnet", 10, 0) {
+            Ok((list, _)) => for t in list { println!("transfer {} {} sats {} at {} status {} kind {} sender {} receiver {}", t.id, t.sats, t.direction, t.at, t.status, t.kind, t.sender, t.receiver); },
+            Err(e) => println!("transfers: {e}"),
+        }
     }
     #[test] #[ignore]
     fn probe_each_operator() {
