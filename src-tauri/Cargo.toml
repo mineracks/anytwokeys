@@ -48,6 +48,10 @@ bc-components = "0.31"
 rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
 tiny-skia = { version = "0.11", default-features = false, features = ["std", "png-format", "simd"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+scrypt = { version = "0.11", default-features = false, features = ["simple", "std"] }
+aes = "0.8"
+cbc = "0.1"
+hmac = "0.12"
 
 # the store key's slot on this Mac: a Keychain item, behind a Touch ID / password prompt (lockbox.rs)
 [target.'cfg(target_os = "macos")'.dependencies]
