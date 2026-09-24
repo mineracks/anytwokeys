@@ -15,7 +15,9 @@
 //! Read from github.com/buildonspark/spark (2026-09-24), not guessed.
 
 /// mainnet operators, in the order the SDK lists them
-pub const OPERATORS: [&str; 3] = ["https://0.spark.lightspark.com", "https://spark-operator.breez.technology", "https://2.spark.flashnet.xyz"];
+/// In the order they actually answer: on 2026-09-24/25 Breez and Flashnet returned a transfer page in 10–14 s while
+/// Lightspark's own operator did not return one at all within 25 s. Balance answers come back from all three quickly.
+pub const OPERATORS: [&str; 3] = ["https://spark-operator.breez.technology", "https://2.spark.flashnet.xyz", "https://0.spark.lightspark.com"];
 
 // ---------- just enough protobuf ----------
 fn varint(mut n: u64, out: &mut Vec<u8>) { loop { let b = (n & 0x7f) as u8; n >>= 7; out.push(if n > 0 { b | 0x80 } else { b }); if n == 0 { break; } } }
@@ -152,13 +154,17 @@ pub fn address_of(identity: &[u8], network: &str) -> Result<String, String> {
 
 // ---------- gRPC-Web, which is what their own browser client speaks ----------
 fn call(base: &str, method: &str, body: Vec<u8>) -> Result<Vec<u8>, String> {
+    // a balance is quick everywhere; a transfer page is not, and a timeout shorter than the answer is a failure of
+    // our own making (2026-09-25: 12 s cut off operators that answer in 14, and an import died of it)
+    let patience = std::time::Duration::from_secs(if method == "query_all_transfers" { 45 } else { 15 });
+    crate::net::emit("spark", serde_json::json!({ "operator": base.trim_start_matches("https://"), "method": method }));
     let mut framed = vec![0u8];
     framed.extend_from_slice(&(body.len() as u32).to_be_bytes());
     framed.extend_from_slice(&body);
     let url = format!("{}/spark.SparkService/{method}", base.trim_end_matches('/'));
     static H: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
-    let http = H.get_or_init(|| reqwest::blocking::Client::builder().user_agent("anytwokeys/0.1").timeout(std::time::Duration::from_secs(12)).build().expect("an HTTP client"));
-    let res = http.post(&url)
+    let http = H.get_or_init(|| reqwest::blocking::Client::builder().user_agent("anytwokeys/0.1").build().expect("an HTTP client"));
+    let res = http.post(&url).timeout(patience)
         .header("content-type", "application/grpc-web+proto")
         .header("x-grpc-web", "1")
         .header("accept", "application/grpc-web+proto")

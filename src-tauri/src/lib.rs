@@ -493,14 +493,25 @@ async fn spark_restore_words(name: String, words: String) -> R<Vault> {
         let s = wallet::load()?;
         if s.vaults.iter().any(|v| v.name == name) { return Err(format!("a vault called '{name}' already exists")); }
         let network = s.settings.network.clone();
+        // Balances first, for both accounts: they are quick from every operator, and a wallet holding sats is decided
+        // by that alone. Only a wallet that is empty on both is asked for its transfers — a slow question — and a
+        // failure to answer THAT is reported as not knowing, never as the wallet not being there.
+        let ids: Vec<(u32, Vec<u8>)> = [1u32, 0].iter().map(|&a| spark::identity_from_words(&words, a).map(|id| (a, id))).collect::<Result<_, _>>()?;
         let mut chosen: Option<(u32, Vec<u8>)> = None;
         let mut seen = Vec::new();
-        for account in [1u32, 0] {
-            let id = spark::identity_from_words(&words, account)?;
-            let balance = spark::balance(&id, &network)?;
-            let (list, _) = spark::transfers(&id, &network, 1, 0)?;
-            seen.push(format!("account {account}: {balance} sats, {}", if list.is_empty() { "no transfers" } else { "has transfers" }));
-            if balance > 0 || !list.is_empty() { chosen = Some((account, id)); break; }
+        for (account, id) in &ids {
+            let balance = spark::balance(id, &network)?;
+            seen.push(format!("account {account}: {balance} sats"));
+            if balance > 0 { chosen = Some((*account, id.clone())); break; }
+        }
+        if chosen.is_none() {
+            for (account, id) in &ids {
+                match spark::transfers(id, &network, 1, 0) {
+                    Ok((list, _)) if !list.is_empty() => { chosen = Some((*account, id.clone())); break; }
+                    Ok(_) => seen.push(format!("account {account}: no transfers")),
+                    Err(e) => seen.push(format!("account {account}: transfers could not be read ({e})")),
+                }
+            }
         }
         { use zeroize::Zeroize; let mut w = words; w.zeroize(); }   // the words have done their one job
         let (account, id) = chosen.ok_or_else(|| format!("those words derive a Spark identity, but Spark has nothing under it on either account ({}). Either the wallet is empty and has never received, or it was made with a different scheme.", seen.join("; ")))?;

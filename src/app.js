@@ -3289,6 +3289,13 @@ function netPing(what) {
 window.__TAURI__.event.listen('net', (ev) => netPing(ev.payload));
 // how far a scan has got. It cannot say how far there is to go — the search ends when enough addresses in a row come
 // back empty — so it says what it has actually done, which is true.
+// which operator is being asked what, while a Spark import runs — so a slow answer is seen as a slow answer and
+// not as a screen that has stopped
+window.__TAURI__.event.listen('spark', (ev) => {
+  const p = ev.payload || {}; const what = p.method === 'query_all_transfers' ? 'transfers' : p.method === 'query_balance' ? 'balance' : p.method;
+  const line = `asking ${p.operator} for the ${what}\u2026 (a transfer page can take up to a minute)`;
+  for (const id of ['#spark-words-note', '#spark-note']) { const n = $(id); if (n && n.textContent && !n.textContent.startsWith('The words')) n.textContent = line; }
+});
 window.__TAURI__.event.listen('scan', (ev) => {
   const p = ev.payload || {}; if (!vault || p.vault !== vault.name) return;
   const bar = $('#scanbar'); if (bar) bar.hidden = false;
