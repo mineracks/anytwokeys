@@ -54,7 +54,8 @@ impl<'a> Reader<'a> {
 /// `spark1…` (bech32m) wraps a protobuf whose first field is the identity public key. That key is all a read needs.
 pub fn identity_of(address: &str) -> Result<(Vec<u8>, String), String> {
     use bech32::primitives::decode::CheckedHrpstring;
-    let s = address.trim();
+    let s = find_address(address).ok_or("that is not a Spark address — it should read like spark1…".to_string())?;
+    let s = s.as_str();
     let parsed = CheckedHrpstring::new::<bech32::Bech32m>(s).map_err(|_| "that is not a Spark address — it should read like spark1…".to_string())?;
     let network = match parsed.hrp().to_lowercase().as_str() {
         "spark" => "mainnet", "sparkt" => "testnet", "sparks" => "signet", "sparkrt" => "regtest",
@@ -70,6 +71,16 @@ pub fn identity_of(address: &str) -> Result<(Vec<u8>, String), String> {
         }
     }
     Err("that Spark address carries no identity key".into())
+}
+
+/// The `spark…1…` inside whatever was pasted or scanned: a bare address, an invoice, a `spark:` URI, a BIP 21 line
+/// with a `spark=` parameter, or a QR's upper-case rendering of any of those. A camera held up to a wallet's Receive
+/// screen should just work, whichever of these that wallet chose to show.
+pub fn find_address(text: &str) -> Option<String> {
+    let lower = text.trim().to_lowercase();
+    // "spark:" as a scheme is followed by the address itself, so every "spark" is tried, not just the first
+    lower.match_indices("spark").map(|(start, _)| lower[start..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect::<String>())
+        .find(|cand| cand.len() >= 20 && cand.contains('1'))
 }
 
 // ---------- gRPC-Web, which is what their own browser client speaks ----------
@@ -215,6 +226,11 @@ mod tests {
         let (got, net) = identity_of(&invoice).expect("an invoice carries the same key");
         assert_eq!(got, key);
         assert_eq!(net, "mainnet");
+        // what a camera sees: the same thing upper-cased, behind a scheme, or inside a BIP 21 line
+        let (k2, _) = identity_of(&invoice.to_uppercase()).expect("QR codes render bech32 in upper case");
+        assert_eq!(k2, key);
+        assert_eq!(identity_of(&format!("spark:{invoice}")).unwrap().0, key);
+        assert_eq!(identity_of(&format!("bitcoin:bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4?amount=0.001&spark={invoice}")).unwrap().0, key);
         assert!(identity_of("spark1notanaddress").is_err());
         assert!(identity_of("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4").unwrap_err().contains("Spark address"));
     }

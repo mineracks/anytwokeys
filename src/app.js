@@ -1681,7 +1681,11 @@ function fillDestination(text) {
   toast('Destination filled');
 }
 let cam2Stream = null, cam2Timer = null;
-const openScan = async (deviceId) => {
+// One camera modal, two jobs: a destination for Send, or whatever a caller asks for. `onRead` gets each decoded
+// code and says whether it was the thing wanted; the default is Send's address.
+const openScan = async (deviceId, onRead) => {
+  if (onRead) openScan.onRead = onRead; else if (!deviceId) openScan.onRead = null;   // a camera switch keeps the job
+  const want = openScan.onRead || ((data) => { if (/^(bitcoin:|bc1|tb1|[13mn2])/i.test(data.trim())) { fillDestination(data); return true; } return false; });
   if (cam2Timer) { clearInterval(cam2Timer); cam2Timer = null; }
   if (cam2Stream) { cam2Stream.getTracks().forEach(t => t.stop()); cam2Stream = null; }
   $('#scan-modal').classList.add('on');
@@ -1690,10 +1694,16 @@ const openScan = async (deviceId) => {
     $('#cam2').srcObject = cam2Stream;
     camChooser($('#scan-pick'), cam2Stream, openScan);
     const reader = makeQrReader($('#cam2-note'));
-    cam2Timer = setInterval(() => { const v = $('#cam2'); if (!v.videoWidth) return; const data = reader.read(v); if (data && /^(bitcoin:|bc1|tb1|[13mn2])/i.test(data.trim())) { fillDestination(data); closeScan(); } }, 350);
+    cam2Timer = setInterval(() => { const v = $('#cam2'); if (!v.videoWidth) return; const data = reader.read(v); if (data && want(data)) closeScan(); }, 350);
   } catch { $('#cam2-note').textContent = 'No camera available on this computer. Paste the address instead.'; }
 };
 $('#scan-to').onclick = () => openScan('');
+// A Spark wallet's Receive screen IS the import: any code with a spark1… in it — address, invoice, a URI carrying
+// either — holds the wallet's identity key, and that is all the watching needs.
+$('#spark-scan') && ($('#spark-scan').onclick = () => openScan('', (data) => {
+  const m = String(data).match(/spark[a-z0-9]*1[a-z0-9]{18,}/i); if (!m) return false;
+  $('#spark-addr').value = m[0]; toast('Spark address read'); $('#spark-read').click(); return true;
+}));
 function closeScan() { if (cam2Timer) clearInterval(cam2Timer); cam2Timer = null; if (cam2Stream) { cam2Stream.getTracks().forEach(t => t.stop()); cam2Stream = null; } $('#scan-modal').classList.remove('on'); }
 $('#scan-close').onclick = closeScan;
 
