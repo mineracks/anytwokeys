@@ -379,6 +379,7 @@ mod tests {
     #[test] #[ignore]
     fn probe_identity_from_env() {
         let id = match std::env::var("SPARK_IDENTITY") { Ok(h) => hex::decode(h).unwrap(), Err(_) => return };
+        println!("address: {}", address_of(&id, "mainnet").unwrap());
         println!("balance: {:?}", balance(&id, "mainnet"));
         match transfers(&id, "mainnet", 10, 0) {
             Ok((list, _)) => for t in list { println!("transfer {} {} sats {} at {} status {} kind {} sender {} receiver {}", t.id, t.sats, t.direction, t.at, t.status, t.kind, t.sender, t.receiver); },

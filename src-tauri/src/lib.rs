@@ -462,11 +462,16 @@ async fn spark_restore(name: String, address: String) -> R<Vault> {
         if let Some(v) = s.vaults.iter().find(|v| v.spark.as_ref().map(|x| x.identity == identity).unwrap_or(false)) {
             return Err(format!("this Spark wallet is already here, as '{}'", v.name));
         }
-        // asked once here so a wallet that cannot be read says so now, rather than looking empty later
+        // Asked once here so a wallet that cannot be read says so now, rather than looking empty later. A wallet with
+        // privacy on answers EMPTY to both questions, not with an error — the operators gate the balance (query_nodes)
+        // and the transfers alike on HasReadAccessToWallet — so "nothing" cannot be told from "withheld" by asking.
+        // Proved 2026-09-25: a Wallet of Satoshi wallet holding 6.86M sats, and having just SENT a transfer we could
+        // see from the other end, read as 0 sats and no transfers. So an empty answer is refused with both readings.
         let balance = spark::balance(&id, &network)?;
         let (list, _) = spark::transfers(&id, &network, 1, 0)?;
-        if list.is_empty() && balance > 0 {
-            return Err("Spark will not list this wallet's transfers — its privacy setting is on. The balance can be read but the history cannot, so there is nothing here to account with.".into());
+        if list.is_empty() {
+            return Err(if balance > 0 { "Spark will not list this wallet's transfers — its privacy setting is on. The balance can be read but the history cannot, so there is nothing here to account with.".into() }
+                else { "Spark shows nothing under this address: no balance and no transfers. That is what an EMPTY wallet looks like — and also exactly what a wallet with its privacy setting on looks like, since a private wallet answers with nothing rather than with a refusal. If you know this wallet holds sats, its privacy setting is on (Wallet of Satoshi's wallets are), and it cannot be read from outside until that is turned off.".into() });
         }
         let mut v = Vault { watch: None, spark: Some(wallet::Spark { address: address.trim().to_string(), identity }), muun: None,
             name, network, threshold: 1, keys: Vec::new(), descriptor: String::new(), address: address.trim().to_string(),
