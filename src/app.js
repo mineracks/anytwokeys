@@ -800,7 +800,7 @@ function syncIfStale() {
 async function sync() {
   if (!vault) return;
   paintVaultCard();
-  $('#balance-sub').textContent = 'syncing…';
+  $('#balance-sub').textContent = 'syncing\u2026'; { const b = $('#scanbar'); if (b) b.hidden = false; }
   // Nothing of another vault may sit under this vault's name, not even for the seconds a sync takes:
   // a vault that has not been drawn yet starts from a blank screen, and an answer that comes back after the person has
   // moved to another vault is for that OTHER vault and is dropped here.
@@ -813,7 +813,7 @@ async function sync() {
     vault._snap = s; vault._snapFor = liveKey(vault); vault._syncedAt = Date.now(); vault._stale = false;
     paintSnap(s);
     fillActivity(vault.name, s);   // dates, amounts and values arrive after the balance; the balance never waits for them
-  } catch (e) { if (!vault || vault.name !== me) return; checkNode(); $('#balance-sub').textContent = 'could not reach the server'; $('#conn').textContent = String(e); }
+  } catch (e) { { const b = $('#scanbar'); if (b) b.hidden = true; } if (!vault || vault.name !== me) return; checkNode(); $('#balance-sub').textContent = 'could not reach the server'; $('#conn').textContent = String(e); }
 }
 /// Draw one vault_sync answer: balance, coins, history, where it came from.
 // Which keys sign this vault, on the card. Drawn wherever the vault is drawn — a snapshot shown without a fresh
@@ -825,6 +825,7 @@ function paintVaultCard() {
   $('#vault-keys').textContent = vault.muun ? 'Its keys stay in Muun; this vault only reads the chain' : vault.keys.map(k => k.name).join(' · ');
 }
 function paintSnap(s) {
+  { const b = $('#scanbar'); if (b) b.hidden = true; }
   {
     vault._coins = s.coins; vault._receive = s.receive; vault._receiveIndex = s.receive_index; vault._rotating = s.rotating; vault._height = s.height; vault._history = s.history; vault._nextChange = s.next_change; vault._gap = s.gap;
     if ($('#s-send').classList.contains('on')) renderCoins();
@@ -3143,6 +3144,14 @@ function netPing(what) {
   clearTimeout(netPing.t); netPing.t = setTimeout(() => n.removeAttribute('data-busy'), 780);
 }
 window.__TAURI__.event.listen('net', (ev) => netPing(ev.payload));
+// how far a scan has got. It cannot say how far there is to go — the search ends when enough addresses in a row come
+// back empty — so it says what it has actually done, which is true.
+window.__TAURI__.event.listen('scan', (ev) => {
+  const p = ev.payload || {}; if (!vault || p.vault !== vault.name) return;
+  const bar = $('#scanbar'); if (bar) bar.hidden = false;
+  const seen = p.checked * (p.each || 1);
+  $('#balance-sub').textContent = `reading the chain \u2014 ${sats(seen)} ${p.change ? 'change ' : ''}address${seen === 1 ? '' : 'es'} looked at, ${p.used ? sats(p.used) + ' with history' : 'none used yet'}`;
+});
 
 const netMenu = (on) => {
   $('#net-menu').hidden = !on; $('#node').setAttribute('aria-expanded', on ? 'true' : 'false');

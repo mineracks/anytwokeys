@@ -686,6 +686,14 @@ with sync_playwright() as p:
     check("a vault with ONE fixed address has no list, and the screen says that instead of sitting empty",
           pg.locator("#addr-fixed").is_visible() and "single fixed address" in pg.inner_text("#addr-fixed") and not pg.locator("#addr-card").is_visible())
     pg.evaluate("window.__rotating = true; vault._rotating = true; show('addresses')"); pg.wait_for_timeout(600)
+    # a first read of a wallet can take a while — a Muun one looks at four addresses per position — so the screen
+    # says what it has actually done rather than pretending to know how far there is to go
+    pg.evaluate("""() => { const f = (window.__listeners || {})['scan']; f && f({ payload: { vault: vault.name, checked: 40, used: 3, each: 4 } }); }""")
+    pg.wait_for_timeout(200)
+    check("a scan in progress says how many addresses it has looked at, and shows a bar", "160 addresses looked at" in pg.inner_text("#balance-sub") and "3 with history" in pg.inner_text("#balance-sub") and pg.evaluate("document.querySelector('#scanbar').hidden") is False, pg.inner_text("#balance-sub"))
+    pg.evaluate("""() => { const f = (window.__listeners || {})['scan']; f && f({ payload: { vault: 'somebody else', checked: 99, used: 0 } }); }""")
+    pg.wait_for_timeout(150)
+    check("and another vault's scan does not touch this screen", "160 addresses" in pg.inner_text("#balance-sub"), pg.inner_text("#balance-sub"))
     check("Addresses is a screen of its own, both chains, including ones never used yet",
           pg.locator("#addr-recv tbody tr").count() >= 2 and pg.locator("#addr-chg tbody tr").count() >= 1 and "unused" in pg.inner_text("#addr-recv"))
     pg.locator("#addr-recv tbody tr").first.click(); pg.wait_for_timeout(400)

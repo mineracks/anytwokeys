@@ -609,3 +609,10 @@ a.tag{text-decoration:none;cursor:pointer} a.tag:hover{text-decoration:underline
 #dev-stage{display:flex;flex-direction:column;gap:var(--s2)}
 #dev-stage .tx-dl{margin:0}
 #dev-cer{display:flex;flex-direction:column;gap:var(--s3)} #dev-cer .guide-row{align-items:flex-start}
+
+/* A wallet being read for the first time can take a while — a Muun one looks at four addresses per position. The
+   bar does not pretend to know how far there is to go: the count beside it is the honest part. */
+.scanbar{height:3px;border-radius:2px;background:var(--line);overflow:hidden;margin-top:10px;max-width:260px}
+.scanbar i{display:block;height:100%;width:40%;border-radius:2px;background:var(--gold);animation:scanrun 1.1s ease-in-out infinite}
+@keyframes scanrun{0%{transform:translateX(-100%)}100%{transform:translateX(250%)}}
+@media (prefers-reduced-motion: reduce){.scanbar i{animation:none;width:100%;opacity:.5}}

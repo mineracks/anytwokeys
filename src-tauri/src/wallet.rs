@@ -569,6 +569,7 @@ pub fn scan(v: &Vault, servers: &Servers, gap: u32) -> Result<Scanned, String> {
             let spks = idx.iter().map(|&p| script_at(v, base | p)).collect::<Result<Vec<_>, _>>()?;
             // a failed query is a failed scan, never "no history": an empty answer resets the next address and the watcher's memory
             let answers = chain::histories(servers, &spks)?;
+            crate::net::emit("scan", serde_json::json!({ "vault": v.name, "checked": end, "used": used.len(), "change": base & CHANGE != 0 }));
             for ((p, spk), h) in idx.iter().zip(spks).zip(answers) {
                 if !h.is_empty() {
                     last_used = Some(*p);
@@ -598,6 +599,7 @@ pub fn scan(v: &Vault, servers: &Servers, gap: u32) -> Result<Scanned, String> {
             let idx: Vec<u32> = (i..end).flat_map(|pos| (0..MUUN_SCHEMES.len() as u32).map(move |s| (s << SCHEME_SHIFT) | flag | pos)).collect();
             let spks = idx.iter().map(|&x| script_at(v, x)).collect::<Result<Vec<_>, _>>()?;
             let answers = chain::histories(servers, &spks)?;
+            crate::net::emit("scan", serde_json::json!({ "vault": v.name, "checked": end, "used": used.len(), "change": flag & CHANGE != 0, "each": MUUN_SCHEMES.len() }));
             for ((x, spk), h) in idx.iter().zip(spks).zip(answers) {
                 let pos = x & POS_MASK;
                 if !h.is_empty() {
