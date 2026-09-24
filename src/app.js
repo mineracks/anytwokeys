@@ -72,6 +72,9 @@ function show(name) {
   const navName = name === 'sign' ? (paintCrumbs.via || 'send') : name === 'tx' ? 'activity' : name;   // Sign has no sidebar entry of its own: light the screen it came from
   $$('.nav[data-go]').forEach(n => n.classList.toggle('on', n.dataset.go === navName));
   // the vault you are in stays lit on every screen that is about it, matching the breadcrumb; not while making another, nor in app settings
+  // a watched wallet has no keys here: the screens that would sign are not offered at all
+  const watched = !!(vault && vault.muun);
+  for (const go of ['send', 'receive', 'messages', 'keys']) { const n = $(`.nav[data-go=${go}]`); if (n) n.hidden = watched; }
   const inVault = vault && !['setup', 'restore', 'settings', 'overview'].includes(name);
   $$('#vault-tabs .nav').forEach(n => n.classList.toggle('on', !!inVault && n.dataset.vault === vault.name));
   $('#title').textContent = { overview: 'All vaults', home: vault ? vault.name : 'Vault', activity: 'Activity', send: 'Send', receive: 'Receive', coins: 'Coins', addresses: 'Addresses', vault: 'Vault settings', keys: 'Keys', settings: 'App settings', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
@@ -2839,8 +2842,29 @@ async function readSeals(force) {
 }
 
 // ---------- restore ----------
-function restoreTab(name) { restoreTab.now = name; $$('.tabs div').forEach(x => x.classList.toggle('on', x.dataset.tab === name)); for (const t of ['keys', 'scan', 'paste']) $('#tab-' + t).hidden = t !== name; $('#sheet-note').hidden = name === 'keys'; if (name === 'scan') startCam(); else stopCam(); if (name === 'keys') { readSeals.sig = null; readSeals(); } }
+function restoreTab(name) { restoreTab.now = name; $$('.tabs div').forEach(x => x.classList.toggle('on', x.dataset.tab === name)); for (const t of ['keys', 'scan', 'paste', 'muun']) $('#tab-' + t).hidden = t !== name; $('#sheet-note').hidden = name === 'keys'; if (name === 'scan') startCam(); else stopCam(); if (name === 'keys') { readSeals.sig = null; readSeals(); } }
 $$('.tabs div').forEach(t => t.onclick = () => restoreTab(t.dataset.tab));
+// ---------- a Muun wallet, watched ----------
+// Muun publishes no xpub and no export. Its kit holds both keys, encrypted with the Recovery Code, so the code is
+// the only way to read which addresses are yours. What is kept afterwards cannot spend: two account xpubs.
+$('#muun-read') && ($('#muun-read').onclick = async () => {
+  const key1 = $('#muun-k1').value.trim(), key2 = $('#muun-k2').value.trim(), code = $('#muun-code').value.trim();
+  const name = $('#muun-name').value.trim() || 'Muun';
+  const note = $('#muun-note');
+  if (!key1 || !key2) return toast('Paste both of the kit\u2019s encrypted keys');
+  if (!code) return toast('Type the recovery code from the kit');
+  note.textContent = 'Reading the kit\u2026';
+  try {
+    const seen = await invoke('muun_check', { key1, key2 });
+    note.textContent = `The kit reads. Unlocking it\u2026${seen.birthday ? ' (this wallet was made at block ' + sats(seen.birthday) + ')' : ''}`;
+    const v = await invoke('muun_restore', { name, key1, key2, code, names: [] });
+    $('#muun-code').value = '';   // the code has done its work and is not kept, on screen or anywhere else
+    store = await invoke('store_get'); vault = store.vaults.find(x => x.name === v.name) || v;
+    note.textContent = '';
+    toast('Watching \u2018' + v.name + '\u2019. Its history is being read from the chain.', 6000);
+    renderTabs(); show('home');
+  } catch (e) { note.textContent = ''; fail(e); }
+});
 async function startCam(deviceId) {
   if (camStream && !deviceId) return;
   if (!deviceId) scanReset($('#cam-note'));   // a fresh scan starts clean; switching camera keeps what is read

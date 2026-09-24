@@ -287,9 +287,18 @@
     <section id="s-restore" class="screen">
       <div class="grid2" style="align-items:start">
         <div style="display:flex;flex-direction:column;gap:14px">
-          <div class="tabs"><div class="on" data-tab="keys">From the keys</div><div data-tab="scan">Scan the sheet</div><div data-tab="paste">Paste the line</div></div>
+          <div class="tabs"><div class="on" data-tab="keys">From the keys</div><div data-tab="scan">Scan the sheet</div><div data-tab="paste">Paste the line</div><div data-tab="muun">From a Muun kit</div></div>
           <div id="tab-keys"><div class="muted" id="seal-read-note">Plug in the keys, together or one after another. Each asks for its own PIN: a sealed key gives up its share only for that, so holding the keys is not enough to see what a vault holds.</div><div id="seal-read-list" style="display:flex;flex-direction:column;gap:10px;margin-top:12px"></div></div>
           <div id="tab-scan" hidden><div class="field" hidden style="margin-bottom:12px"><div class="cap">Camera</div><div class="camrow" id="scan-pick2" role="radiogroup" aria-label="Which camera"></div></div><div class="cam"><video id="cam" autoplay playsinline muted></video><div class="frame"></div></div><div class="muted" style="font-size:13px;margin-top:8px" id="cam-note">Hold the sheet's code in the frame.</div></div>
+          <div id="tab-muun" class="stack" hidden>
+            <div class="muted" style="font-size:13px">Muun has no export, and its Emergency Kit names your keys only by fingerprint — so the Recovery Code is the only way in. Paste both keys from the kit and type the code, and this becomes a <b>watched</b> vault: its keys are unlocked here to read the two account keys, and the halves that could spend are dropped before anything is saved. Spending stays in Muun.</div>
+            <div class="field"><div class="label">First encrypted key</div><textarea id="muun-k1" class="mono" spellcheck="false" placeholder="from the kit, under “Encrypted keys” — a long line beginning 4L…" style="min-height:70px"></textarea></div>
+            <div class="field"><div class="label">Second encrypted key</div><textarea id="muun-k2" class="mono" spellcheck="false" placeholder="the second one" style="min-height:70px"></textarea></div>
+            <div class="field"><div class="label">Recovery code</div><input id="muun-code" class="mono" spellcheck="false" autocomplete="off" placeholder="LB2Q-48Z3-25JR-S5JB-5SUS-HXHJ-RCMM-8YUA"><div class="muted" style="font-size:13px" id="muun-code-note">Kept only while this runs: it is never written down, and never leaves this computer.</div></div>
+            <div class="field"><div class="label">Call this vault</div><input id="muun-name" placeholder="Muun" maxlength="60"></div>
+            <div class="row"><button class="btn primary" id="muun-read">Watch this wallet</button></div>
+            <div class="muted" style="font-size:13px" id="muun-note"></div>
+          </div>
           <div id="tab-paste" class="stack" hidden><div class="field"><textarea id="desc-in" class="mono" placeholder="wsh(sortedmulti(2,02…,03…,03…))#checksum cc=…   ·   or the UR text of a backup, UR:CRYPTO-OUTPUT/1-2/…, each part on its own line" spellcheck="false"></textarea></div><div class="row"><button class="btn" id="desc-read">Read it</button><button class="btn" id="bsms-open" title="Open a BSMS descriptor record (BIP 129)">Open a BSMS file</button></div></div>
           <div class="muted" id="sheet-note" hidden style="font-size:13px">The code on a recovery sheet carries the descriptor alone. Nothing on it can spend.</div>
         </div>

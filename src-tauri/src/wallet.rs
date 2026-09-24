@@ -45,6 +45,9 @@ pub struct Vault {
     /// last time the labels were confirmed in step with the label host; 0 = never
     #[serde(default)] pub labels_synced: u64,
     #[serde(default)] pub seal: Seal,
+    /// A **watched** Muun wallet: the two keys out of its Emergency Kit. Not a descriptor — a Muun wallet pays to
+    /// four kinds of address from the same pair, so it is derived rather than written (see `muun.rs`).
+    #[serde(default)] pub muun: Option<Muun>,
     /// A vault whose keys are EXTENDED keys held by other signers (a SeedSigner, a Coldcard, Sparrow): the standard
     /// wallet descriptor exactly as it came, multipath `<0;1>/*` for receive and change. Present = every address comes
     /// from here by ordinary BIP32, and none of the card machinery (chain code, seal, card signing) applies.
@@ -142,7 +145,12 @@ pub struct Store {
 }
 
 pub fn network_of(s: &str) -> Network {
-    if s == "mainnet" { Network::Bitcoin } else { Network::Signet }
+    match s {
+        "mainnet" => Network::Bitcoin,
+        // the vault kinds read from other wallets carry their own vectors on regtest; a store never holds one
+        "regtest" => Network::Regtest,
+        _ => Network::Signet,
+    }
 }
 
 pub fn store_path() -> std::path::PathBuf { crate::lockbox::dir().join("store.json") }
@@ -271,7 +279,38 @@ pub fn position(index: u32) -> u32 { index & !CHANGE }
 /// extended-key vault always does, by BIP32. Ask this for "rotating" — and ask `cc_of` only when the chain code's
 /// VALUE is needed for the card arithmetic. Using the one for the other made an extended-key vault scan a single
 /// address, skip its change chain, hand out the same receive address every time, and not recognise its own change.
-pub fn rotates(v: &Vault) -> bool { v.ext.is_some() || v.chain_code.is_some() }
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Muun {
+    /// the owner's account key at m/1h/1h, and Muun's, as xpubs — never the private halves
+    pub user: String,
+    pub cosign: String,
+    /// Muun's own birthday for the wallet: which block to look from
+    #[serde(default)] pub birthday: u16,
+}
+
+/// A Muun wallet has no single script per position: it pays to v2, v3, v4 and v5 addresses from the same keys, on
+/// two chains. One `index` names all three — the scheme in bits 28-30, our change flag in bit 31, the position
+/// below — so every screen that already speaks in indexes (coins, history, labels) keeps working untouched.
+pub const SCHEME_SHIFT: u32 = 28;
+pub const SCHEME_MASK: u32 = 0x7000_0000;
+pub const POS_MASK: u32 = 0x0FFF_FFFF;
+/// What Muun's own recovery tool sweeps. v1 exists in their code but no tree generates it, so a v1 address would be
+/// unswept by Muun itself; it is left out here for the same reason, and said out loud rather than silently.
+pub const MUUN_SCHEMES: [crate::muun::Scheme; 4] = [crate::muun::Scheme::V2, crate::muun::Scheme::V3, crate::muun::Scheme::V4, crate::muun::Scheme::V5];
+
+pub fn rotates(v: &Vault) -> bool { v.ext.is_some() || v.chain_code.is_some() || v.muun.is_some() }
+
+/// The address a Muun index names. Muun counts its chains the other way round from everyone else: `m/1h/1h/0` is
+/// CHANGE and `m/1h/1h/1` is what it hands out to be paid to (their `address_generator.go`). Reading that backwards
+/// would have watched the wrong half of the wallet.
+fn muun_script(m: &Muun, index: u32, network: &str) -> Result<ScriptBuf, String> {
+    use std::str::FromStr;
+    let user = bitcoin::bip32::Xpub::from_str(&m.user).map_err(|e| format!("this vault's owner key is damaged: {e}"))?;
+    let cosign = bitcoin::bip32::Xpub::from_str(&m.cosign).map_err(|e| format!("this vault's Muun key is damaged: {e}"))?;
+    let scheme = MUUN_SCHEMES[(((index & SCHEME_MASK) >> SCHEME_SHIFT) as usize).min(MUUN_SCHEMES.len() - 1)];
+    let chain = if index & CHANGE != 0 { 0 } else { 1 };
+    Ok(crate::muun::address_at(&user, &cosign, scheme, chain, index & POS_MASK, network_of(network))?.script_pubkey())
+}
 
 pub fn cc_of(v: &Vault) -> Option<[u8; 32]> {
     let h = v.chain_code.as_ref()?;
@@ -301,6 +340,7 @@ static DERIVED: std::sync::Mutex<Option<HashMap<String, Derived>>> = std::sync::
 static CHAINS: std::sync::Mutex<Option<HashMap<String, Vec<Descriptor<DescriptorPublicKey>>>>> = std::sync::Mutex::new(None);
 /// What a vault's scripts depend on, and nothing else: the same text always derives the same scripts.
 fn identity(v: &Vault) -> String {
+    if let Some(m) = &v.muun { return format!("m|{}|{}", m.user, m.cosign); }
     match &v.ext { Some(e) => format!("x|{e}"), None => format!("c|{}|{}|{}", v.threshold, v.chain_code.as_deref().unwrap_or(""), v.keys.iter().map(|k| k.pubkey.as_str()).collect::<Vec<_>>().join(",")) }
 }
 /// The receive and change chains of an extended-key descriptor, parsed once.
@@ -314,9 +354,10 @@ fn ext_chains(ext: &str) -> Result<Vec<Descriptor<DescriptorPublicKey>>, String>
 pub fn script_at(v: &Vault, index: u32) -> Result<ScriptBuf, String> {
     let id = identity(v);
     if let Some(s) = DERIVED.lock().map_err(|_| "derivation cache poisoned")?.as_ref().and_then(|m| m.get(&id)).and_then(|d| d.fwd.get(&index)) { return Ok(s.clone()); }
-    let spk = match &v.ext {
-        Some(_) => ext_definite_of(v, index)?.script_pubkey(),
-        None => script_of(&descriptor_for(v.threshold, &keys_at(v, index)?)?)?,
+    let spk = match (&v.muun, &v.ext) {
+        (Some(m), _) => muun_script(m, index, &v.network)?,
+        (None, Some(_)) => ext_definite_of(v, index)?.script_pubkey(),
+        (None, None) => script_of(&descriptor_for(v.threshold, &keys_at(v, index)?)?)?,
     };
     let mut g = DERIVED.lock().map_err(|_| "derivation cache poisoned")?;
     let d = g.get_or_insert_with(HashMap::new).entry(id).or_default();
@@ -328,6 +369,7 @@ fn ext_definite_of(v: &Vault, index: u32) -> Result<Descriptor<miniscript::Defin
 }
 
 pub fn descriptor_at(v: &Vault, index: u32) -> Result<String, String> {
+    if v.muun.is_some() { return Err("a Muun wallet is watched, not spent from here: it pays to four kinds of address from the same keys, so it has no one descriptor. Spend it in Muun.".into()); }
     // an extended-key vault is read AS WRITTEN — never rebuilt through descriptor_for, which only makes sortedmulti
     if let Some(ext) = &v.ext { return ext_definite(ext, index).map(|d| d.to_string()); }
     descriptor_for(v.threshold, &keys_at(v, index)?)
@@ -540,8 +582,18 @@ pub fn scan(v: &Vault, servers: &Servers, gap: u32) -> Result<Scanned, String> {
         let last = i.saturating_sub(1);
         Ok((next.unwrap_or(last + 1), last))
     };
-    let (next, scan_max) = chain(0)?;
-    let (next_change, scan_max_change) = if rotating { chain(CHANGE)? } else { (0, 0) };
+    // A Muun wallet is four wallets wearing one name: the same positions carry a v2, v3, v4 and v5 address, and any
+    // of them may hold coins. Each is walked on its own, and the vault remembers the furthest any of them reached.
+    let bases: Vec<u32> = match &v.muun {
+        Some(_) => (0..MUUN_SCHEMES.len() as u32).map(|s| s << SCHEME_SHIFT).collect(),
+        None => vec![0],
+    };
+    let (mut next, mut scan_max, mut next_change, mut scan_max_change) = (0, 0, 0, 0);
+    for base in bases {
+        let (n, m) = chain(base)?;
+        next = next.max(n); scan_max = scan_max.max(m);
+        if rotating { let (nc, mc) = chain(base | CHANGE)?; next_change = next_change.max(nc); scan_max_change = scan_max_change.max(mc); }
+    }
     Ok(Scanned { coins, history, next, scan_max, next_change, scan_max_change })
 }
 
@@ -551,8 +603,11 @@ pub fn ours_table(v: &Vault) -> Result<impl Fn(&ScriptBuf) -> Option<u32>, Strin
     let (recv, chg, rotating) = (v.scan_max.max(v.next) + GAP, v.scan_max_change.max(v.next_change) + GAP, rotates(v));
     let mut table: HashMap<ScriptBuf, u32> = HashMap::new();
     if !rotating { table.insert(script_at(v, 0)?, 0); } else {
-        for i in 0..=recv { table.insert(script_at(v, i)?, i); }
-        for i in 0..=chg { table.insert(script_at(v, CHANGE | i)?, CHANGE | i); }
+        // every scheme a Muun wallet uses counts as ours, or its own change would look like a payment to a stranger
+        for base in match &v.muun { Some(_) => (0..MUUN_SCHEMES.len() as u32).map(|s| s << SCHEME_SHIFT).collect(), None => vec![0u32] } {
+            for i in 0..=recv { table.insert(script_at(v, base | i)?, base | i); }
+            for i in 0..=chg { table.insert(script_at(v, base | CHANGE | i)?, base | CHANGE | i); }
+        }
     }
     Ok(move |spk: &ScriptBuf| table.get(spk).copied())
 }
@@ -869,7 +924,7 @@ mod tests {
     fn vault(cc: Option<&str>) -> Vault {
         let keys = ["03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2", "032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe", "038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47"];
         let descriptor = descriptor_for(2, &keys.iter().map(|k| k.to_string()).collect::<Vec<_>>()).unwrap();
-        Vault { name: "t".into(), network: "signet".into(), threshold: 2, keys: keys.iter().enumerate().map(|(i, k)| KeyRef { name: format!("k{i}"), serial: 0, pubkey: k.to_string() , device: None }).collect(),
+        Vault { muun: None, name: "t".into(), network: "signet".into(), threshold: 2, keys: keys.iter().enumerate().map(|(i, k)| KeyRef { name: format!("k{i}"), serial: 0, pubkey: k.to_string() , device: None }).collect(),
             descriptor, address: String::new(), created: 0, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None }
     }
     #[test]
@@ -939,7 +994,7 @@ mod ext_tests {
     use super::*;
     fn vault_of(desc: &str) -> Vault {
         let info = ext_parse(desc).unwrap().unwrap();
-        Vault { name: "ext".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
+        Vault { muun: None, name: "ext".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
             chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(),
             files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: Some(info.descriptor), cost_method: None }
     }
