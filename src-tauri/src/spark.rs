@@ -204,6 +204,17 @@ mod tests {
             assert_eq!(id.len(), 33, "an identity key is a compressed public key");
             bitcoin::secp256k1::PublicKey::from_slice(&id).unwrap_or_else(|e| panic!("{addr}: not a public key: {e}"));
         }
+        // An INVOICE is the same envelope with more in it (`spark_invoice_fields` is field 2), so pasting one works
+        // just as well — which the restore screen now tells people, and this is why that is true.
+        let key = hex::decode("02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5").unwrap();
+        let mut body = Vec::new();
+        bytes_field(1, &key, &mut body);
+        bytes_field(2, &[0x08, 0x01, 0x12, 0x04, 1, 2, 3, 4], &mut body);   // some invoice fields riding along
+        let hrp = bech32::Hrp::parse("spark").unwrap();
+        let invoice = bech32::encode::<bech32::Bech32m>(hrp, &body).unwrap();
+        let (got, net) = identity_of(&invoice).expect("an invoice carries the same key");
+        assert_eq!(got, key);
+        assert_eq!(net, "mainnet");
         assert!(identity_of("spark1notanaddress").is_err());
         assert!(identity_of("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4").unwrap_err().contains("Spark address"));
     }

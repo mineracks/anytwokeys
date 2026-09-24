@@ -98,9 +98,12 @@ tr:last-child td{border-bottom:0}
 .cam{height:300px;border:1px solid var(--line);border-radius:6px;background:#2a2622;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
 .cam video{width:100%;height:100%;object-fit:cover}
 .cam .frame{position:absolute;width:180px;height:180px;border:2px solid var(--gold);border-radius:8px}
-.tabs{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden;font-family:var(--display);font-weight:600;font-size:14px}
-.tabs div{flex:1;padding:12px;text-align:center;cursor:pointer;color:var(--muted);display:flex;align-items:center;justify-content:center;gap:8px}
-.tabs div.on{background:var(--gold-soft);color:var(--ink)}
+/* Five ways in and counting: stretched equal cells turned into a wall of wrapped words. They are choices, so they
+   read as a list of choices — each its own width, wrapping like text, and none of them two lines tall. */
+.tabs{display:flex;flex-wrap:wrap;gap:var(--s2);font-family:var(--display);font-weight:600;font-size:14px}
+.tabs div{padding:9px 14px;cursor:pointer;color:var(--muted);display:inline-flex;align-items:center;gap:8px;white-space:nowrap;border:1px solid var(--line);border-radius:999px;background:var(--panel);min-height:40px}
+.tabs div:hover{border-color:var(--gold)}
+.tabs div.on{background:var(--gold-soft);color:var(--ink);border-color:var(--gold)}
 a{color:var(--gold)}
 #shell:not([hidden]){display:contents}
 [hidden]{display:none !important}
@@ -616,3 +619,8 @@ a.tag{text-decoration:none;cursor:pointer} a.tag:hover{text-decoration:underline
 .scanbar i{display:block;height:100%;width:40%;border-radius:2px;background:var(--gold);animation:scanrun 1.1s ease-in-out infinite}
 @keyframes scanrun{0%{transform:translateX(-100%)}100%{transform:translateX(250%)}}
 @media (prefers-reduced-motion: reduce){.scanbar i{animation:none;width:100%;opacity:.5}}
+
+/* Restore has nothing on the right until something has been read, and an empty card beside a half-width form is
+   just a hole. Until then the form has the room, at a width that reads. */
+#restore-grid.alone{grid-template-columns:minmax(0,620px)}
+#restore-grid.alone #restore-card{display:none}

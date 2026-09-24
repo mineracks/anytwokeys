@@ -2866,7 +2866,15 @@ async function readSeals(force) {
 }
 
 // ---------- restore ----------
-function restoreTab(name) { restoreTab.now = name; $$('.tabs div').forEach(x => x.classList.toggle('on', x.dataset.tab === name)); for (const t of ['keys', 'scan', 'paste', 'muun', 'spark']) $('#tab-' + t).hidden = t !== name; $('#sheet-note').hidden = name === 'keys'; if (name === 'scan') startCam(); else stopCam(); if (name === 'keys') { readSeals.sig = null; readSeals(); } }
+function restoreTab(name) { restoreTab.now = name; $$('.tabs div').forEach(x => x.classList.toggle('on', x.dataset.tab === name)); for (const t of ['keys', 'scan', 'paste', 'muun', 'spark']) $('#tab-' + t).hidden = t !== name; $('#sheet-note').hidden = !['scan', 'paste'].includes(name);   // it is about a recovery sheet, and only two of these are
+  // a result from another way in is not about this one: it goes when the choice changes
+  if (restoreTab.last && restoreTab.last !== name) { $('#restore-card').innerHTML = ''; parsed = null; }
+  restoreTab.last = name;
+  restoreRoom(); if (name === 'scan') startCam(); else stopCam(); if (name === 'keys') { readSeals.sig = null; readSeals(); } }
+/// The right-hand card only earns its place once something has been read.
+function restoreRoom() { const g = $('#restore-grid'); if (g) g.classList.toggle('alone', !$('#restore-card').innerHTML.trim()); }
+const restoreObserver = new MutationObserver(restoreRoom);
+$('#restore-card') && restoreObserver.observe($('#restore-card'), { childList: true, subtree: true });
 $$('.tabs div').forEach(t => t.onclick = () => restoreTab(t.dataset.tab));
 // ---------- a Spark wallet, watched ----------
 // Wallet of Satoshi and anything else on Spark. Its address alone reads it: the operators answer balance and
