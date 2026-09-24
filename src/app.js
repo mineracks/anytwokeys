@@ -74,7 +74,9 @@ function show(name) {
   // the vault you are in stays lit on every screen that is about it, matching the breadcrumb; not while making another, nor in app settings
   // a watched wallet has no keys here: the screens that would sign are not offered at all
   const watched = !!(vault && vault.muun);
-  for (const go of ['send', 'receive', 'messages', 'keys']) $$(`[data-go=${go}]`).forEach(n => { n.hidden = watched; });
+  // only the ways IN to those screens — the sidebar and Home's own actions. A blanket [data-go] would also
+  // un-hide buttons that are hidden for their own reasons elsewhere.
+  for (const go of ['send', 'receive', 'messages', 'keys']) $$(`.nav[data-go=${go}], #s-home [data-go=${go}]`).forEach(n => { n.hidden = watched; });
   const inVault = vault && !['setup', 'restore', 'settings', 'overview'].includes(name);
   $$('#vault-tabs .nav').forEach(n => n.classList.toggle('on', !!inVault && n.dataset.vault === vault.name));
   $('#title').textContent = { overview: 'All vaults', home: vault ? vault.name : 'Vault', activity: 'Activity', send: 'Send', receive: 'Receive', coins: 'Coins', addresses: 'Addresses', vault: 'Vault settings', keys: 'Keys', settings: 'App settings', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
@@ -86,7 +88,7 @@ function show(name) {
   if (name !== 'restore') stopCam();
   if (name !== 'sign') stopQr();
   if (name !== 'keys') hideDesc();
-  if (name === 'home') { renderHomeSummary(); syncIfStale(); labelsSync(); paintDrillNudge(); }   // the picture belongs to the vault being shown, not the one left behind
+  if (name === 'home') { paintVaultCard(); renderHomeSummary(); syncIfStale(); labelsSync(); paintDrillNudge(); }   // the picture belongs to the vault being shown, not the one left behind
   if (name === 'receive') drawAddress();
   if (name === 'activity') { if (vault && !vault._coins) sync(); else paintActivity(); }
   if (name === 'addresses') { recPageClose('addr'); renderAddresses(); }
@@ -797,9 +799,7 @@ function syncIfStale() {
 }
 async function sync() {
   if (!vault) return;
-  // a watched wallet has no keys HERE, so the card must not read as though it had ("2 of 0 keys sign")
-  $('#vault-kind').textContent = vault.muun ? 'Watched' : vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
-  $('#vault-keys').textContent = vault.muun ? 'Its keys stay in Muun; this vault only reads the chain' : vault.keys.map(k => k.name).join(' · ');
+  paintVaultCard();
   $('#balance-sub').textContent = 'syncing…';
   // Nothing of another vault may sit under this vault's name, not even for the seconds a sync takes:
   // a vault that has not been drawn yet starts from a blank screen, and an answer that comes back after the person has
@@ -816,6 +816,14 @@ async function sync() {
   } catch (e) { if (!vault || vault.name !== me) return; checkNode(); $('#balance-sub').textContent = 'could not reach the server'; $('#conn').textContent = String(e); }
 }
 /// Draw one vault_sync answer: balance, coins, history, where it came from.
+// Which keys sign this vault, on the card. Drawn wherever the vault is drawn — a snapshot shown without a fresh
+// sync used to leave the LAST vault's keys under this vault's name.
+function paintVaultCard() {
+  if (!vault) return;
+  // a watched wallet has no keys HERE, so the card must not read as though it had ("2 of 0 keys sign")
+  $('#vault-kind').textContent = vault.muun ? 'Watched' : vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
+  $('#vault-keys').textContent = vault.muun ? 'Its keys stay in Muun; this vault only reads the chain' : vault.keys.map(k => k.name).join(' · ');
+}
 function paintSnap(s) {
   {
     vault._coins = s.coins; vault._receive = s.receive; vault._receiveIndex = s.receive_index; vault._rotating = s.rotating; vault._height = s.height; vault._history = s.history; vault._nextChange = s.next_change; vault._gap = s.gap;
@@ -2858,11 +2866,11 @@ $('#muun-read') && ($('#muun-read').onclick = async () => {
   try {
     const seen = await invoke('muun_check', { key1, key2 });
     note.textContent = `The kit reads. Unlocking it\u2026${seen.birthday ? ' (this wallet was made at block ' + sats(seen.birthday) + ')' : ''}`;
-    const v = await invoke('muun_restore', { name, key1, key2, code, names: [] });
+    const v = await invoke('muun_restore', { name, key1, key2, code, expect: $('#muun-desc').value.trim() || null, names: [] });
     $('#muun-code').value = '';   // the code has done its work and is not kept, on screen or anywhere else
     store = await invoke('store_get'); vault = store.vaults.find(x => x.name === v.name) || v;
     note.textContent = '';
-    toast('Watching \u2018' + v.name + '\u2019. Its history is being read from the chain.', 6000);
+    toast(`Watching \u2018${v.name}\u2019, keys ${v.muun.fp_user} and ${v.muun.fp_cosign} \u2014 they should be the two fingerprints your kit names. Reading its history from the chain.`, 9000);
     renderTabs(); show('home');
   } catch (e) { note.textContent = ''; fail(e); }
 });

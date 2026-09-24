@@ -286,6 +286,9 @@ pub struct Muun {
     pub cosign: String,
     /// Muun's own birthday for the wallet: which block to look from
     #[serde(default)] pub birthday: u16,
+    /// the master fingerprints the kit's own descriptors name — what says the recovery code was the right one
+    #[serde(default)] pub fp_user: String,
+    #[serde(default)] pub fp_cosign: String,
 }
 
 /// A Muun wallet has no single script per position: it pays to v2, v3, v4 and v5 addresses from the same keys, on
@@ -582,18 +585,49 @@ pub fn scan(v: &Vault, servers: &Servers, gap: u32) -> Result<Scanned, String> {
         let last = i.saturating_sub(1);
         Ok((next.unwrap_or(last + 1), last))
     };
-    // A Muun wallet is four wallets wearing one name: the same positions carry a v2, v3, v4 and v5 address, and any
-    // of them may hold coins. Each is walked on its own, and the vault remembers the furthest any of them reached.
-    let bases: Vec<u32> = match &v.muun {
-        Some(_) => (0..MUUN_SCHEMES.len() as u32).map(|s| s << SCHEME_SHIFT).collect(),
-        None => vec![0],
+    // A Muun wallet allocates from ONE counter and picks a scheme per address, so a position that is empty in v5 may
+    // be a v3 address in use. Walking each scheme on its own would stop after `gap` empty positions and never reach
+    // the ones a later scheme uses — which is why Muun's own tool walks thousands of positions instead of a gap.
+    // Here a position counts as used when ANY of its four addresses has history, and the gap counts positions.
+    let muun_chain = |flag: u32, coins: &mut Vec<CoinAt>, history: &mut Vec<(String, i32, u32)>| -> Result<(u32, u32), String> {
+        let (mut last_used, mut next, mut i) = (None::<u32>, None::<u32>, 0u32);
+        let mut used: Vec<(u32, ScriptBuf)> = Vec::new();
+        loop {
+            let end = last_used.map(|u| u + gap + 1).unwrap_or(gap);
+            if i >= end { break; }
+            let idx: Vec<u32> = (i..end).flat_map(|pos| (0..MUUN_SCHEMES.len() as u32).map(move |s| (s << SCHEME_SHIFT) | flag | pos)).collect();
+            let spks = idx.iter().map(|&x| script_at(v, x)).collect::<Result<Vec<_>, _>>()?;
+            let answers = chain::histories(servers, &spks)?;
+            for ((x, spk), h) in idx.iter().zip(spks).zip(answers) {
+                let pos = x & POS_MASK;
+                if !h.is_empty() {
+                    last_used = Some(last_used.map_or(pos, |u: u32| u.max(pos)));
+                    for item in h { history.push((item.txid, item.height, *x)); }
+                    used.push((*x, spk));
+                }
+            }
+            i = end;
+        }
+        // the first position where NO scheme has been used: what the wallet would hand out next
+        let seen: std::collections::HashSet<u32> = used.iter().map(|(x, _)| x & POS_MASK).collect();
+        for pos in 0..i { if !seen.contains(&pos) { next = Some(pos); break; } }
+        let spks: Vec<ScriptBuf> = used.iter().map(|(_, s)| s.clone()).collect();
+        for ((index, _), list) in used.iter().zip(chain::unspents(servers, &spks)?) {
+            for c in list { coins.push(CoinAt { txid: c.txid, vout: c.vout, value: c.value, height: c.height, index: *index }); }
+        }
+        Ok((next.unwrap_or(i), i.saturating_sub(1)))
     };
-    let (mut next, mut scan_max, mut next_change, mut scan_max_change) = (0, 0, 0, 0);
-    for base in bases {
-        let (n, m) = chain(base)?;
-        next = next.max(n); scan_max = scan_max.max(m);
-        if rotating { let (nc, mc) = chain(base | CHANGE)?; next_change = next_change.max(nc); scan_max_change = scan_max_change.max(mc); }
-    }
+    let (next, scan_max, next_change, scan_max_change) = if v.muun.is_some() {
+        let (mut c2, mut h2) = (Vec::new(), Vec::new());
+        let (n, m) = muun_chain(0, &mut c2, &mut h2)?;
+        let (nc, mc) = muun_chain(CHANGE, &mut c2, &mut h2)?;
+        coins.extend(c2); history.extend(h2);
+        (n, m, nc, mc)
+    } else {
+        let (n, m) = chain(0)?;
+        let (nc, mc) = if rotating { chain(CHANGE)? } else { (0, 0) };
+        (n, m, nc, mc)
+    };
     Ok(Scanned { coins, history, next, scan_max, next_change, scan_max_change })
 }
 

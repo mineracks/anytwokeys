@@ -328,7 +328,7 @@ fn descriptor_parse(text: String) -> R<Parsed> {
 /// The salt always comes from the SECOND key — the same salt was used for both, but Muun's older format left it out
 /// of the first one (their `keys_generator.go` says exactly this).
 #[tauri::command]
-fn muun_restore(name: String, key1: String, key2: String, code: String, names: Vec<String>) -> R<Vault> {
+fn muun_restore(name: String, key1: String, key2: String, code: String, expect: Option<String>, names: Vec<String>) -> R<Vault> {
     use bitcoin::bip32::{ChildNumber, Xpub};
     let _ = names;
     let mut s = wallet::load()?;
@@ -343,7 +343,25 @@ fn muun_restore(name: String, key1: String, key2: String, code: String, names: V
         let at = xpriv.derive_priv(&secp, &path).map_err(|e| e.to_string())?;
         Ok(Xpub::from_priv(&secp, &at).to_string())
     };
-    let m = wallet::Muun { user: account(&k1)?, cosign: account(&k2)?, birthday: k2.birthday.max(k1.birthday) };
+    // A WRONG recovery code does not fail loudly: the shared secret comes out different, the 64 bytes decrypt to
+    // something, and that something parses as a perfectly good private key. The wallet it then watches is nobody's,
+    // and the screen would simply say "no transactions". The kit prints the real fingerprints in its descriptors, so
+    // they are the check — shown always, and enforced when a line from the kit is given.
+    let fingerprint = |k: &muun::KitKey| -> Result<String, String> {
+        let (xpriv, _) = muun::decrypt(k, unlock, net)?;
+        Ok(xpriv.fingerprint(&secp).to_string())
+    };
+    let (fp1, fp2) = (fingerprint(&k1)?, fingerprint(&k2)?);
+    if let Some(line) = expect.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
+        let said: Vec<String> = line.to_lowercase().as_bytes().windows(8)
+            .filter(|w| w.iter().all(|c| c.is_ascii_hexdigit()))
+            .map(|w| String::from_utf8_lossy(w).to_string()).collect();
+        let missing: Vec<&String> = [&fp1, &fp2].into_iter().filter(|f| !said.contains(f)).collect();
+        if !missing.is_empty() {
+            return Err(format!("that recovery code does not match this kit. The keys it unlocked are {fp1} and {fp2}, and the line you pasted names neither of those — check the code, character by character. Nothing was saved."));
+        }
+    }
+    let m = wallet::Muun { user: account(&k1)?, cosign: account(&k2)?, birthday: k2.birthday.max(k1.birthday), fp_user: fp1, fp_cosign: fp2 };
     if m.user == m.cosign { return Err("both of those are the same key — a kit has two different ones".into()); }
     if let Some(v) = s.vaults.iter().find(|v| v.muun.as_ref().map(|o| o.user == m.user).unwrap_or(false)) {
         return Err(format!("this Muun wallet is already here, as '{}'", v.name));
@@ -2410,7 +2428,7 @@ mod signers_vault_tests {
         v.muun = Some(wallet::Muun {
             user: "tpubDBf5wCeqg3KrLJiXaveDzD5JtFJ1ss9NVvFMx4RYS73SjwPEEawcAQ7V1B5DGM4gunWDeYNrnkc49sUaf7mS1wUKiJJQD6WEctExUQoLvrg".into(),
             cosign: "tpubDB22PFkUaHoB7sgxh7exCivV5rAevVSzbB8WkFCCdbHq39r8xnYexiot4NGbi8PM6E1ySVeaHsoDeMYb6EMndpFrzVmuX8iQNExzwNpU61B".into(),
-            birthday: 0 });
+            birthday: 0, fp_user: String::new(), fp_cosign: String::new() });
         // scheme 2 of [v2, v3, v4, v5] is v4; position 2 on the chain Muun hands out
         let v4 = (2u32 << wallet::SCHEME_SHIFT) | 2;
         assert_eq!(wallet::address_at(&v, v4).unwrap(), "bcrt1qrs3vk4dzv70syck2qdz3g06tgckq4pftenuk5p77st9glnskpvtqe2tvvk");
