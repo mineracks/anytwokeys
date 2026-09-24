@@ -190,16 +190,43 @@ fn call(base: &str, method: &str, body: Vec<u8>) -> Result<Vec<u8>, String> {
 
 fn net_id(network: &str) -> u64 { match network { "mainnet" => 1, "regtest" => 2, "testnet" => 3, _ => 4 } }
 
-/// What Spark says this wallet holds, in sats. Its word, not the chain's.
+/// What Spark says this wallet holds, in sats: every AVAILABLE leaf it owns, summed — which is how their own
+/// read-only client does it (`query_nodes` by owner, status AVAILABLE, paged), and NOT `query_balance`, which
+/// answered 0 for a wallet that WoS showed holding sats (2026-09-25). A stranger's key also answers 0, so that
+/// probe could never have told the two apart.
 pub fn balance(identity: &[u8], network: &str) -> Result<u64, String> {
-    let mut req = Vec::new();
-    bytes_field(1, identity, &mut req);
-    int_field(2, net_id(network), &mut req);
-    let out = try_operators("query_balance", req)?;
-    let mut r = Reader::new(&out);
-    while !r.done() { if let Some((1, _, v)) = r.field() { return Ok(v); } }
-    Ok(0)
+    let (mut total, mut offset, mut seen) = (0u64, 0i64, std::collections::HashSet::new());
+    // a person's wallet is a few leaves to a few hundred; a service's is tens of thousands and would page for ever
+    // (the SSP's own key hung a probe past ten minutes, 2026-09-25). Forty pages is 4,000 leaves: past that the sum
+    // is "at least", and the import must not hang on it.
+    while offset >= 0 && seen.len() < 40 {
+        if !seen.insert(offset) { return Err("Spark kept returning the same page".into()); }
+        let mut req = Vec::new();
+        bytes_field(1, identity, &mut req);            // source: owner_identity_pubkey
+        int_field(3, 0, &mut req);                     // include_parents: false
+        int_field(4, 100, &mut req);                   // limit
+        int_field(5, offset as u64, &mut req);         // offset
+        int_field(6, net_id(network), &mut req);       // network
+        int_field(7, 1, &mut req);                     // statuses: [AVAILABLE]
+        let out = try_operators("query_nodes", req)?;
+        let (mut r, mut next, mut n) = (Reader::new(&out), -1i64, 0usize);
+        while !r.done() {
+            match r.field() {
+                Some((1, entry, _)) => {                // map<string, TreeNode>: key = 1, value = 2
+                    let mut e = Reader::new(&entry);
+                    while !e.done() { match e.field() { Some((2, node, _)) => { total += node_value(&node); n += 1; } Some(_) => continue, None => break } }
+                }
+                Some((2, _, v)) => next = v as i64,
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        if n == 0 { break; }
+        offset = next;
+    }
+    Ok(total)
 }
+fn node_value(b: &[u8]) -> u64 { let mut r = Reader::new(b); while !r.done() { if let Some((3, _, v)) = r.field() { return v; } } 0 }
 
 #[derive(serde::Serialize, Clone, Debug, Default)]
 pub struct Transfer {
@@ -216,22 +243,28 @@ pub struct Transfer {
 /// Every transfer this wallet was part of, newest page first. An empty page means either an empty wallet or a
 /// wallet withholding its history — see the note at the top of this file; the balance is what tells them apart.
 pub fn transfers(identity: &[u8], network: &str, limit: u64, offset: u64) -> Result<(Vec<Transfer>, i64), String> {
-    let mut req = Vec::new();
-    bytes_field(60, identity, &mut req);   // sender_or_receiver_identity_public_key
-    int_field(4, net_id(network), &mut req);
-    int_field(40, limit, &mut req);
-    int_field(50, offset, &mut req);
-    let out = try_operators("query_all_transfers", req)?;
-    let (mut list, mut next) = (Vec::new(), 0i64);
-    let mut r = Reader::new(&out);
-    while !r.done() {
-        match r.field() {
-            Some((1, v, _)) => list.push(one_transfer(&v, identity)),
-            Some((2, _, v)) => next = v as i64,
-            Some(_) => continue,
-            None => break,
+    // asked twice, as sender and as receiver — the fields their own client uses. The newer "either side" field
+    // (60) came back empty from the live operators for a wallet WoS showed holding sats (2026-09-25).
+    let mut list: Vec<Transfer> = Vec::new();
+    let mut next = -1i64;
+    for side in [2u64, 1] {   // 2 = sender_identity_public_key, 1 = receiver_identity_public_key
+        let mut req = Vec::new();
+        bytes_field(side, identity, &mut req);
+        int_field(4, net_id(network), &mut req);
+        int_field(40, limit, &mut req);
+        int_field(50, offset, &mut req);
+        let out = try_operators("query_all_transfers", req)?;
+        let mut r = Reader::new(&out);
+        while !r.done() {
+            match r.field() {
+                Some((1, v, _)) => { let t = one_transfer(&v, identity); if !list.iter().any(|x| x.id == t.id) { list.push(t); } }
+                Some((2, _, v)) => next = next.max(v as i64),
+                Some(_) => continue,
+                None => break,
+            }
         }
     }
+    list.sort_by(|a, b| b.at.cmp(&a.at));
     Ok((list, next))
 }
 
@@ -322,6 +355,14 @@ mod tests {
         assert!(identity_from_words("abandon abandon not words", 1).is_err());
     }
     /// A key nobody uses: the answer must be a clean zero, which proves the wire format rather than the wallet.
+    /// The mainnet SSP's identity key (their wallet-config.ts): a party that provably moves leaves every day, so it
+    /// is a positive control for the rewritten questions — a stranger answers 0 to a right question and a wrong one.
+    #[test] #[ignore]
+    fn a_wallet_known_to_be_busy_answers_more_than_zero() {
+        let ssp = hex::decode("023e33e2920326f64ea31058d44777442d97d7d5cbfcf54e3060bc1695e5261c93").unwrap();
+        let t = transfers(&ssp, "mainnet", 5, 0);
+        println!("SSP transfers: {:?}", t.as_ref().map(|(l, n)| (l.len(), *n, l.iter().map(|x| (x.sats, x.direction.clone(), x.at)).collect::<Vec<_>>())));
+    }
     #[test] #[ignore]
     fn probe_each_operator() {
         let id = hex::decode("02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5").unwrap();

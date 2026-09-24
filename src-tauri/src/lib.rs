@@ -496,7 +496,9 @@ async fn spark_restore_words(name: String, words: String) -> R<Vault> {
         // Balances first, for both accounts: they are quick from every operator, and a wallet holding sats is decided
         // by that alone. Only a wallet that is empty on both is asked for its transfers — a slow question — and a
         // failure to answer THAT is reported as not knowing, never as the wallet not being there.
-        let ids: Vec<(u32, Vec<u8>)> = [1u32, 0].iter().map(|&a| spark::identity_from_words(&words, a).map(|id| (a, id))).collect::<Result<_, _>>()?;
+        // 1 then 0 are the defaults (mainnet and the SDK's own); a few more cost one quick balance question each,
+        // and a wallet that chose its own account number is found rather than declared absent
+        let ids: Vec<(u32, Vec<u8>)> = [1u32, 0, 2, 3, 4, 5].iter().map(|&a| spark::identity_from_words(&words, a).map(|id| (a, id))).collect::<Result<_, _>>()?;
         let mut chosen: Option<(u32, Vec<u8>)> = None;
         let mut seen = Vec::new();
         for (account, id) in &ids {
@@ -505,7 +507,7 @@ async fn spark_restore_words(name: String, words: String) -> R<Vault> {
             if balance > 0 { chosen = Some((*account, id.clone())); break; }
         }
         if chosen.is_none() {
-            for (account, id) in &ids {
+            for (account, id) in ids.iter().take(2) {   // transfers are slow: only the two defaults are asked
                 match spark::transfers(id, &network, 1, 0) {
                     Ok((list, _)) if !list.is_empty() => { chosen = Some((*account, id.clone())); break; }
                     Ok(_) => seen.push(format!("account {account}: no transfers")),
