@@ -117,6 +117,82 @@ pub fn decrypt(k: &KitKey, unlock: [u8; 32], network: bitcoin::Network) -> Resul
     Ok((xpriv, k.birthday))
 }
 
+// ---------- the addresses a Muun wallet has used ----------
+//
+// A Muun wallet is not one descriptor. Over the years it has paid to FIVE kinds of address from the same two keys,
+// and one wallet's history can span all of them — so a reader that knows four would quietly show the wrong balance.
+// Key order is fixed (the owner's, then Muun's) and never sorted.
+
+/// The two keys sit at `m/schema:1'/recovery:1'`; an address is `<chain>/<index>` below that, unhardened.
+pub fn derive(k: &bitcoin::bip32::Xpub, chain: u32, index: u32) -> Result<bitcoin::secp256k1::PublicKey, String> {
+    use bitcoin::bip32::ChildNumber;
+    let secp = Secp256k1::new();
+    let path = [ChildNumber::from_normal_idx(chain).map_err(|e| e.to_string())?, ChildNumber::from_normal_idx(index).map_err(|e| e.to_string())?];
+    Ok(k.derive_pub(&secp, &path).map_err(|e| e.to_string())?.public_key)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Scheme { V1, V2, V3, V4, V5 }
+pub const SCHEMES: [Scheme; 5] = [Scheme::V1, Scheme::V2, Scheme::V3, Scheme::V4, Scheme::V5];
+
+/// `OP_2 <owner> <muun> OP_2 OP_CHECKMULTISIG` — the script behind v2, v3 and v4 alike.
+fn multisig(user: &bitcoin::secp256k1::PublicKey, muun: &bitcoin::secp256k1::PublicKey) -> bitcoin::ScriptBuf {
+    bitcoin::blockdata::script::Builder::new()
+        .push_int(2)
+        .push_key(&bitcoin::PublicKey::new(*user))
+        .push_key(&bitcoin::PublicKey::new(*muun))
+        .push_int(2)
+        .push_opcode(bitcoin::opcodes::all::OP_CHECKMULTISIG)
+        .into_script()
+}
+
+/// MuSig2 key aggregation **as Muun does it**, which is the older draft rather than the final BIP 327: the list hash
+/// and each coefficient are taken over the keys' **x-only** (32-byte) form, where BIP 327 uses the 33-byte
+/// compressed form. Implementing the published standard here would give a different key and therefore a wrong
+/// address. Read from their vendored `musig/keyagg_impl.h` (2026-09-24).
+pub fn key_agg(user: &bitcoin::secp256k1::PublicKey, muun: &bitcoin::secp256k1::PublicKey) -> Result<bitcoin::secp256k1::XOnlyPublicKey, String> {
+    use bitcoin::secp256k1::{Parity, PublicKey as Pk, XOnlyPublicKey};
+    use sha2::{Digest, Sha256};
+    let secp = Secp256k1::new();
+    let tagged = |tag: &str, msg: &[u8]| -> [u8; 32] {
+        let t = Sha256::digest(tag.as_bytes());
+        let mut h = Sha256::new(); h.update(t); h.update(t); h.update(msg);
+        h.finalize().into()
+    };
+    let xs: Vec<XOnlyPublicKey> = [user, muun].iter().map(|k| k.x_only_public_key().0).collect();
+    let mut list = Vec::new();
+    for x in &xs { list.extend_from_slice(&x.serialize()); }
+    let l = tagged("KeyAgg list", &list);
+    // the coefficient of the SECOND DISTINCT key is 1; every other key's is a hash
+    let second = xs.iter().find(|x| **x != xs[0]).copied();
+    let mut sum: Option<Pk> = None;
+    for x in &xs {
+        let point = Pk::from_x_only_public_key(*x, Parity::Even);
+        let term = if Some(*x) == second { point } else {
+            let mut msg = l.to_vec(); msg.extend_from_slice(&x.serialize());
+            let c = Scalar::from_be_bytes(tagged("KeyAgg coefficient", &msg)).map_err(|_| "a key aggregation coefficient fell outside the curve order".to_string())?;
+            point.mul_tweak(&secp, &c).map_err(|e| e.to_string())?
+        };
+        sum = Some(match sum { None => term, Some(acc) => acc.combine(&term).map_err(|e| e.to_string())? });
+    }
+    Ok(sum.ok_or("no keys to aggregate")?.x_only_public_key().0)
+}
+
+/// One address of one scheme. For v5 the MuSig2 aggregate is the taproot INTERNAL key, tweaked the ordinary
+/// key-path way (`TapTweak` over itself, no script tree).
+pub fn address_at(user: &bitcoin::bip32::Xpub, muun: &bitcoin::bip32::Xpub, scheme: Scheme, chain: u32, index: u32, network: bitcoin::Network) -> Result<bitcoin::Address, String> {
+    use bitcoin::{Address, ScriptBuf};
+    let u = derive(user, chain, index)?;
+    let m = derive(muun, chain, index)?;
+    Ok(match scheme {
+        Scheme::V1 => Address::p2pkh(bitcoin::PublicKey::new(u), network),
+        Scheme::V2 => Address::p2sh(&multisig(&u, &m), network).map_err(|e| e.to_string())?,
+        Scheme::V3 => Address::p2sh(&ScriptBuf::new_p2wsh(&multisig(&u, &m).wscript_hash()), network).map_err(|e| e.to_string())?,
+        Scheme::V4 => Address::p2wsh(&multisig(&u, &m), network),
+        Scheme::V5 => Address::p2tr(&Secp256k1::new(), key_agg(&u, &m)?, None, network),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +215,43 @@ mod tests {
         let wrong = scrypt256(b"not the password", &k.salt.unwrap()).unwrap();
         let other = decrypt(&k, wrong, bitcoin::Network::Regtest).map(|(x, _)| x.to_string());
         assert!(other.as_deref() != Ok("tprv8ZgxMBicQKsPcxg1GFGZgL5zALjPwijrYNUqTi2s9JsVqDLzbpX55U9JH2PKAQKExtpdTyboZmV2ytaqr9pAHuxE1hX8k9bQgZAjq25E6P7"), "a wrong code must not give the right key");
+    }
+    fn xpub(s: &str) -> bitcoin::bip32::Xpub {
+        use std::str::FromStr;
+        match bitcoin::bip32::Xpub::from_str(s) {
+            Ok(x) => x,
+            Err(_) => bitcoin::bip32::Xpub::from_priv(&Secp256k1::new(), &bitcoin::bip32::Xpriv::from_str(s).unwrap()),
+        }
+    }
+    /// Muun's own address vectors (libwallet/addresses/v{2,3,4,5}_test.go), on regtest, at the paths they state.
+    /// Each is a different scheme over the same pair of keys, and a wallet's history can hold all of them.
+    #[test]
+    fn every_kind_of_muun_address_matches_the_address_muun_computes() {
+        let net = bitcoin::Network::Regtest;
+        let cases: [(Scheme, &str, &str, u32, u32, &str); 4] = [
+            (Scheme::V2, "tprv8dfM4H5fYJirMai5Er3LguicgUAyxmcSQbFub5ens16amX1e1HAFiW4SXnFVw9nu9FedFQqTPGTTjPEmgfvvXMKww3UcRpFbbC4DFjbCcTb",
+             "tpubDBYMnFoxYLdMBZThTk4uARTe4kGPeEYWdKcaEzaUxt1cesetnxtTqmAxVkzDRou51emWytommyLWcF91SdF5KecA6Ja8oHK1FF7d5U2hMxX", 1, 0, "2NDeWrsJEwvxwVnvtWzPjhDC5B2LYkFuX2s"),
+            (Scheme::V3, "tpubDAN21T1DFREQQS4FvpUktKRBzXXsj5ddenAa5u198hLXvErFFR4Lj8bt8xMG3xnZr6u8mx1vrFW9RwCDXQwQuYRCLq1j9Nr2VJUrENzteQH",
+             "tpubDAsVhzq6otpasovieofhiaY38bSFGyJaBGvrJjBv9whhSnftUXfMTMVrq4BbTXT5A9b78CqqbPuM2j1ZGWdiggd7JHUTZAHh8GXDTt4Pkj9", 1, 0, "2MswEXmCLaHQq6pUTtnUVF8wVArfYSqUec5"),
+            (Scheme::V4, "tpubDBf5wCeqg3KrLJiXaveDzD5JtFJ1ss9NVvFMx4RYS73SjwPEEawcAQ7V1B5DGM4gunWDeYNrnkc49sUaf7mS1wUKiJJQD6WEctExUQoLvrg",
+             "tpubDB22PFkUaHoB7sgxh7exCivV5rAevVSzbB8WkFCCdbHq39r8xnYexiot4NGbi8PM6E1ySVeaHsoDeMYb6EMndpFrzVmuX8iQNExzwNpU61B", 1, 2, "bcrt1qrs3vk4dzv70syck2qdz3g06tgckq4pftenuk5p77st9glnskpvtqe2tvvk"),
+            // taproot, whose output key is the MuSig2 aggregate of the pair — the one that would be wrong under BIP 327
+            (Scheme::V5, "tpubDBf5wCeqg3KrLJiXaveDzD5JtFJ1ss9NVvFMx4RYS73SjwPEEawcAQ7V1B5DGM4gunWDeYNrnkc49sUaf7mS1wUKiJJQD6WEctExUQoLvrg",
+             "tpubDB22PFkUaHoB7sgxh7exCivV5rAevVSzbB8WkFCCdbHq39r8xnYexiot4NGbi8PM6E1ySVeaHsoDeMYb6EMndpFrzVmuX8iQNExzwNpU61B", 1, 17, "bcrt1pvqngr85tm8hmsv2hjyrejlpsy7u65f7vke8mmrxnyuj3aj3xsapqvh8yrf"),
+        ];
+        for (scheme, user, muun, chain, index, want) in cases {
+            let got = address_at(&xpub(user), &xpub(muun), scheme, chain, index, net).unwrap();
+            assert_eq!(got.to_string(), want, "{scheme:?} at {chain}/{index}");
+        }
+    }
+    /// The script behind v2 is the one Muun prints in its own test, key order and all.
+    #[test]
+    fn the_multisig_script_is_muuns_own_bytes() {
+        let (u, m) = (xpub("tprv8dfM4H5fYJirMai5Er3LguicgUAyxmcSQbFub5ens16amX1e1HAFiW4SXnFVw9nu9FedFQqTPGTTjPEmgfvvXMKww3UcRpFbbC4DFjbCcTb"),
+                      xpub("tpubDBYMnFoxYLdMBZThTk4uARTe4kGPeEYWdKcaEzaUxt1cesetnxtTqmAxVkzDRou51emWytommyLWcF91SdF5KecA6Ja8oHK1FF7d5U2hMxX"));
+        let script = multisig(&derive(&u, 1, 0).unwrap(), &derive(&m, 1, 0).unwrap());
+        assert_eq!(&bitcoin::consensus::encode::serialize_hex(&script)[2..],
+                   "5221029fa5af7a34c142c1ce348b360abeb7de01df25b1d50129e58a67a6b846c9303b21025714f6b3670d4a38f5e2d6e8f239c9fc072543ce33dca54fcb4f4886a5cb87a652ae");
     }
     #[test]
     fn a_recovery_code_is_read_the_way_muun_writes_it() {
