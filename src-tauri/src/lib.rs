@@ -432,6 +432,12 @@ fn xpub_restore(name: String, text: String, names: Vec<String>) -> R<Vault> {
     if let Some(v) = s.vaults.iter().find(|v| v.watch.as_ref().map(|w| w.key == key).unwrap_or(false)) {
         return Err(format!("this key is already here, as '{}'", v.name));
     }
+    // What the key IS, said back: a wallet that exports the wrong node is the commonest way this ends in silence.
+    // depth 3 is an account key (m/purpose'/coin'/account'), which is what a watch-only export should be; depth 0 is
+    // a master, whose only reachable addresses are m/0/i and m/1/i.
+    if x.depth == 0 {
+        return Err("that is a MASTER key, not an account key. Hardened levels cannot be derived from a public key, so this app could only watch m/0/i — almost certainly not where your wallet keeps its coins. Export the account key (what a wallet calls its watch-only or xpub export).".into());
+    }
     let mut v = Vault { watch: Some(wallet::Watch { key, kinds, said }), spark: None, muun: None, name,
         network: network.to_string(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address: String::new(),
         created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
@@ -2588,6 +2594,11 @@ mod signers_vault_tests {
         assert!(at(3).starts_with("bc1p"), "taproot: {}", at(3));
         let table = wallet::ours_table(&v).unwrap();
         for k in 0..4u32 { let spk = wallet::script_at(&v, k << wallet::SCHEME_SHIFT).unwrap(); assert_eq!(table(&spk), Some(k << wallet::SCHEME_SHIFT), "kind {k} is recognised as ours"); }
+        // and the scan must WALK every one of them. It did not: a wallet watched from a plain xpub was scanned for
+        // the legacy kind alone, so one holding 153,181 sats read as empty (2026-09-25).
+        assert_eq!(wallet::scan_bases(&v), vec![0, 1 << wallet::SCHEME_SHIFT, 2 << wallet::SCHEME_SHIFT, 3 << wallet::SCHEME_SHIFT]);
+        v.watch = None;
+        assert_eq!(wallet::scan_bases(&v), vec![0], "an ordinary vault is the single walk it always was");
     }
     #[test]
     fn it_refuses_what_it_should() {

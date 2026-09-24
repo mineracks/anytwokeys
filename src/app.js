@@ -837,6 +837,14 @@ function paintSnap(s) {
     if ($('#s-send').classList.contains('on')) renderCoins();
     if ($('#s-receive').classList.contains('on')) renderAddresses();
     vault._balance = s.balance; vault._now = null; paintBalance();
+    // A watched wallet that comes back with nothing at all is far more often the wrong sort of key than an empty
+    // wallet, and "0 sats" tells the person neither. Say what was looked at and what else it could be.
+    if (vault.watch && !s.coins.length && !(s.history || []).length) {
+      const many = vault.watch.kinds.length > 1;
+      $('#balance-sub').textContent = `nothing found in the first ${sats((vault._gap || 20))} addresses of ${many ? 'any kind' : vault.watch.kinds[0]}, on both chains`;
+      const note = $('#watch-empty') || (() => { const d = document.createElement('div'); d.id = 'watch-empty'; d.className = 'muted'; d.style.cssText = 'font-size:13px;margin-top:10px'; $('#balance-sub').parentElement.appendChild(d); return d; })();
+      note.innerHTML = 'If this wallet is a <b>multisig</b>, one key cannot find its addresses \u2014 every cosigner goes into the address, so paste the wallet\u2019s <b>descriptor</b> instead. Otherwise check the key is the one your wallet exports for watching, and that the account is the right one.';
+    } else { const n = $('#watch-empty'); if (n) n.remove(); }
     const unconf = s.coins.filter(c => c.height === 0).reduce((a, c) => a + c.value, 0);
     $('#balance-sub').textContent = `${s.coins.length} coin${s.coins.length === 1 ? '' : 's'}` + (unconf ? ` · ${sats(unconf)} unconfirmed` : ' · all confirmed');
     $('#conn').textContent = `Connected to ${s.servers.electrum.replace(/^\w+:\/\//, '')} · block ${sats(s.height)}`;

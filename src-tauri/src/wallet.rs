@@ -329,6 +329,11 @@ pub const POS_MASK: u32 = 0x0FFF_FFFF;
 /// unswept by Muun itself; it is left out here for the same reason, and said out loud rather than silently.
 pub const MUUN_SCHEMES: [crate::muun::Scheme; 4] = [crate::muun::Scheme::V2, crate::muun::Scheme::V3, crate::muun::Scheme::V4, crate::muun::Scheme::V5];
 
+/// Where each walk of the chain starts: one per kind of address this vault uses. Getting this wrong is silent — the
+/// kinds that are not walked simply never appear — which is exactly what happened to a wallet watched from a plain
+/// xpub (2026-09-25): only the legacy kind was scanned, and a wallet holding 153,181 sats read as empty.
+pub fn scan_bases(v: &Vault) -> Vec<u32> { (0..schemes(v) as u32).map(|s| s << SCHEME_SHIFT).collect() }
+
 /// How many kinds of address one position carries. One for an ordinary wallet; a Muun wallet has four schemes, and
 /// a wallet watched from a plain xpub has as many as the key could mean.
 pub fn schemes(v: &Vault) -> usize {
@@ -683,8 +688,15 @@ pub fn scan(v: &Vault, servers: &Servers, gap: u32) -> Result<Scanned, String> {
         coins.extend(c2); history.extend(h2);
         (n, m, nc, mc)
     } else {
-        let (n, m) = chain(0)?;
-        let (nc, mc) = if rotating { chain(CHANGE)? } else { (0, 0) };
+        // Every kind this vault watches is walked, each with its own gap: for a wallet watched from a plain xpub the
+        // kinds are separate wallets that happen to share a key, so one being unused says nothing about the next.
+        // A vault of one kind — every ordinary one — is the same single walk it always was.
+        let (mut n, mut m, mut nc, mut mc) = (0, 0, 0, 0);
+        for base in scan_bases(v) {
+            let (a, b) = chain(base)?;
+            n = n.max(a); m = m.max(b);
+            if rotating { let (c, d) = chain(base | CHANGE)?; nc = nc.max(c); mc = mc.max(d); }
+        }
         (n, m, nc, mc)
     };
     Ok(Scanned { coins, history, next, scan_max, next_change, scan_max_change })
