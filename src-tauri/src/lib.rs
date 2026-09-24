@@ -109,6 +109,25 @@ async fn vault_activity(name: String, history: Vec<(String, i32)>, ccy: String) 
         let prices = if s.settings.custom { s.settings.prices.clone() } else { activity::PRICES.to_string() };
         // `ccy` is what the screen resolved the setting to ("auto" is worked out from the device there); empty = no fiat
         if !(ccy.is_empty() || (ccy.len() == 3 && ccy.chars().all(|c| c.is_ascii_uppercase()))) { return Err("the currency is a three-letter code".into()); }
+        // A Spark wallet's history comes from an operator, in whole transfers: no inputs, no outputs, no fee of its
+        // own, and an id that is Spark's rather than a txid. Priced the same way every other row is.
+        if let Some(sp) = &v.spark {
+            let id = hex::decode(&sp.identity).map_err(|_| "this vault's Spark key is damaged")?;
+            let (list, _) = spark::transfers(&id, &v.network, 200, 0)?;
+            let rows: Vec<activity::Row> = list.iter().map(|t| activity::Row {
+                txid: t.id.clone(),
+                time: if t.at > 0 { Some(t.at as u32) } else { None },
+                net: Some(if t.direction == "out" { -(t.sats as i64) } else { t.sats as i64 }),
+                fee: None, quote: None, ins: Vec::new(), outs: Vec::new(),
+            }).collect();
+            let mut a = activity::priced(&v, rows, &ccy, &prices)?;
+            // A wallet that holds sats but shows no transfers is not an empty wallet: it is one whose history Spark
+            // is withholding (its owner turned on private mode). Said plainly rather than drawn as "nothing here".
+            if a.rows.is_empty() && spark::balance(&id, &v.network).unwrap_or(0) > 0 {
+                a.note = Some("Spark says this wallet holds a balance but will not list its transfers — its privacy setting is on, so the history cannot be read here.".into());
+            }
+            return Ok(a);
+        }
         let mut a = activity::build(&v, &servers, &history, &ccy, &prices)?;
         // a transaction this person's other vault also holds is a transfer between the two (the watcher records every
         // vault's transactions each minute, so this needs no request of its own)
@@ -269,7 +288,7 @@ fn vault_create(name: String, threshold: usize, keys: Vec<NewKey>, rotating: Opt
     let pubs: Vec<String> = keys.iter().map(|k| k.pubkey.to_lowercase()).collect();
     let descriptor = wallet::descriptor_for(threshold, &pubs)?;
     let network = wallet::network_of(&s.settings.network);
-    let mut v = Vault { muun: None, name, network: s.settings.network.clone(), threshold,
+    let mut v = Vault { spark: None, muun: None, name, network: s.settings.network.clone(), threshold,
         keys: keys.into_iter().map(|k| wallet::KeyRef { name: k.name, serial: k.serial, pubkey: k.pubkey.to_lowercase(), device: None }).collect(),
         descriptor, address: String::new(), created: now(),
         chain_code: if rotating.unwrap_or(true) { Some(fresh_chain_code()) } else { None }, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None };
@@ -317,7 +336,7 @@ fn descriptor_parse(text: String) -> R<Parsed> {
     let (desc_text, cc) = wallet::split_recovery(&text);
     let (threshold, keys) = wallet::keys_of(&desc_text)?;
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
-    let tmp = Vault { muun: None, name: String::new(), network: s.settings.network.clone(), threshold, keys: keys.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.clone(), device: None }).collect(),
+    let tmp = Vault { spark: None, muun: None, name: String::new(), network: s.settings.network.clone(), threshold, keys: keys.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.clone(), device: None }).collect(),
         descriptor: descriptor.clone(), address: String::new(), created: 0, chain_code: cc.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None };
     let address = wallet::address_at(&tmp, 0)?;
     Ok(Parsed { threshold, keys, descriptor: wallet::recovery_line(&tmp), address, rotating: cc.is_some(), ext: None, kind: "cards".into(), name: ur_name })
@@ -374,7 +393,7 @@ fn muun_restore(name: String, key1: String, key2: String, code: String, expect: 
     if let Some(v) = s.vaults.iter().find(|v| v.muun.as_ref().map(|o| o.user == m.user).unwrap_or(false)) {
         return Err(format!("this Muun wallet is already here, as '{}'", v.name));
     }
-    let mut v = Vault { muun: Some(m), name, network: s.settings.network.clone(), threshold: 2,
+    let mut v = Vault { spark: None, muun: Some(m), name, network: s.settings.network.clone(), threshold: 2,
         keys: Vec::new(), descriptor: String::new(), address: String::new(), created: now(), chain_code: None,
         next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(),
         notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0,
@@ -383,6 +402,40 @@ fn muun_restore(name: String, key1: String, key2: String, code: String, expect: 
     s.vaults.push(v.clone());
     wallet::save(&s)?;
     Ok(v)
+}
+
+/// A Spark wallet, WATCHED — Wallet of Satoshi's self-custody mode and anything else built on Spark. All it takes is
+/// the wallet's own `spark1…` address: its figures are then Spark's word, not the chain's, which the screens say.
+#[tauri::command]
+async fn spark_restore(name: String, address: String) -> R<Vault> {
+    block(move || {
+        let mut s = wallet::load()?;
+        if s.vaults.iter().any(|v| v.name == name) { return Err(format!("a vault called '{name}' already exists")); }
+        let (id, network) = spark::identity_of(&address)?;
+        if network != s.settings.network { return Err(format!("that address is a {network} Spark wallet, and this app is set to {}", s.settings.network)); }
+        let identity = hex::encode(&id);
+        if let Some(v) = s.vaults.iter().find(|v| v.spark.as_ref().map(|x| x.identity == identity).unwrap_or(false)) {
+            return Err(format!("this Spark wallet is already here, as '{}'", v.name));
+        }
+        // asked once here so a wallet that cannot be read says so now, rather than looking empty later
+        let balance = spark::balance(&id, &network)?;
+        let (list, _) = spark::transfers(&id, &network, 1, 0)?;
+        if list.is_empty() && balance > 0 {
+            return Err("Spark will not list this wallet's transfers — its privacy setting is on. The balance can be read but the history cannot, so there is nothing here to account with.".into());
+        }
+        let mut v = Vault { spark: Some(wallet::Spark { address: address.trim().to_string(), identity }), muun: None,
+            name, network, threshold: 1, keys: Vec::new(), descriptor: String::new(), address: address.trim().to_string(),
+            created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
+            labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
+            more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None,
+            // a Spark wallet has no coins to identify, so the method that counts the coins actually spent cannot
+            // apply to it; it counts first in, first out, and the screen says which
+            cost_method: Some("fifo".into()) };
+        v.address = v.spark.as_ref().unwrap().address.clone();
+        s.vaults.push(v.clone());
+        wallet::save(&s)?;
+        Ok(v)
+    }).await
 }
 
 /// What a kit's key says about itself before any code is typed: enough to tell someone they pasted the wrong thing.
@@ -411,7 +464,7 @@ fn vault_restore(name: String, text: String, names: Vec<String>) -> R<Vault> {
     let (desc_text, cc) = wallet::split_recovery(&text);
     let (threshold, keys) = wallet::keys_of(&desc_text)?;
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
-    let mut v = Vault { muun: None, name, network: s.settings.network.clone(), threshold,
+    let mut v = Vault { spark: None, muun: None, name, network: s.settings.network.clone(), threshold,
         keys: keys.iter().enumerate().map(|(i, k)| wallet::KeyRef { name: names.get(i).cloned().unwrap_or_else(|| format!("key {}", i + 1)), serial: 0, pubkey: k.clone(), device: None }).collect(),
         descriptor, address: String::new(), created: now(), chain_code: cc, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None };
     v.address = wallet::address_at(&v, 0)?;
@@ -493,7 +546,7 @@ fn signers_vault(name: String, threshold: usize, keys: &[SignerIn], network: &st
 /// A vault of extended keys held by other signers. Each key is named for the person, and keeps its origin — the
 /// fingerprint and path a hardware signer matches on — as the "pubkey" shown for it; it is never a card's key.
 pub(crate) fn ext_vault(name: String, info: &wallet::ExtInfo, names: &[String]) -> Vault {
-    Vault { muun: None, name, network: info.network.clone(), threshold: info.threshold,
+    Vault { spark: None, muun: None, name, network: info.network.clone(), threshold: info.threshold,
         keys: info.keys.iter().enumerate().map(|(i, k)| wallet::KeyRef { name: names.get(i).cloned().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| if k.fixed { format!("key {} · a card", i + 1) } else { format!("key {} · {}", i + 1, k.fingerprint) }),
             // a fixed key is kept as the bare key, so a card plugged in is recognised as this vault's by the key it holds
             serial: 0, pubkey: if k.fixed { k.xpub.clone() } else { format!("[{}/{}]{}", k.fingerprint, k.path.trim_start_matches("m/").replace('\'', "h"), k.xpub) }, device: if k.fixed { Some("card".into()) } else { None } }).collect(),
@@ -566,6 +619,14 @@ async fn vault_sync(name: String) -> R<Snapshot> {
         let s = wallet::load()?;
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
         let servers = wallet::servers_for(&s, &v.network);
+        // A Spark wallet is not on the chain: its balance comes from an operator, and it has no coins, no addresses
+        // and no block height of its own. Everything else on the screen is drawn from this same shape.
+        if let Some(sp) = &v.spark {
+            let id = hex::decode(&sp.identity).map_err(|_| "this vault's Spark key is damaged")?;
+            let balance = spark::balance(&id, &v.network)?;
+            return Ok(Snapshot { coins: Vec::new(), balance, height: 0, history: Vec::new(), servers,
+                receive: sp.address.clone(), receive_index: 0, rotating: false, next_change: 0, gap: 0 });
+        }
         let sc = wallet::scan(&v, &servers, s.settings.gap)?;
         let balance = sc.coins.iter().map(|c| c.value).sum();
         let height = chain::height(&servers).unwrap_or(0);
@@ -1137,7 +1198,7 @@ struct Candidate { id: String, have: usize, locked: usize, need: usize, record: 
 
 fn seal_vault(rec: &seal::Record, name: String, shares: Vec<String>, sealed: Vec<String>) -> R<Vault> {
     let descriptor = wallet::descriptor_for(rec.threshold, &rec.pubkeys)?;
-    let mut v = Vault { muun: None, name, network: rec.network.clone(), threshold: rec.threshold,
+    let mut v = Vault { spark: None, muun: None, name, network: rec.network.clone(), threshold: rec.threshold,
         keys: rec.pubkeys.iter().zip(&rec.key_names).map(|(p, n)| wallet::KeyRef { name: n.clone(), serial: 0, pubkey: p.clone(), device: None }).collect(),
         descriptor, address: String::new(), created: now(), chain_code: rec.chain_code.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0,
         seal: wallet::Seal { shares, sealed }, ext: None, cost_method: None };
@@ -2130,7 +2191,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
-            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget, spend_preview, disposal_set, muun_restore, muun_check,
+            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget, spend_preview, disposal_set, muun_restore, muun_check, spark_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
         .build(tauri::generate_context!())
@@ -2547,7 +2608,7 @@ mod shares_tests {
         let mut ext = ext_vault("x".into(), &info, &[]); ext.address = wallet::address_at(&ext, 0).unwrap();
         let cards = ["03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2", "032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe", "038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47"];
         let d = wallet::descriptor_for(2, &cards.iter().map(|c| c.to_string()).collect::<Vec<_>>()).unwrap();
-        let card = Vault { muun: None, name: "c".into(), network: "mainnet".into(), threshold: 2, keys: cards.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.to_string(), device: None }).collect(),
+        let card = Vault { spark: None, muun: None, name: "c".into(), network: "mainnet".into(), threshold: 2, keys: cards.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.to_string(), device: None }).collect(),
             descriptor: d, address: String::new(), created: 0, chain_code: Some("ab".repeat(32)), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None };
         let dir = std::env::temp_dir().join(format!("a2k-shares-{}", std::process::id())); let _ = std::fs::remove_dir_all(&dir);
         unsafe { std::env::set_var("A2K_DATA_DIR", &dir); }

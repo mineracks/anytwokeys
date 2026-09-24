@@ -287,9 +287,17 @@
     <section id="s-restore" class="screen">
       <div class="grid2" style="align-items:start">
         <div style="display:flex;flex-direction:column;gap:14px">
-          <div class="tabs"><div class="on" data-tab="keys">From the keys</div><div data-tab="scan">Scan the sheet</div><div data-tab="paste">Paste the line</div><div data-tab="muun">From a Muun kit</div></div>
+          <div class="tabs"><div class="on" data-tab="keys">From the keys</div><div data-tab="scan">Scan the sheet</div><div data-tab="paste">Paste the line</div><div data-tab="muun">From a Muun kit</div><div data-tab="spark">From a Spark wallet</div></div>
           <div id="tab-keys"><div class="muted" id="seal-read-note">Plug in the keys, together or one after another. Each asks for its own PIN: a sealed key gives up its share only for that, so holding the keys is not enough to see what a vault holds.</div><div id="seal-read-list" style="display:flex;flex-direction:column;gap:10px;margin-top:12px"></div></div>
           <div id="tab-scan" hidden><div class="field" hidden style="margin-bottom:12px"><div class="cap">Camera</div><div class="camrow" id="scan-pick2" role="radiogroup" aria-label="Which camera"></div></div><div class="cam"><video id="cam" autoplay playsinline muted></video><div class="frame"></div></div><div class="muted" style="font-size:13px;margin-top:8px" id="cam-note">Hold the sheet's code in the frame.</div></div>
+          <div id="tab-spark" class="stack" hidden>
+            <div class="muted" style="font-size:13px">Wallet of Satoshi's self-custody mode, and anything else built on Spark. Paste the wallet's own address — nothing else is needed, and nothing here can spend it.</div>
+            <div class="field"><div class="label">Spark address</div><input id="spark-addr" class="mono" spellcheck="false" placeholder="spark1…"></div>
+            <div class="field"><div class="label">Call this vault</div><input id="spark-name" placeholder="Wallet of Satoshi" maxlength="60"></div>
+            <div class="row"><button class="btn primary" id="spark-read">Watch this wallet</button></div>
+            <div class="muted" style="font-size:13px"><b>These figures are Spark's word, not the chain's.</b> A Spark wallet holds nothing on the chain — its coins sit in leaves under a two-of-two with an operator — so nothing here can be checked against our own node, the way every other vault is. It is worth having anyway: dated transfers are what a cost basis needs.</div>
+            <div class="muted" style="font-size:13px" id="spark-note"></div>
+          </div>
           <div id="tab-muun" class="stack" hidden>
             <div class="muted" style="font-size:13px">Muun has no export, and its Emergency Kit names your keys only by fingerprint — so the Recovery Code is the only way in. Paste both keys from the kit and type the code, and this becomes a <b>watched</b> vault: its keys are unlocked here to read the two account keys, and the halves that could spend are dropped before anything is saved. Spending stays in Muun.</div>
             <div class="field"><div class="label">First encrypted key</div><textarea id="muun-k1" class="mono" spellcheck="false" placeholder="from the kit, under “Encrypted keys” — a long line beginning 4L…" style="min-height:70px"></textarea></div>

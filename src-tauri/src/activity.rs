@@ -159,6 +159,33 @@ pub fn build(v: &wallet::Vault, servers: &Servers, history: &[(String, i32)], cc
     Ok(Activity { ccy: ccy.to_string(), rows, now, note, transfers: HashMap::new() })
 }
 
+/// Rows that arrive already made — a Spark wallet's transfers, which have no inputs, no outputs and no chain — given
+/// the same prices as every other row: the quote for the hour each one happened, today's price for what they are
+/// worth now, and the rest fetched in the background and kept.
+pub fn priced(v: &wallet::Vault, mut rows: Vec<Row>, ccy: &str, prices_url: &str) -> Result<Activity, String> {
+    let cache = load_cache();
+    let fiat = v.network == "mainnet" && !ccy.is_empty() && !prices_url.is_empty();
+    let mut wanted: Vec<(String, u32)> = Vec::new();
+    for r in rows.iter_mut() {
+        if let (true, Some(t)) = (fiat, r.time) {
+            let (day, hour) = day_hour(t);
+            let key = format!("{ccy}:{day}T{hour:02}");
+            match cache.prices.get(&key) {
+                Some(q) => r.quote = Some(q.clone()),
+                None => if !wanted.contains(&(day.clone(), hour)) { wanted.push((day, hour)); },
+            }
+        }
+    }
+    let now = if fiat { now_quote(prices_url, ccy) } else { None };
+    let pending = wanted.len();
+    if fiat && pending > 0 { fill_later(&v.name, prices_url, ccy, wanted); }
+    let note = if v.network != "mainnet" { Some("Test coins have no price.".into()) }
+        else if !fiat { None }
+        else if pending > 0 { Some(format!("Fetching {pending} past price{} in the background; they fill in as they arrive, and are kept.", if pending == 1 { "" } else { "s" })) }
+        else { None };
+    Ok(Activity { ccy: ccy.to_string(), rows, now, note, transfers: HashMap::new() })
+}
+
 /// One address's own flow: for each transaction that touched it, when, and how many sats it gained or lost there —
 /// what was paid TO the address, less what was spent FROM it. Transactions come from the chain cache (the same ones
 /// Activity already fetched), block times from the price cache's times: in the usual case no request at all.
@@ -494,7 +521,7 @@ mod lineage_tests {
     #[ignore]
     fn rows_dump() {
         let info = crate::wallet::ext_parse(&std::env::var("EXT_DESC").unwrap()).unwrap().unwrap();
-        let v = crate::wallet::Vault { muun: None, name: "real".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
+        let v = crate::wallet::Vault { spark: None, muun: None, name: "real".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
             chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(),
             files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: Some(info.descriptor), cost_method: None };
         let servers = crate::chain::Servers { electrum: "ssl://electrum.mineracks.com:50002".into(), explorer: String::new() };
@@ -510,7 +537,7 @@ mod lineage_tests {
     #[ignore]
     fn lineage_live_closes_on_a_real_wallet() {
         let info = crate::wallet::ext_parse(&std::env::var("EXT_DESC").unwrap()).unwrap().unwrap();
-        let v = crate::wallet::Vault { muun: None, name: "x".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
+        let v = crate::wallet::Vault { spark: None, muun: None, name: "x".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
             chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(),
             files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: Some(info.descriptor), cost_method: None };
         let servers = crate::chain::Servers { electrum: "ssl://electrum.mineracks.com:50002".into(), explorer: String::new() };

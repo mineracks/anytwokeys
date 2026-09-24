@@ -191,6 +191,22 @@ fn try_operators(method: &str, req: Vec<u8>) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Real Spark addresses from their own SDK tests, with the networks their tests expect. A wrong offset into the
+    /// payload would still yield 33 bytes, so the key is also required to be a point on the curve.
+    #[test]
+    fn a_spark_address_gives_up_its_key_and_says_which_network() {
+        for (addr, want) in [
+            ("spark1pgss9qg3vdslzmt2name9v550skuvlu6lj5xt9sly90k7p0gxughlqv023jqmc", "mainnet"),
+            ("sparkrt1pgssx5us3wkqjza8g80xz3a9gznx25msq6g3ty8exfym9q3ahcv86vsnxxdy83", "regtest"),
+        ] {
+            let (id, net) = identity_of(addr).unwrap();
+            assert_eq!(net, want, "{addr}");
+            assert_eq!(id.len(), 33, "an identity key is a compressed public key");
+            bitcoin::secp256k1::PublicKey::from_slice(&id).unwrap_or_else(|e| panic!("{addr}: not a public key: {e}"));
+        }
+        assert!(identity_of("spark1notanaddress").is_err());
+        assert!(identity_of("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4").unwrap_err().contains("Spark address"));
+    }
     /// A key nobody uses: the answer must be a clean zero, which proves the wire format rather than the wallet.
     #[test] #[ignore]
     fn probe_each_operator() {

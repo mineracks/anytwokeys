@@ -73,7 +73,11 @@ function show(name) {
   $$('.nav[data-go]').forEach(n => n.classList.toggle('on', n.dataset.go === navName));
   // the vault you are in stays lit on every screen that is about it, matching the breadcrumb; not while making another, nor in app settings
   // a watched wallet has no keys here: the screens that would sign are not offered at all
-  const watched = !!(vault && vault.muun);
+  const watched = !!(vault && (vault.muun || vault.spark));
+  // a Spark wallet has no addresses and no coins at all — not hidden screens, absent ones. Only ever HIDDEN here:
+  // whether the Coins tab is shown at all is the person's own setting, and this must not undo it.
+  if (vault && vault.spark) for (const go of ['coins', 'addresses']) $$(`.nav[data-go=${go}]`).forEach(n => { n.hidden = true; });
+  else { paintCoinsTab(); $$('.nav[data-go=addresses]').forEach(n => { n.hidden = false; }); }
   // only the ways IN to those screens — the sidebar and Home's own actions. A blanket [data-go] would also
   // un-hide buttons that are hidden for their own reasons elsewhere.
   for (const go of ['send', 'receive', 'messages', 'keys']) $$(`.nav[data-go=${go}], #s-home [data-go=${go}]`).forEach(n => { n.hidden = watched; });
@@ -821,8 +825,8 @@ async function sync() {
 function paintVaultCard() {
   if (!vault) return;
   // a watched wallet has no keys HERE, so the card must not read as though it had ("2 of 0 keys sign")
-  $('#vault-kind').textContent = vault.muun ? 'Watched' : vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
-  $('#vault-keys').textContent = vault.muun ? 'Its keys stay in Muun; this vault only reads the chain' : vault.keys.map(k => k.name).join(' · ');
+  $('#vault-kind').textContent = vault.spark ? 'Watched \u00b7 Spark' : vault.muun ? 'Watched' : vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
+  $('#vault-keys').textContent = vault.spark ? 'Told to us by Spark \u2014 these figures are not checked against the chain' : vault.muun ? 'Its keys stay in Muun; this vault only reads the chain' : vault.keys.map(k => k.name).join(' · ');
 }
 function paintSnap(s) {
   { const b = $('#scanbar'); if (b) b.hidden = true; }
@@ -2852,8 +2856,26 @@ async function readSeals(force) {
 }
 
 // ---------- restore ----------
-function restoreTab(name) { restoreTab.now = name; $$('.tabs div').forEach(x => x.classList.toggle('on', x.dataset.tab === name)); for (const t of ['keys', 'scan', 'paste', 'muun']) $('#tab-' + t).hidden = t !== name; $('#sheet-note').hidden = name === 'keys'; if (name === 'scan') startCam(); else stopCam(); if (name === 'keys') { readSeals.sig = null; readSeals(); } }
+function restoreTab(name) { restoreTab.now = name; $$('.tabs div').forEach(x => x.classList.toggle('on', x.dataset.tab === name)); for (const t of ['keys', 'scan', 'paste', 'muun', 'spark']) $('#tab-' + t).hidden = t !== name; $('#sheet-note').hidden = name === 'keys'; if (name === 'scan') startCam(); else stopCam(); if (name === 'keys') { readSeals.sig = null; readSeals(); } }
 $$('.tabs div').forEach(t => t.onclick = () => restoreTab(t.dataset.tab));
+// ---------- a Spark wallet, watched ----------
+// Wallet of Satoshi and anything else on Spark. Its address alone reads it: the operators answer balance and
+// transfer questions without authentication unless that wallet turned privacy on. Nothing here can spend it, and
+// nothing here can check it either — the figures are Spark's word, which the screens say plainly.
+$('#spark-read') && ($('#spark-read').onclick = async () => {
+  const address = $('#spark-addr').value.trim(), name = $('#spark-name').value.trim() || 'Spark wallet';
+  const note = $('#spark-note');
+  if (!address) return toast('Paste the wallet\u2019s Spark address');
+  note.textContent = 'Asking Spark\u2026';
+  try {
+    const v = await invoke('spark_restore', { name, address });
+    store = await invoke('store_get'); vault = store.vaults.find(x => x.name === v.name) || v;
+    note.textContent = '';
+    toast(`Watching \u2018${v.name}\u2019. Its balance and transfers come from Spark, and cannot be checked against the chain.`, 8000);
+    renderTabs(); show('home');
+  } catch (e) { note.textContent = ''; fail(e); }
+});
+
 // ---------- a Muun wallet, watched ----------
 // Muun publishes no xpub and no export. Its kit holds both keys, encrypted with the Recovery Code, so the code is
 // the only way to read which addresses are yours. What is kept afterwards cannot spend: two account xpubs.
