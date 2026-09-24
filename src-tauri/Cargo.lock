@@ -87,6 +87,7 @@ dependencies = [
  "aes",
  "bc-components",
  "bc-envelope",
+ "bech32",
  "bitcoin",
  "block2",
  "cbc",

@@ -1,3 +1,4 @@
+mod spark;
 mod muun;
 mod activity;
 mod net;
