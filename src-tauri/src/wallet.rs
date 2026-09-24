@@ -45,6 +45,8 @@ pub struct Vault {
     /// last time the labels were confirmed in step with the label host; 0 = never
     #[serde(default)] pub labels_synced: u64,
     #[serde(default)] pub seal: Seal,
+    /// A wallet watched from one extended key — an ordinary xpub export, with no way to spend.
+    #[serde(default)] pub watch: Option<Watch>,
     /// A **watched** Spark wallet (Wallet of Satoshi's self-custody mode, and anything else on Spark). It holds no
     /// coins on the chain, so this vault has no addresses and nothing our own node can check: its figures are
     /// Spark's word, and the screens say so.
@@ -283,6 +285,20 @@ pub fn position(index: u32) -> u32 { index & !CHANGE }
 /// extended-key vault always does, by BIP32. Ask this for "rotating" — and ask `cc_of` only when the chain code's
 /// VALUE is needed for the card arithmetic. Using the one for the other made an extended-key vault scan a single
 /// address, skip its change chain, hand out the same receive address every time, and not recognise its own change.
+/// A wallet watched from ONE extended key, as most wallets offer to export it. An account xpub does not say which
+/// kind of address it is for: `ypub`/`zpub` do (SLIP-132), a plain `xpub` does not, and wallets export a plain one
+/// for all of them. Guessing would silently show a wrong balance, so a plain key is watched for EVERY standard
+/// kind at once — the same way a Muun wallet's four are.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Watch {
+    /// the account key, always written as a plain xpub/tpub — the kind lives beside it, not in version bytes
+    pub key: String,
+    /// "pkh" (BIP 44) · "shwpkh" (BIP 49) · "wpkh" (BIP 84) · "tr" (BIP 86)
+    pub kinds: Vec<String>,
+    /// what the key said about itself, if anything: "zpub", "ypub", or empty when it was a plain xpub
+    #[serde(default)] pub said: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Spark {
     /// the wallet's own `spark1…` address, as its owner reads it in their app
@@ -313,7 +329,32 @@ pub const POS_MASK: u32 = 0x0FFF_FFFF;
 /// unswept by Muun itself; it is left out here for the same reason, and said out loud rather than silently.
 pub const MUUN_SCHEMES: [crate::muun::Scheme; 4] = [crate::muun::Scheme::V2, crate::muun::Scheme::V3, crate::muun::Scheme::V4, crate::muun::Scheme::V5];
 
-pub fn rotates(v: &Vault) -> bool { v.spark.is_none() && (v.ext.is_some() || v.chain_code.is_some() || v.muun.is_some()) }
+/// How many kinds of address one position carries. One for an ordinary wallet; a Muun wallet has four schemes, and
+/// a wallet watched from a plain xpub has as many as the key could mean.
+pub fn schemes(v: &Vault) -> usize {
+    if v.muun.is_some() { MUUN_SCHEMES.len() } else { v.watch.as_ref().map(|w| w.kinds.len().max(1)).unwrap_or(1) }
+}
+
+/// The address a watched extended key gives at one kind and position.
+fn watch_script(w: &Watch, index: u32, network: &str) -> Result<ScriptBuf, String> {
+    use std::str::FromStr;
+    let xpub = bitcoin::bip32::Xpub::from_str(&w.key).map_err(|e| format!("this vault's key is damaged: {e}"))?;
+    let kind = w.kinds.get(((index & SCHEME_MASK) >> SCHEME_SHIFT) as usize).map(|s| s.as_str()).unwrap_or("wpkh");
+    let chain = if index & CHANGE != 0 { 1 } else { 0 };
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let path = [bitcoin::bip32::ChildNumber::from_normal_idx(chain).map_err(|e| e.to_string())?,
+                bitcoin::bip32::ChildNumber::from_normal_idx(index & POS_MASK).map_err(|e| e.to_string())?];
+    let pk = bitcoin::PublicKey::new(xpub.derive_pub(&secp, &path).map_err(|e| e.to_string())?.public_key);
+    let net = network_of(network);
+    Ok(match kind {
+        "pkh" => Address::p2pkh(pk, net).script_pubkey(),
+        "shwpkh" => Address::p2shwpkh(&bitcoin::CompressedPublicKey(pk.inner), net).script_pubkey(),
+        "tr" => Address::p2tr(&secp, pk.inner.x_only_public_key().0, None, net).script_pubkey(),
+        _ => Address::p2wpkh(&bitcoin::CompressedPublicKey(pk.inner), net).script_pubkey(),
+    })
+}
+
+pub fn rotates(v: &Vault) -> bool { v.spark.is_none() && (v.ext.is_some() || v.chain_code.is_some() || v.muun.is_some() || v.watch.is_some()) }
 
 /// The address a Muun index names. Muun counts its chains the other way round from everyone else: `m/1h/1h/0` is
 /// CHANGE and `m/1h/1h/1` is what it hands out to be paid to (their `address_generator.go`). Reading that backwards
@@ -355,6 +396,7 @@ static DERIVED: std::sync::Mutex<Option<HashMap<String, Derived>>> = std::sync::
 static CHAINS: std::sync::Mutex<Option<HashMap<String, Vec<Descriptor<DescriptorPublicKey>>>>> = std::sync::Mutex::new(None);
 /// What a vault's scripts depend on, and nothing else: the same text always derives the same scripts.
 fn identity(v: &Vault) -> String {
+    if let Some(w) = &v.watch { return format!("w|{}|{}", w.key, w.kinds.join(",")); }
     if let Some(m) = &v.muun { return format!("m|{}|{}", m.user, m.cosign); }
     match &v.ext { Some(e) => format!("x|{e}"), None => format!("c|{}|{}|{}", v.threshold, v.chain_code.as_deref().unwrap_or(""), v.keys.iter().map(|k| k.pubkey.as_str()).collect::<Vec<_>>().join(",")) }
 }
@@ -371,6 +413,7 @@ pub fn script_at(v: &Vault, index: u32) -> Result<ScriptBuf, String> {
     if let Some(s) = DERIVED.lock().map_err(|_| "derivation cache poisoned")?.as_ref().and_then(|m| m.get(&id)).and_then(|d| d.fwd.get(&index)) { return Ok(s.clone()); }
     if v.spark.is_some() { return Err("a Spark wallet has no addresses on the chain".into()); }
     let spk = match (&v.muun, &v.ext) {
+        _ if v.watch.is_some() => watch_script(v.watch.as_ref().unwrap(), index, &v.network)?,
         (Some(m), _) => muun_script(m, index, &v.network)?,
         (None, Some(_)) => ext_definite_of(v, index)?.script_pubkey(),
         (None, None) => script_of(&descriptor_for(v.threshold, &keys_at(v, index)?)?)?,
@@ -654,7 +697,7 @@ pub fn ours_table(v: &Vault) -> Result<impl Fn(&ScriptBuf) -> Option<u32>, Strin
     let mut table: HashMap<ScriptBuf, u32> = HashMap::new();
     if !rotating { table.insert(script_at(v, 0)?, 0); } else {
         // every scheme a Muun wallet uses counts as ours, or its own change would look like a payment to a stranger
-        for base in match &v.muun { Some(_) => (0..MUUN_SCHEMES.len() as u32).map(|s| s << SCHEME_SHIFT).collect(), None => vec![0u32] } {
+        for base in (0..schemes(v) as u32).map(|s| s << SCHEME_SHIFT) {
             for i in 0..=recv { table.insert(script_at(v, base | i)?, base | i); }
             for i in 0..=chg { table.insert(script_at(v, base | CHANGE | i)?, base | CHANGE | i); }
         }
@@ -974,7 +1017,7 @@ mod tests {
     fn vault(cc: Option<&str>) -> Vault {
         let keys = ["03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2", "032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe", "038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47"];
         let descriptor = descriptor_for(2, &keys.iter().map(|k| k.to_string()).collect::<Vec<_>>()).unwrap();
-        Vault { spark: None, muun: None, name: "t".into(), network: "signet".into(), threshold: 2, keys: keys.iter().enumerate().map(|(i, k)| KeyRef { name: format!("k{i}"), serial: 0, pubkey: k.to_string() , device: None }).collect(),
+        Vault { watch: None, spark: None, muun: None, name: "t".into(), network: "signet".into(), threshold: 2, keys: keys.iter().enumerate().map(|(i, k)| KeyRef { name: format!("k{i}"), serial: 0, pubkey: k.to_string() , device: None }).collect(),
             descriptor, address: String::new(), created: 0, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None }
     }
     #[test]
@@ -1044,7 +1087,7 @@ mod ext_tests {
     use super::*;
     fn vault_of(desc: &str) -> Vault {
         let info = ext_parse(desc).unwrap().unwrap();
-        Vault { spark: None, muun: None, name: "ext".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
+        Vault { watch: None, spark: None, muun: None, name: "ext".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
             chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(),
             files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: Some(info.descriptor), cost_method: None }
     }

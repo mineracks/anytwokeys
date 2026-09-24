@@ -73,14 +73,16 @@ function show(name) {
   $$('.nav[data-go]').forEach(n => n.classList.toggle('on', n.dataset.go === navName));
   // the vault you are in stays lit on every screen that is about it, matching the breadcrumb; not while making another, nor in app settings
   // a watched wallet has no keys here: the screens that would sign are not offered at all
-  const watched = !!(vault && (vault.muun || vault.spark));
+  const watched = !!(vault && (vault.muun || vault.spark || vault.watch));
   // a Spark wallet has no addresses and no coins at all — not hidden screens, absent ones. Only ever HIDDEN here:
   // whether the Coins tab is shown at all is the person's own setting, and this must not undo it.
   if (vault && vault.spark) for (const go of ['coins', 'addresses']) $$(`.nav[data-go=${go}]`).forEach(n => { n.hidden = true; });
   else { paintCoinsTab(); $$('.nav[data-go=addresses]').forEach(n => { n.hidden = false; }); }
   // only the ways IN to those screens — the sidebar and Home's own actions. A blanket [data-go] would also
   // un-hide buttons that are hidden for their own reasons elsewhere.
-  for (const go of ['send', 'receive', 'messages', 'keys']) $$(`.nav[data-go=${go}], #s-home [data-go=${go}]`).forEach(n => { n.hidden = watched; });
+  for (const go of ['send', 'messages', 'keys']) $$(`.nav[data-go=${go}], #s-home [data-go=${go}]`).forEach(n => { n.hidden = watched; });
+  // Receive is real for a watched wallet of one key — those addresses ARE its own — but means nothing for Muun or Spark
+  $$('.nav[data-go=receive], #s-home [data-go=receive]').forEach(n => { n.hidden = !!(vault && (vault.muun || vault.spark)); });
   const inVault = vault && !['setup', 'restore', 'settings', 'overview'].includes(name);
   $$('#vault-tabs .nav').forEach(n => n.classList.toggle('on', !!inVault && n.dataset.vault === vault.name));
   $('#title').textContent = { overview: 'All vaults', home: vault ? vault.name : 'Vault', activity: 'Activity', send: 'Send', receive: 'Receive', coins: 'Coins', addresses: 'Addresses', vault: 'Vault settings', keys: 'Keys', settings: 'App settings', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
@@ -825,8 +827,8 @@ async function sync() {
 function paintVaultCard() {
   if (!vault) return;
   // a watched wallet has no keys HERE, so the card must not read as though it had ("2 of 0 keys sign")
-  $('#vault-kind').textContent = vault.spark ? 'Watched \u00b7 Spark' : vault.muun ? 'Watched' : vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
-  $('#vault-keys').textContent = vault.spark ? 'Told to us by Spark \u2014 these figures are not checked against the chain' : vault.muun ? 'Its keys stay in Muun; this vault only reads the chain' : vault.keys.map(k => k.name).join(' · ');
+  $('#vault-kind').textContent = vault.spark ? 'Watched \u00b7 Spark' : vault.muun ? 'Watched' : vault.watch ? 'Watched \u00b7 one key' : vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
+  $('#vault-keys').textContent = vault.watch ? `From one exported key \u00b7 ${vault.watch.kinds.length > 1 ? 'every kind of address watched' : vault.watch.kinds[0]}` : vault.spark ? 'Told to us by Spark \u2014 these figures are not checked against the chain' : vault.muun ? 'Its keys stay in Muun; this vault only reads the chain' : vault.keys.map(k => k.name).join(' · ');
 }
 function paintSnap(s) {
   { const b = $('#scanbar'); if (b) b.hidden = true; }
@@ -2923,9 +2925,31 @@ async function restoreCode(t) {
 }
 function stopCam() { if (camTimer) clearInterval(camTimer); camTimer = null; if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; } }
 $('#desc-read').onclick = () => readDescriptor($('#desc-in').value);
+/// One exported key, watched. A zpub or ypub says which kind of address it is for; a plain xpub does not, and
+/// wallets export a plain one for all of them — so every kind is watched at once rather than one being guessed.
+function readBareKey(key) {
+  const kind = /^z|^v/.test(key) ? 'native segwit (BIP 84)' : /^y|^u/.test(key) ? 'wrapped segwit (BIP 49)' : '';
+  $('#restore-card').innerHTML = `<div class="ok">Read: one extended key \u2014 a wallet to watch, with no way to spend</div>
+    <div class="mono muted" style="background:var(--ground);padding:12px;border-radius:6px;border:1px solid var(--line);overflow-wrap:anywhere">${esc(key.slice(0, 24))}\u2026${esc(key.slice(-8))}</div>
+    <div class="muted" style="font-size:13px">${kind ? `This key says it is for <b>${kind}</b> addresses, so that is what will be watched.`
+      : 'A plain <span class="mono">xpub</span> does not say which kind of address it is for, and wallets export one for all of them \u2014 so <b>legacy, wrapped segwit, native segwit and taproot are all watched</b>. Guessing one would show a confidently wrong balance.'}</div>
+    <div class="field"><div class="label">Call this vault</div><input id="watch-name" value="watched wallet" maxlength="60"></div>
+    <button class="btn primary" id="watch-go">Watch this wallet</button>`;
+  $('#watch-go').onclick = async () => {
+    try {
+      const v = await invoke('xpub_restore', { name: $('#watch-name').value.trim() || 'watched wallet', text: key, names: [] });
+      store = await invoke('store_get'); vault = store.vaults.find(x => x.name === v.name) || v;
+      renderTabs(); show('home');
+    } catch (e) { fail(e); }
+  };
+}
 let parsed = null;
 async function readDescriptor(text) {
   try {
+    // A bare extended key is what most wallets mean by "export xpub". It is not a descriptor and never will be, so
+    // it is offered as what it is: a wallet to watch, with no way to spend.
+    const bare = text.trim();
+    if (/^(x|y|z|t|u|v)pub[1-9A-HJ-NP-Za-km-z]{50,}$/.test(bare)) return readBareKey(bare);
     parsed = await invoke('descriptor_parse', { text });
     if (parsed.ext) return readExtended(parsed);
     const names = ['laptop', 'keyring', 'off-site'];
