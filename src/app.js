@@ -2904,6 +2904,77 @@ $('#spark-read') && ($('#spark-read').onclick = async () => {
   } catch (e) { note.textContent = ''; fail(e); }
 });
 
+// One box per seed word. Only the box being edited shows its word; every other is masked, so the whole phrase is
+// never on the screen at once. Words complete from the BIP 39 list — the same list the parser checks against — and
+// each finished word is checked as it is left. When the set is full the checksum is checked and the verdict shown,
+// before anything is derived. A paste into any box fills the rest.
+let seedWords = null;
+const seedBoxes = () => [...$$('#seed-grid input')];
+const seedPhrase = () => seedBoxes().map(i => i.value.trim().toLowerCase()).filter(Boolean).join(' ');
+function seedClear() { seedBoxes().forEach(i => { i.value = ''; i.parentElement.className = ''; }); $('#spark-suggest').innerHTML = ''; $('#spark-words-count').textContent = ''; }
+async function seedBuild(n) {
+  const grid = $('#seed-grid'); if (!grid) return;
+  if (!seedWords) { try { seedWords = await invoke('seed_wordlist'); } catch { seedWords = []; } }
+  const set = new Set(seedWords);
+  grid.innerHTML = Array.from({ length: n }, (_, i) => `<label><span>${i + 1}</span><input type="password" data-i="${i}" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" aria-label="word ${i + 1}"></label>`).join('');
+  const strip = $('#spark-suggest'), count = $('#spark-words-count');
+  const boxes = seedBoxes();
+  const mark = (box) => { const w = box.value.trim().toLowerCase(); box.parentElement.className = !w ? '' : set.has(w) ? 'ok' : 'bad'; };
+  const verdict = async () => {
+    const filled = boxes.filter(b => b.value.trim()).length, bad = boxes.filter(b => b.parentElement.className === 'bad').length;
+    if (filled < n) { count.innerHTML = `${filled} of ${n}${bad ? ` \u00b7 <span class="warn">${bad} not in the list</span>` : ''}`; return; }
+    try { await invoke('seed_check', { words: seedPhrase() }); count.innerHTML = '<span class="ok">\u2713 all ' + n + ' words are in the list and the checksum matches</span>'; }
+    catch (e) { count.innerHTML = `<span class="warn">\u2717 ${esc(String(e && e.message || e))}</span>`; }
+  };
+  const suggest = (box) => {
+    const typing = box.value.trim().toLowerCase();
+    const hits = typing && !set.has(typing) ? seedWords.filter(w => w.startsWith(typing)).slice(0, 8) : [];
+    strip.innerHTML = hits.map(w => `<button type="button" class="btn small" data-word="${w}">${w}</button>`).join('');
+    strip.querySelectorAll('[data-word]').forEach(b => { b.onmousedown = (e) => e.preventDefault(); b.onclick = () => { box.value = b.dataset.word; advance(box); }; });
+  };
+  const advance = (box) => { mark(box); strip.innerHTML = ''; const next = boxes[+box.dataset.i + 1]; if (next) next.focus(); else box.blur(); verdict(); };
+  boxes.forEach(box => {
+    box.addEventListener('focus', () => { box.type = 'text'; suggest(box); });
+    box.addEventListener('blur', () => { box.type = 'password'; mark(box); verdict(); });
+    box.addEventListener('input', () => suggest(box));
+    box.addEventListener('keydown', (e) => {
+      const first = strip.firstElementChild;
+      if ((e.key === 'Tab' || e.key === 'Enter' || e.key === ' ') && !e.shiftKey) {
+        if (first && !set.has(box.value.trim().toLowerCase())) { e.preventDefault(); box.value = first.dataset.word; advance(box); }
+        else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); advance(box); }
+      }
+    });
+    box.addEventListener('paste', (e) => {
+      const words = (e.clipboardData.getData('text') || '').trim().split(/\s+/);
+      if (words.length < 2) return;
+      e.preventDefault();
+      words.forEach((w, k) => { const b = boxes[+box.dataset.i + k]; if (b) { b.value = w.toLowerCase(); mark(b); } });
+      verdict();
+    });
+  });
+  count.textContent = '';
+}
+$('#seed-len') && $('#seed-len').addEventListener('click', (e) => { const o = e.target.closest('.opt'); if (!o) return; $$('#seed-len .opt').forEach(x => x.classList.toggle('on', x === o)); seedBuild(+o.dataset.n); });
+$('#spark-words-adv') && $('#spark-words-adv').addEventListener('toggle', () => { if ($('#spark-words-adv').open && !seedBoxes().length) seedBuild(12); });
+
+// The words unlock the wallet; what comes out is its public identity. They are cleared from the boxes on success
+// AND on failure — a failure is not a reason to leave them sitting on a screen.
+$('#spark-words-go') && ($('#spark-words-go').onclick = async () => {
+  const words = seedPhrase(), note = $('#spark-words-note');
+  const name = $('#spark-name').value.trim() || 'Wallet of Satoshi';
+  const n = words.split(/\s+/).filter(Boolean).length;
+  if (![12, 15, 18, 21, 24].includes(n)) return toast(`Seed words come in 12 or 24 (this has ${n})`);
+  note.textContent = 'Working out the identity and asking Spark\u2026';
+  try {
+    const v = await invoke('spark_restore_words', { name, words });
+    seedClear();
+    store = await invoke('store_get'); vault = store.vaults.find(x => x.name === v.name) || v;
+    note.textContent = '';
+    toast(`Watching \u2018${v.name}\u2019 as ${v.address.slice(0, 14)}\u2026 The words were not kept.`, 8000);
+    renderTabs(); show('home');
+  } catch (e) { seedClear(); note.textContent = 'The words were cleared.'; fail(e); }
+});
+
 // ---------- a Muun wallet, watched ----------
 // Muun publishes no xpub and no export. Its kit holds both keys, encrypted with the Recovery Code, so the code is
 // the only way to read which addresses are yours. What is kept afterwards cannot spend: two account xpubs.

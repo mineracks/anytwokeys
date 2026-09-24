@@ -483,6 +483,53 @@ async fn spark_restore(name: String, address: String) -> R<Vault> {
     }).await
 }
 
+/// A Spark wallet watched from its SEED WORDS, for an app that shows no Spark code (Wallet of Satoshi shows only
+/// Lightning and on-chain). The words are used for one derivation and dropped; the vault keeps the identity public
+/// key and the address made from it — the same rule as a Muun recovery code. Mainnet wallets default to account 1,
+/// older SDK builds to 0, so both are tried and Spark itself says which one is a wallet with anything in it.
+#[tauri::command]
+async fn spark_restore_words(name: String, words: String) -> R<Vault> {
+    block(move || {
+        let s = wallet::load()?;
+        if s.vaults.iter().any(|v| v.name == name) { return Err(format!("a vault called '{name}' already exists")); }
+        let network = s.settings.network.clone();
+        let mut chosen: Option<(u32, Vec<u8>)> = None;
+        let mut seen = Vec::new();
+        for account in [1u32, 0] {
+            let id = spark::identity_from_words(&words, account)?;
+            let balance = spark::balance(&id, &network)?;
+            let (list, _) = spark::transfers(&id, &network, 1, 0)?;
+            seen.push(format!("account {account}: {balance} sats, {}", if list.is_empty() { "no transfers" } else { "has transfers" }));
+            if balance > 0 || !list.is_empty() { chosen = Some((account, id)); break; }
+        }
+        { use zeroize::Zeroize; let mut w = words; w.zeroize(); }   // the words have done their one job
+        let (account, id) = chosen.ok_or_else(|| format!("those words derive a Spark identity, but Spark has nothing under it on either account ({}). Either the wallet is empty and has never received, or it was made with a different scheme.", seen.join("; ")))?;
+        let _ = account;
+        let address = spark::address_of(&id, &network)?;
+        spark_vault(s, name, address, hex::encode(&id), network)
+    }).await
+}
+
+#[tauri::command]
+fn seed_wordlist() -> Vec<&'static str> { spark::wordlist() }
+#[tauri::command]
+fn seed_check(words: String) -> R<usize> { use zeroize::Zeroize; let r = spark::words_check(&words); let mut w = words; w.zeroize(); r }
+
+/// The vault a Spark identity makes, whichever way the identity was found.
+fn spark_vault(mut s: Store, name: String, address: String, identity: String, network: String) -> R<Vault> {
+    if let Some(v) = s.vaults.iter().find(|v| v.spark.as_ref().map(|x| x.identity == identity).unwrap_or(false)) {
+        return Err(format!("this Spark wallet is already here, as '{}'", v.name));
+    }
+    let v = Vault { watch: None, spark: Some(wallet::Spark { address: address.clone(), identity }), muun: None,
+        name, network, threshold: 1, keys: Vec::new(), descriptor: String::new(), address,
+        created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
+        labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
+        more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: Some("fifo".into()) };
+    s.vaults.push(v.clone());
+    wallet::save(&s)?;
+    Ok(v)
+}
+
 /// What a kit's key says about itself before any code is typed: enough to tell someone they pasted the wrong thing.
 #[tauri::command]
 fn muun_check(key1: String, key2: String) -> R<serde_json::Value> {
@@ -2236,7 +2283,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
-            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, xpub_restore,
+            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
         .build(tauri::generate_context!())

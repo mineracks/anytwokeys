@@ -296,6 +296,18 @@
             <div class="field"><div class="label">Or paste it</div><input id="spark-addr" class="mono" spellcheck="false" placeholder="spark1…  or  a spark: / bitcoin:…?spark= line"></div>
             <div class="field"><div class="label">Call this vault</div><input id="spark-name" placeholder="Wallet of Satoshi" maxlength="60"></div>
             <div class="row"><button class="btn" id="spark-read">Watch this wallet</button></div>
+            <details class="adv" id="spark-words-adv"><summary>The app shows no Spark code — only Lightning and on-chain? Use its seed words</summary>
+              <div class="stack" style="margin-top:10px">
+                <div style="font-size:14px;line-height:1.5"><b>Read this first.</b> Seed words unlock everything that wallet can spend — every sat, not a view of it. They are used here for one calculation, the wallet's public identity, and then thrown away: never saved, never sent, cleared from this box the moment they have worked. Even so, typing them into any computer means trusting that computer with the wallet. Wallet of Satoshi is itself a hot wallet on a phone, so this is not a new kind of risk — but it is a second machine that has seen the words. Do it on a computer you would trust with the wallet itself, or not at all.</div>
+                <div class="field"><div class="row" style="justify-content:space-between;align-items:center"><div class="label">Seed words</div><div class="pick tight" id="seed-len"><div class="opt on" data-n="12">12 words</div><div class="opt" data-n="24">24 words</div></div></div>
+                  <div class="muted" style="font-size:13px">Only the word you are on is shown; the rest stay hidden. Type the first letters and pick, or paste the whole set into the first box.</div>
+                  <div class="seed-grid" id="seed-grid"></div>
+                  <div class="row" id="spark-suggest" style="gap:var(--s2);flex-wrap:wrap;min-height:34px" aria-live="polite"></div>
+                  <div style="font-size:14px" id="spark-words-count" aria-live="polite"></div></div>
+                <div class="row"><button class="btn primary" id="spark-words-go">Read the wallet's identity from these words</button></div>
+                <div class="muted" style="font-size:13px" id="spark-words-note"></div>
+              </div>
+            </details>
             <div class="muted" style="font-size:13px"><b>These figures are Spark's word, not the chain's.</b> A Spark wallet holds nothing on the chain — its coins sit in leaves under a two-of-two with an operator — so nothing here can be checked against our own node, the way every other vault is. It is worth having anyway: dated transfers are what a cost basis needs.</div>
             <div class="muted" style="font-size:13px" id="spark-note"></div>
           </div>

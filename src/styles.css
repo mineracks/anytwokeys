@@ -624,3 +624,12 @@ a.tag{text-decoration:none;cursor:pointer} a.tag:hover{text-decoration:underline
    just a hole. Until then the form has the room, at a width that reads. */
 #restore-grid.alone{grid-template-columns:minmax(0,620px)}
 #restore-grid.alone #restore-card{display:none}
+
+/* one box per seed word: numbered, masked unless it is the one being edited. The INPUT is the box — the number
+   sits inside its padding — so there is no inner control a few pixels from an outer edge. */
+.seed-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:var(--s2);margin-top:6px}
+.seed-grid label{position:relative;display:block}
+.seed-grid span{position:absolute;left:11px;top:50%;transform:translateY(-50%);font-family:var(--display);font-size:12px;color:var(--muted);pointer-events:none}
+.seed-grid input{width:100%;padding:10px 12px 10px 36px;font-family:var(--mono);font-size:14px;color:var(--ink);border:1px solid var(--line);border-radius:6px;background:var(--panel)}
+.seed-grid label.bad input{border-color:var(--warn)} .seed-grid label.ok input{border-color:var(--signal)}
+.seed-grid input:focus{outline:none;border-color:var(--gold)}

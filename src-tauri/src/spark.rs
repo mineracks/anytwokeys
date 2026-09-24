@@ -83,6 +83,73 @@ pub fn find_address(text: &str) -> Option<String> {
         .find(|cand| cand.len() >= 20 && cand.contains('1'))
 }
 
+// ---------- from the seed words, when the app shows no Spark address ----------
+//
+// Wallet of Satoshi shows Lightning and on-chain on its Receive screen and no Spark code, but it does show the
+// seed words. Spark's published scheme (docs.spark.money/wallets/identity-key-derivation, fetched 2026-09-25):
+// a standard BIP 39 seed with no passphrase, and the identity key at `m/8797555'/account'/0'` — 8797555 being the
+// last three bytes of SHA256("spark"). **Mainnet defaults to account 1**, for wallets made before accounts existed.
+//
+// The words unlock everything the wallet can spend. They are used here for one derivation and then dropped: what
+// the vault keeps is the identity PUBLIC key, which is what a Spark address carries anyway. The same shape as a Muun
+// recovery code, and the same rule: nothing that can spend is written down.
+pub const PURPOSE: u32 = 8797555;
+
+/// The identity public key of one account of a wallet made from these words.
+pub fn identity_from_words(words: &str, account: u32) -> Result<Vec<u8>, String> {
+    use bitcoin::bip32::{ChildNumber, Xpriv};
+    use zeroize::Zeroize;
+    // Every secret made on the way — the normalised words, the seed, the root, the derived private key — is wiped
+    // when it has done its one job, not left for the allocator to hand out later. The error never quotes the words.
+    let mut norm = words.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    let parsed = bip39::Mnemonic::parse_normalized(&norm);
+    norm.zeroize();
+    let m = parsed.map_err(|_| "those are not a valid set of seed words (a word is not in the list, or the checksum fails — check each one)".to_string())?;
+    let mut seed = m.to_seed("");
+    drop(m);
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let root = Xpriv::new_master(bitcoin::Network::Bitcoin, &seed);
+    seed.zeroize();
+    let mut root = root.map_err(|e| e.to_string())?;
+    let path = [ChildNumber::from_hardened_idx(PURPOSE), ChildNumber::from_hardened_idx(account), ChildNumber::from_hardened_idx(0)]
+        .into_iter().collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    let derived = root.derive_priv(&secp, &path);
+    root.private_key.non_secure_erase();
+    let mut k = derived.map_err(|e| e.to_string())?;
+    let public = k.private_key.public_key(&secp).serialize().to_vec();
+    k.private_key.non_secure_erase();
+    Ok(public)
+}
+
+/// Does this set of words check out — right count, every word in the list, checksum true? Nothing is derived and
+/// nothing is kept; the screen asks this the moment the last box is filled, so a slip is caught before the words go
+/// anywhere near a key.
+pub fn words_check(words: &str) -> Result<usize, String> {
+    use zeroize::Zeroize;
+    let mut norm = words.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    let n = norm.split(' ').filter(|w| !w.is_empty()).count();
+    let r = bip39::Mnemonic::parse_normalized(&norm).map(|_| n).map_err(|e| match e {
+        bip39::Error::BadWordCount(c) => format!("{c} words — a set is 12 or 24"),
+        bip39::Error::UnknownWord(i) => format!("word {} is not in the list", i + 1),
+        bip39::Error::InvalidChecksum => "the checksum does not match: one of the words is wrong, or two are swapped".into(),
+        other => other.to_string(),
+    });
+    norm.zeroize();
+    r
+}
+
+/// The 2048 English words, for a screen that completes them as they are typed — from the same list the parser
+/// checks against, so the two cannot disagree.
+pub fn wordlist() -> Vec<&'static str> { bip39::Language::English.word_list().to_vec() }
+
+/// The `spark1…` for an identity key: the same envelope `identity_of` reads, written the other way.
+pub fn address_of(identity: &[u8], network: &str) -> Result<String, String> {
+    let mut body = Vec::new();
+    bytes_field(1, identity, &mut body);
+    let hrp = bech32::Hrp::parse(match network { "mainnet" => "spark", "regtest" => "sparkrt", "testnet" => "sparkt", _ => "sparks" }).map_err(|e| e.to_string())?;
+    bech32::encode::<bech32::Bech32m>(hrp, &body).map_err(|e| e.to_string())
+}
+
 // ---------- gRPC-Web, which is what their own browser client speaks ----------
 fn call(base: &str, method: &str, body: Vec<u8>) -> Result<Vec<u8>, String> {
     let mut framed = vec![0u8];
@@ -233,6 +300,20 @@ mod tests {
         assert_eq!(identity_of(&format!("bitcoin:bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4?amount=0.001&spark={invoice}")).unwrap().0, key);
         assert!(identity_of("spark1notanaddress").is_err());
         assert!(identity_of("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4").unwrap_err().contains("Spark address"));
+    }
+    /// Spark publishes the scheme but no vector, so the check is two implementations that never met: this one, and
+    /// embit in Python, on the standard test words. Account 1 is what mainnet uses by default.
+    #[test]
+    fn the_identity_key_from_seed_words_matches_an_independent_implementation() {
+        let words = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        assert_eq!(hex::encode(identity_from_words(words, 0).unwrap()), "02698b27ac308b275671b3ca25436346469d04a5bba578ae39feba1d65897a6abc");
+        assert_eq!(hex::encode(identity_from_words(words, 1).unwrap()), "0281363910b0dc0015a4a25e758da30f0e28388ea5252c0e3713936f2d4ef7d3d5");
+        // and the address written for it reads back as the same key, on the right network
+        let id = identity_from_words(words, 1).unwrap();
+        let addr = address_of(&id, "mainnet").unwrap();
+        assert!(addr.starts_with("spark1"), "{addr}");
+        assert_eq!(identity_of(&addr).unwrap(), (id, "mainnet".to_string()));
+        assert!(identity_from_words("abandon abandon not words", 1).is_err());
     }
     /// A key nobody uses: the answer must be a clean zero, which proves the wire format rather than the wallet.
     #[test] #[ignore]

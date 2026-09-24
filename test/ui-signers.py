@@ -34,6 +34,9 @@ const H = {
     else if (/^ur:/i.test(t)) { const n = new Set(t.split(/\s+/).map(x => x.toLowerCase())).size; if (n < 2) throw 'some QR parts are missing: 1 of 2 pieces recovered so far; keep the code in the frame until it completes'; }
     return { threshold: 2, keys: ['a', 'b', 'c'], descriptor: 'wsh(sortedmulti(2,[c9ad277c/48h/0h/0h/2h]xpub6EAC…/<0;1>/*,…))#abcd1234', address: 'bc1qplate', rotating: true, kind: 'sortedmulti', name: 'Plate backup',
       ext: [{ fingerprint: 'c9ad277c', path: 'm/48h/0h/0h/2h', xpub: 'xpub6EAC4GduaPj3E', fixed: false }, { fingerprint: 'fbdb4a1e', path: 'm/48h/0h/0h/2h', xpub: 'xpub6Eb', fixed: false }, { fingerprint: '2b94355d', path: 'm/48h/0h/0h/2h', xpub: 'xpub6Ec', fixed: false }] }; },
+  seed_wordlist: () => ['abandon', 'ability', 'able', 'about', 'above', 'absent', 'absorb', 'abstract', 'absurd', 'abuse', 'zoo'],
+  seed_check: (a) => { if (a.words === Array(11).fill('abandon').join(' ') + ' about') return 12; throw 'the checksum does not match: one of the words is wrong, or two are swapped'; },
+  spark_restore_words: (a) => { window.__wordsSeen = a.words; throw 'Spark has nothing under it'; },
   vault_recovery: () => 'wsh(sortedmulti(2,[c9ad277c/48h/0h/0h/2h]xpub6EAC/<0;1>/*,[47a280ae]03c58267,[c65e5ec6]0331794a))#shownline',
   seal_read: () => ({ cards: 0, foreign: [], found: [] }),
   vault_shares_pdf: (a) => { window.__sharesAsked = a; return '/Users/p/Desktop/shares'; },
@@ -335,6 +338,25 @@ with sync_playwright() as p:
 
     check("no page errors", not errs, "; ".join(errs[:3]))
     print("unmocked:", sorted(set(pg.evaluate("__unmocked"))))
+    # ---- seed words for a Spark wallet: one masked box per word, completed from the list, checksum on the last ----
+    pg.evaluate("show('restore'); restoreTab('spark')"); pg.wait_for_timeout(300)
+    pg.evaluate("document.querySelector('#spark-words-adv').open = true; document.querySelector('#spark-words-adv').dispatchEvent(new Event('toggle'))"); pg.wait_for_timeout(400)
+    boxes = pg.locator("#seed-grid input")
+    check("twelve boxes, every one masked until it is being edited", boxes.count() == 12 and pg.evaluate("[...document.querySelectorAll('#seed-grid input')].every(i => i.type === 'password')"))
+    boxes.nth(0).focus(); pg.wait_for_timeout(100)
+    check("the box being edited shows its word", pg.evaluate("document.querySelector('#seed-grid input').type") == "text")
+    boxes.nth(0).type("ab"); pg.wait_for_timeout(150)
+    hits = [b.inner_text() for b in pg.locator("#spark-suggest [data-word]").all()]
+    check("typing the first letters offers the words that start that way, in list order", hits[:3] == ["abandon", "ability", "able"], str(hits))
+    boxes.nth(0).press("Tab"); pg.wait_for_timeout(150)
+    check("Tab takes the first, masks it, and moves to the next box", pg.evaluate("document.querySelectorAll('#seed-grid input')[0].value") == "abandon" and pg.evaluate("document.querySelectorAll('#seed-grid input')[0].type") == "password" and pg.evaluate("document.activeElement.dataset.i") == "1")
+    pg.evaluate("""() => { const b = document.querySelectorAll('#seed-grid input')[0]; const dt = new DataTransfer(); dt.setData('text', Array(11).fill('abandon').join(' ') + ' about'); b.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })); }""")
+    pg.wait_for_timeout(400)
+    check("pasting a whole set into a box fills the rest, and a full set is checksum-checked at once", pg.evaluate("[...document.querySelectorAll('#seed-grid input')].map(i => i.value).join(' ')").endswith("abandon about") and "checksum matches" in pg.inner_text("#spark-words-count"), pg.inner_text("#spark-words-count"))
+    boxes.nth(11).focus(); boxes.nth(11).fill("zoo"); boxes.nth(11).blur(); pg.wait_for_timeout(400)
+    check("a wrong last word turns the verdict, with the reason", "checksum does not match" in pg.inner_text("#spark-words-count"), pg.inner_text("#spark-words-count"))
+    pg.click("#spark-words-go"); pg.wait_for_timeout(500)
+    check("after a failed read every box is cleared, not left on screen", pg.evaluate("[...document.querySelectorAll('#seed-grid input')].every(i => i.value === '')") and (pg.evaluate("__wordsSeen") or "").endswith("zoo") and "cleared" in pg.inner_text("#spark-words-note"))
     b.close()
 print(f"\n{len(fails)} failed" if fails else "\nall passed")
 audit.finish()
