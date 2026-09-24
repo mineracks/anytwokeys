@@ -337,31 +337,38 @@ fn muun_restore(name: String, key1: String, key2: String, code: String, expect: 
     let (k1, k2) = (muun::decode(&key1)?, muun::decode(&key2)?);
     let unlock = muun::code_key(&code, k2.salt.or(k1.salt))?;
     let secp = bitcoin::secp256k1::Secp256k1::new();
-    let account = |k: &muun::KitKey| -> Result<String, String> {
+    // Muun's two keys do NOT arrive at the same depth. Their own tool says so in one line:
+    //     decryptedKeys[0].Key.Path = "m/1'/1'"   // a little adjustment for legacy users
+    // The owner's key is ALREADY the account key; Muun's is a master that still needs m/1h/1h. Deriving both the
+    // same way sends one of them a level too deep, and the wallet then watches addresses that do not exist —
+    // which is exactly what happened on Piers's kit (2026-09-24): no transactions, and a fingerprint that missed.
+    //
+    // So the kit's own descriptors decide it. Each key is taken both ways, and the reading whose fingerprint the kit
+    // names is the right one. That check IS the proof the recovery code was right, so it is not guesswork either way.
+    let both = |k: &muun::KitKey| -> Result<[(String, String); 2], String> {
+        use bitcoin::bip32::{ChildNumber, Xpub};
         let (xpriv, _) = muun::decrypt(k, unlock, net)?;
         let path = [ChildNumber::from_hardened_idx(1).map_err(|e| e.to_string())?, ChildNumber::from_hardened_idx(1).map_err(|e| e.to_string())?];
-        let at = xpriv.derive_priv(&secp, &path).map_err(|e| e.to_string())?;
-        Ok(Xpub::from_priv(&secp, &at).to_string())
+        let lower = xpriv.derive_priv(&secp, &path).map_err(|e| e.to_string())?;
+        Ok([(Xpub::from_priv(&secp, &xpriv).to_string(), xpriv.fingerprint(&secp).to_string()),
+            (Xpub::from_priv(&secp, &lower).to_string(), lower.fingerprint(&secp).to_string())])
     };
-    // A WRONG recovery code does not fail loudly: the shared secret comes out different, the 64 bytes decrypt to
-    // something, and that something parses as a perfectly good private key. The wallet it then watches is nobody's,
-    // and the screen would simply say "no transactions". The kit prints the real fingerprints in its descriptors, so
-    // they are the check — shown always, and enforced when a line from the kit is given.
-    let fingerprint = |k: &muun::KitKey| -> Result<String, String> {
-        let (xpriv, _) = muun::decrypt(k, unlock, net)?;
-        Ok(xpriv.fingerprint(&secp).to_string())
-    };
-    let (fp1, fp2) = (fingerprint(&k1)?, fingerprint(&k2)?);
-    if let Some(line) = expect.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
-        let said: Vec<String> = line.to_lowercase().as_bytes().windows(8)
+    let (a, b) = (both(&k1)?, both(&k2)?);
+    let named: Vec<String> = expect.as_deref().map(str::trim).filter(|l| !l.is_empty())
+        .map(|line| line.to_lowercase().as_bytes().windows(8)
             .filter(|w| w.iter().all(|c| c.is_ascii_hexdigit()))
-            .map(|w| String::from_utf8_lossy(w).to_string()).collect();
-        let missing: Vec<&String> = [&fp1, &fp2].into_iter().filter(|f| !said.contains(f)).collect();
-        if !missing.is_empty() {
-            return Err(format!("that recovery code does not match this kit. The keys it unlocked are {fp1} and {fp2}, and the line you pasted names neither of those — check the code, character by character. Nothing was saved."));
-        }
-    }
-    let m = wallet::Muun { user: account(&k1)?, cosign: account(&k2)?, birthday: k2.birthday.max(k1.birthday), fp_user: fp1, fp_cosign: fp2 };
+            .map(|w| String::from_utf8_lossy(w).to_string()).collect())
+        .unwrap_or_default();
+    let pick = |v: &[(String, String); 2], fallback: usize| -> Result<(String, String), String> {
+        if named.is_empty() { return Ok(v[fallback].clone()); }
+        v.iter().find(|(_, fp)| named.contains(fp)).cloned()
+            .ok_or_else(|| format!("that recovery code does not match this kit: it unlocked a key whose fingerprint is {} (or {} one level down), and the line you pasted names neither. Check the code character by character. Nothing was saved.", v[0].1, v[1].1))
+    };
+    // without a line to check against, fall back to what Muun's own tool assumes: the owner's key is the account
+    // key already, Muun's is a master
+    let (user, fp_user) = pick(&a, 0)?;
+    let (cosign, fp_cosign) = pick(&b, 1)?;
+    let m = wallet::Muun { user, cosign, birthday: k2.birthday.max(k1.birthday), fp_user, fp_cosign };
     if m.user == m.cosign { return Err("both of those are the same key — a kit has two different ones".into()); }
     if let Some(v) = s.vaults.iter().find(|v| v.muun.as_ref().map(|o| o.user == m.user).unwrap_or(false)) {
         return Err(format!("this Muun wallet is already here, as '{}'", v.name));
