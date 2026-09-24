@@ -539,7 +539,6 @@ async fn vault_sync(name: String) -> R<Snapshot> {
     block(move || {
         let s = wallet::load()?;
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
-        watch_only(&v)?;
         let servers = wallet::servers_for(&s, &v.network);
         let sc = wallet::scan(&v, &servers, s.settings.gap)?;
         let balance = sc.coins.iter().map(|c| c.value).sum();
@@ -2424,8 +2423,22 @@ mod signers_vault_tests {
         use std::str::FromStr;
         assert_eq!(chg, muun::address_at(&bitcoin::bip32::Xpub::from_str(&user).unwrap(), &bitcoin::bip32::Xpub::from_str(&cosign).unwrap(),
                    muun::Scheme::V4, 0, 2, bitcoin::Network::Regtest).unwrap().to_string(), "our change flag is Muun's chain 0");
-        // and it cannot be spent from here, however it is asked
+        // and it cannot be spent from here, however it is asked — refused by the arithmetic itself, not only by a
+        // guard on a command, so no new command can forget to ask
         assert!(wallet::descriptor_at(&v, 0).unwrap_err().contains("watched"));
+        let coin = wallet::CoinAt { txid: "aa".repeat(32), vout: 0, value: 100_000, height: 900_000, index: v4 };
+        assert!(wallet::select(&v, &[coin], v4 | wallet::CHANGE, "bc1q08zdgswgey4kqeau8af0v7ak8e72aqdpnhhsc45uqdush8qs44zs4zwyh7", 1_000, 2.0, false, None).is_err(),
+                "a watched wallet cannot build a spend");
+        // but it MUST still be readable: the whole point is watching it. Every scheme's scripts are recognised as
+        // ours, on both chains — this is what a guard on the wrong function broke once (2026-09-24, on the bench).
+        let table = wallet::ours_table(&v).unwrap();
+        for scheme in 0..wallet::MUUN_SCHEMES.len() as u32 {
+            for chain in [0, wallet::CHANGE] {
+                let idx = (scheme << wallet::SCHEME_SHIFT) | chain;
+                let spk = wallet::script_at(&v, idx).unwrap();
+                assert_eq!(table(&spk), Some(idx), "scheme {scheme} chain {chain} must be recognised as ours");
+            }
+        }
     }
     #[test]
     fn it_refuses_what_it_should() {

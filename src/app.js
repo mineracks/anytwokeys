@@ -74,7 +74,7 @@ function show(name) {
   // the vault you are in stays lit on every screen that is about it, matching the breadcrumb; not while making another, nor in app settings
   // a watched wallet has no keys here: the screens that would sign are not offered at all
   const watched = !!(vault && vault.muun);
-  for (const go of ['send', 'receive', 'messages', 'keys']) { const n = $(`.nav[data-go=${go}]`); if (n) n.hidden = watched; }
+  for (const go of ['send', 'receive', 'messages', 'keys']) $$(`[data-go=${go}]`).forEach(n => { n.hidden = watched; });
   const inVault = vault && !['setup', 'restore', 'settings', 'overview'].includes(name);
   $$('#vault-tabs .nav').forEach(n => n.classList.toggle('on', !!inVault && n.dataset.vault === vault.name));
   $('#title').textContent = { overview: 'All vaults', home: vault ? vault.name : 'Vault', activity: 'Activity', send: 'Send', receive: 'Receive', coins: 'Coins', addresses: 'Addresses', vault: 'Vault settings', keys: 'Keys', settings: 'App settings', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
@@ -797,8 +797,9 @@ function syncIfStale() {
 }
 async function sync() {
   if (!vault) return;
-  $('#vault-kind').textContent = vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
-  $('#vault-keys').textContent = vault.keys.map(k => k.name).join(' · ');
+  // a watched wallet has no keys HERE, so the card must not read as though it had ("2 of 0 keys sign")
+  $('#vault-kind').textContent = vault.muun ? 'Watched' : vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
+  $('#vault-keys').textContent = vault.muun ? 'Its keys stay in Muun; this vault only reads the chain' : vault.keys.map(k => k.name).join(' · ');
   $('#balance-sub').textContent = 'syncing…';
   // Nothing of another vault may sit under this vault's name, not even for the seconds a sync takes:
   // a vault that has not been drawn yet starts from a blank screen, and an answer that comes back after the person has
