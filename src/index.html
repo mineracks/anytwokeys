@@ -309,7 +309,7 @@
     <section id="s-restore" class="screen">
       <div class="grid2 alone" id="restore-grid" style="align-items:start">
         <div style="display:flex;flex-direction:column;gap:14px">
-          <div class="tabs"><div class="on" data-tab="keys">From the keys</div><div data-tab="scan">Scan the sheet</div><div data-tab="paste">Paste the line</div><div data-tab="muun">From a Muun kit</div><div data-tab="spark">From a Spark wallet</div><div data-tab="statement">From a statement</div></div>
+          <div class="tabs"><div class="on" data-tab="keys">From the keys</div><div data-tab="scan">Scan the sheet</div><div data-tab="paste">Paste the line</div><div data-tab="muun">From a Muun kit</div><div data-tab="spark">From a Spark wallet</div><div data-tab="statement">From a statement</div><div data-tab="node">From a Lightning node</div></div>
           <div id="tab-keys"><div class="muted" id="seal-read-note">Plug in the keys, together or one after another. Each asks for its own PIN: a sealed key gives up its share only for that, so holding the keys is not enough to see what a vault holds.</div><div id="seal-read-list" style="display:flex;flex-direction:column;gap:10px;margin-top:12px"></div></div>
           <div id="tab-scan" hidden><div class="field" hidden style="margin-bottom:12px"><div class="cap">Camera</div><div class="camrow" id="scan-pick2" role="radiogroup" aria-label="Which camera"></div></div><div class="cam"><video id="cam" autoplay playsinline muted></video><div class="frame"></div></div><div class="muted" style="font-size:13px;margin-top:8px" id="cam-note">Hold the sheet's code in the frame.</div></div>
           <div id="tab-spark" class="stack" hidden>
@@ -449,6 +449,29 @@
             <div class="field"><div class="label">Call this vault</div><input id="spark-name" placeholder="Wallet of Satoshi" maxlength="60"></div>
             <div class="row"><button class="btn" id="spark-read">Watch this wallet</button></div>
             <div class="muted" style="font-size:13px" id="spark-note"></div>
+          </div>
+          <div id="tab-node" class="stack" hidden>
+            <div class="sk-warn"><b>Your own node, read but never spent.</b> A Lightning node you run holds sats on the chain and in channels, and its ledger names the two things every other wallet here is missing — on-chain transaction ids and Lightning payment hashes — so its moves to and from your other vaults link exactly. It is read with a credential that can only look; the app proves that before keeping it, and keeps it sealed.</div>
+            <div class="sk-step"><div class="sk-num">1</div><div class="sk-lead"><b>Which node.</b> <span class="muted" style="font-weight:400">Core Lightning now; LND next.</span></div></div>
+            <div class="seg" role="radiogroup" aria-label="Kind of node" id="node-kind"><button type="button" role="radio" aria-checked="true" data-kind="cln">Core Lightning</button><button type="button" role="radio" aria-checked="false" data-kind="lnd" disabled title="Next">LND (soon)</button></div>
+            <div class="sk-step"><div class="sk-num">2</div><div class="sk-lead"><b>Where it is, and a credential that can only read.</b> <span class="muted" style="font-weight:400">Made on the node, once; it cannot pay, withdraw, open or close, and the app checks that.</span></div></div>
+            <div class="field"><div class="label">Address</div><input id="node-url" class="mono" spellcheck="false" autocomplete="off" placeholder="https://your-node:3010  (or http:// on your own network)"></div>
+            <div class="field"><div class="label">Read-only rune</div><input id="node-cred" class="mono" type="password" spellcheck="false" autocomplete="off" placeholder="paste the rune"></div>
+            <details class="adv"><summary>How to make a read-only rune</summary><div class="stack" style="font-size:13px">
+              <div class="muted">On the machine that runs Core Lightning — an Umbrel, a Start9, a RaspiBlitz, or a server — one command makes a rune that can list and read, and nothing else. Copy it, run it, and paste what it prints into the box above. It is the only thing the node ever hands this app.</div>
+              <div class="mono" style="font-size:11.5px;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--ground);word-break:break-all;-webkit-user-select:text;user-select:text">lightning-cli createrune restrictions='[["method=getinfo","method=listfunds","method=listpeerchannels","method=listclosedchannels","method=listinvoices","method=listpays","method=listsendpays","method=listtransactions","method=listforwards","method=bkpr-listaccountevents","method=bkpr-listincome","method=bkpr-listbalances","method=checkrune","method=decode"]]'</div>
+              <div class="muted">On Umbrel: <span class="mono">docker exec core-lightning_lightningd_1 lightning-cli createrune …</span> On Start9 the Core Lightning service page has a REST address and lets you make runes under Properties. The address is where clnrest answers: on Umbrel and Start9 it is on the service page; on a server it is the <span class="mono">clnrest-host</span> and <span class="mono">clnrest-port</span> lines in your config. A rune made for another app, or the admin rune, is refused here.</div>
+            </div></details>
+            <div class="row"><button class="btn primary" id="node-check">Check the node</button></div>
+            <div class="muted" id="node-note" aria-live="polite"></div>
+            <div id="node-preview" class="stack" hidden>
+              <div class="sk-step"><div class="sk-num">3</div><div class="sk-lead"><b>What it answered.</b> <span class="muted" style="font-weight:400">Check the name is your node, then keep it.</span></div></div>
+              <dl class="tx-dl" id="node-facts"></dl>
+              <div id="node-proof" class="sk-warn"></div>
+              <div id="node-pin-row" class="sk-warn" hidden></div>
+              <div class="field"><div class="label">Call this vault</div><input id="node-name" placeholder="My node" maxlength="60"></div>
+              <div class="row"><button class="btn primary" id="node-add">Watch this node</button></div>
+            </div>
           </div>
           <div id="tab-statement" class="stack" hidden>
             <div class="sk-warn"><b>A wallet that no longer exists still shaped the coins you hold now.</b> Wallet of Satoshi closed its custodial wallet when it moved to self-custody and gave each person their history as a CSV. Read here, that history keeps the coins that left it into your other vaults their origin, their age and their cost. Nothing in it can be spent.</div>

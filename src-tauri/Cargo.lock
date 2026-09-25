@@ -116,6 +116,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rfd",
  "rusqlite",
+ "rustls",
  "scrypt",
  "security-framework",
  "serde",

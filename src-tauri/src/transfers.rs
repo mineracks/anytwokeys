@@ -11,9 +11,11 @@ struct Fact { id: String, net: i64, time: u32, counter: String, own: bool, #[ser
     #[serde(default)] paid: Vec<u64>,
     /// where money went, and where it arrived, as (address, sats): an on-chain outflow's outputs; an inflow's own
     /// outputs; a statement row's one address and amount. The same pair on both sides of two vaults is the same payment.
-    #[serde(default)] paid_to: Vec<(String, u64)>, #[serde(default)] got: Vec<(String, u64)> }
+    #[serde(default)] paid_to: Vec<(String, u64)>, #[serde(default)] got: Vec<(String, u64)>,
+    /// a Lightning payment hash: the one identifier both ends of a Lightning payment know
+    #[serde(default)] hash: String }
 #[derive(Clone, Default, Serialize, Deserialize)]
-struct Snapshot { name: String, network: String, identity: String, #[serde(default)] muun: bool, #[serde(default)] statement: bool, fingerprint: String, rows: Vec<Fact> }
+struct Snapshot { name: String, network: String, identity: String, #[serde(default)] muun: bool, #[serde(default)] statement: bool, #[serde(default)] node: bool, fingerprint: String, rows: Vec<Fact> }
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Cache { vaults: BTreeMap<String, Snapshot> }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -34,7 +36,8 @@ fn candidates(ak:&str,a:&Snapshot,bk:&str,b:&Snapshot)->Vec<Candidate> {
     if a.network != b.network { return vec![]; }
     // a statement's Lightning rows can only have gone to, or come from, a wallet that speaks Lightning: Spark, or Muun
     // (whose Lightning shows on-chain). Its on-chain rows are matched by address, never here.
-    if a.statement || b.statement { let (s, o) = if a.statement { (a, b) } else { (b, a) }; if s.statement && o.statement { return vec![]; } if o.identity.is_empty() && !o.muun { return vec![]; } }
+    if a.statement || b.statement { let (s, o) = if a.statement { (a, b) } else { (b, a) }; if s.statement && o.statement { return vec![]; } if o.identity.is_empty() && !o.muun && !o.node { return vec![]; } }
+    else if (a.node || b.node) && a.identity.is_empty() && b.identity.is_empty() && !(a.muun || b.muun) && !(a.node && b.node) { return vec![]; }
     else if a.identity.is_empty() && b.identity.is_empty() { return vec![]; }
     let both_spark=!a.identity.is_empty() && !b.identity.is_empty();
     let allowance=if both_spark {0} else if a.muun || b.muun {1000} else {10000};
@@ -84,7 +87,7 @@ impl Index {
         for v in &s.vaults {
             let snap = self.cache.vaults.entry(key(v)).or_default();
             snap.name = v.name.clone(); snap.network = v.network.clone();
-            snap.muun = v.muun.is_some(); snap.statement = v.statement.is_some();
+            snap.muun = v.muun.is_some(); snap.statement = v.statement.is_some(); snap.node = v.node.is_some();
             snap.identity = v.spark.as_ref().map(|sp| sp.identity.to_lowercase()).unwrap_or_default();
         }
         self.build();
@@ -112,6 +115,7 @@ impl Index {
         }
         for (id,name) in &self.active { self.certain.insert(id.clone(),(self.cache.vaults[id].fingerprint.clone(),roster.clone(),view.links[name].clone())); }
         self.by_address(&mut view);
+        self.by_hash(&mut view);
         // Match only changed vault pairs. Turning cached matches into a view is a cheap index lookup.
         let keys:Vec<_>=self.active.keys().cloned().collect();
         for (n,ak) in keys.iter().enumerate() { for bk in keys.iter().skip(n+1) {
@@ -174,6 +178,29 @@ impl Index {
             }
         } }
     }
+    /// Certain by payment hash: a Lightning payment one vault made and another received carry the same hash — the
+    /// same payment, whatever else the two records say. Unique both ways, as by_address; identity links win.
+    fn by_hash(&self, view: &mut View) {
+        let keys: Vec<_> = self.active.keys().cloned().collect();
+        for (n, ak) in keys.iter().enumerate() { for bk in keys.iter().skip(n + 1) {
+            let (a, b) = (&self.cache.vaults[ak], &self.cache.vaults[bk]);
+            if a.network != b.network { continue; }
+            for (pk, p, rk, r) in [(ak, a, bk, b), (bk, b, ak, a)] {
+                let mut got: BTreeMap<&str, Vec<&Fact>> = BTreeMap::new();
+                for f in &r.rows { if f.net > 0 && !f.hash.is_empty() { got.entry(f.hash.as_str()).or_default().push(f); } }
+                let mut pairs: Vec<(&Fact, &Fact)> = Vec::new();
+                for f in &p.rows { if f.net < 0 && !f.hash.is_empty() { if let Some(rs) = got.get(f.hash.as_str()) { for o in rs { if o.time.abs_diff(f.time) <= 86400 { pairs.push((f, *o)); } } } } }
+                let mut out_n: BTreeMap<&str, usize> = BTreeMap::new(); let mut in_n: BTreeMap<&str, usize> = BTreeMap::new();
+                for (f, o) in &pairs { *out_n.entry(&f.id).or_default() += 1; *in_n.entry(&o.id).or_default() += 1; }
+                for (f, o) in pairs {
+                    if out_n[f.id.as_str()] != 1 || in_n[o.id.as_str()] != 1 { continue; }
+                    let event = pair_key(pk, &f.id, rk, &o.id);
+                    view.links.entry(p.name.clone()).or_default().entry(f.id.clone()).or_insert(Link { peer: r.name.clone(), peer_id: o.id.clone(), event: event.clone(), tier: 2, forgotten: false, own: false });
+                    view.links.entry(r.name.clone()).or_default().entry(o.id.clone()).or_insert(Link { peer: p.name.clone(), peer_id: f.id.clone(), event, tier: 2, forgotten: false, own: false });
+                }
+            }
+        } }
+    }
     fn ingest(&mut self, v: &wallet::Vault, a: &activity::Activity, s: &wallet::Store) -> bool {
         let identity = v.spark.as_ref().map(|sp| sp.identity.to_lowercase()).unwrap_or_default();
         let raw: BTreeMap<_,_> = a.spark.iter().map(|t| (t.id.as_str(),t)).collect();
@@ -182,15 +209,18 @@ impl Index {
             let t = raw.get(r.txid.as_str());
             let own = t.map(|t| !identity.is_empty() && t.sender.eq_ignore_ascii_case(&identity) && t.receiver.eq_ignore_ascii_case(&identity)).unwrap_or(false);
             let counter = t.map(|t| if t.direction == "out" {t.receiver.to_lowercase()} else {t.sender.to_lowercase()}).unwrap_or_default();
-            Some(Fact { id:r.txid.clone(),net,time:r.time.unwrap_or(0),counter,own,known:a.transfers.contains_key(&r.txid), paid:Vec::new(), paid_to:Vec::new(), got:Vec::new() })
+            Some(Fact { id:r.txid.clone(),net,time:r.time.unwrap_or(0),counter,own,known:a.transfers.contains_key(&r.txid), paid:Vec::new(), paid_to:Vec::new(), got:Vec::new(), hash:String::new() })
         }).collect();
         if let Some(st) = &v.statement {
             // a statement row names one address and one amount: what it paid, or what arrived
             let by_id: BTreeMap<&str, &crate::statement::Row> = st.rows.iter().map(|r| (r.id.as_str(), r)).collect();
-            for f in rows.iter_mut() { if let Some(r) = by_id.get(f.id.as_str()) { if r.layer == "chain" && !r.address.is_empty() {
+            for f in rows.iter_mut() { if let Some(r) = by_id.get(f.id.as_str()) { if r.layer == "lightning" { f.hash = r.hash.clone(); } if r.layer == "chain" && !r.address.is_empty() {
                 let amount = (f.net.unsigned_abs()).saturating_sub(r.fee);
                 if f.net < 0 { f.paid_to = vec![(r.address.clone(), amount)]; f.paid = vec![amount]; } else { f.got = vec![(r.address.clone(), amount)]; }
             } } }
+        } else if let Some(n) = &v.node {
+            let by_id: BTreeMap<&str, &crate::node::Event> = n.events.iter().map(|e| (e.id.as_str(), e)).collect();
+            for f in rows.iter_mut() { if let Some(e) = by_id.get(f.id.as_str()) { if e.layer == "lightning" { f.hash = e.hash.clone(); } } }
         } else if identity.is_empty() {
             use std::str::FromStr;
             let net_of = crate::wallet::network_of(&v.network);
@@ -210,7 +240,7 @@ impl Index {
         let fingerprint = digest(&serde_json::to_vec(&rows).unwrap());
         let id=key(v);
         let changed = self.cache.vaults.get(&id).map(|p| &p.fingerprint) != Some(&fingerprint);
-        if changed { self.cache.vaults.insert(id, Snapshot {name:v.name.clone(),network:v.network.clone(),identity,muun:v.muun.is_some(),statement:v.statement.is_some(),fingerprint,rows}); }
+        if changed { self.cache.vaults.insert(id, Snapshot {name:v.name.clone(),network:v.network.clone(),identity,muun:v.muun.is_some(),statement:v.statement.is_some(),node:v.node.is_some(),fingerprint,rows}); }
         self.reconcile(s,changed); changed
     }
 }
@@ -320,6 +350,14 @@ mod tests {
         i.cache.vaults.insert("s".into(),st); i.cache.vaults.insert("k".into(),snap("Spark","kk",&[(70,10300,"in")])); i.cache.vaults.insert("c".into(),snap("Chain","",&[(21000,20300,"got")])); i.build();
         let p: Vec<_>=i.view.proposals.iter().map(|p|(p.pair.from_id.clone(),p.pair.to_id.clone())).collect();
         assert_eq!(p,vec![("ln".to_string(),"in".to_string())],"the Lightning row is proposed to the Spark wallet; the chain row is not proposed to anyone: {p:?}");
+    }
+    #[test] fn the_same_payment_hash_paid_by_one_and_received_by_another_is_one_payment() {
+        let mut i=Index::default();i.active=BTreeMap::from([("s".into(),"Statement".into()),("n".into(),"Node".into())]);
+        let mut st=snap("Statement","",&[(-70,10000,"pay")]); st.statement=true; st.rows[0].hash="ab".repeat(32);
+        let mut nd=snap("Node","",&[(70,10020,"inv"),(70,10030,"other")]); nd.rows[0].hash="ab".repeat(32); nd.rows[1].hash="cd".repeat(32);
+        i.cache.vaults.insert("s".into(),st); i.cache.vaults.insert("n".into(),nd); i.build();
+        let l=&i.view.links["Statement"]["pay"]; assert_eq!((l.peer.as_str(),l.peer_id.as_str(),l.tier),("Node","inv",2));
+        assert_eq!(i.view.links["Node"]["inv"].peer_id,"pay"); assert!(!i.view.links["Node"].contains_key("other"));
     }
     #[test] fn a_row_that_arrives_twice_is_one_candidate_and_still_unique() {
         let mut i=indexed();

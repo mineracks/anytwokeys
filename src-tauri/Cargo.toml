@@ -26,6 +26,8 @@ bitcoin = { version = "0.32", features = ["serde", "rand-std", "base64", "secp-r
 miniscript = { version = "12", features = ["serde"] }
 electrum-client = { version = "0.23", default-features = false, features = ["use-rustls-ring", "proxy"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+# a node's self-signed certificate is pinned by fingerprint (node.rs): rustls direct, the same backend reqwest uses
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 dirs = "6"
 num-bigint = "0.4"
 num-traits = "0.2"
