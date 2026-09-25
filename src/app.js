@@ -811,7 +811,53 @@ const overTx = () => $('.modal.on') || !$('#lock').hidden || /INPUT|TEXTAREA|SEL
 document.addEventListener('keydown', (e) => { if (!$('#s-tx').classList.contains('on') || overTx() || e.metaKey || e.ctrlKey || e.altKey) return; if (e.key === 'ArrowLeft') stepTx(-1); if (e.key === 'ArrowRight') stepTx(1); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('#s-tx').classList.contains('on') && !/INPUT|TEXTAREA/.test(document.activeElement.tagName)) show('home'); });
 
-let transferView = { links: {} };
+let transferView = { links: {}, proposals: [] };
+let checkingTransfers = false;
+function linkedNames(start) {
+  const names=[...start];
+  for (let i=0;i<names.length;i++) for (const peer of Object.values(txFacts[names[i]]?.transfers || {}).flat())
+    if (!names.includes(peer) && txFacts[peer] && store.vaults.some(v=>v.name===peer && v.network===store.vaults.find(x=>x.name===names[i])?.network)) names.push(peer);
+  return names;
+}
+async function loadTransferPeers(start) {
+  const seen=new Set(), todo=[...start], failed=[];
+  while (todo.length) {
+    const name=todo.shift(); if (seen.has(name)) continue; seen.add(name);
+    try { await sumInput(name); } catch {failed.push(name);continue;}
+    for (const peer of Object.values(txFacts[name]?.transfers || {}).flat()) if (!seen.has(peer) && store.vaults.some(v=>v.name===peer)) todo.push(peer);
+  }
+  return failed;
+}
+function paintTransferProposals() {
+  const box=$('#transfer-proposals'); if (!box || !vault) return;
+  const proposals=(transferView.proposals || []).filter(p=>p.pair.from===vault.name || p.pair.to===vault.name);
+  box.innerHTML='<div class="label">Possible transfers</div><p class="muted">Amounts and dates can suggest a move between your wallets. Your figures change only after you confirm it. Split payments are not matched.</p><button class="btn" id="transfer-check">Check other vaults</button><p id="transfer-check-note" class="muted"></p>';
+  if (!proposals.length) box.insertAdjacentHTML('beforeend','<p class="muted">No suggestions in the histories checked so far. Unlock and refresh the other vaults to include them.</p>');
+  for (const p of proposals) {
+    const c=p.pair, line=document.createElement('div');line.className='card';
+    line.innerHTML=`<strong>${esc(c.from)} → ${esc(c.to)}</strong><p>${sats(c.out)} sats out; ${sats(c.incoming)} sats in; difference ${sats(c.out-c.incoming)} sats.</p><p class="muted">${new Date(c.at*1000).toLocaleString()} → ${new Date(c.arrived*1000).toLocaleString()}</p><p class="mono muted" style="overflow-wrap:anywhere">${esc(c.from_id)} → ${esc(c.to_id)}</p>${p.unique ? '' : '<p class="warn">More than one transfer fits. These candidates stay unlinked.</p>'}`;
+    for (const yes of [true,false]) {
+      if (yes && !p.unique) continue;
+      const b=document.createElement('button'); b.className='btn'; b.textContent=yes ? 'Yes, that’s mine' : 'No'; b.dataset.transferAnswer=p.key; b.dataset.yes=String(yes);
+      b.onclick=async()=>{b.disabled=true;try {store=await invoke('transfer_answer',{key:p.key,yes}); await refreshTransferLinks(); if(vault){vault=store.vaults.find(v=>v.name===vault.name)||vault;repaintFacts(txFacts[vault.name]);renderHomeSummary();}} catch(e){fail(e);} finally {b.disabled=false;}};
+      line.appendChild(b);
+    }
+    box.appendChild(line);
+  }
+  $('#transfer-check').disabled=checkingTransfers;
+  $('#transfer-check').onclick=async()=>{
+    if(checkingTransfers)return;checkingTransfers=true;
+    const b=$('#transfer-check');b.disabled=true;const failures=[];
+    const net=vault.network;
+    for (const v of store.vaults.filter(v=>v.network===net)) {
+      $('#transfer-check-note').textContent='Checking '+v.name+'…';
+      try {await sumInput(v.name);} catch {failures.push(v.name);}
+    }
+    checkingTransfers=false;await refreshTransferLinks();
+    $('#transfer-check-note').textContent=failures.length ? 'Unlock and refresh these vaults, then check again: '+failures.join(', ') : 'Checked every available history.';
+    if(vault) {repaintFacts(txFacts[vault.name]);renderHomeSummary();}
+  };
+}
 async function refreshTransferLinks() {
   try { transferView = await invoke('transfer_links'); } catch { return; }
   for (const [name, f] of Object.entries(txFacts)) {
@@ -820,11 +866,13 @@ async function refreshTransferLinks() {
     for (const [id,l] of Object.entries(f.links)) if (!l.forgotten && !l.own) f.transfers[id] = [l.peer];
   }
   vaultLedger.memo = {};
+  paintTransferProposals();
 }
+const factOwner = v => v ? JSON.stringify([v.network,v.spark?.identity,v.ext || v.descriptor,v.watch?.key,v.muun?.user,v.muun?.cosign]) : '';
 function keepActivity(name, a) {
   vaultLedger.memo = {};
-  return txFacts[name] = { rows: Object.fromEntries(a.rows.map(r => [r.txid, r])), now: a.now, ccy: a.ccy,
-    transfers: a.transfers || {}, chainTransfers: a.transfers || {}, links: transferView.links?.[name] || {},
+  return txFacts[name] = { owner:factOwner(store.vaults.find(v=>v.name===name)), rows: Object.fromEntries(a.rows.map(r => [r.txid, r])), now: a.now, ccy: a.ccy,
+    transfers: a.transfers || {}, chainTransfers: (a.spark || []).length ? {} : (a.transfers || {}), links: transferView.links?.[name] || {},
     spark: Object.fromEntries((a.spark || []).map(t => [t.id, t])), pending: pricesPending(a.note) };
 }
 function transferText(f, id) {
@@ -839,7 +887,7 @@ async function fillActivity(name, s) {
   let a; try { a = await invoke('vault_activity', { name, history: s.history.map(h => [h.txid, h.height]), ccy }); }
   catch (e) { clearTimeout(fillLater.t); if (vault && vault.name === name) { $$('#activity .when, #activity .amt, #act-all .when, #act-all .amt').forEach(td => { if (td.textContent === '…') td.textContent = '—'; }); $('#activity-note').textContent = 'Dates and amounts could not be fetched: ' + e; $('#activity-note').hidden = false; } return; }
   if (!vault || vault.name !== name) return;
-  keepActivity(name, a); await refreshTransferLinks();
+  keepActivity(name, a); txFacts[name].history=s.history.map(h=>[h.txid,h.height]); await refreshTransferLinks();
   if (!vault || vault.name !== name) return;
   if (vault.spark) { txList[name] = (a.spark || []).map(t => ({ txid: t.id, height: 0, index: 0 })); paintActivity(); }
   if ($('#s-tx').classList.contains('on')) renderTx();
@@ -848,10 +896,11 @@ async function fillActivity(name, s) {
   renderHomeSummary();
   if (a.note && vault.network === 'mainnet') { $('#activity-note').textContent = a.note; $('#activity-note').hidden = false; }
   // a transfer's other end, fetched once, so this vault's figures treat the move as a move and not a sale
-  const wanted = [...new Set(Object.values(txFacts[name].transfers || {}).flat())].filter(n => !txFacts[n] && store.vaults.some(v => v.name === n));
+  const wanted = [...new Set(Object.values(txFacts[name].transfers || {}).flat())].filter(n => (!txFacts[n] || txFacts[n].stale) && store.vaults.some(v => v.name === n));
   if (wanted.length && !fillActivity.fetching) {
     fillActivity.fetching = true;
-    Promise.all(wanted.map(n => sumInput(n).catch(() => null))).then(() => {
+    loadTransferPeers(wanted).then(failed => {
+      if(failed.length && vault) {$('#activity-note').textContent='Transfer cost history is incomplete. Unlock and refresh: '+failed.join(', ');$('#activity-note').hidden=false;}
       fillActivity.fetching = false; vaultLedger.memo = {};
       if (vault && txFacts[vault.name]) { repaintFacts(txFacts[vault.name]); renderHomeSummary(); if ($('#s-tx').classList.contains('on')) renderTx(); }
     });
@@ -958,6 +1007,7 @@ function actMatch(h, q) {
 }
 function renderActScreen() {
   if (!vault) return;
+  paintTransferProposals();
   const all = txList[vault.name] || [], q = ($('#act-find').value || '').trim().toLowerCase();
   const hits = all.filter(h => actMatch(h, q));
   actFill($('#act-all'), hits.slice(0, actShown));
@@ -1247,15 +1297,16 @@ function renderRecHead() { if (recView.kind === 'coin') renderCoins2(); if (recV
 // ---------- a vault over time: balance, value, and what it cost ----------
 // The ledger is where correctness lives, so it is a plain function of the transactions and nothing else.
 //
-// COST BASIS is average cost, and it MOVES WITH THE COINS. A deposit from outside costs what it was worth when it
+// Cost basis moves with the coins under each of the three methods. A deposit from outside costs what it was worth when it
 // arrived. A spend takes its share of the basis with it. A transfer between two vaults in scope is not a sale and a
 // purchase: the coins' cost goes across with them and only the fee's share is spent — otherwise moving coins between
-// your own vaults would quietly reset their cost to that day's price. Such a transfer is recognised the only reliable
-// way there is: the same transaction appears in more than one vault's history.
+// your own vaults would quietly reset their cost to that day's price. Shared transaction ids and the evidence index join the two legs; amount/time suggestions
+// are joined only after confirmation. Spark has no coin lineage, so its account entries carry dated lots.
 //
 // It is what each deposit was worth on arrival, which is a cost only if the deposit was a purchase. A deposit from a
 // wallet this app does not hold (an exchange, Sparrow) is counted at that day's price because nothing better is known.
-function buildLedger(inputs, method, kinds) {
+function buildLedger(inputs, method, kinds, scope) {
+  const inScope = name => !scope || scope.includes(name);
   method = method || 'average';
   kinds = kinds || {};
   // ---- events: one per transaction, with a leg per vault it touched and the coins it spent and made ----
@@ -1263,7 +1314,7 @@ function buildLedger(inputs, method, kinds) {
   const inputByName = new Map(inputs.map(v => [v.name,v]));
   const eventKey = (v,r) => {
     const l=v.links?.[r.txid], peer=l && inputByName.get(l.peer), pr=peer?.rows.find(x=>x.txid===l.peer_id);
-    if (l && !l.forgotten && !l.own && peer?.network === v.network && pr && r.net*pr.net<0 && (r.net<0 ? -r.net>=pr.net : -pr.net>=r.net)) return 'link:'+l.event;
+    if (l && !l.forgotten && !l.own && peer?.network === v.network && peer.links?.[l.peer_id]?.event === l.event && pr && r.net*pr.net<0 && (r.net<0 ? -r.net>=pr.net : -pr.net>=r.net)) return 'link:'+l.event;
     return (v.network || '') + ':' + r.txid;
   };
   for (const v of inputs) for (const r of v.rows) {
@@ -1272,14 +1323,14 @@ function buildLedger(inputs, method, kinds) {
     const k = eventKey(v,r);
     const e = ev.get(k) || { txid: r.txid, t, legs: [], price: null };
     e.t = Math.min(e.t, t);
-    e.legs.push({ vault: v.name, id:r.txid, net: v.links?.[r.txid]?.own ? 0 : r.net, ins: (r.ins || []).map(x => [...x]), outs: (r.outs || []).map(([n, sats]) => [r.txid + ':' + n, sats]) });
+    e.legs.push({ vault: v.name, id:r.txid, t, price:r.quote?.price || (!r.time ? v.now?.price : null), net: v.links?.[r.txid]?.own ? 0 : r.net, ins: (r.ins || []).map(x => [...x]), outs: (r.outs || []).map(([n, sats]) => [r.txid + ':' + n, sats]) });
     const p = r.quote ? r.quote.price : (!r.time && v.now ? v.now.price : null);
     if (p && !e.price) e.price = p;
     ev.set(k, e);
   }
   for (const e of ev.values()) {
     const outgoing=e.legs.find(l=>l.net<0);
-    if (outgoing) e.txid=outgoing.id;
+    if (outgoing) {e.txid=outgoing.id; e.t=outgoing.t; if(outgoing.price)e.price=outgoing.price;}
   }
   // ---- order: by time; inside one instant, a transaction that spends a coin another one made comes after it (the
   // chain's own order); anything still undecided takes covered spends first, then arrivals, then the rest ----
@@ -1306,14 +1357,14 @@ function buildLedger(inputs, method, kinds) {
   const pools = {};               // average: vault → { sats, basis }
   const realised = {}, sats = {}, timeline = [];
   let internal = 0, unpriced = 0;
-  const heldLots = () => method === 'utxo' ? [...coins.values()].flatMap(c => c.lots) : method === 'fifo' ? Object.values(queues).flat() : null;
-  const basisNow = () => method === 'average' ? Object.values(pools).reduce((a, p) => a + p.basis, 0) : (heldLots().reduce((a, l) => a + (l.cost || 0), 0));
+  const heldLots = () => method === 'utxo' ? [...coins.values()].filter(c => inScope(c.vault)).flatMap(c => c.lots) : method === 'fifo' ? Object.entries(queues).filter(([n]) => inScope(n)).flatMap(([,q]) => q) : null;
+  const basisNow = () => method === 'average' ? Object.entries(pools).filter(([n]) => inScope(n)).reduce((a, [,p]) => a + p.basis, 0) : (heldLots().reduce((a, l) => a + (l.cost || 0), 0));
   const popFifo = (vault, n) => { const q = queues[vault] || (queues[vault] = []), out = []; let need = n;
     while (need > 1e-9 && q.length) { const l = q[0]; if (l.sats <= need + 1e-9) { out.push(q.shift()); need -= l.sats; } else { const f = need / l.sats; out.push({ sats: need, cost: l.cost === null ? null : l.cost * f, t: l.t }); l.sats -= need; if (l.cost !== null) l.cost *= (1 - f); need = 0; } }
     if (need > 1e-9) out.push({ sats: need, cost: null, t: null });   // more left than was known to be held: its cost is unknown, never zero
     return out; };
   for (const e of events) {
-    const before = { sats: Object.values(sats).reduce((a, x) => a + x, 0), basis: basisNow() };
+    const before = { sats: Object.entries(sats).filter(([n]) => inScope(n)).reduce((a, [,x]) => a + x, 0), basis: basisNow() };
     if (method === 'utxo') for (const l of e.legs) {
       if (l.ins.length || l.outs.length || !l.net) continue;
       if (l.net > 0) l.outs = [[l.id + ':account:' + l.vault, l.net]];
@@ -1321,7 +1372,13 @@ function buildLedger(inputs, method, kinds) {
         let need = -l.net, used = 0;
         // Spark exposes amounts, not coin lineage: take its account lots oldest first.
         for (const [op,c] of coins) if (c.vault === l.vault && need > 0) {
-          const n=c.lots.reduce((a,x)=>a+x.sats,0); l.ins.push([op,n]); used+=n; need-=n;
+          const n=c.lots.reduce((a,x)=>a+x.sats,0), take=Math.min(n,need);
+          if(take<n) {
+            const picked=l.id+':slice:'+op;
+            coins.set(picked,{vault:l.vault,lots:scale(c.lots,take/n)});
+            c.lots=scale(c.lots,1-take/n);l.ins.push([picked,take]);
+          } else l.ins.push([op,take]);
+          used+=take;need-=take;
         }
         if (need > 0) { l.ins.push([l.id+':unknown:'+l.vault,need]); used+=need; }
         if (used > -l.net) l.outs.push([l.id+':change:'+l.vault,used+l.net]);
@@ -1375,7 +1432,7 @@ function buildLedger(inputs, method, kinds) {
       pool = left > 0 ? [{ sats: left, cost: outflow > 0 ? leaving * left / outflow : 0, t: null }] : null;
     }
     for (const l of e.legs) sats[l.vault] = (sats[l.vault] || 0) + l.net;
-    if (pool && left > 0) {
+    if (pool && left > 0 && e.legs.some(l => l.net < 0 && inScope(l.vault))) {
       const cost = sumCost(pool), proceeds = e.price ? left / 1e8 * e.price : null;
       const dated = pool.filter(l => l.t !== null);
       // What the person said this spend WAS. Only "my own wallet elsewhere" changes the arithmetic: coins moved
@@ -1386,7 +1443,7 @@ function buildLedger(inputs, method, kinds) {
       if (kinds[e.txid] === 'self') { realised[e.txid].moved = true; realised[e.txid].gain = null; realised[e.txid].proceeds = null; }
     }
     if (realised[e.txid]) for (const l of e.legs) if (l.net < 0) realised[l.id] = realised[e.txid];
-    timeline.push({ t: e.t, txid: e.txid, price: e.price, before, sats: Object.values(sats).reduce((a, x) => a + x, 0), basis: basisNow(), internal: isInternal });
+    timeline.push({ t: e.t, txid: e.txid, price: e.price, before, sats: Object.entries(sats).filter(([n]) => inScope(n)).reduce((a, [,x]) => a + x, 0), basis: basisNow(), internal: isInternal });
   }
   // each coin still held, with the lots its sats came from (meaningful under 'utxo', where coins keep their own history)
   return { coins: Object.fromEntries([...coins].map(([op, c]) => [op, c.lots])), queues, pools, timeline, internal, unpriced, realised, method, perVault: { sats, basis: method === 'average' ? Object.fromEntries(Object.entries(pools).map(([k, p]) => [k, p.basis])) : Object.fromEntries(Object.keys(sats).map(v => [v, (method === 'utxo' ? [...coins.values()].filter(c => c.vault === v).flatMap(c => c.lots) : (queues[v] || [])).reduce((a, l) => a + (l.cost || 0), 0)])) } };
@@ -1415,7 +1472,7 @@ function vaultLedger(name) {
   for (const n of names) for (const [k, rec] of Object.entries((store.vaults.find(x => x.name === n) || {}).more || {}))
     if (k.startsWith('tx:') && rec.disposal && rec.disposal.kind) kinds[k.slice(3)] = rec.disposal.kind;
   const m = methodFor(v), key = m + ':' + inputs.map(i => i.name + ':' + i.rows.length).join(',') + ':' + (f.now ? f.now.price : 0) + ':' + JSON.stringify(kinds);
-  if (!vaultLedger.memo[name] || vaultLedger.memo[name].key !== key) vaultLedger.memo[name] = { key, L: buildLedger(inputs, m, kinds) };
+  if (!vaultLedger.memo[name] || vaultLedger.memo[name].key !== key) vaultLedger.memo[name] = { key, L: buildLedger(inputs, m, kinds, [name]) };
   return vaultLedger.memo[name].L;
 }
 vaultLedger.memo = {};
@@ -1586,10 +1643,10 @@ async function sumInput(name) {
   const v = store.vaults.find(x => x.name === name); if (!v) return null;
   const ccy = v.network === 'mainnet' ? fiatCcy() : '';
   let f = txFacts[name];
-  if (!f || (f.ccy || '') !== ccy) {
+  if (!f || (f.stale && name !== vault?.name) || (f.owner && f.owner !== factOwner(v)) || (f.ccy || '') !== ccy) {
     const s = await invoke('vault_sync', { name });
     const a = await invoke('vault_activity', { name, history: s.history.map(h => [h.txid, h.height]), ccy });
-    f = keepActivity(name, a); await refreshTransferLinks();
+    f = keepActivity(name, a); f.history=s.history.map(h=>[h.txid,h.height]); await refreshTransferLinks();
   }
   return { name, network: v.network, links: f.links, rows: Object.values(f.rows), now: f.now, ccy: f.ccy, pending: f.pending || 0 };
 }
@@ -1609,7 +1666,8 @@ async function renderSummary(box, names, opts = {}) {
   const now = priced ? (inputs.find(i => i.now) || {}).now : null;
   const methods = [...new Set(inputs.map(i => methodFor(store.vaults.find(v => v.name === i.name))))];
   const method = methods.length === 1 ? methods[0] : methodFor(null);
-  const L = buildLedger(inputs, method);
+  const ledgerInputs = linkedNames(names).map(n => ({name:n, network:store.vaults.find(v=>v.name===n)?.network, rows:Object.values(txFacts[n]?.rows || {}), now:txFacts[n]?.now, links:txFacts[n]?.links}));
+  const L = buildLedger(ledgerInputs, method, {}, names);
   const rangeKey = sumPref('range', 'all'), R = SUM_RANGES.find(r => r[0] === rangeKey) || SUM_RANGES[3];
   const to = Math.floor(Date.now() / 1000), first = L.timeline.length ? L.timeline[0].t : to;
   const from = R[2] ? Math.min(to - R[2] * 86400, to - 3600) : Math.max(0, first - Math.max(3600, (to - first) * 0.03));
@@ -1620,7 +1678,7 @@ async function renderSummary(box, names, opts = {}) {
   const nowState = L.timeline.length ? L.timeline[L.timeline.length - 1] : { sats: 0, basis: 0 };
   const value = now ? nowState.sats / 1e8 * now.price : null, gain = value !== null ? value - nowState.basis : null;
   // past prices still on their way: a basis drawn without them is not a small basis, it is an unfinished one
-  const loading = inputs.reduce((n, i) => n + (i.pending || 0), 0), loadingS = loading === 1 ? '' : 's';
+  const loading = linkedNames(names).map(n=>txFacts[n] || {}).reduce((n, i) => n + (i.pending || 0), 0), loadingS = loading === 1 ? '' : 's';
   box.classList.remove('sum-loading');
   box.innerHTML = '';
   const topRow = document.createElement('div'); topRow.className = 'sum-top';
@@ -1666,6 +1724,7 @@ async function renderSummary(box, names, opts = {}) {
   if (priced) notes.push(`Cost is by ${COST_METHODS[method].short}: what each coin was worth when it arrived \u2014 a true cost only if it was a purchase.`);
   if (methods.length > 1) notes.push('These vaults do not all follow the same method, so they are counted here by the app\u2019s; each vault\u2019s own Home shows it by its own.');
   if (L.internal) notes.push(`${L.internal} transfer${L.internal === 1 ? '' : 's'} between these vaults ${L.internal === 1 ? 'was' : 'were'} recognised and counted as a move, not a sale and a purchase: the coins kept their cost.`);
+  if (method === 'utxo' && linkedNames(names).some(n=>store.vaults.find(v=>v.name===n)?.spark)) notes.push('Spark supplies no coin lineage. Its account entries are used oldest first; the chain’s actual inputs are still followed.');
   if (loading) notes.push(`${loading} past price${loadingS} ${loading === 1 ? 'is' : 'are'} still being fetched; cost basis and gains settle as they arrive.`);
   else if (L.unpriced) notes.push(`${L.unpriced} deposit${L.unpriced === 1 ? ' has' : 's have'} no price, so ${L.unpriced === 1 ? 'its' : 'their'} cost is left out rather than guessed.`);
   if (opts.extra) notes.push(opts.extra);
@@ -2615,7 +2674,7 @@ $('#title-input').addEventListener('blur', () => { if (!$('#title-input').hidden
 $('#vault-pdf').onclick = async () => { try { toast('Saved ' + await invoke('vault_pdf', { name: vault.name }), 6000); } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
 // never fall back to `vault.descriptor`: for a rotating vault that is the line WITHOUT its chain code, which restores the wrong addresses
 $('#copy-desc').onclick = async () => { try { if (!vault._recovery) vault._recovery = await invoke('vault_recovery', { name: vault.name }); if (!vault._recovery) throw 'the recovery line could not be read'; await navigator.clipboard.writeText(vault._recovery); toast('Recovery line copied'); } catch (e) { fail(e); } };
-askTwice($('#forget-vault'), 'Forget this vault on this computer? The coins stay on the chain; two sealed keys, or the recovery line and two keys, bring it back.', 'Yes, forget it here', async () => { store = await invoke('vault_forget', { name: vault.name }); vault = null; boot(); });
+askTwice($('#forget-vault'), 'Forget this vault on this computer? The coins stay on the chain; two sealed keys, or the recovery line and two keys, bring it back.', 'Yes, forget it here', async () => { store = await invoke('vault_forget', { name: vault.name }); await refreshTransferLinks(); vault = null; boot(); });
 
 // ---------- setup (enrol) ----------
 function renderSetup() {
@@ -3437,7 +3496,7 @@ $('#vs-rewrite-go').onclick = async () => { const text = $('#vs-rewrite-in').val
   catch (e) { fail(e); } };
 $('#vs-pdf').onclick = () => invoke('vault_pdf', { name: vault.name }).then((p) => toast('Saved to ' + p)).catch(fail);
 $('#vs-rename').onclick = () => { show('home'); setTimeout(() => $('#title-edit').click(), 80); };
-askTwice($('#vs-forget'), 'Forget this vault on this computer? The coins stay on the chain; two sealed keys, or the recovery line and two keys, bring it back.', 'Yes, forget it here', async () => { store = await invoke('vault_forget', { name: vault.name }); vault = null; boot(); });
+askTwice($('#vs-forget'), 'Forget this vault on this computer? The coins stay on the chain; two sealed keys, or the recovery line and two keys, bring it back.', 'Yes, forget it here', async () => { store = await invoke('vault_forget', { name: vault.name }); await refreshTransferLinks(); vault = null; boot(); });
 $('#coins-switch').onclick = () => { try { localStorage.setItem('a2k-coins-tab', coinsTab() ? 'off' : 'on'); } catch {} paintCoinsTab(); };
 // A change of method changes every realised figure, so every ledger is worked out again.
 const methodChanged = () => { vaultLedger.memo = {}; if ($('#s-home').classList.contains('on')) renderHomeSummary(); };
@@ -3551,8 +3610,15 @@ function notice(ev, stay) {
 window.__TAURI__.event.listen('vault-event', (ev) => notice(ev.payload));
 // the background watcher saw a deposit, a spend or a confirmation: refresh what is on screen
 // past prices arrived in the background: redraw the money column from what is now kept (no chain request)
-window.__TAURI__.event.listen('prices-filled', (ev) => { if (vault && ev.payload === vault.name && vault._snap) fillActivity(vault.name, vault._snap); });
+window.__TAURI__.event.listen('prices-filled', async (ev) => {
+  if (vault && ev.payload === vault.name && vault._snap) {fillActivity(vault.name, vault._snap);return;}
+  const name=ev.payload,f=txFacts[name]; if(!f?.history)return;
+  try {const a=await invoke('vault_activity',{name,history:f.history,ccy:f.ccy});const next=keepActivity(name,a);next.history=f.history;await refreshTransferLinks();
+    if(vault) {repaintFacts(txFacts[vault.name]);renderHomeSummary();}
+  } catch {} // an expired reader stays locked; the next explicit refresh can unlock it
+});
 window.__TAURI__.event.listen('vault-changed', (ev) => {
+  if(txFacts[ev.payload]) txFacts[ev.payload].stale=true;
   for (const [k, l] of Object.entries(LIVE)) if (k.startsWith(ev.payload + '|')) l._stale = true;
   if (!vault || ev.payload !== vault.name) { return; }
   vault._stale = true;

@@ -6,21 +6,52 @@ use std::collections::{BTreeMap};
 use std::sync::Mutex;
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-struct Fact { id: String, net: i64, time: u32, counter: String, own: bool }
+struct Fact { id: String, net: i64, time: u32, counter: String, own: bool, #[serde(default)] known: bool }
 #[derive(Clone, Default, Serialize, Deserialize)]
-struct Snapshot { name: String, network: String, identity: String, fingerprint: String, rows: Vec<Fact> }
+struct Snapshot { name: String, network: String, identity: String, #[serde(default)] muun: bool, fingerprint: String, rows: Vec<Fact> }
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Cache { vaults: BTreeMap<String, Snapshot> }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Link { pub peer: String, pub peer_id: String, pub event: String, pub tier: u8, pub forgotten: bool, pub own: bool }
 #[derive(Clone, Default, Serialize)]
-pub struct View { pub links: BTreeMap<String, BTreeMap<String, Link>> }
+pub struct View { pub links: BTreeMap<String, BTreeMap<String, Link>>, pub proposals: Vec<Proposal> }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Candidate { from_key:String, to_key:String, pub from:String, pub to:String, pub from_id:String, pub to_id:String, pub out:u64, pub incoming:u64, pub at:u32, pub arrived:u32 }
+impl Candidate { fn key(&self)->String { pair_key(&self.from_key,&self.from_id,&self.to_key,&self.to_id) } }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Answer { pub yes:bool, pub pair:Candidate }
+#[derive(Clone, Serialize)]
+pub struct Proposal { pub key:String, pub pair:Candidate, pub unique:bool }
 #[derive(Default)]
-struct Index { cache: Cache, active: BTreeMap<String, String>, view: View, builds: usize }
+struct PairCache { fingerprint:(String,String), candidates:Vec<Candidate> }
+// Bucket by amount, then check bounded time. No outflow × all inflows scan.
+fn candidates(ak:&str,a:&Snapshot,bk:&str,b:&Snapshot)->Vec<Candidate> {
+    if a.network != b.network || (a.identity.is_empty() && b.identity.is_empty()) { return vec![]; }
+    let both_spark=!a.identity.is_empty() && !b.identity.is_empty();
+    let allowance=if both_spark {0} else if a.muun || b.muun {1000} else {10000};
+    let after=if both_spark {3600} else {86400};
+    let mut buckets:BTreeMap<(u64,u32),Vec<&Fact>>=BTreeMap::new();
+    for r in &b.rows { if r.net>0 && r.time>0 && !r.own && !r.known { buckets.entry((r.net as u64,r.time)).or_default().push(r); } }
+    let mut result=vec![];
+    for r in &a.rows { if r.net>=0 || r.time==0 || r.own || r.known {continue;}
+        let out=r.net.unsigned_abs();
+        // Each amount bucket is searched by time too. Range bounds limit the amount search to the fee cap.
+        let mut amount=out.saturating_sub(allowance);
+        while let Some((&(n,_),_))=buckets.range((amount,0)..=(out,u32::MAX)).next() {
+            for (_,rs) in buckets.range((n,r.time.saturating_sub(3600))..=(n,r.time.saturating_add(after))) { for other in rs {
+                if r.id == other.id { continue; } // already handled by shared-id evidence
+                result.push(Candidate {from_key:ak.into(),to_key:bk.into(),from:a.name.clone(),to:b.name.clone(),from_id:r.id.clone(),to_id:other.id.clone(),out,incoming:other.net as u64,at:r.time,arrived:other.time});
+            } }
+            if n>=out {break;} amount=n+1;
+        }
+    } result
+}
+#[derive(Default)]
+struct Index { cache: Cache, active: BTreeMap<String, String>, view: View, builds: usize, pairs:BTreeMap<String,PairCache>, answers:BTreeMap<String,Answer>, pair_builds:usize, certain:BTreeMap<String,(String,String,BTreeMap<String,Link>)> }
 static INDEX: Mutex<Option<Index>> = Mutex::new(None);
 fn digest(s: &[u8]) -> String { hex::encode(Sha256::digest(s)) }
 fn key(v: &wallet::Vault) -> String {
-    digest(format!("{}|{}", v.network, v.spark.as_ref().map(|s| s.identity.as_str()).unwrap_or(if v.descriptor.is_empty() { &v.address } else { &v.descriptor })).as_bytes())
+    digest(format!("{}|{}", v.network, v.spark.as_ref().map(|s| s.identity.to_lowercase()).unwrap_or_else(||crate::wallet::identity(v))).as_bytes())
 }
 fn pair_key(a: &str, ai: &str, b: &str, bi: &str) -> String {
     let mut ends = [(a, ai), (b, bi)]; ends.sort();
@@ -29,11 +60,13 @@ fn pair_key(a: &str, ai: &str, b: &str, bi: &str) -> String {
 impl Index {
     fn reconcile(&mut self, s: &wallet::Store, changed: bool) {
         let active: BTreeMap<_, _> = s.vaults.iter().map(|v| (key(v), v.name.clone())).collect();
-        if !changed && active == self.active { return; }
+        if !changed && active == self.active && self.answers == s.transfer_answers { return; }
+        self.answers=s.transfer_answers.clone();
         self.active = active;
         for v in &s.vaults {
             let snap = self.cache.vaults.entry(key(v)).or_default();
             snap.name = v.name.clone(); snap.network = v.network.clone();
+            snap.muun = v.muun.is_some();
             snap.identity = v.spark.as_ref().map(|sp| sp.identity.to_lowercase()).unwrap_or_default();
         }
         self.build();
@@ -41,8 +74,10 @@ impl Index {
     fn build(&mut self) {
         self.builds += 1;
         let mut view = View::default();
+        let roster=digest(&serde_json::to_vec(&self.cache.vaults.iter().map(|(k,v)|(k,&v.name,&v.network,&v.identity,self.active.contains_key(k))).collect::<Vec<_>>()).unwrap());
         for (id, name) in &self.active {
             let a = &self.cache.vaults[id];
+            if let Some((fp,r,links))=self.certain.get(id) { if fp==&a.fingerprint && r==&roster {view.links.insert(name.clone(),links.clone());continue;} }
             let links = view.links.entry(name.clone()).or_default();
             for r in &a.rows {
                 if r.own {
@@ -57,6 +92,40 @@ impl Index {
                 links.insert(r.id.clone(), Link { peer: b.name.clone(), peer_id: r.id.clone(), event: pair_key(id,&r.id,bid,&r.id), tier:1, forgotten:!self.active.contains_key(bid), own:false });
             }
         }
+        for (id,name) in &self.active { self.certain.insert(id.clone(),(self.cache.vaults[id].fingerprint.clone(),roster.clone(),view.links[name].clone())); }
+        // Match only changed vault pairs. Turning cached matches into a view is a cheap index lookup.
+        let keys:Vec<_>=self.active.keys().cloned().collect();
+        for (n,ak) in keys.iter().enumerate() { for bk in keys.iter().skip(n+1) {
+            let a=&self.cache.vaults[ak];let b=&self.cache.vaults[bk];
+            let id=pair_key(ak,"",bk,"");let fp=(a.fingerprint.clone(),b.fingerprint.clone());
+            if self.pairs.get(&id).map(|p| &p.fingerprint)==Some(&fp) {continue;}
+            let mut found=candidates(ak,a,bk,b);found.extend(candidates(bk,b,ak,a));
+            self.pairs.insert(id,PairCache{fingerprint:fp,candidates:found});self.pair_builds+=1;
+        } }
+        // A saved Yes applies only to the same signed amounts and still-existing rows. A changed history cannot
+        // silently inherit an old answer. Forgotten peers retain a plain-language note, not an accounting link.
+        for answer in self.answers.values().filter(|a|a.yes) {
+            let p=&answer.pair;
+            for (key,id,peer,pid,net) in [(&p.from_key,&p.from_id,&p.to_key,&p.to_id,-(p.out as i64)),(&p.to_key,&p.to_id,&p.from_key,&p.from_id,p.incoming as i64)] {
+                let Some(name)=self.active.get(key) else {continue};
+                let Some(a)=self.cache.vaults.get(key) else {continue};
+                if !a.rows.iter().any(|r|&r.id==id && r.net==net) {continue;}
+                let forgotten=!self.active.contains_key(peer);
+                let peer_name=self.active.get(peer).cloned().unwrap_or_else(||if peer==&p.to_key {p.to.clone()}else{p.from.clone()});
+                let valid=forgotten || self.cache.vaults.get(peer).map(|b|b.network==a.network && b.rows.iter().any(|r|&r.id==pid && r.net==if peer==&p.to_key {p.incoming as i64}else{-(p.out as i64)})).unwrap_or(false);
+                if valid { view.links.entry(name.clone()).or_default().entry(id.clone()).or_insert(Link {peer:peer_name,peer_id:pid.clone(),event:p.key(),tier:3,forgotten,own:false}); }
+            }
+        }
+        let mut pending=vec![];
+        for pc in self.pairs.values() { for p in &pc.candidates {
+            if !self.active.contains_key(&p.from_key) || !self.active.contains_key(&p.to_key) || self.answers.contains_key(&p.key()) {continue;}
+            let from=&self.active[&p.from_key];let to=&self.active[&p.to_key];
+            if view.links.get(from).and_then(|m|m.get(&p.from_id)).is_some_and(|l|!l.forgotten) || view.links.get(to).and_then(|m|m.get(&p.to_id)).is_some_and(|l|!l.forgotten) {continue;}
+            let mut p=p.clone();p.from=from.clone();p.to=to.clone();pending.push(p);
+        } }
+        let mut counts:BTreeMap<(String,String),usize>=BTreeMap::new();
+        for p in &pending { *counts.entry((p.from_key.clone(),p.from_id.clone())).or_default()+=1;*counts.entry((p.to_key.clone(),p.to_id.clone())).or_default()+=1; }
+        view.proposals=pending.into_iter().map(|p|Proposal{key:p.key(),unique:counts[&(p.from_key.clone(),p.from_id.clone())]==1 && counts[&(p.to_key.clone(),p.to_id.clone())]==1,pair:p}).collect();
         self.view = view;
     }
     fn ingest(&mut self, v: &wallet::Vault, a: &activity::Activity, s: &wallet::Store) -> bool {
@@ -67,13 +136,13 @@ impl Index {
             let t = raw.get(r.txid.as_str());
             let own = t.map(|t| !identity.is_empty() && t.sender.eq_ignore_ascii_case(&identity) && t.receiver.eq_ignore_ascii_case(&identity)).unwrap_or(false);
             let counter = t.map(|t| if t.direction == "out" {t.receiver.to_lowercase()} else {t.sender.to_lowercase()}).unwrap_or_default();
-            Some(Fact { id:r.txid.clone(),net,time:r.time.unwrap_or(0),counter,own })
+            Some(Fact { id:r.txid.clone(),net,time:r.time.unwrap_or(0),counter,own,known:a.transfers.contains_key(&r.txid) })
         }).collect();
         rows.sort_by(|a,b| a.id.cmp(&b.id));
         let fingerprint = digest(&serde_json::to_vec(&rows).unwrap());
         let id=key(v);
         let changed = self.cache.vaults.get(&id).map(|p| &p.fingerprint) != Some(&fingerprint);
-        if changed { self.cache.vaults.insert(id, Snapshot {name:v.name.clone(),network:v.network.clone(),identity,fingerprint,rows}); }
+        if changed { self.cache.vaults.insert(id, Snapshot {name:v.name.clone(),network:v.network.clone(),identity,muun:v.muun.is_some(),fingerprint,rows}); }
         self.reconcile(s,changed); changed
     }
 }
@@ -93,6 +162,17 @@ pub fn record(v:&wallet::Vault,a:&mut activity::Activity,s:&wallet::Store) {
     });
 }
 pub fn view(s:&wallet::Store)->View { with_index(|i| {i.reconcile(s,false); i.view.clone()}) }
+pub fn answer(key:&str,yes:bool)->Result<wallet::Store,String> {
+    // Lock order is index -> store throughout the matcher; the answer and view advance together.
+    with_index(|i| {
+        let s=wallet::load()?;i.reconcile(&s,false);
+        let p=i.view.proposals.iter().find(|p|p.key==key).ok_or("this suggestion changed; check the refreshed list")?;
+        if yes && !p.unique {return Err("more than one transfer fits; this pair cannot be confirmed".into());}
+        let answer=Answer{yes,pair:p.pair.clone()};
+        let s=wallet::update(|s| {s.transfer_answers.insert(key.to_string(),answer);})?;
+        i.reconcile(&s,false);Ok(s)
+    })
+}
 pub fn clear() { if let Ok(mut g)=INDEX.lock(){*g=None;} }
 
 #[cfg(test)]
@@ -115,6 +195,48 @@ mod tests {
         let mut i=Index::default();assert!(i.ingest(&v,&a,&s));let n=i.builds;
         a.rows[0].quote=Some(activity::Quote{price:100.,basis:"test".into()});assert!(!i.ingest(&v,&a,&s));assert_eq!(i.builds,n);
         a.rows[0].net=Some(11);assert!(i.ingest(&v,&a,&s));a.rows[0].time=Some(2);assert!(i.ingest(&v,&a,&s));
+    }
+    fn snap(name:&str, identity:&str, amounts:&[(i64,u32,&str)])->Snapshot {
+        Snapshot{name:name.into(),network:"mainnet".into(),identity:identity.into(),fingerprint:name.into(),rows:amounts.iter().map(|(n,t,id)|Fact{id:(*id).into(),net:*n,time:*t,..Default::default()}).collect(),..Default::default()}
+    }
+    fn indexed()->Index {
+        let mut i=Index::default();i.active=BTreeMap::from([("a".into(),"A".into()),("b".into(),"B".into())]);
+        i.cache.vaults.insert("a".into(),snap("A","aa",&[(-20000,10000,"out")]));
+        i.cache.vaults.insert("b".into(),snap("B","",&[(19500,10100,"in")]));i.build();i
+    }
+    #[test] fn candidates_are_bounded_by_amount_time_and_network() {
+        let a=snap("A","aa",&[(-20000,10000,"out")]);let mut b=snap("B","bb",&[(20000,13600,"in")]);
+        assert_eq!(candidates("a",&a,"b",&b).len(),1);
+        b.rows[0].time=13601;assert!(candidates("a",&a,"b",&b).is_empty());
+        b.rows[0].time=6400;assert_eq!(candidates("a",&a,"b",&b).len(),1);
+        b.rows[0].time=6399;assert!(candidates("a",&a,"b",&b).is_empty());
+        b.rows[0].time=10000;b.rows[0].net=19999;assert!(candidates("a",&a,"b",&b).is_empty());
+        b.identity.clear();b.rows[0].time=96400;b.rows[0].net=10000;assert_eq!(candidates("a",&a,"b",&b).len(),1);
+        b.rows[0].time=96401;assert!(candidates("a",&a,"b",&b).is_empty());
+        b.rows[0].time=10000;b.rows[0].net=9999;assert!(candidates("a",&a,"b",&b).is_empty());
+        b.rows[0].net=19000;b.muun=true;assert_eq!(candidates("a",&a,"b",&b).len(),1);
+        b.rows[0].net=18999;assert!(candidates("a",&a,"b",&b).is_empty());
+        b.rows[0].net=20000;b.network="signet".into();assert!(candidates("a",&a,"b",&b).is_empty());
+    }
+    #[test] fn uniqueness_is_both_sides_and_answers_survive_rebuild() {
+        let mut i=indexed();assert_eq!(i.view.proposals.len(),1);assert!(i.view.proposals[0].unique);assert!(i.view.links["A"].is_empty());
+        let p=i.view.proposals[0].pair.clone();let key=p.key();
+        i.cache.vaults.get_mut("a").unwrap().rows.push(Fact{id:"out2".into(),net:-20000,time:10000,..Default::default()});i.cache.vaults.get_mut("a").unwrap().fingerprint="changed".into();i.build();
+        assert_eq!(i.view.proposals.len(),2);assert!(i.view.proposals.iter().all(|p|!p.unique));
+        i.answers.insert(key.clone(),Answer{yes:false,pair:p.clone()});i.build();assert_eq!(i.view.proposals.len(),1);assert!(i.view.proposals[0].unique);
+        i.answers.insert(key,Answer{yes:true,pair:p});i.build();assert_eq!(i.view.links["A"]["out"].tier,3);assert!(i.view.proposals.is_empty());
+        i.active.remove("b");i.build();assert!(i.view.links["A"]["out"].forgotten);
+        i.active.insert("b".into(),"Renamed".into());i.build();assert_eq!(i.view.links["A"]["out"].peer,"Renamed");assert!(!i.view.links["A"]["out"].forgotten);
+        i.cache.vaults.get_mut("b").unwrap().rows[0].net=19000;i.build();assert!(!i.view.links["A"].contains_key("out"));
+    }
+    #[test] fn historical_addition_and_only_changed_pairs_are_matched() {
+        let mut i=indexed();let n=i.pair_builds;i.build();assert_eq!(i.pair_builds,n);
+        i.active.insert("c".into(),"C".into());i.cache.vaults.insert("c".into(),snap("C","cc",&[(20000,10001,"historic")]));i.build();assert_eq!(i.pair_builds,n+2);assert!(i.view.proposals.iter().all(|p|!p.unique));
+        i.cache.vaults.get_mut("b").unwrap().fingerprint="different".into();i.build();assert_eq!(i.pair_builds,n+4);
+    }
+    #[test] fn user_answers_round_trip_in_store() {
+        let i=indexed();let p=i.view.proposals[0].pair.clone();let mut s=wallet::Store::default();s.transfer_answers.insert(p.key(),Answer{yes:false,pair:p});
+        let back:wallet::Store=serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();assert_eq!(s.transfer_answers,back.transfer_answers);
     }
     #[test] fn pair_keys_are_symmetric_and_scoped(){assert_eq!(pair_key("a","1","b","2"),pair_key("b","2","a","1"));assert_ne!(pair_key("a","1","b","2"),pair_key("c","1","b","2"));}
 }

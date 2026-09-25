@@ -134,6 +134,8 @@ pub struct Seen { pub txs: std::collections::HashMap<String, i32>, pub coins: st
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Store {
+    /// The person’s answers about transfers; derived matches belong in the encrypted cache.
+    #[serde(default)] pub transfer_answers: std::collections::BTreeMap<String, crate::transfers::Answer>,
     pub vaults: Vec<Vault>,
     pub settings: Settings,
     pub last_psbt: Option<String>,
@@ -430,7 +432,7 @@ struct Derived { fwd: HashMap<u32, ScriptBuf>, rev: HashMap<ScriptBuf, u32> }
 static DERIVED: std::sync::Mutex<Option<HashMap<String, Derived>>> = std::sync::Mutex::new(None);
 static CHAINS: std::sync::Mutex<Option<HashMap<String, Vec<Descriptor<DescriptorPublicKey>>>>> = std::sync::Mutex::new(None);
 /// What a vault's scripts depend on, and nothing else: the same text always derives the same scripts.
-fn identity(v: &Vault) -> String {
+pub(crate) fn identity(v: &Vault) -> String {
     if let Some(w) = &v.watch { return format!("w|{}|{}", w.key, w.kinds.join(",")); }
     if let Some(m) = &v.muun { return format!("m|{}|{}", m.user, m.cosign); }
     match &v.ext { Some(e) => format!("x|{e}"), None => format!("c|{}|{}|{}", v.threshold, v.chain_code.as_deref().unwrap_or(""), v.keys.iter().map(|k| k.pubkey.as_str()).collect::<Vec<_>>().join(",")) }

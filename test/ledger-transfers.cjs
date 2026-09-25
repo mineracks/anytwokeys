@@ -14,3 +14,22 @@ for(const method of ['utxo','fifo','average']) {
  const self=buildLedger([{name:'A',network:'mainnet',rows:[row('deposit',1,100000,100000),row('self',2,-1000)],links:{self:{own:true}}}],method);assert.equal(self.perVault.basis.A,100);assert.equal(Object.keys(self.realised).length,0);
 }
 console.log('PASS all three methods: Spark moves, confirmed distinct ids, proposals unchanged, chain bridge, fee-only disposal, self');
+
+for(const method of ['utxo','fifo','average']) {
+ const ab={peer:'B',peer_id:'bin',event:'ab'},ba={peer:'A',peer_id:'aout',event:'ab'},bc={peer:'C',peer_id:'cin',event:'bc'},cb={peer:'B',peer_id:'bout',event:'bc'};
+ const inputs=[{name:'A',network:'mainnet',links:{aout:ab},rows:[row('deposit',9000,100000,100000),row('aout',10000,-60000)]},{name:'B',network:'mainnet',links:{bin:ba,bout:bc},rows:[row('bin',7000,59000),row('bout',12000,-30000)]},{name:'C',network:'mainnet',links:{cin:cb},rows:[row('cin',12001,29000)]}];
+ const l=buildLedger(inputs,method,{},['C']);assert.ok(Math.abs(l.timeline.at(-1).basis-29)<1e-8,method+' multi-hop / clock skew');assert.equal(l.timeline.at(-1).sats,29000);assert.equal(Object.keys(l.realised).length,0);
+ const a=buildLedger(inputs,method,{},['A']);assert.equal(a.realised.aout.sats,1000);assert.equal(Object.keys(a.realised).length,1);
+ const twice=buildLedger(inputs,method,{},['C']);assert.deepEqual(twice,l,'ledger never mutates its inputs');
+ const cross=buildLedger([{name:'A',network:'mainnet',rows:[row('deposit',1,100000,100000),row('move',2,-60000)]},{name:'B',network:'signet',rows:[row('move',2,60000)]}],method);assert.equal(cross.internal,0,'networks never join');
+ const gone=buildLedger([{...inputs[0],links:{aout:{...ab,forgotten:true}}}],method);assert.equal(gone.realised.aout.sats,60000,'forgotten peer is a plain outflow');
+ const reverse=[{name:'S',network:'mainnet',rows:[row('fund',1,100000,100000),row('x',2,-60000)],links:{x:{peer:'C',peer_id:'y',event:'bridge'}}},{name:'C',network:'mainnet',rows:[{...row('y',3,59000),outs:[[0,59000]]}],links:{y:{peer:'S',peer_id:'x',event:'bridge'}}}];
+ const back=buildLedger(reverse,method);assert.ok(Math.abs(back.perVault.basis.C-59)<1e-8);assert.equal(back.realised.x.sats,1000);
+}
+console.log('PASS: scoped Home/report totals, multi-hop, clock skew, both bridge directions, repeatability, networks, forgotten peer');
+
+{
+ const l=buildLedger([{name:'S',rows:[row('one',1,50000,100000),row('two',2,50000,200000),row('spend',3,-60000)]}],'utxo');
+ assert.ok(Math.abs(l.realised.spend.cost-70)<1e-8);assert.ok(Math.abs(l.perVault.basis.S-80)<1e-8);
+ console.log('PASS: partial Spark account entries retain the unused basis');
+}
