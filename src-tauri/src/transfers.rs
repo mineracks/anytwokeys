@@ -8,9 +8,12 @@ use std::sync::Mutex;
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct Fact { id: String, net: i64, time: u32, counter: String, own: bool, #[serde(default)] known: bool,
     /// for an on-chain outflow: every output value of its transaction — what it PAID, as distinct from the vault's net
-    #[serde(default)] paid: Vec<u64> }
+    #[serde(default)] paid: Vec<u64>,
+    /// where money went, and where it arrived, as (address, sats): an on-chain outflow's outputs; an inflow's own
+    /// outputs; a statement row's one address and amount. The same pair on both sides of two vaults is the same payment.
+    #[serde(default)] paid_to: Vec<(String, u64)>, #[serde(default)] got: Vec<(String, u64)> }
 #[derive(Clone, Default, Serialize, Deserialize)]
-struct Snapshot { name: String, network: String, identity: String, #[serde(default)] muun: bool, fingerprint: String, rows: Vec<Fact> }
+struct Snapshot { name: String, network: String, identity: String, #[serde(default)] muun: bool, #[serde(default)] statement: bool, fingerprint: String, rows: Vec<Fact> }
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Cache { vaults: BTreeMap<String, Snapshot> }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -28,14 +31,19 @@ pub struct Proposal { pub key:String, pub pair:Candidate, pub unique:bool }
 struct PairCache { fingerprint:(String,String), candidates:Vec<Candidate> }
 // Bucket by amount, then check bounded time. No outflow × all inflows scan.
 fn candidates(ak:&str,a:&Snapshot,bk:&str,b:&Snapshot)->Vec<Candidate> {
-    if a.network != b.network || (a.identity.is_empty() && b.identity.is_empty()) { return vec![]; }
+    if a.network != b.network { return vec![]; }
+    // a statement's Lightning rows can only have gone to, or come from, a wallet that speaks Lightning: Spark, or Muun
+    // (whose Lightning shows on-chain). Its on-chain rows are matched by address, never here.
+    if a.statement || b.statement { let (s, o) = if a.statement { (a, b) } else { (b, a) }; if s.statement && o.statement { return vec![]; } if o.identity.is_empty() && !o.muun { return vec![]; } }
+    else if a.identity.is_empty() && b.identity.is_empty() { return vec![]; }
     let both_spark=!a.identity.is_empty() && !b.identity.is_empty();
     let allowance=if both_spark {0} else if a.muun || b.muun {1000} else {10000};
     let after=if both_spark {3600} else {86400};
     let mut buckets:BTreeMap<(u64,u32),Vec<&Fact>>=BTreeMap::new();
-    for r in &b.rows { if r.net>0 && r.time>0 && !r.own && !r.known { buckets.entry((r.net as u64,r.time)).or_default().push(r); } }
+    let lightning = |s: &Snapshot, f: &Fact| !s.statement || (f.paid_to.is_empty() && f.got.is_empty());   // a statement's chain rows sit this out
+    for r in &b.rows { if r.net>0 && r.time>0 && !r.own && !r.known && lightning(b, r) { buckets.entry((r.net as u64,r.time)).or_default().push(r); } }
     let mut result=vec![];
-    for r in &a.rows { if r.net>=0 || r.time==0 || r.own || r.known {continue;}
+    for r in &a.rows { if r.net>=0 || r.time==0 || r.own || r.known || !lightning(a, r) {continue;}
         let out=r.net.unsigned_abs();
         // Each amount bucket is searched by time too. Range bounds limit the amount search to the fee cap.
         let mut amount=out.saturating_sub(allowance);
@@ -76,7 +84,7 @@ impl Index {
         for v in &s.vaults {
             let snap = self.cache.vaults.entry(key(v)).or_default();
             snap.name = v.name.clone(); snap.network = v.network.clone();
-            snap.muun = v.muun.is_some();
+            snap.muun = v.muun.is_some(); snap.statement = v.statement.is_some();
             snap.identity = v.spark.as_ref().map(|sp| sp.identity.to_lowercase()).unwrap_or_default();
         }
         self.build();
@@ -103,6 +111,7 @@ impl Index {
             }
         }
         for (id,name) in &self.active { self.certain.insert(id.clone(),(self.cache.vaults[id].fingerprint.clone(),roster.clone(),view.links[name].clone())); }
+        self.by_address(&mut view);
         // Match only changed vault pairs. Turning cached matches into a view is a cheap index lookup.
         let keys:Vec<_>=self.active.keys().cloned().collect();
         for (n,ak) in keys.iter().enumerate() { for bk in keys.iter().skip(n+1) {
@@ -141,6 +150,30 @@ impl Index {
         view.proposals=pending.into_iter().map(|p|Proposal{key:p.key(),unique:counts[&(p.from_key.clone(),p.from_id.clone())]==1 && counts[&(p.to_key.clone(),p.to_id.clone())]==1,pair:p}).collect();
         self.view = view;
     }
+    /// Certain by address: one vault paid (address, sats) and another received exactly (address, sats), within three
+    /// days — the same payment seen from both ends, whatever their ids. Only when the pair is unique both ways: two
+    /// identical payments to one address are left to be proposed, not assumed. Identity links, already in place, win.
+    fn by_address(&self, view: &mut View) {
+        let keys: Vec<_> = self.active.keys().cloned().collect();
+        for (n, ak) in keys.iter().enumerate() { for bk in keys.iter().skip(n + 1) {
+            let (a, b) = (&self.cache.vaults[ak], &self.cache.vaults[bk]);
+            if a.network != b.network { continue; }
+            for (pk, p, rk, r) in [(ak, a, bk, b), (bk, b, ak, a)] {
+                let mut got: BTreeMap<&(String, u64), Vec<&Fact>> = BTreeMap::new();
+                for f in &r.rows { if f.net > 0 { for g in &f.got { got.entry(g).or_default().push(f); } } }
+                let mut pairs: Vec<(&Fact, &Fact)> = Vec::new();
+                for f in &p.rows { if f.net < 0 { for t in &f.paid_to { if let Some(rs) = got.get(t) { for o in rs { if o.time.abs_diff(f.time) <= 3 * 86400 { pairs.push((f, *o)); } } } } } }
+                let mut out_n: BTreeMap<&str, usize> = BTreeMap::new(); let mut in_n: BTreeMap<&str, usize> = BTreeMap::new();
+                for (f, o) in &pairs { *out_n.entry(&f.id).or_default() += 1; *in_n.entry(&o.id).or_default() += 1; }
+                for (f, o) in pairs {
+                    if out_n[f.id.as_str()] != 1 || in_n[o.id.as_str()] != 1 { continue; }
+                    let event = pair_key(pk, &f.id, rk, &o.id);
+                    view.links.entry(p.name.clone()).or_default().entry(f.id.clone()).or_insert(Link { peer: r.name.clone(), peer_id: o.id.clone(), event: event.clone(), tier: 2, forgotten: false, own: false });
+                    view.links.entry(r.name.clone()).or_default().entry(o.id.clone()).or_insert(Link { peer: p.name.clone(), peer_id: f.id.clone(), event, tier: 2, forgotten: false, own: false });
+                }
+            }
+        } }
+    }
     fn ingest(&mut self, v: &wallet::Vault, a: &activity::Activity, s: &wallet::Store) -> bool {
         let identity = v.spark.as_ref().map(|sp| sp.identity.to_lowercase()).unwrap_or_default();
         let raw: BTreeMap<_,_> = a.spark.iter().map(|t| (t.id.as_str(),t)).collect();
@@ -149,19 +182,35 @@ impl Index {
             let t = raw.get(r.txid.as_str());
             let own = t.map(|t| !identity.is_empty() && t.sender.eq_ignore_ascii_case(&identity) && t.receiver.eq_ignore_ascii_case(&identity)).unwrap_or(false);
             let counter = t.map(|t| if t.direction == "out" {t.receiver.to_lowercase()} else {t.sender.to_lowercase()}).unwrap_or_default();
-            Some(Fact { id:r.txid.clone(),net,time:r.time.unwrap_or(0),counter,own,known:a.transfers.contains_key(&r.txid), paid:Vec::new() })
+            Some(Fact { id:r.txid.clone(),net,time:r.time.unwrap_or(0),counter,own,known:a.transfers.contains_key(&r.txid), paid:Vec::new(), paid_to:Vec::new(), got:Vec::new() })
         }).collect();
-        if identity.is_empty() {
+        if let Some(st) = &v.statement {
+            // a statement row names one address and one amount: what it paid, or what arrived
+            let by_id: BTreeMap<&str, &crate::statement::Row> = st.rows.iter().map(|r| (r.id.as_str(), r)).collect();
+            for f in rows.iter_mut() { if let Some(r) = by_id.get(f.id.as_str()) { if r.layer == "chain" && !r.address.is_empty() {
+                let amount = (f.net.unsigned_abs()).saturating_sub(r.fee);
+                if f.net < 0 { f.paid_to = vec![(r.address.clone(), amount)]; f.paid = vec![amount]; } else { f.got = vec![(r.address.clone(), amount)]; }
+            } } }
+        } else if identity.is_empty() {
             use std::str::FromStr;
+            let net_of = crate::wallet::network_of(&v.network);
             let ids: Vec<(usize, bitcoin::Txid)> = rows.iter().enumerate().filter(|(_, r)| r.net < 0).filter_map(|(i, r)| bitcoin::Txid::from_str(&r.id).ok().map(|t| (i, t))).collect();
             let txs = crate::db::txs(&v.network, &ids.iter().map(|(_, t)| *t).collect::<Vec<_>>());
-            for ((i, _), t) in ids.iter().zip(txs) { if let Some(t) = t { let mut paid: Vec<u64> = t.output.iter().map(|o| o.value.to_sat()).collect(); paid.sort(); paid.dedup(); rows[*i].paid = paid; } }
+            for ((i, _), t) in ids.iter().zip(txs) { if let Some(t) = t {
+                let mut paid: Vec<u64> = t.output.iter().map(|o| o.value.to_sat()).collect(); paid.sort(); paid.dedup(); rows[*i].paid = paid;
+                let mut to: Vec<(String, u64)> = t.output.iter().filter_map(|o| bitcoin::Address::from_script(&o.script_pubkey, net_of).ok().map(|a| (a.to_string().to_lowercase(), o.value.to_sat()))).collect(); to.sort(); rows[*i].paid_to = to;
+            } }
+            // an inflow's own outputs, by address: the activity row already names them by index
+            let outs: BTreeMap<&str, &Vec<(u32, u64)>> = a.rows.iter().map(|r| (r.txid.as_str(), &r.outs)).collect();
+            for f in rows.iter_mut() { if f.net > 0 { if let Some(o) = outs.get(f.id.as_str()) {
+                let mut got: Vec<(String, u64)> = o.iter().filter_map(|(i, s)| crate::wallet::address_at(v, *i).ok().map(|a| (a.to_lowercase(), *s))).collect(); got.sort(); f.got = got;
+            } } }
         }
         rows.sort_by(|a,b| a.id.cmp(&b.id));
         let fingerprint = digest(&serde_json::to_vec(&rows).unwrap());
         let id=key(v);
         let changed = self.cache.vaults.get(&id).map(|p| &p.fingerprint) != Some(&fingerprint);
-        if changed { self.cache.vaults.insert(id, Snapshot {name:v.name.clone(),network:v.network.clone(),identity,muun:v.muun.is_some(),fingerprint,rows}); }
+        if changed { self.cache.vaults.insert(id, Snapshot {name:v.name.clone(),network:v.network.clone(),identity,muun:v.muun.is_some(),statement:v.statement.is_some(),fingerprint,rows}); }
         self.reconcile(s,changed); changed
     }
 }
@@ -252,6 +301,25 @@ mod tests {
         let mut near=snap("Chain","",&[(-2532,10000,"tx")]); near.rows[0].paid=vec![1095,1000];
         k.cache.vaults.insert("c".into(),near); k.cache.vaults.insert("s".into(),snap("Spark","ss",&[(1095,10500,"dep")])); k.build();
         assert_eq!(k.view.proposals.len(),1); assert!(k.view.proposals[0].pair.exact && k.view.proposals[0].unique);
+    }
+    #[test] fn the_same_address_and_amount_on_both_sides_is_one_payment_unless_it_repeats() {
+        let mut i=Index::default();i.active=BTreeMap::from([("s".into(),"Statement".into()),("c".into(),"Chain".into())]);
+        let mut st=snap("Statement","",&[(-21000,10000,"row1"),(-5000,20000,"row2"),(-5000,30000,"row3")]);
+        st.rows[0].paid_to=vec![("bc1qcold".into(),20000)]; st.rows[1].paid_to=vec![("bc1qsame".into(),5000)]; st.rows[2].paid_to=vec![("bc1qsame".into(),5000)];
+        let mut ch=snap("Chain","",&[(20000,10100,"tx1"),(5000,20100,"tx2"),(5000,30100,"tx3"),(20000,9_000_000,"far")]);
+        ch.rows[0].got=vec![("bc1qcold".into(),20000)]; ch.rows[1].got=vec![("bc1qsame".into(),5000)]; ch.rows[2].got=vec![("bc1qsame".into(),5000)]; ch.rows[3].got=vec![("bc1qcold".into(),20000)];
+        i.cache.vaults.insert("s".into(),st); i.cache.vaults.insert("c".into(),ch); i.build();
+        let l=&i.view.links["Statement"]["row1"]; assert_eq!((l.peer.as_str(),l.peer_id.as_str(),l.tier),("Chain","tx1",2),"paid to the address, received at it: one payment, both ways");
+        assert_eq!(i.view.links["Chain"]["tx1"].peer_id,"row1");
+        assert!(!i.view.links["Statement"].contains_key("row2") && !i.view.links["Chain"].contains_key("tx2"),"two identical payments to one address are not assumed");
+        assert!(!i.view.links["Chain"].contains_key("far"),"a receipt three months later is not the same payment");
+    }
+    #[test] fn a_statements_lightning_rows_are_proposed_to_spark_and_muun_only_and_its_chain_rows_never() {
+        let mut i=Index::default();i.active=BTreeMap::from([("s".into(),"Statement".into()),("k".into(),"Spark".into()),("c".into(),"Chain".into())]);
+        let mut st=snap("Statement","",&[(-70,10000,"ln"),(-21000,20000,"chain")]); st.statement=true; st.rows[1].paid_to=vec![("bc1qx".into(),20000)];
+        i.cache.vaults.insert("s".into(),st); i.cache.vaults.insert("k".into(),snap("Spark","kk",&[(70,10300,"in")])); i.cache.vaults.insert("c".into(),snap("Chain","",&[(21000,20300,"got")])); i.build();
+        let p: Vec<_>=i.view.proposals.iter().map(|p|(p.pair.from_id.clone(),p.pair.to_id.clone())).collect();
+        assert_eq!(p,vec![("ln".to_string(),"in".to_string())],"the Lightning row is proposed to the Spark wallet; the chain row is not proposed to anyone: {p:?}");
     }
     #[test] fn a_row_that_arrives_twice_is_one_candidate_and_still_unique() {
         let mut i=indexed();
