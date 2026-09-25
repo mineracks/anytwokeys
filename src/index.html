@@ -362,7 +362,7 @@
                   <div class="row" id="spark-suggest" style="gap:var(--s2);flex-wrap:wrap;min-height:34px" aria-live="polite"></div>
                   <div style="font-size:14px" id="spark-words-count" aria-live="polite"></div></div>
                 <div class="row"><button class="btn" id="spark-words-go">Try an anonymous read</button><button class="btn primary" id="spark-gate">Gate this wallet with a YubiKey</button></div>
-                <details id="spark-discovery-options"><summary>Account discovery options</summary><div class="stack">
+                <details id="spark-discovery-options" class="adv"><summary>Account discovery options</summary><div class="stack">
                   <div class="muted">Start with Spark accounts 0–5. Blitz uses a separate child-wallet scheme; that scheme is not confirmed for Wallet of Satoshi. Scan further ranges only when needed.</div>
                   <label>Scheme<select id="spark-scheme"><option value="direct">Spark account</option><option value="blitz">Blitz derived wallet</option></select></label>
                   <div class="row"><label>First account index<input id="spark-account-start" type="number" min="0" max="2147483647" value="0"></label><label>Number to check<input id="spark-account-count" type="number" min="1" max="20" value="6"></label></div>
@@ -373,11 +373,12 @@
                 <div id="spark-candidates" class="stack" aria-live="polite"></div>
                 <div id="spark-enrollment" class="stack" hidden>
                   <div class="sk-warn" id="spark-selected"></div>
+                  <label>Call this vault<input id="spark-enroll-name" placeholder="Wallet of Satoshi" maxlength="60"></label>
                   <label class="spark-check"><input type="checkbox" id="spark-owner-confirm"> I recognise this wallet's identity and balance/history and want to enrol this reader.</label>
                   <label>Reader YubiKey<select id="spark-card"></select></label>
                   <button class="btn" id="spark-cards-refresh">Refresh plugged-in keys</button>
                   <div class="muted">Use a dedicated card with an empty signature slot, or an existing secp256k1 key with touch locked to FIXED. Only a key generated on the card here is known to have never left it. An existing key may also sign other vaults.</div>
-                  <details><summary>Create a reader key in an empty slot</summary><div class="stack">
+                  <details class="adv"><summary>Create a reader key in an empty slot</summary><div class="stack">
                     <div class="muted">Generates a non-exportable key and locks physical touch on. An occupied slot will be refused.</div>
                     <label>Admin PIN<input type="password" autocomplete="off" id="spark-admin-pin"></label>
                     <button class="btn" id="spark-generate">Generate in the selected empty slot</button>
@@ -389,6 +390,7 @@
                   <div class="muted" id="spark-enroll-note" aria-live="polite"></div>
                 </div>
                 <div class="muted" style="font-size:13px" id="spark-words-note"></div>
+                <div class="row"><button class="btn primary" id="spark-rediscover" hidden>Discover again</button></div>
               </div>
             </details>
 

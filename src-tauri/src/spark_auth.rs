@@ -76,6 +76,7 @@ pub fn derive_identity(words: &str, account: u32, scheme: &str) -> R<Identity> {
     }
 }
 
+#[derive(Clone)]
 pub struct Session { pub operator: String, token: Zeroizing<String>, until: Instant, pub expires: i64, epoch: u64 }
 impl Session { pub fn live(&self) -> bool { Instant::now() < self.until && self.epoch == EPOCH.load(Ordering::SeqCst) } pub(crate) fn token(&self) -> &str { &self.token } }
 fn challenge_digest(p: &Protected, public: &[u8]) -> R<[u8;32]> {
@@ -121,6 +122,7 @@ fn settings(s: &Session, owner: &[u8]) -> R<Setting> {
 
 #[derive(Clone, Serialize)]
 pub struct Candidate { pub id: String, pub account: u32, pub scheme: String, pub identity: String, pub address: String, pub balance: u64, pub private: bool, pub existing_reader: String, pub network: String }
+#[derive(Clone)]
 struct Pending { candidate: Candidate, owner: Session, until: Instant, epoch: u64, discovery: u64 }
 struct Cached { session: std::sync::Arc<Session>, epoch: u64 }
 #[derive(Default)]
@@ -131,6 +133,10 @@ static DISCOVERY: AtomicU64 = AtomicU64::new(0);
 fn runtime() -> &'static Mutex<Runtime> { RUNTIME.get_or_init(|| Mutex::new(Runtime::default())) }
 fn key_for(sp: &wallet::Spark, network: &str) -> String { format!("{network}:{}:{}:{}", sp.identity, sp.reader_pubkey, sp.reader_card) }
 pub fn clear() { EPOCH.fetch_add(1, Ordering::SeqCst); if let Ok(mut r) = runtime().lock() { *r = Runtime::default(); } }
+/// The point of no return for one discovered wallet: once its setting is about to change, or its discovery has
+/// expired, the candidate is not offered again on the same discovery. Until then a wrong PIN, a wrong card or a name
+/// clash leaves it in place for another go within its own lifetime — nothing is extended, and no seed is kept.
+fn consume(id: &str) { if let Ok(mut r) = runtime().lock() { r.pending.remove(id); } }
 pub fn prune() { if let Ok(mut r) = runtime().lock() { r.pending.retain(|_, p| p.until > Instant::now() && p.owner.live()); r.readers.retain(|_, c| c.session.live()); } }
 pub fn cancel_discovery() { DISCOVERY.fetch_add(1, Ordering::SeqCst); if let Ok(mut r) = runtime().lock() { r.pending.clear(); } }
 pub fn session(sp: &wallet::Spark, network: &str) -> R<Option<std::sync::Arc<Session>>> {
@@ -241,8 +247,8 @@ pub fn enroll(candidate_id: String, name: String, reader: String, pubkey: String
     let name = name.trim().to_string();
     if name.is_empty() || name.chars().count() > 60 { return Err("give the wallet a name of up to 60 characters".into()); }
     let store = wallet::load()?;
-    let p = runtime().lock().map_err(|_| "Spark session lock failed")?.pending.remove(&candidate_id).ok_or("discovery expired; enter the words and find the wallet again")?;
-    if p.until <= Instant::now() || !p.owner.live() || (p.epoch != EPOCH.load(Ordering::SeqCst) || p.discovery != DISCOVERY.load(Ordering::SeqCst)) { return Err("discovery expired; find the wallet again".into()); }
+    let p = runtime().lock().map_err(|_| "Spark session lock failed")?.pending.get(&candidate_id).cloned().ok_or("discovery expired; enter the words and find the wallet again")?;
+    if p.until <= Instant::now() || !p.owner.live() || (p.epoch != EPOCH.load(Ordering::SeqCst) || p.discovery != DISCOVERY.load(Ordering::SeqCst)) { consume(&candidate_id); return Err("discovery expired; find the wallet again".into()); }
     let c = checked_card(&reader, &pubkey)?;
     if pubkey == p.candidate.identity { return Err("the reader must be a different key from the wallet owner".into()); }
     if store.vaults.iter().any(|v| v.name == name && v.spark.as_ref().map(|s| s.identity.as_str()) != Some(&p.candidate.identity)) { return Err("that name belongs to another vault".into()); }
@@ -258,6 +264,7 @@ pub fn enroll(candidate_id: String, name: String, reader: String, pubkey: String
     let history = spark::transfers_with(&owner, &p.candidate.network, 10, 0, Some(&p.owner))?.0;
     if balance == 0 && history.is_empty() { return Err("this identity has no visible funds or transfers; enrolment stopped".into()); }
     if p.epoch != EPOCH.load(Ordering::SeqCst) || p.discovery != DISCOVERY.load(Ordering::SeqCst) { return Err("the app locked; enrolment stopped".into()); }
+    consume(&candidate_id);   // from here the wallet may change: this discovery is spent either way
     let update = UpdateSetting { private: if make_private { Some(true) } else { None }, master: Some(reader_key.clone()) };
     spark::rpc(&p.owner.operator, "spark.SparkService", "update_wallet_setting", update.encode_to_vec(), Some(&p.owner))
         .map_err(|e| format!("{e}. The operator may have applied the reader setting; discover again to check it before retrying."))?;

@@ -152,7 +152,7 @@ function renderTabs() {
   const tabs = $('#vault-tabs'); tabs.innerHTML = '';
   for (const v of store.vaults) {
     const d = document.createElement('div'); d.className = 'nav' + (vault && v.name === vault.name ? ' on' : ''); d.style.fontWeight = '600'; d.dataset.vault = v.name;
-    d.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${v.network === 'mainnet' ? 'var(--gold)' : 'var(--signal)'};display:inline-block;flex:0 0 8px"></span><span style="flex-grow:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v.name)}">${esc(v.name)}</span><span class="muted" style="font-size:11px;font-weight:400">${v.keys.length === 1 ? '1 key' : v.threshold + ' of ' + v.keys.length}</span>`;
+    d.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${v.network === 'mainnet' ? 'var(--gold)' : 'var(--signal)'};display:inline-block;flex:0 0 8px"></span><span style="flex-grow:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v.name)}">${esc(v.name)}</span><span class="muted" style="font-size:11px;font-weight:400">${v.spark ? (v.spark.authenticated ? 'YubiKey reader' : 'Watched \u00b7 Spark') : v.muun || v.watch ? 'Watched' : v.keys.length === 1 ? '1 key' : v.threshold + ' of ' + v.keys.length}</span>`;
     d.onclick = () => { vault = v; rememberVault(v); paintNet(); show('home'); };
     tabs.appendChild(d);
   }
@@ -780,7 +780,7 @@ async function fillActivity(name, s) {
   let a; try { a = await invoke('vault_activity', { name, history: s.history.map(h => [h.txid, h.height]), ccy }); }
   catch (e) { clearTimeout(fillLater.t); if (vault && vault.name === name) { $$('#activity .when, #activity .amt, #act-all .when, #act-all .amt').forEach(td => { if (td.textContent === '…') td.textContent = '—'; }); $('#activity-note').textContent = 'Dates and amounts could not be fetched: ' + e; $('#activity-note').hidden = false; } return; }
   if (!vault || vault.name !== name) return;
-  txFacts[name] = { rows: Object.fromEntries(a.rows.map(r => [r.txid, r])), now: a.now, ccy: a.ccy, transfers: a.transfers || {}, spark: Object.fromEntries((a.spark || []).map(t => [t.id, t])) };   // kept by vault NAME and txid, never on the vault object, which is replaced on every store re-read
+  txFacts[name] = { rows: Object.fromEntries(a.rows.map(r => [r.txid, r])), now: a.now, ccy: a.ccy, transfers: a.transfers || {}, spark: Object.fromEntries((a.spark || []).map(t => [t.id, t])), pending: pricesPending(a.note) };   // kept by vault NAME and txid, never on the vault object, which is replaced on every store re-read
   if (vault.spark) { txList[name] = (a.spark || []).map(t => ({ txid: t.id, height: 0, index: 0 })); paintActivity(); }
   if ($('#s-tx').classList.contains('on')) renderTx();
   repaintFacts(txFacts[name]);
@@ -836,7 +836,7 @@ async function sync() {
 function paintVaultCard() {
   if (!vault) return;
   // a watched wallet has no keys HERE, so the card must not read as though it had ("2 of 0 keys sign")
-  $('#vault-kind').textContent = vault.spark ? 'Watched \u00b7 Spark' : vault.muun ? 'Watched' : vault.watch ? 'Watched \u00b7 one key' : vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
+  $('#vault-kind').textContent = vault.spark ? (vault.spark.authenticated ? 'Watched \u00b7 YubiKey reader' : 'Watched \u00b7 Spark') : vault.muun ? 'Watched' : vault.watch ? 'Watched \u00b7 one key' : vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
   $('#vault-keys').textContent = vault.watch ? `From one exported key \u00b7 ${vault.watch.kinds.length > 1 ? 'every kind of address watched' : vault.watch.kinds[0]}` : vault.spark ? 'Told to us by Spark \u2014 these figures are not checked against the chain' : vault.muun ? 'Its keys stay in Muun; this vault only reads the chain' : vault.keys.map(k => k.name).join(' · ');
 }
 function paintSnap(s) {
@@ -1490,6 +1490,8 @@ async function pricesRange(ccy, fromT, toT) {
   return sumRuns[key];
 }
 // What the ledger needs for one vault: its transactions with dates, amounts and prices. The screen usually has it.
+// how many past prices the backend is still fetching for this vault — its own count, from its own note
+const pricesPending = note => { const m = /^Fetching (\d+) past price/.exec(note || ''); return m ? Number(m[1]) : 0; };
 async function sumInput(name) {
   const v = store.vaults.find(x => x.name === name); if (!v) return null;
   const ccy = v.network === 'mainnet' ? fiatCcy() : '';
@@ -1497,9 +1499,9 @@ async function sumInput(name) {
   if (!f || (f.ccy || '') !== ccy) {
     const s = await invoke('vault_sync', { name });
     const a = await invoke('vault_activity', { name, history: s.history.map(h => [h.txid, h.height]), ccy });
-    f = txFacts[name] = { rows: Object.fromEntries(a.rows.map(r => [r.txid, r])), now: a.now, ccy: a.ccy };
+    f = txFacts[name] = { rows: Object.fromEntries(a.rows.map(r => [r.txid, r])), now: a.now, ccy: a.ccy, pending: pricesPending(a.note) };
   }
-  return { name, network: v.network, rows: Object.values(f.rows), now: f.now, ccy: f.ccy };
+  return { name, network: v.network, rows: Object.values(f.rows), now: f.now, ccy: f.ccy, pending: f.pending || 0 };
 }
 async function renderSummary(box, names, opts = {}) {
   const me = (renderSummary.seq = (renderSummary.seq || 0) + 1);
@@ -1527,6 +1529,8 @@ async function renderSummary(box, names, opts = {}) {
   const S = sumSeries(L, from, to, prices, now);
   const nowState = L.timeline.length ? L.timeline[L.timeline.length - 1] : { sats: 0, basis: 0 };
   const value = now ? nowState.sats / 1e8 * now.price : null, gain = value !== null ? value - nowState.basis : null;
+  // past prices still on their way: a basis drawn without them is not a small basis, it is an unfinished one
+  const loading = inputs.reduce((n, i) => n + (i.pending || 0), 0), loadingS = loading === 1 ? '' : 's';
   box.classList.remove('sum-loading');
   box.innerHTML = '';
   const topRow = document.createElement('div'); topRow.className = 'sum-top';
@@ -1543,10 +1547,11 @@ async function renderSummary(box, names, opts = {}) {
   k.appendChild(tile('Holding', sats(nowState.sats) + ' sats', inputs.length > 1 ? `across ${inputs.length} vaults` : ''));
   if (priced && value !== null) {
     k.appendChild(tile('Worth now', money(value, ccy), '1 BTC = ' + money(now.price, ccy)));
-    k.appendChild(tile('Cost basis', money(nowState.basis, ccy), 'what it was worth as it arrived'));
+    k.appendChild(tile('Cost basis', money(nowState.basis, ccy), loading ? `incomplete \u00b7 ${loading} past price${loadingS} still loading` : 'what it was worth as it arrived'));
     const pct = nowState.basis > 0 ? gain / nowState.basis * 100 : null;
     // a status colour, so it goes with a sign and an arrow and never by colour alone
-    k.appendChild(tile('Unrealised', (gain >= 0 ? '▲ +' : '▼ −') + money(Math.abs(gain), ccy), pct === null ? '' : (gain >= 0 ? '+' : '−') + Math.abs(pct).toFixed(1) + '% on cost', gain >= 0 ? 'up' : 'down'));
+    if (loading) k.appendChild(tile('Unrealised', '\u2026', `settles when ${loading === 1 ? 'that price arrives' : 'those prices arrive'}`));
+    else k.appendChild(tile('Unrealised', (gain >= 0 ? '▲ +' : '▼ −') + money(Math.abs(gain), ccy), pct === null ? '' : (gain >= 0 ? '+' : '−') + Math.abs(pct).toFixed(1) + '% on cost', gain >= 0 ? 'up' : 'down'));
     const inR = Object.values(L.realised).filter(x => x.t > from && x.t <= to), known = inR.filter(x => x.gain !== null), rg = known.reduce((a, x) => a + x.gain, 0);
     k.appendChild(tile('Realised', inR.length ? (rg >= 0 ? '▲ +' : '▼ −') + money(Math.abs(rg), ccy) : 'nothing yet', inR.length ? `${inR.length} disposal${inR.length === 1 ? '' : 's'} in this range${known.length < inR.length ? ` \u00b7 ${inR.length - known.length} of unknown cost` : ''}` : 'nothing has left in this range', inR.length ? (rg >= 0 ? 'up' : 'down') : ''));
   }
@@ -1571,7 +1576,8 @@ async function renderSummary(box, names, opts = {}) {
   if (priced) notes.push(`Cost is by ${COST_METHODS[method].short}: what each coin was worth when it arrived \u2014 a true cost only if it was a purchase.`);
   if (methods.length > 1) notes.push('These vaults do not all follow the same method, so they are counted here by the app\u2019s; each vault\u2019s own Home shows it by its own.');
   if (L.internal) notes.push(`${L.internal} transfer${L.internal === 1 ? '' : 's'} between these vaults ${L.internal === 1 ? 'was' : 'were'} recognised and counted as a move, not a sale and a purchase: the coins kept their cost.`);
-  if (L.unpriced) notes.push(`${L.unpriced} deposit${L.unpriced === 1 ? ' has' : 's have'} no price, so ${L.unpriced === 1 ? 'its' : 'their'} cost is left out rather than guessed.`);
+  if (loading) notes.push(`${loading} past price${loadingS} ${loading === 1 ? 'is' : 'are'} still being fetched; cost basis and gains settle as they arrive.`);
+  else if (L.unpriced) notes.push(`${L.unpriced} deposit${L.unpriced === 1 ? ' has' : 's have'} no price, so ${L.unpriced === 1 ? 'its' : 'their'} cost is left out rather than guessed.`);
   if (opts.extra) notes.push(opts.extra);
   const nt = document.createElement('div'); nt.className = 'muted'; nt.style.cssText = 'font-size:12.5px;margin-top:12px'; nt.textContent = notes.join(' '); box.appendChild(nt);
   // a table of the same figures: nothing is reachable only by hovering
@@ -3391,7 +3397,20 @@ function sparkResetEnrollment() {
   $('#spark-discovery-stop').hidden = true;
   $('#spark-enroll-pin').value = ''; $('#spark-admin-pin').value = '';
   $('#spark-owner-confirm').checked = false; $('#spark-replace-reader').checked = false;
+  $('#spark-read').closest('.row').hidden = false; $('#spark-rediscover').hidden = true;
 }
+// a discovery that is spent — expired, or the wallet was touched — is said so, with the one next action, not a form
+// that still looks live
+function sparkDiscoverySpent(msg) {
+  sparkResetEnrollment();
+  $('#spark-words-note').textContent = msg + ' Nothing was saved.';
+  $('#spark-rediscover').hidden = false;
+}
+$('#spark-rediscover').onclick = () => {
+  $('#spark-rediscover').hidden = true; $('#spark-words-note').textContent = '';
+  $('#spark-words-adv').open = true;
+  const first = $('#seed-grid input'); if (first) { first.scrollIntoView({ block: 'center' }); first.focus(); }
+};
 async function sparkCancel() {
   ++sparkDiscoverySeq; seedClear(); sparkResetEnrollment();
   await invoke('spark_discovery_cancel');
@@ -3420,13 +3439,15 @@ $('#spark-gate').onclick = async () => {
     if (seq !== sparkDiscoverySeq) return;
     sparkFound = result.wallets;
     $('#spark-words-note').textContent = `Checked ${result.checked} account(s). The seed words were cleared. ` + (sparkFound.length ? 'Select the identity you recognise; temporary owner sessions expire within ten minutes.' : 'No wallet with funds or history matched. This does not prove your wallet is empty: check the identity and derivation options.') + (result.errors.length ? ` ${result.errors.length} checks failed: ${result.errors.join(' · ')}` : '');
-    $('#spark-candidates').innerHTML = sparkFound.map((c, i) => `<button class="btn" data-spark-candidate="${i}">Account ${c.account} · ${sats(c.balance)} sats · ${c.private ? 'private' : 'public'}<br><span class="mono">${esc(c.identity)}</span></button>`).join('');
+    $('#spark-candidates').innerHTML = sparkFound.map((c, i) => `<button class="btn" data-spark-candidate="${i}">Select \u2192 Account ${c.account} · ${sats(c.balance)} sats · ${c.private ? 'private' : 'public'}<br><span class="mono">${esc(c.identity)}</span></button>`).join('');
     $$('[data-spark-candidate]').forEach(b => b.onclick = async () => {
       if (sparkBusy) return;
       sparkSelected = sparkFound[Number(b.dataset.sparkCandidate)]; const c = sparkSelected;
       $('#spark-selected').textContent = `Selected account ${c.account}: ${sats(c.balance)} sats. Identity ${c.identity}. ${c.balance === 0 ? 'This identity has transfer history but no available balance.' : 'Compare this with the wallet you control.'} ${c.existing_reader ? 'An existing designated reader is set: ' + c.existing_reader : 'No designated reader is set.'}`;
       $('#spark-owner-confirm').checked = false; $('#spark-replace-reader').checked = false; $('#spark-make-private').checked = false;
       $('#spark-replace-row').hidden = !c.existing_reader;
+      $('#spark-enroll-name').value = $('#spark-enroll-name').value || $('#spark-name').value;
+      $('#spark-read').closest('.row').hidden = true;   // one next action: the anonymous read steps out of the way
       $('#spark-enrollment').hidden = false; $('#spark-enroll-note').textContent = '';
       await sparkLoadCards();
     });
@@ -3456,12 +3477,18 @@ $('#spark-enroll').onclick = async () => {
   sparkSetBusy(true); $('#spark-cancel').disabled = true; $('#spark-discovery-stop').disabled = true;
   $('#spark-enroll-note').textContent = 'Touch the YubiKey when it flashes. Then Spark will register the reader and verify its access.';
   try {
-    const request = invoke('spark_enroll', { candidateId: sparkSelected.id, name: $('#spark-name').value.trim() || 'Wallet of Satoshi', reader: c.reader, pubkey: c.pubkey, pin, makePrivate: $('#spark-make-private').checked, replaceReader: $('#spark-replace-reader').checked });
+    const request = invoke('spark_enroll', { candidateId: sparkSelected.id, name: $('#spark-enroll-name').value.trim() || $('#spark-name').value.trim() || 'Wallet of Satoshi', reader: c.reader, pubkey: c.pubkey, pin, makePrivate: $('#spark-make-private').checked, replaceReader: $('#spark-replace-reader').checked });
     pin = ''; const v = await request;
     sparkResetEnrollment(); store = await invoke('store_get'); vault = store.vaults.find(x => x.name === v.name) || v;
     toast('Reader enrolled and verified. Only public references were saved; the seed was not kept.', 8000);
     renderTabs(); show('home');
-  } catch (e) { $('#spark-enroll-note').textContent = String(e) + ' For another attempt, enter the words and discover the wallet again.'; sparkSelected = null; }
+  } catch (e) {
+    // spent (expired, locked, or the wallet may already have changed) → the explicit state; anything before that point
+    // (wrong PIN, wrong card, a name clash) keeps the discovered wallet selected for another go
+    const msg = String(e);
+    if (/discovery expired|find the wallet again|discover again|discover and review again|app locked/i.test(msg)) sparkDiscoverySpent(msg);
+    else { $('#spark-enroll-note').textContent = msg + ' The discovered wallet is still selected: check the card and PIN and try again.'; $('#spark-enroll-pin').focus(); }
+  }
   finally { pin = ''; sparkSetBusy(false); $('#spark-cancel').disabled = false; $('#spark-discovery-stop').disabled = false; }
 };
 window.__TAURI__.event.listen('spark-discovery', ev => { if (sparkBusy) $('#spark-words-note').textContent = `Checking account ${ev.payload.account} (${ev.payload.checked} of ${ev.payload.count})… No wallet settings are changed during discovery.`; });
