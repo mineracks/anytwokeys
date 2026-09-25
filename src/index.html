@@ -309,7 +309,7 @@
     <section id="s-restore" class="screen">
       <div class="grid2 alone" id="restore-grid" style="align-items:start">
         <div style="display:flex;flex-direction:column;gap:14px">
-          <div class="tabs"><div class="on" data-tab="keys">From the keys</div><div data-tab="scan">Scan the sheet</div><div data-tab="paste">Paste the line</div><div data-tab="muun">From a Muun kit</div><div data-tab="spark">From a Spark wallet</div></div>
+          <div class="tabs"><div class="on" data-tab="keys">From the keys</div><div data-tab="scan">Scan the sheet</div><div data-tab="paste">Paste the line</div><div data-tab="muun">From a Muun kit</div><div data-tab="spark">From a Spark wallet</div><div data-tab="statement">From a statement</div></div>
           <div id="tab-keys"><div class="muted" id="seal-read-note">Plug in the keys, together or one after another. Each asks for its own PIN: a sealed key gives up its share only for that, so holding the keys is not enough to see what a vault holds.</div><div id="seal-read-list" style="display:flex;flex-direction:column;gap:10px;margin-top:12px"></div></div>
           <div id="tab-scan" hidden><div class="field" hidden style="margin-bottom:12px"><div class="cap">Camera</div><div class="camrow" id="scan-pick2" role="radiogroup" aria-label="Which camera"></div></div><div class="cam"><video id="cam" autoplay playsinline muted></video><div class="frame"></div></div><div class="muted" style="font-size:13px;margin-top:8px" id="cam-note">Hold the sheet's code in the frame.</div></div>
           <div id="tab-spark" class="stack" hidden>
@@ -449,6 +449,22 @@
             <div class="field"><div class="label">Call this vault</div><input id="spark-name" placeholder="Wallet of Satoshi" maxlength="60"></div>
             <div class="row"><button class="btn" id="spark-read">Watch this wallet</button></div>
             <div class="muted" style="font-size:13px" id="spark-note"></div>
+          </div>
+          <div id="tab-statement" class="stack" hidden>
+            <div class="sk-warn"><b>A wallet that no longer exists still shaped the coins you hold now.</b> Wallet of Satoshi closed its custodial wallet when it moved to self-custody and gave each person their history as a CSV. Read here, that history keeps the coins that left it into your other vaults their origin, their age and their cost. Nothing in it can be spent.</div>
+            <div class="sk-step"><div class="sk-num">1</div><div class="sk-lead"><b>Choose the statement.</b> <span class="muted" style="font-weight:400">The CSV file Wallet of Satoshi gave you. It is read on this computer and never leaves it.</span></div></div>
+            <div class="row"><button class="btn primary" id="stmt-pick">Choose the CSV file…</button></div>
+            <div class="muted" id="stmt-note" aria-live="polite"></div>
+            <div id="stmt-preview" class="stack" hidden>
+              <div class="sk-step"><div class="sk-num">2</div><div class="sk-lead"><b>Check it is your wallet.</b> <span class="muted" style="font-weight:400">What the file says, before anything is kept.</span></div></div>
+              <dl class="tx-dl" id="stmt-facts"></dl>
+              <div id="stmt-recon" class="sk-warn"></div>
+              <div class="chart" id="stmt-chart"></div>
+              <details class="adv"><summary>How the columns were read</summary><div class="muted" id="stmt-columns" style="font-size:13px"></div></details>
+              <div class="sk-step"><div class="sk-num">3</div><div class="sk-lead"><b>Name it and keep it.</b> <span class="muted" style="font-weight:400">Its moves to and from your other vaults are linked on the next refresh.</span></div></div>
+              <div class="field"><div class="label">Call this vault</div><input id="stmt-name" placeholder="Wallet of Satoshi · custodial, closed" maxlength="60"></div>
+              <div class="row"><button class="btn primary" id="stmt-import">Import the statement</button></div>
+            </div>
           </div>
           <div id="tab-muun" class="stack" hidden>
             <div class="muted" style="font-size:13px">Muun has no export, and its Emergency Kit names your keys only by fingerprint — so the Recovery Code is the only way in. Paste both keys from the kit and type the code, and this becomes a <b>watched</b> vault: its keys are unlocked here to read the two account keys, and the halves that could spend are dropped before anything is saved. Spending stays in Muun.</div>

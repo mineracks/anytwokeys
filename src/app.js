@@ -77,16 +77,16 @@ function show(name) {
   $$('.nav[data-go]').forEach(n => n.classList.toggle('on', n.dataset.go === navName));
   // the vault you are in stays lit on every screen that is about it, matching the breadcrumb; not while making another, nor in app settings
   // a watched wallet has no keys here: the screens that would sign are not offered at all
-  const watched = !!(vault && (vault.muun || vault.spark || vault.watch));
+  const watched = !!(vault && (vault.muun || vault.spark || vault.watch || vault.statement));
   // a Spark wallet has no addresses and no coins at all — not hidden screens, absent ones. Only ever HIDDEN here:
   // whether the Coins tab is shown at all is the person's own setting, and this must not undo it.
-  if (vault && vault.spark) for (const go of ['coins', 'addresses']) $$(`.nav[data-go=${go}]`).forEach(n => { n.hidden = true; });
+  if (vault && (vault.spark || vault.statement)) for (const go of ['coins', 'addresses']) $$(`.nav[data-go=${go}]`).forEach(n => { n.hidden = true; });
   else { paintCoinsTab(); $$('.nav[data-go=addresses]').forEach(n => { n.hidden = false; }); }
   // only the ways IN to those screens — the sidebar and Home's own actions. A blanket [data-go] would also
   // un-hide buttons that are hidden for their own reasons elsewhere.
   for (const go of ['send', 'messages', 'keys']) $$(`.nav[data-go=${go}], #s-home [data-go=${go}]`).forEach(n => { n.hidden = watched; });
   // Receive is real for a watched wallet of one key — those addresses ARE its own — but means nothing for Muun or Spark
-  $$('.nav[data-go=receive], #s-home [data-go=receive]').forEach(n => { n.hidden = !!(vault && (vault.muun || vault.spark)); });
+  $$('.nav[data-go=receive], #s-home [data-go=receive]').forEach(n => { n.hidden = !!(vault && (vault.muun || vault.spark || vault.statement)); });
   const inVault = vault && !['setup', 'restore', 'settings', 'overview'].includes(name);
   $$('#vault-tabs .nav').forEach(n => n.classList.toggle('on', !!inVault && n.dataset.vault === vault.name));
   $('#title').textContent = { overview: 'All vaults', home: vault ? vault.name : 'Vault', activity: 'Activity', send: 'Send', receive: 'Receive', coins: 'Coins', addresses: 'Addresses', vault: 'Vault settings', keys: 'Keys', settings: 'App settings', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
@@ -155,7 +155,7 @@ function renderTabs() {
   const tabs = $('#vault-tabs'); tabs.innerHTML = '';
   for (const v of store.vaults) {
     const d = document.createElement('div'); d.className = 'nav' + (vault && v.name === vault.name ? ' on' : ''); d.style.fontWeight = '600'; d.dataset.vault = v.name;
-    d.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${v.network === 'mainnet' ? 'var(--gold)' : 'var(--signal)'};display:inline-block;flex:0 0 8px"></span><span style="flex-grow:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v.name)}">${esc(v.name)}</span><span class="muted" style="font-size:11px;font-weight:400">${v.spark ? (v.spark.authenticated ? 'YubiKey reader' : 'Watched \u00b7 Spark') : v.muun || v.watch ? 'Watched' : v.keys.length === 1 ? '1 key' : v.threshold + ' of ' + v.keys.length}</span>`;
+    d.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${v.network === 'mainnet' ? 'var(--gold)' : 'var(--signal)'};display:inline-block;flex:0 0 8px"></span><span style="flex-grow:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v.name)}">${esc(v.name)}</span><span class="muted" style="font-size:11px;font-weight:400">${v.statement ? 'Statement' : v.spark ? (v.spark.authenticated ? 'YubiKey reader' : 'Watched \u00b7 Spark') : v.muun || v.watch ? 'Watched' : v.keys.length === 1 ? '1 key' : v.threshold + ' of ' + v.keys.length}</span>`;
     d.onclick = () => { if (d.dataset.dragged) return; vault = v; rememberVault(v); paintNet(); show('home'); };
     // drag to reorder — by pointer, not HTML5 drag-and-drop: the window's file-drop handling (attachments) takes
     // every drag session on macOS, so a dragover never reaches the page. The drop goes before or after the row
@@ -373,7 +373,16 @@ async function renderTx() {
   fitNote(); if (renderTx.last !== name + txid) { renderTx.last = name + txid; recSaid(''); }
   renderFiles(); renderCtx();
   $('#tx-chain').open = (() => { try { return localStorage.getItem('a2k-chain-open') === '1'; } catch { return false; } })();
-  $('#tx-explorer').hidden = !!vault.spark; $('#tx-pdf').hidden = !!vault.spark; $('#tx-chain').hidden = !!vault.spark;
+  $('#tx-explorer').hidden = !!(vault.spark || vault.statement); $('#tx-pdf').hidden = !!(vault.spark || vault.statement); $('#tx-chain').hidden = !!(vault.spark || vault.statement);
+  if (vault.statement) {
+    const r = stmtRow(txid), st = $('#tx-status'); st.className = 'state ok'; st.querySelector('span').textContent = r ? `${r.layer === 'chain' ? 'on-chain' : 'Lightning'} \u00b7 from the statement` : 'from the statement';
+    const kind = !r ? '' : r.kind === 'income' ? (r.pos ? 'a sale through the point of sale \u2014 income' : 'a reward \u2014 income') : r.kind === 'received' ? 'received \u2014 a cost only if it was a purchase' : 'paid';
+    $('#tx-dl').innerHTML = [['Transfer', transferText(facts, txid) || 'Outside the watched vaults'], ['Source', `${esc(vault.statement.source)}\u2019s statement \u2014 the custodian\u2019s word; nothing on the chain to check it against`], ['Kind', kind],
+      r ? ['Amount', `${sats(Math.abs(r.net) - r.fee)} sats${r.fee ? ` + ${sats(r.fee)} sats fee` : ''}`] : null,
+      r && r.address ? ['Address', `<span class="mono">${esc(r.address)}</span>`] : null, r && r.hash ? ['Payment hash', `<span class="mono" style="font-size:12px;word-break:break-all">${esc(r.hash)}</span>`] : null,
+      r && r.memo ? ['Memo', esc(r.memo)] : null].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+    $('#tx-proof').textContent = ''; $('#tx-chain-body').innerHTML = ''; return;
+  }
   if (vault.spark) {
     const t = facts.spark?.[txid], st = $('#tx-status'); st.className = 'state ' + (t?.status === 5 ? 'ok' : 'here'); st.querySelector('span').textContent = sparkTransferStatus(t?.status);
     $('#tx-dl').innerHTML = [['Transfer', transferText(facts, txid) || 'Outside the watched vaults'], ['Source', "Spark's word — not verified against the chain"], ['Transfer id', txid], ['From identity', t?.sender || 'unknown'], ['To identity', t?.receiver || 'unknown'], ['Amount', t ? sats(t.sats) + ' sats' : 'unknown'], ['Accounting', t?.status === 5 ? 'Completed transfer included' : 'Not completed; excluded from cost basis']].map(([k,v]) => `<dt>${esc(k)}</dt><dd class="mono">${esc(v)}</dd>`).join('');
@@ -951,8 +960,8 @@ async function sync() {
 function paintVaultCard() {
   if (!vault) return;
   // a watched wallet has no keys HERE, so the card must not read as though it had ("2 of 0 keys sign")
-  $('#vault-kind').textContent = vault.spark ? (vault.spark.authenticated ? 'Watched \u00b7 YubiKey reader' : 'Watched \u00b7 Spark') : vault.muun ? 'Watched' : vault.watch ? 'Watched \u00b7 one key' : vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
-  $('#vault-keys').textContent = vault.watch ? `From one exported key \u00b7 ${vault.watch.kinds.length > 1 ? 'every kind of address watched' : vault.watch.kinds[0]}` : vault.spark ? 'Told to us by Spark \u2014 these figures are not checked against the chain' : vault.muun ? 'Its keys stay in Muun; this vault only reads the chain' : vault.keys.map(k => k.name).join(' · ');
+  $('#vault-kind').textContent = vault.statement ? 'Closed wallet \u00b7 from its statement' : vault.spark ? (vault.spark.authenticated ? 'Watched \u00b7 YubiKey reader' : 'Watched \u00b7 Spark') : vault.muun ? 'Watched' : vault.watch ? 'Watched \u00b7 one key' : vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
+  $('#vault-keys').textContent = vault.statement ? `Read from the statement ${vault.statement.source} gave \u00b7 ${sats(vault.statement.rows.length)} rows \u00b7 nothing here can be spent` : vault.watch ? `From one exported key \u00b7 ${vault.watch.kinds.length > 1 ? 'every kind of address watched' : vault.watch.kinds[0]}` : vault.spark ? 'Told to us by Spark \u2014 these figures are not checked against the chain' : vault.muun ? 'Its keys stay in Muun; this vault only reads the chain' : vault.keys.map(k => k.name).join(' · ');
 }
 function paintSnap(s) {
   { const b = $('#scanbar'); if (b) b.hidden = true; }
@@ -972,6 +981,7 @@ function paintSnap(s) {
     const unconf = s.coins.filter(c => c.height === 0).reduce((a, c) => a + c.value, 0);
     $('#balance-sub').textContent = `${s.coins.length} coin${s.coins.length === 1 ? '' : 's'}` + (unconf ? ` · ${sats(unconf)} unconfirmed` : ' · all confirmed');
     $('#conn').textContent = `Connected to ${s.servers.electrum.replace(/^\w+:\/\//, '')} · block ${sats(s.height)}`;
+    if (vault.statement) { $('#balance-sub').textContent = `closed wallet \u2014 the statement leaves ${sats(vault.statement.closes_at)} sats; its history is kept for the coins that left it`; $('#conn').textContent = 'Off-chain \u00b7 figures from the custodian\u2019s statement, nothing on the chain to check them against'; }
     if (vault.spark) { $('#balance-sub').textContent = vault.spark.authenticated ? 'Spark reports this balance · YubiKey reader' : 'Spark reports this balance · anonymous read'; $('#conn').textContent = 'Off-chain · figures supplied by Spark, not verified against the chain'; }
     $('#activity-note').hidden = true;
     txList[vault.name] = s.history.slice().reverse();
@@ -985,6 +995,10 @@ document.addEventListener('click', (e) => { const a = e.target.closest('[data-tx
 // One row builder for both, so a transaction reads the same wherever it is seen, and fillActivity fills both tables.
 const HOME_ACT = 10, ACT_PAGE = 60;
 function actRowHtml(h) {
+  if (vault?.statement) {
+    const r = stmtRow(h.txid), how = r ? `${r.layer === 'chain' ? 'on-chain' : 'Lightning'} \u00b7 ${r.kind === 'income' ? (r.pos ? 'sale' : 'reward') : r.kind}` : 'from the statement';
+    return `<td class="when muted">…</td><td class="mono">${esc(h.txid.slice(0, 10))}…</td><td>${lblHtml('tx:' + h.txid)}<span class="xfer" data-xfer="${esc(h.txid)}"></span></td><td class="r amt muted">…</td><td class="r">${esc(how)}</td>`;
+  }
   if (vault?.spark) {
     const t = txFacts[vault.name]?.spark?.[h.txid];
     return `<td class="when muted">…</td><td class="mono">${esc(h.txid.slice(0, 10))}…</td><td>${lblHtml('tx:' + h.txid)}<span class="xfer" data-xfer="${esc(h.txid)}"></span></td><td class="r amt muted">…</td><td class="r">${esc(sparkTransferStatus(t?.status))}</td>`;
@@ -1764,6 +1778,47 @@ function renderOverview() {
     empty: names.length ? 'Nothing has arrived in these vaults yet.' : 'Every vault is switched off above. Switch one on to see it.',
     extra: main.length > 1 ? 'Switch a vault off above to leave it out; a transfer from a vault that is switched off then counts as coming from outside.' : '' });
 }
+
+// ---------- a closed custodial wallet, from its statement ----------
+// The rows live in the vault (store_get hands them over); one map per vault object, built once, never on draw.
+function stmtRow(id) { if (!vault || !vault.statement) return null; if (!vault._stmt) vault._stmt = Object.fromEntries((vault.statement.rows || []).map(r => [r.id, r])); return vault._stmt[id] || null; }
+let stmtText = '';
+$('#stmt-pick').onclick = async () => {
+  $('#stmt-note').textContent = ''; $('#stmt-preview').hidden = true;
+  let text; try { text = await invoke('statement_pick'); } catch (e) { if (String(e) !== 'cancelled') $('#stmt-note').textContent = String(e); return; }
+  let p; try { p = await invoke('statement_preview', { text }); } catch (e) { $('#stmt-note').textContent = String(e); return; }
+  stmtText = text;
+  const day = t => new Date(t * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+  $('#stmt-facts').innerHTML = [
+    ['Statement', `${esc(p.source)} · ${sats(p.rows)} rows`],
+    ['Covers', `${day(p.first)} to ${day(p.last)}`],
+    ['Of which', `${sats(p.lightning)} Lightning · ${sats(p.chain)} on-chain${p.pos ? ` · ${sats(p.pos)} through the point of sale` : ''}${p.rewards ? ` · ${sats(p.rewards)} reward${p.rewards === 1 ? '' : 's'}` : ''}`],
+    ['In', `${sats(p.credits)} sats`],
+    ['Out', `${sats(p.debits)} sats, plus ${sats(p.fees)} sats in fees`],
+  ].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+  const dust = Math.abs(p.closes_at) <= 100;
+  $('#stmt-recon').innerHTML = dust
+    ? `<b>✓ It reconciles.</b> In, less out, less the fees on what went out, leaves ${sats(p.closes_at)} sats — a closed wallet, read right.`
+    : `<b>It does not close at zero:</b> the rows leave ${sats(p.closes_at)} sats. Either the export is partial or its fees read differently from Wallet of Satoshi’s. It can still be imported; the figure stays visible on the vault.`;
+  $('#stmt-recon').style.borderLeftColor = dust ? 'var(--signal)' : 'var(--no)';
+  lineChart($('#stmt-chart'), { title: 'Balance, in sats', sub: 'What the wallet held, row by row. If this is the shape you remember, it is your wallet.', from: p.first, to: Math.max(p.last, p.first + 86400),
+    series: [{ name: 'Balance', color: 'var(--series-value)', pts: p.series, step: true, area: true }], fmt: v => sats(Math.round(v)) + ' sats', fmtAxis: v => csats(v) });
+  $('#stmt-columns').textContent = 'utcDate → when (UTC) · type → in or out · currency → Lightning or on-chain · amount, fees → sats, read exactly from the decimal · address → the invoice (its payment hash is kept) or the bitcoin address · description → the row’s label · pointOfSale → a sale, counted as income. A payment’s fee was charged on top of it; a receipt’s fee is what the sender paid and was not deducted.';
+  if (!$('#stmt-name').value) $('#stmt-name').value = 'Wallet of Satoshi · custodial, closed';
+  $('#stmt-preview').hidden = false;
+};
+$('#stmt-import').onclick = async () => {
+  if (!stmtText) return toast('Choose the statement first');
+  const name = $('#stmt-name').value.trim() || 'Wallet of Satoshi · custodial, closed';
+  $('#stmt-import').disabled = true;
+  try {
+    const [v, n] = await invoke('statement_import', { name, text: stmtText });
+    stmtText = ''; $('#stmt-preview').hidden = true;
+    store = await invoke('store_get'); vault = store.vaults.find(x => x.name === v.name) || v; rememberVault(vault);
+    toast(n ? `${sats(n)} row${n === 1 ? '' : 's'} kept. Nothing in this wallet can be spent; its history is here for the coins that left it.` : 'Already here: that statement added nothing new.', 8000);
+    renderTabs(); paintNet(); show('home');
+  } catch (e) { fail(e); } finally { $('#stmt-import').disabled = false; }
+};
 
 // ---------- receive ----------
 // A wallet watched from a plain xpub is watched for every kind of address, and only the wallet that holds the keys
@@ -3096,7 +3151,7 @@ async function readSeals(force) {
 }
 
 // ---------- restore ----------
-function restoreTab(name) { if (name !== 'spark' && restoreTab.now === 'spark') { seedClear(); if (sparkSelected || sparkBusy) sparkCancel().catch(() => {}); } restoreTab.now = name; $$('.tabs div').forEach(x => x.classList.toggle('on', x.dataset.tab === name)); for (const t of ['keys', 'scan', 'paste', 'muun', 'spark']) $('#tab-' + t).hidden = t !== name; $('#sheet-note').hidden = !['scan', 'paste'].includes(name);   // it is about a recovery sheet, and only two of these are
+function restoreTab(name) { if (name !== 'spark' && restoreTab.now === 'spark') { seedClear(); if (sparkSelected || sparkBusy) sparkCancel().catch(() => {}); } restoreTab.now = name; $$('.tabs div').forEach(x => x.classList.toggle('on', x.dataset.tab === name)); for (const t of ['keys', 'scan', 'paste', 'muun', 'spark', 'statement']) $('#tab-' + t).hidden = t !== name; $('#sheet-note').hidden = !['scan', 'paste'].includes(name);   // it is about a recovery sheet, and only two of these are
   // a result from another way in is not about this one: it goes when the choice changes
   if (restoreTab.last && restoreTab.last !== name) { $('#restore-card').innerHTML = ''; parsed = null; }
   restoreTab.last = name;
@@ -3360,7 +3415,7 @@ function renderVaultSettings() {
   $('#vs-facts').innerHTML = [
     ['Name', esc(vault.name)],
     ['Network', vault.network === 'mainnet' ? 'mainnet \u2014 real coins' : esc(vault.network) + ' \u2014 a test network; these coins are worth nothing'],
-    ['Kind', vault.watch ? `watched \u2014 one exported key, ${vault.watch.kinds.length > 1 ? 'every kind of address' : vault.watch.kinds[0]}${vault.watch.sp ? ', and silent payments' : ''}` : vault.spark ? (vault.spark.authenticated ? 'watched \u2014 Spark, through a YubiKey reader' : 'watched \u2014 Spark') : vault.muun ? 'watched \u2014 a Muun wallet' : single ? 'a single key' : `${vault.threshold} of ${n} keys \u2014 any ${vault.threshold} of them sign`],
+    ['Kind', vault.statement ? `a closed custodial wallet, read from the statement ${esc(vault.statement.source)} gave` : vault.watch ? `watched \u2014 one exported key, ${vault.watch.kinds.length > 1 ? 'every kind of address' : vault.watch.kinds[0]}${vault.watch.sp ? ', and silent payments' : ''}` : vault.spark ? (vault.spark.authenticated ? 'watched \u2014 Spark, through a YubiKey reader' : 'watched \u2014 Spark') : vault.muun ? 'watched \u2014 a Muun wallet' : single ? 'a single key' : `${vault.threshold} of ${n} keys \u2014 any ${vault.threshold} of them sign`],
     ['Keys', vault.keys.map(k => esc(k.name)).join(' \u00b7 ')],
     ['Made', vault.created ? new Date(vault.created * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' }) : '\u2014'],
   ].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
@@ -3378,7 +3433,7 @@ function renderVaultSettings() {
     ? '<b>This vault has never been drilled.</b> Until it has, "the keys can recover it" is something you believe rather than something you have seen.'
     : `Last drill: <b>${esc(drillWords(ds))}</b> \u2014 ${ds.days === 0 ? 'today' : sats(ds.days) + ' day' + (ds.days === 1 ? '' : 's') + ' ago'}. ${ds.every ? (ds.due ? 'That is past the ' + sats(ds.every) + ' days you asked for.' : 'The next is due in ' + sats(ds.every - ds.days) + ' day' + (ds.every - ds.days === 1 ? '' : 's') + '.') : 'You have asked not to be reminded.'}`;
   $('#vs-drill-when').classList.toggle('warn', ds.due);
-  $('#vs-drill').hidden = single || !!vault.ext;
+  $('#vs-drill').hidden = single || !!vault.ext || !!(vault.watch || vault.spark || vault.muun || vault.statement);
   if (fixedCards(vault).length) { $('#vs-drill-when').classList.remove('warn'); $('#vs-drill-when').textContent = ''; $('#vs-drill-what').textContent = `To check this vault can be recovered: plug in each card \u2014 the Keys screen shows it plugged in only if it holds this vault\u2019s key; on each signing device, load its seed words and confirm it shows the fingerprint on the Keys screen; then load the wallet descriptor below into a wallet and confirm the first address matches this vault\u2019s.`; }
   else if (vault.ext) { $('#vs-drill-when').classList.remove('warn'); $('#vs-drill-when').textContent = ''; $('#vs-drill-what').textContent = `This vault's keys live on other devices, each from its own seed words, so there are no cards here to drill. To check it can be recovered: on each signing device, load its seed words and confirm it shows the fingerprint on this vault's Keys screen; then load the wallet descriptor below into it and confirm the first address matches this vault's.`; }
   else $('#vs-drill-what').textContent = single
