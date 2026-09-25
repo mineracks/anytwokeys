@@ -13,6 +13,7 @@ input,textarea{-webkit-user-select:text;user-select:text}
 .nav.on{background:var(--gold-soft);color:var(--ink)}
 .nav{touch-action:none;user-select:none;-webkit-user-select:none}
 .nav.dragging{opacity:.45}
+.keyrow.vk[data-key-open]{cursor:pointer} .keyrow.vk[data-key-open]:hover{background:var(--gold-soft)}
 .nav.drop-before{box-shadow:inset 0 2px 0 var(--gold)}
 .nav.drop-after{box-shadow:inset 0 -2px 0 var(--gold)}
 .nav svg{width:18px;height:18px;flex:0 0 18px}

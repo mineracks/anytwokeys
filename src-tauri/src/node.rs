@@ -34,6 +34,8 @@ pub struct Node {
     pub read_at: u64,
     /// the ledger, oldest first
     pub events: Vec<Event>,
+    /// where the last read got to, per list, so the next asks only for what is new (LND: heights and indexes)
+    #[serde(default)] pub marks: std::collections::BTreeMap<String, u64>,
 }
 
 /// One accounting event, in the shape the rest of the app reads (activity rows, the transfer index).
@@ -201,9 +203,8 @@ impl Cln {
         // the ledger keeps one row per id, its amounts summed, its fee summed
         let mut merged: std::collections::BTreeMap<String, Event> = std::collections::BTreeMap::new();
         for e in out { match merged.get_mut(&e.id) { Some(m) => { m.net += e.net; m.fee += e.fee; if m.time == 0 { m.time = e.time; } if m.memo.is_empty() { m.memo = e.memo; } } None => { merged.insert(e.id.clone(), e); } } }
-        let mut rows: Vec<Event> = merged.into_values().filter(|e| e.net != 0 || e.fee != 0).collect();
-        rows.sort_by_key(|e| (e.time, e.id.clone()));
-        Ok(rows)
+        let rows: Vec<Event> = merged.into_values().filter(|e| e.net != 0 || e.fee != 0).collect();
+        Ok(fold_routed(rows))
     }
 }
 
@@ -333,9 +334,84 @@ impl Lnd {
             let time = { let ns = n(f, "timestamp_ns"); if ns > 0 { (ns / 1_000_000_000) as u32 } else { n(f, "timestamp") as u32 } };
             out.push(Event { id: format!("routed:{time}:{k}"), time, net: fee, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "routed".into(), memo: String::new() });
         }
-        out.sort_by_key(|e| (e.time, e.id.clone()));
-        Ok(out)
+        Ok(fold_routed(out))
     }
+    /// What is new since the marks: transactions from a little below the last height, invoices and payments past
+    /// their indexes, forwards after the last one seen. The marks to keep are returned with the events.
+    pub fn events_since(&self, marks: &std::collections::BTreeMap<String, u64>) -> R<(Vec<Event>, std::collections::BTreeMap<String, u64>)> {
+        let m = |k: &str| marks.get(k).copied().unwrap_or(0);
+        if marks.is_empty() { let ev = self.events()?; return Ok((ev.clone(), self.marks_after(&ev)?)); }
+        let n = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str().and_then(|s| s.parse::<i64>().ok()).or_else(|| x.as_i64())).unwrap_or(0);
+        let s = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let arr = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_array()).cloned().unwrap_or_default();
+        use bitcoin::base64::{engine::general_purpose::STANDARD, Engine};
+        let mut opens = std::collections::HashSet::new(); let mut closes = std::collections::HashSet::new();
+        for c in arr(&self.get("/v1/channels")?, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } }
+        for c in arr(&self.get("/v1/channels/closed")?, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } let ct = s(&c, "closing_tx_hash").to_lowercase(); if !ct.is_empty() { closes.insert(ct); } }
+        let mut out = Vec::new();
+        let from_height = m("height").saturating_sub(6);
+        for t in arr(&self.get(&format!("/v1/transactions?start_height={from_height}"))?, "transactions") {
+            let txid = s(&t, "tx_hash").to_lowercase(); let amount = n(&t, "amount"); let fee = n(&t, "total_fees").max(0) as u64; let time = n(&t, "time_stamp") as u32;
+            if txid.is_empty() { continue; }
+            let (layer, kind, net) = if opens.contains(&txid) { ("channel", "open", -(fee as i64)) } else if closes.contains(&txid) { ("channel", "close", 0) } else if amount >= 0 { ("chain", "deposit", amount) } else { ("chain", "withdrawal", amount) };
+            if net == 0 && fee == 0 && layer != "channel" { continue; }
+            out.push(Event { id: txid.clone(), time, net, fee: if amount < 0 || layer == "channel" { fee } else { 0 }, layer: layer.into(), txid, hash: String::new(), kind: kind.into(), memo: s(&t, "label") });
+        }
+        let inv_from = m("invoice").saturating_sub(200);   // an invoice settles after it is added: look a little way back
+        for i in arr(&self.get(&format!("/v1/invoices?index_offset={inv_from}&num_max_invoices=100000"))?, "invoices") {
+            if s(&i, "state") != "SETTLED" && i.get("settled").and_then(|x| x.as_bool()) != Some(true) { continue; }
+            let hash = STANDARD.decode(s(&i, "r_hash")).map(hex::encode).unwrap_or_default();
+            let amt = n(&i, "amt_paid_sat"); if amt <= 0 || hash.is_empty() { continue; }
+            out.push(Event { id: hash.clone(), time: n(&i, "settle_date") as u32, net: amt, fee: 0, layer: "lightning".into(), txid: String::new(), hash, kind: "received".into(), memo: s(&i, "memo") });
+        }
+        for p in arr(&self.get(&format!("/v1/payments?include_incomplete=false&index_offset={}&max_payments=100000", m("payment")))?, "payments") {
+            if s(&p, "status") != "SUCCEEDED" { continue; }
+            let hash = s(&p, "payment_hash").to_lowercase(); let amt = n(&p, "value_sat"); let fee = n(&p, "fee_sat").max(0) as u64;
+            let time = { let ns = n(&p, "creation_time_ns"); if ns > 0 { (ns / 1_000_000_000) as u32 } else { n(&p, "creation_date") as u32 } };
+            if hash.is_empty() { continue; }
+            out.push(Event { id: format!("{hash}:out"), time, net: -(amt + fee as i64), fee, layer: "lightning".into(), txid: String::new(), hash, kind: "paid".into(), memo: String::new() });
+        }
+        let fw = self.post("/v1/switch", serde_json::json!({ "start_time": (m("forward") + 1).to_string(), "num_max_events": 50000 }))?;
+        for (k, f) in arr(&fw, "forwarding_events").iter().enumerate() {
+            let fee = n(f, "fee"); if fee <= 0 { continue; }
+            let time = { let ns = n(f, "timestamp_ns"); if ns > 0 { (ns / 1_000_000_000) as u32 } else { n(f, "timestamp") as u32 } };
+            out.push(Event { id: format!("routed:{time}:{k}"), time, net: fee, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "routed".into(), memo: String::new() });
+        }
+        let ev = fold_routed(out);
+        let mut marks = self.marks_after(&ev)?;
+        // a read with no new forwards keeps the forward mark it had, or the next read would fetch them all again
+        if marks.get("forward").copied().unwrap_or(0) < m("forward") { marks.insert("forward".into(), m("forward")); }
+        Ok((ev, marks))
+    }
+    /// The marks a read leaves: the chain tip, the last invoice and payment indexes, the last forward's time.
+    fn marks_after(&self, ev: &[Event]) -> R<std::collections::BTreeMap<String, u64>> {
+        let n = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str().and_then(|s| s.parse::<u64>().ok()).or_else(|| x.as_u64())).unwrap_or(0);
+        let mut marks = std::collections::BTreeMap::new();
+        marks.insert("height".into(), n(&self.get("/v1/getinfo")?, "block_height"));
+        let inv = self.get("/v1/invoices?reversed=true&num_max_invoices=1")?; marks.insert("invoice".into(), n(&inv, "last_index_offset"));
+        let pay = self.get("/v1/payments?include_incomplete=true&reversed=true&max_payments=1")?; marks.insert("payment".into(), n(&pay, "last_index_offset"));
+        marks.insert("forward".into(), ev.iter().filter(|e| e.kind == "routed").map(|e| e.time as u64).max().unwrap_or(0));
+        Ok(marks)
+    }
+}
+
+/// Routing fees are many and small: one row per UTC day carries the day's total, its time the last forward's.
+pub fn fold_routed(mut ev: Vec<Event>) -> Vec<Event> {
+    let mut days: std::collections::BTreeMap<u32, (i64, u32)> = std::collections::BTreeMap::new();
+    ev.retain(|e| { if e.kind == "routed" { let d = days.entry(e.time / 86400).or_insert((0, 0)); d.0 += e.net; d.1 = d.1.max(e.time); false } else { true } });
+    for (day, (net, time)) in days { if net != 0 { ev.push(Event { id: format!("routed:{day}"), time, net, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "routed".into(), memo: String::new() }); } }
+    ev.sort_by_key(|e| (e.time, e.id.clone()));
+    ev
+}
+
+/// New events folded into a ledger already held: a row seen again replaces its earlier reading (a transaction
+/// confirmed, an invoice settled); a day's routing row adds to what the day already had.
+pub fn merge_events(have: &[Event], new: Vec<Event>) -> Vec<Event> {
+    let mut by_id: std::collections::BTreeMap<String, Event> = have.iter().map(|e| (e.id.clone(), e.clone())).collect();
+    for e in new { if e.kind == "routed" { if let Some(h) = by_id.get_mut(&e.id) { h.net += e.net; h.time = h.time.max(e.time); continue; } } by_id.insert(e.id.clone(), e); }
+    let mut out: Vec<Event> = by_id.into_values().collect();
+    out.sort_by_key(|e| (e.time, e.id.clone()));
+    out
 }
 
 // ---------- the sealed credential ----------
@@ -369,7 +445,15 @@ mod tests {
         assert!(!ev.is_empty()); assert!(ev.windows(2).all(|w| w[0].time <= w[1].time));
         let kinds: std::collections::BTreeMap<&str, usize> = ev.iter().fold(Default::default(), |mut m, e| { *m.entry(e.kind.as_str()).or_default() += 1; m });
         eprintln!("{alias} {version} height {height} · on-chain {onchain} · channels {channels} ({n}) · pending {pending} · events {} {:?} · pin {} · refused {}", ev.len(), kinds, c.seen_pin(), refused.len());
+        // the incremental read: from the marks a full read leaves, a second read brings back nothing new (or nearly)
+        let (first, marks) = c.events_since(&Default::default()).unwrap();
+        let t0 = std::time::Instant::now();
+        let (again, marks2) = c.events_since(&marks).unwrap();
+        eprintln!("first read {} rows; marks {:?}; again {} rows in {:.1}s; marks after {:?}", first.len(), marks, again.len(), t0.elapsed().as_secs_f64(), marks2);
+        assert!(again.len() <= 12, "a refresh with nothing new re-reads only the transactions near the tip: {}", again.len());
+        assert_eq!(node_merge_len(&first, again.clone()), first.len(), "merging what was re-read adds nothing");
     }
+    fn node_merge_len(have: &[Event], new: Vec<Event>) -> usize { merge_events(have, new).len() }
     /// The real node, named by A2K_CLN_URL and a rune file at A2K_CLN_RUNE: read-only proved, info, funds, the ledger.
     #[test] #[ignore]
     fn the_real_node_reads_and_the_rune_cannot_spend() {
@@ -388,6 +472,18 @@ mod tests {
         let ln: Vec<_> = ev.iter().filter(|e| e.layer == "lightning" && e.kind != "routed").collect();
         let hashed = ln.iter().filter(|e| e.hash.len() == 64).count();
         assert!(hashed * 20 >= ln.len() * 19, "{hashed} of {} Lightning events name their payment hash (a channel push has none)", ln.len());
+    }
+    #[test]
+    fn routing_fees_fold_into_one_row_per_day_and_merge_adds_to_it() {
+        let r = |t: u32, id: &str, net: i64| Event { id: id.into(), time: t, net, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "routed".into(), memo: String::new() };
+        let ev = fold_routed(vec![r(86400 * 100 + 10, "a", 3), r(86400 * 100 + 50, "b", 4), r(86400 * 101 + 1, "c", 5)]);
+        assert_eq!(ev.iter().map(|e| (e.id.as_str(), e.net, e.time)).collect::<Vec<_>>(), vec![("routed:100", 7, 86400 * 100 + 50), ("routed:101", 5, 86400 * 101 + 1)]);
+        let later = fold_routed(vec![r(86400 * 101 + 900, "d", 2)]);
+        let all = merge_events(&ev, later);
+        assert_eq!(all.iter().map(|e| (e.id.as_str(), e.net)).collect::<Vec<_>>(), vec![("routed:100", 7), ("routed:101", 7)], "a day's row grows; nothing is counted twice");
+        let paid = Event { id: "h:out".into(), time: 5, net: -70, fee: 1, layer: "lightning".into(), txid: String::new(), hash: "h".into(), kind: "paid".into(), memo: String::new() };
+        let again = merge_events(&[paid.clone()], vec![Event { net: -71, ..paid.clone() }]);
+        assert_eq!(again.len(), 1); assert_eq!(again[0].net, -71, "a row seen again is replaced, not added");
     }
     #[test]
     fn an_lnd_credential_is_hex_base64_or_an_lndconnect_link() {

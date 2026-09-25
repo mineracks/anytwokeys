@@ -577,9 +577,42 @@ fn spark_vault(mut s: Store, name: String, address: String, identity: String, ne
     Ok(v)
 }
 
+// ---------- a key's card: shown after the person proves presence ----------
+
+/// What a key's card holds — where it is kept, photos of it, notes on who knows — is a map to the custody, so it is
+/// shown only after Touch ID (or the Mac's password), or after one of this vault's keys signs a fresh random digest
+/// with its PIN and touch: proof the key is in hand, not just its name known. Everything is sealed on disk already;
+/// this is about the screen, in a room. Returns when the proof lapses (ten minutes), for the window's own clock.
+#[tauri::command]
+async fn key_card_open(name: String, reader: Option<String>, pin: Option<String>) -> R<u64> {
+    let pin = pin.map(zeroize::Zeroizing::new);
+    block(move || {
+        let s = wallet::load()?;
+        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
+        match (reader, pin) {
+            (Some(reader), Some(pin)) => {
+                use std::str::FromStr;
+                let card = cards::list().map_err(|e| e.to_string())?.into_iter().find(|c| c.reader == reader).ok_or("that key is no longer plugged in")?;
+                let pub_hex = card.pubkey.ok_or("this key has no signing key")?;
+                if !v.keys.iter().any(|k| k.pubkey == pub_hex) { return Err("that is not one of this vault's keys".into()); }
+                let digest: [u8; 32] = lockbox::random();
+                let (r, sg) = cards::sign_digest(&reader, &pin, &digest).map_err(|e| e.to_string())?;
+                let mut compact = [0u8; 64]; compact[..32].copy_from_slice(&r); compact[32..].copy_from_slice(&sg);
+                let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+                let sig = bitcoin::secp256k1::ecdsa::Signature::from_compact(&compact).map_err(|_| "the key's signature could not be read")?;
+                let pk = bitcoin::secp256k1::PublicKey::from_str(&pub_hex).map_err(|_| "this key's public key is damaged")?;
+                secp.verify_ecdsa(&bitcoin::secp256k1::Message::from_digest(digest), &sig, &pk).map_err(|_| "the key did not prove itself: its signature does not match its public key")?;
+            }
+            _ => lockbox::mac::presence("show this key's card")?,
+        }
+        Ok(now() + 600)
+    }).await
+}
+
 // ---------- a Lightning node the person runs (node.rs) ----------
 
 /// Open the node with a credential, prove the credential read-only, and read it. Nothing is kept.
+thread_local! { static LND_MARKS: std::cell::RefCell<std::collections::BTreeMap<String, u64>> = std::cell::RefCell::new(Default::default()); }
 fn node_check_with(kind: &str, url: &str, cred: &str, pin: &str) -> R<(node::Check, node::Node)> {
     let (refused, (alias, pubkey, version, network, height), (onchain, channels, pending, channel_count), events, pin_seen, url) = match kind {
         "cln" => { let c = node::Cln::open(url, cred, pin)?; (c.prove_read_only(cred.trim())?, c.info()?, c.funds()?, c.events()?, c.seen_pin(), url.trim().trim_end_matches('/').to_string()) }
@@ -588,12 +621,16 @@ fn node_check_with(kind: &str, url: &str, cred: &str, pin: &str) -> R<(node::Che
             let url = lc.url.clone().unwrap_or_else(|| url.trim().to_string());
             let pin = if !pin.is_empty() { pin.to_string() } else { lc.pin.clone().unwrap_or_default() };
             let c = node::Lnd::open(&url, &lc.macaroon_hex, &pin)?;
-            (c.prove_read_only()?, c.info()?, c.funds()?, c.events()?, c.seen_pin(), url.trim_end_matches('/').to_string())
+            let (ev, marks) = c.events_since(&Default::default())?;
+            let out = (c.prove_read_only()?, c.info()?, c.funds()?, ev, c.seen_pin(), url.trim_end_matches('/').to_string());
+            LND_MARKS.with(|m| *m.borrow_mut() = marks);
+            out
         }
         _ => return Err("the node is Core Lightning or LND".into()),
     };
     if network != "bitcoin" && network != "mainnet" { return Err(format!("this node is on {network}, not mainnet")); }
-    let n = node::Node { kind: kind.into(), url: url.clone(), pin: if pin.is_empty() { pin_seen.clone() } else { pin.replace(':', "").to_lowercase() }, alias: alias.clone(), pubkey: pubkey.clone(), version: version.clone(), onchain, channels, pending, read_at: now(), events: events.clone() };
+    let marks = if kind == "lnd" { LND_MARKS.with(|m| std::mem::take(&mut *m.borrow_mut())) } else { Default::default() };
+    let n = node::Node { kind: kind.into(), url: url.clone(), pin: if pin.is_empty() { pin_seen.clone() } else { pin.replace(':', "").to_lowercase() }, alias: alias.clone(), pubkey: pubkey.clone(), version: version.clone(), onchain, channels, pending, read_at: now(), events: events.clone(), marks };
     Ok((node::Check { kind: kind.into(), alias, pubkey, version, network, height, onchain, channels, pending, channel_count, refused, pin: pin_seen, events: events.len() }, n))
 }
 #[tauri::command]
@@ -629,8 +666,27 @@ async fn node_add(name: String, kind: String, url: String, cred: String, pin: St
 /// A fresh read of a node already here, with its sealed credential and its pinned certificate.
 fn node_read(n: &node::Node) -> R<node::Node> {
     let cred = node::cred(&node::id_of(&n.url, &n.pubkey))?;
-    let (_, fresh) = node_check_with(&n.kind, &n.url, &cred, &n.pin)?;
-    if fresh.pubkey != n.pubkey { return Err(format!("the node at {} is not the one this vault watches (a different identity answered)", n.url)); }
+    let mut fresh = n.clone();
+    match n.kind.as_str() {
+        "lnd" => {
+            // only what is new since the marks: the whole ledger is read once, at Watch, and grown from then on
+            let c = node::Lnd::open(&n.url, &cred, &n.pin)?;
+            let (_, pubkey, version, _, _) = c.info()?;
+            if pubkey != n.pubkey { return Err(format!("the node at {} is not the one this vault watches (a different identity answered)", n.url)); }
+            let (onchain, channels, pending, _) = c.funds()?;
+            let (new, marks) = c.events_since(&n.marks)?;
+            fresh.events = node::merge_events(&n.events, new); fresh.marks = marks;
+            fresh.onchain = onchain; fresh.channels = channels; fresh.pending = pending; fresh.version = version; fresh.read_at = now();
+        }
+        _ => {
+            // the bookkeeper's income view is one call, whole: read it, fold it, keep it
+            let c = node::Cln::open(&n.url, &cred, &n.pin)?;
+            let (_, pubkey, version, _, _) = c.info()?;
+            if pubkey != n.pubkey { return Err(format!("the node at {} is not the one this vault watches (a different identity answered)", n.url)); }
+            let (onchain, channels, pending, _) = c.funds()?;
+            fresh.events = c.events()?; fresh.onchain = onchain; fresh.channels = channels; fresh.pending = pending; fresh.version = version; fresh.read_at = now();
+        }
+    }
     Ok(fresh)
 }
 
@@ -2184,7 +2240,7 @@ fn seal_restore(id: String, name: String, found: Vec<Found>) -> R<Vault> {
 // ---------- labels (BIP 329) ----------
 #[tauri::command]
 async fn label_set(name: String, key: String, label: String) -> R<Store> {
-    if !(key.starts_with("addr:") || key.starts_with("tx:") || key.starts_with("out:")) { return Err("label key must be addr:, tx: or out:".into()); }
+    if !(key.starts_with("addr:") || key.starts_with("tx:") || key.starts_with("out:") || key.starts_with("key:")) { return Err("label key must be addr:, tx:, out: or key:".into()); }
     let nm = name.clone();
     wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) {
         let label = label.trim().to_string();
@@ -2198,7 +2254,7 @@ async fn label_set(name: String, key: String, label: String) -> R<Store> {
 /// The long note on a transaction, an address or a coin. It rides in the same synced record as the label.
 #[tauri::command]
 async fn note_set(name: String, key: String, note: String) -> R<Store> {
-    if !(key.starts_with("addr:") || key.starts_with("tx:") || key.starts_with("out:")) { return Err("note key must be addr:, tx: or out:".into()); }
+    if !(key.starts_with("addr:") || key.starts_with("tx:") || key.starts_with("out:") || key.starts_with("key:")) { return Err("note key must be addr:, tx:, out: or key:".into()); }
     if note.chars().count() > 20_000 { return Err("a note holds up to 20,000 characters".into()); }
     let nm = name.clone();
     wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) {
@@ -2214,7 +2270,7 @@ async fn note_set(name: String, key: String, note: String) -> R<Store> {
 #[derive(Serialize)]
 struct Attached { store: Store, added: usize, notes: Vec<String>, errors: Vec<String> }
 
-fn record_key_ok(key: &str) -> R<()> { if key.starts_with("addr:") || key.starts_with("tx:") || key.starts_with("out:") { Ok(()) } else { Err("the record key must be addr:, tx: or out:".into()) } }
+fn record_key_ok(key: &str) -> R<()> { if key.starts_with("addr:") || key.starts_with("tx:") || key.starts_with("out:") || key.starts_with("key:") { Ok(()) } else { Err("the record key must be addr:, tx: or out:".into()) } }
 
 async fn attach_into(name: String, key: String, items: Vec<(String, Vec<u8>)>, keep_original: bool, mut errors: Vec<String>) -> R<Attached> {
     record_key_ok(&key)?;
@@ -2636,7 +2692,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
-            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
+            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
         .build(tauri::generate_context!())

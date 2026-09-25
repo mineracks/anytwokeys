@@ -98,6 +98,7 @@ function show(name) {
   if (checkNode.net !== (vault ? vault.network : store.settings.network)) checkNode();
   if (!['tx', 'addresses', 'coins'].includes(name) && $('#tx-notes').parentElement !== recHome) recHome.appendChild($('#tx-notes'));
   if (name !== 'restore') stopCam();
+  if (name !== 'keys' && recPage.kind === 'key') closeKeyCard(false);
   if (name !== 'sign') stopQr();
   if (name !== 'keys') hideDesc();
   if (name === 'home') { paintVaultCard(); renderHomeSummary(); syncIfStale(); labelsSync(); paintDrillNudge(); }   // the picture belongs to the vault being shown, not the one left behind
@@ -127,9 +128,10 @@ function paintCrumbs(name) {
     if (name === 'sign') trail.push(paintCrumbs.via === 'messages' ? ['Messages', 'messages'] : ['Send', 'send']);
     if (name === 'tx') trail.push(['Activity', 'activity']);
     if ((name === 'coins' && recPage.kind === 'coin') || (name === 'addresses' && recPage.kind === 'addr')) trail.push([name === 'coins' ? 'Coins' : 'Addresses', name]);
+    if (name === 'keys' && recPage.kind === 'key') trail.push(['Keys', 'keys']);
   }
   if (name === 'settings') trail.push(['Any Two Keys', null]);
-  const here = { home: '', send: 'Send', receive: 'Receive', keys: 'Keys', settings: 'App settings', setup: 'New vault', restore: 'Restore', sign: 'Sign', messages: 'Messages', tx: name === 'tx' && vault && txView.txid ? txHeadline() : '', coins: recPage.kind === 'coin' ? recPage.leaf : '', addresses: recPage.kind === 'addr' ? recPage.leaf : '' }[name] || '';
+  const here = { home: '', send: 'Send', receive: 'Receive', keys: recPage.kind === 'key' ? recPage.leaf : 'Keys', settings: 'App settings', setup: 'New vault', restore: 'Restore', sign: 'Sign', messages: 'Messages', tx: name === 'tx' && vault && txView.txid ? txHeadline() : '', coins: recPage.kind === 'coin' ? recPage.leaf : '', addresses: recPage.kind === 'addr' ? recPage.leaf : '' }[name] || '';
   const el = $('#crumbs'); el.hidden = !trail.length;
   const html = trail.map(([t, go]) => (go ? `<a tabindex="0" role="link" data-crumb="${go}">${esc(t)}</a>` : `<span>${esc(t)}</span>`) + '<span class="sep">›</span>').join('') + `<span class="here">${esc(here)}</span>`;
   if (el._html !== html) { el._html = html; el.innerHTML = html; }   // a poll must not take focus off a crumb
@@ -459,6 +461,7 @@ const REC_WORDS = {
   tx:   ['Anything worth keeping with this transaction: what it paid for, an invoice number, who to ask.', 'A few words: who, or what for'],
   addr: ['Anything worth keeping with this address: who you gave it to, what it is for, when you handed it over.', 'A few words: who you gave it to'],
   coin: ['Anything worth keeping with this coin: where it came from, what it is being kept for, why it is not to be spent yet.', 'A few words: where it came from'],
+  key:  ['Anything worth keeping with this key: where it is kept, who knows, what its PIN hint is, when it was last checked. Photos of it and its sheet can go in the files.', 'A few words: where it lives'],
 };
 function recPoint(kind, key, slot) {
   recView = { kind, key };
@@ -1224,12 +1227,13 @@ function recPageOpen(kind, id) {
     ? [['Amount', sats(coin.value) + ' sats'], ['Output', `<a href="#" class="mono" data-go-tx="${coin.txid}">${coin.txid}</a>:${coin.vout}`], ['Address', (() => { const a = coinAddr(coin); return a ? `<a href="#" class="mono" data-go-addr="${esc(a)}">${esc(a)}</a>` : 'not known until the next sync'; })()],
        ['Status', coin.height > 0 ? `in block ${sats(coin.height)}${tip ? ' \u00b7 ' + sats(tip - coin.height + 1) + ' deep' : ''}` : 'not in a block yet']]
     : [['Address', `<span class="mono" style="word-break:break-all;-webkit-user-select:text;user-select:text">${esc(id)}</span>`], ['Chain', `${row.chain === 'change' ? 'change \u2014 the app sends what is left over here' : 'receive \u2014 one to hand out'}${vault._rotating ? ' \u00b7 ' + fmtIndex(row.index) : ''}`],
-       ['Holding', held ? `${sats(held)} sats in ` + H.map(h => `<a href="#" data-go-coin="${h.op}">${h.op.slice(0, 8)}\u2026:${h.op.split(':')[1]}</a>`).join(', ') : ((vault._history || []).some(x => x.index === row.index) ? 'nothing now \u2014 it has been used and spent from' : 'nothing yet \u2014 this address has never been used')]];
+       ['Holding', held ? `${sats(held)} sats in ${sats(H.length)} coin${H.length === 1 ? '' : 's'} \u2014 listed below` : ((vault._history || []).some(x => x.index === row.index) ? 'nothing now \u2014 it has been used and spent from' : 'nothing yet \u2014 this address has never been used')]];
   const txs = kind === 'addr' ? [...new Set((vault._history || []).filter(x => x.index === row.index).map(x => x.txid))] : [];
   if (txs.length) chain.push(['Transactions', txs.map(t => `<a href="#" class="mono" data-go-tx="${t}">${t.slice(0, 10)}\u2026</a>`).join(', ')]);
   box.innerHTML = `<div class="txnav"><button class="btn small" type="button" data-rec-step="-1"${i > 0 ? '' : ' disabled'}>${words[0]}</button><span class="muted">${i >= 0 ? `${i + 1} of ${l.length}` : ''}</span><button class="btn small" type="button" data-rec-step="1"${i >= 0 && i < l.length - 1 ? '' : ' disabled'}>${words[1]}</button></div>
     <div class="chart rec-strip" id="rec-chart"></div>${kind === 'addr' ? '<div class="chart rec-strip" id="rec-bal"></div>' : ''}
     <dl class="tx-dl">${[...money_, ...chain].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
+    ${kind === 'addr' && H.length ? `<div class="label" style="margin-top:6px">Coins here now</div><table class="tbl" id="addr-coins"><thead><tr><th>Coin</th><th class="r">Amount</th><th>Arrived</th><th class="r">Depth</th><th class="r">Cost</th></tr></thead><tbody>${H.slice().sort((a, b) => b.c.value - a.c.value).map(h => `<tr class="rowpick" data-go-coin="${esc(h.op)}"><td><a href="#" class="mono" data-go-coin="${esc(h.op)}">${esc(h.op.slice(0, 10))}\u2026:${esc(h.op.split(':')[1])}</a></td><td class="r" style="font-variant-numeric:tabular-nums">${sats(h.c.value)} sats</td><td>${h.since ? dateOf(h.since) : '\u2014'}</td><td class="r muted">${h.c.height > 0 ? (tip ? sats(tip - h.c.height + 1) + ' deep' : 'in block ' + sats(h.c.height)) : 'pending'}</td><td class="r muted">${h.cost === null || h.cost === undefined ? '\u2014' : ccy ? money(h.cost, ccy) : '\u2014'}</td></tr>`).join('')}</tbody></table>` : ''}
     <div class="row">${kind === 'coin' ? '<button class="btn small" type="button" id="coin-spend">Spend this coin</button>' : '<button class="btn small" type="button" id="addr-show">Show it on Receive</button><button class="btn small" type="button" id="addr-copy">Copy it</button>'}<button class="btn small" type="button" id="rec-pdf">Save as PDF</button></div>
     ${kind === 'addr' ? `<div class="muted" style="font-size:13px">${(vault._history || []).some(x => x.index === row.index) ? 'An address that has been used is public: whoever you gave it to can see everything it has ever held.' : 'Labelling an address before you hand it out is the point: when a deposit arrives you already know who it was from.'}</div>` : ''}
     <div id="rec-slot"></div>`;
@@ -2552,10 +2556,10 @@ async function renderAddresses() {
     for (const [chain, sel] of [['receive', '#addr-recv tbody'], ['change', '#addr-chg tbody']]) {
       const tb = $(sel); tb.innerHTML = '';
       for (const r of rows.filter(r => r.chain === chain).slice().reverse()) {
-        const bal = coins.filter(c => c.index === r.index).reduce((a, c) => a + c.value, 0);
+        const here = coins.filter(c => c.index === r.index), bal = here.reduce((a, c) => a + c.value, 0);
         const used = hist.some(x => x.index === r.index);
         const tr = document.createElement('tr'); tr.className = 'rowpick' + (r.current ? ' cur' : '') + (r.future ? ' future' : '');
-        tr.innerHTML = `<td class="muted">${r.position}</td><td class="mono" title="${r.address}">${r.address}</td><td>${lblHtml('addr:' + r.address)}</td><td class="r" style="font-variant-numeric:tabular-nums">${bal ? sats(bal) + ' sats' : '<span class="muted">—</span>'}</td><td class="r ${r.current ? 'ok' : 'muted'}">${r.current ? (chain === 'change' ? 'next change' : 'next deposit') : r.future ? 'unused · ahead' : used ? (bal ? 'in use' : 'spent') : 'unused'}</td>`;
+        tr.innerHTML = `<td class="muted">${r.position}</td><td class="mono" title="${r.address}">${r.address}</td><td>${lblHtml('addr:' + r.address)}</td><td class="r" style="font-variant-numeric:tabular-nums">${bal ? sats(bal) + ' sats<small class="muted" style="display:block;font-size:11.5px">' + sats(here.length) + ' coin' + (here.length === 1 ? '' : 's') + '</small>' : '<span class="muted">—</span>'}</td><td class="r ${r.current ? 'ok' : 'muted'}">${r.current ? (chain === 'change' ? 'next change' : 'next deposit') : r.future ? 'unused · ahead' : used ? (bal ? 'in use' : 'spent') : 'unused'}</td>`;
         tr.addEventListener('click', (e) => { if (e.target.closest('.lbl')) return; openAddress(r); });
         tb.appendChild(tr);
       }
@@ -2717,11 +2721,66 @@ function vaultKeyRow(k, i) {
     .concat(card ? ['touch ' + String(card.touch).toLowerCase()] : []);
   const seen = firstSeenWords(k.pubkey); if (seen) facts.push(seen);
   const adv = fw ? keyAdvisories({ firmware: fw }) : [];
-  return `<div class="keyrow vk"><span class="keyart">${art}</span><div class="who"><div class="name"><span class="name-text">${esc(k.name)}</span><button class="pencil" data-edit-idx="${i}" title="Rename this key">${PENCIL}</button></div><div class="muted" style="font-size:13px">${esc(facts.join(' · '))} · <span class="mono">${k.pubkey.slice(0, 12)}…</span></div>${adv.map(a => `<div class="warn advline" style="font-size:13px;margin-top:6px"><b>${esc(a.id)}: ${esc(a.title)}.</b> ${esc(a.says)} ${esc(a.here)}</div>`).join('')}</div>`
+  return `<div class="keyrow vk" data-key-open="${esc(k.pubkey)}" title="Open this key\u2019s card"><span class="keyart">${art}</span><div class="who"><div class="name"><span class="name-text">${esc(k.name)}</span><button class="pencil" data-edit-idx="${i}" title="Rename this key">${PENCIL}</button></div><div class="muted" style="font-size:13px">${esc(facts.join(' · '))} · <span class="mono">${k.pubkey.slice(0, 12)}…</span></div>${adv.map(a => `<div class="warn advline" style="font-size:13px;margin-top:6px"><b>${esc(a.id)}: ${esc(a.title)}.</b> ${esc(a.says)} ${esc(a.here)}</div>`).join('')}</div>`
     + `<div class="kright"><div class="state ${card ? 'here' : ''}"><i></i>${card ? 'plugged in' : 'not plugged in'}</div><div class="kseal" data-seal-slot="${i}"></div></div></div>`;
+}
+// ---------- a key's card: everything kept about one key, behind a proof of presence ----------
+let keyCardOpenUntil = 0;
+function closeKeyCard(repaint = true) {
+  if (recPage.kind !== 'key') return;
+  const d = $('#key-detail'); if (d.contains($('#tx-notes'))) recHome.appendChild($('#tx-notes'));
+  d.hidden = true; d.innerHTML = ''; $('#keys-main').hidden = false; recPage.kind = null; recPage.id = null; recPage.leaf = '';
+  if (repaint) paintCrumbs('keys');
+}
+function openKeyCard(pub) {
+  if (!vault) return; const i = vault.keys.findIndex(k => k.pubkey === pub); if (i < 0) return;
+  const k = vault.keys[i];
+  recPage.kind = 'key'; recPage.id = pub; recPage.leaf = k.name;
+  $('#keys-main').hidden = true; const d = $('#key-detail'); d.hidden = false;
+  const card = cards.find(c => c.pubkey === pub), pf = packedForm(pub);
+  const art = card ? keyArt(card.form || 3, !!card.nfc, 64) : pf ? keyArt(pf, !!(pf & 0x80), 64) : '<svg width="24" height="24"><use href="#ring"/></svg>';
+  const model = card ? modelName(card.form, card.nfc) : pf ? modelName(pf, !!(pf & 0x80), !!(pf & 0x40)) : 'YubiKey';
+  const fw = card && card.firmware ? card.firmware : ((store && store.key_fw) || {})[pub] || '';
+  const elsewhere = store.vaults.filter(v => v.name !== vault.name && v.keys.some(x => x.pubkey === pub)).map(v => v.name);
+  const seen = firstSeenWords(pub);
+  const facts = [['Name', esc(k.name)], ['Key', `${model}${k.serial ? ' · serial ' + esc(String(k.serial)) : ''}${fw ? ' · firmware ' + esc(fw) : ''}`],
+    ['Public key', `<span class="mono" style="font-size:12px;word-break:break-all;-webkit-user-select:text;user-select:text">${esc(pub)}</span>`],
+    ['Now', card ? `plugged in${card.touch ? ' · touch ' + esc(String(card.touch).toLowerCase()) : ''}` : 'not plugged in'],
+    ['Signs for', [vault.name].concat(elsewhere).map(esc).join(' · ') + (elsewhere.length ? ` — ${sats(elsewhere.length + 1)} vaults share this key` : '')],
+    seen ? ['Seen', esc(seen)] : null].filter(Boolean);
+  d.innerHTML = `<div class="txnav"><button class="btn small" type="button" id="key-back">‹ All keys</button><span class="muted">${esc(k.name)}</span><span></span></div>
+    <div class="row" style="gap:18px;align-items:flex-start"><span class="keyart" style="flex:0 0 auto">${art}</span><dl class="tx-dl" style="flex:1 1 320px;min-width:0">${facts.map(([a, b]) => `<dt>${a}</dt><dd>${b}</dd>`).join('')}</dl></div>
+    <div id="key-private"></div>`;
+  $('#key-back').onclick = () => closeKeyCard();
+  paintKeyPrivate();
+  paintCrumbs('keys');
+}
+// The map to the custody — where the key is kept, photos, who knows — is drawn only while a proof of presence
+// holds: Touch ID, or one of this vault's keys signing a fresh challenge. The proof is the window's for ten minutes.
+function paintKeyPrivate() {
+  const box = $('#key-private'); if (!box || recPage.kind !== 'key') return;
+  const pub = recPage.id;
+  if (Date.now() < keyCardOpenUntil) {
+    box.innerHTML = '<div class="label" style="margin-top:8px">Kept with this key</div><div class="muted" style="font-size:13px">Where it lives, who knows, photos of it and of its sheet. Sealed on this computer like everything else; shown here for ten minutes after you proved you are the one looking.</div><div id="key-rec-slot"></div>';
+    recPoint('key', 'key:' + pub, $('#key-rec-slot'));
+    return;
+  }
+  const here = cards.filter(c => c.pubkey && vault.keys.some(k => k.pubkey === c.pubkey));
+  box.innerHTML = `<div class="sk-warn" style="margin-top:8px"><b>What this card holds is a map to the custody.</b> Where the key is kept, photos of it and its sheet, notes on who knows. It is sealed on disk like everything else; showing it on a screen deserves a second look, so it opens with Touch ID — or with one of this vault’s keys, PIN and touch.</div>
+    <div class="row" style="gap:10px;flex-wrap:wrap;align-items:flex-end"><button class="btn primary" type="button" id="key-open-mac">Show it — Touch ID</button>${here.length ? `<label style="margin:0">or with <select id="key-open-card">${here.map(c => `<option value="${esc(c.reader)}">${esc((vault.keys.find(k => k.pubkey === c.pubkey) || {}).name || 'key')} · ${esc(String(c.serial))}</option>`).join('')}</select></label><label style="margin:0">PIN<input id="key-open-pin" type="password" autocomplete="off" style="width:120px"></label><button class="btn" type="button" id="key-open-with">Show it — key</button>` : '<span class="muted" style="font-size:13px">Plug in one of this vault’s keys to open it with a PIN and touch instead.</span>'}</div>
+    <div class="muted" id="key-open-note" aria-live="polite"></div>`;
+  const opened = (until) => { keyCardOpenUntil = until * 1000; paintKeyPrivate(); setTimeout(() => { if (recPage.kind === 'key' && Date.now() >= keyCardOpenUntil) paintKeyPrivate(); }, Math.max(0, keyCardOpenUntil - Date.now()) + 50); };
+  $('#key-open-mac').onclick = async () => { $('#key-open-note').textContent = ''; try { opened(await invoke('key_card_open', { name: vault.name, reader: null, pin: null })); } catch (e) { $('#key-open-note').textContent = String(e); } };
+  const withKey = $('#key-open-with'); if (withKey) withKey.onclick = async () => {
+    let pin = $('#key-open-pin').value; $('#key-open-pin').value = ''; if (!pin) return toast('Enter the key’s PIN');
+    if (/^[cbdefghijklnrtuv]{32,}$/.test(pin)) { pin = ''; return toast('That was the key typing a one-time code, not a PIN. Nothing was sent to the card.', 8000); }
+    $('#key-open-note').textContent = 'Touch the key when it flashes…';
+    try { const req = invoke('key_card_open', { name: vault.name, reader: $('#key-open-card').value, pin }); pin = ''; opened(await req); } catch (e) { $('#key-open-note').textContent = String(e); }
+  };
 }
 function renderKeys(force) {
   if (!vault) return;
+  if (recPage.kind === 'key' && !vault.keys.some(k => k.pubkey === recPage.id)) closeKeyCard(false);
   paintKeyLife();
   if (force || !keysBusy()) { $('#keys-list').innerHTML = vault.keys.map(vaultKeyRow).join(''); paintSealSlots(); }
   invoke('vault_recovery', { name: vault.name }).then(l => { if (vault._recovery !== l) hideDesc.shown = false; vault._recovery = l; paintDesc(); }); $('#keys-k').textContent = vault.threshold; $$('.keys-k2').forEach(e => e.textContent = vault.threshold);
@@ -2753,6 +2812,8 @@ function renderKeysNow() {
 }
 // rename a key in place from the pencil on its row
 $('#keys-list').addEventListener('click', (e) => {
+  const open = e.target.closest('[data-key-open]');
+  if (open && !e.target.closest('.pencil, input, button, .kseal, a')) { openKeyCard(open.dataset.keyOpen); return; }
   const b = e.target.closest('[data-edit-idx]'); if (!b || $('#keys-list .key-input')) return;   // one rename at a time; a PIN field in another row is not a rename
   const idx = +b.dataset.editIdx, nameEl = b.parentElement, cur = vault.keys[idx].name;
   const inp = document.createElement('input'); inp.className = 'key-input'; inp.value = cur; inp.maxLength = 40;
