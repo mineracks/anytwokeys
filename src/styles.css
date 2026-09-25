@@ -653,3 +653,15 @@ a.tag{text-decoration:none;cursor:pointer} a.tag:hover{text-decoration:underline
 .sk-lead{font-family:var(--display);font-weight:600;font-size:15px}
 .sk-warn{border-left:3px solid var(--gold);background:var(--gold-soft);border-radius:0 6px 6px 0;padding:12px 14px;font-size:13.5px;line-height:1.5}
 .sk-warn b{color:var(--ink)}
+
+/* Spark reader enrolment and session dialogs. */
+.spark-check{display:flex;align-items:flex-start;gap:10px;font-size:14px;line-height:1.5}
+.spark-check input{width:auto;min-height:0;margin-top:5px;flex:none}
+#spark-enrollment,#spark-candidates{overflow-wrap:anywhere}
+#spark-discovery-options .stack{padding-top:12px}
+#spark-unlock-form{max-height:90vh;overflow:auto}
+.sk-ok{stroke:var(--signal);fill:none}.sk-warn-s{stroke:var(--no)}.sk-warn-t{fill:var(--no)}.sk-warn-b{stroke:var(--no);fill:none}
+
+#spark-enrollment label:not(.spark-check),#spark-discovery-options label,#spark-unlock-form label{display:flex;flex-direction:column;gap:6px}
+#spark-enrollment input:not([type=checkbox]),#spark-enrollment select,#spark-discovery-options input,#spark-discovery-options select,#spark-unlock-form input,#spark-unlock-form select{padding:11px 14px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font:inherit;min-height:44px;width:100%}
+#spark-candidates button{display:block;text-align:left;white-space:normal}

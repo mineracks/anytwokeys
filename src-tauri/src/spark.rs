@@ -99,28 +99,8 @@ pub const PURPOSE: u32 = 8797555;
 
 /// The identity public key of one account of a wallet made from these words.
 pub fn identity_from_words(words: &str, account: u32) -> Result<Vec<u8>, String> {
-    use bitcoin::bip32::{ChildNumber, Xpriv};
-    use zeroize::Zeroize;
-    // Every secret made on the way — the normalised words, the seed, the root, the derived private key — is wiped
-    // when it has done its one job, not left for the allocator to hand out later. The error never quotes the words.
-    let mut norm = words.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
-    let parsed = bip39::Mnemonic::parse_normalized(&norm);
-    norm.zeroize();
-    let m = parsed.map_err(|_| "those are not a valid set of seed words (a word is not in the list, or the checksum fails — check each one)".to_string())?;
-    let mut seed = m.to_seed("");
-    drop(m);
-    let secp = bitcoin::secp256k1::Secp256k1::new();
-    let root = Xpriv::new_master(bitcoin::Network::Bitcoin, &seed);
-    seed.zeroize();
-    let mut root = root.map_err(|e| e.to_string())?;
-    let path = [ChildNumber::from_hardened_idx(PURPOSE), ChildNumber::from_hardened_idx(account), ChildNumber::from_hardened_idx(0)]
-        .into_iter().collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
-    let derived = root.derive_priv(&secp, &path);
-    root.private_key.non_secure_erase();
-    let mut k = derived.map_err(|e| e.to_string())?;
-    let public = k.private_key.public_key(&secp).serialize().to_vec();
-    k.private_key.non_secure_erase();
-    Ok(public)
+    let key = crate::spark_auth::derive_identity(words, account, "direct")?;
+    Ok(key.public().serialize().to_vec())
 }
 
 /// Does this set of words check out — right count, every word in the list, checksum true? Nothing is derived and
@@ -153,39 +133,65 @@ pub fn address_of(identity: &[u8], network: &str) -> Result<String, String> {
 }
 
 // ---------- gRPC-Web, which is what their own browser client speaks ----------
-fn call(base: &str, method: &str, body: Vec<u8>) -> Result<Vec<u8>, String> {
-    // a balance is quick everywhere; a transfer page is not, and a timeout shorter than the answer is a failure of
-    // our own making (2026-09-25: 12 s cut off operators that answer in 14, and an import died of it)
+pub(crate) fn rpc(base: &str, service: &str, method: &str, body: Vec<u8>, session: Option<&crate::spark_auth::Session>) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    crate::net::out("Spark")?;
+    if let Some(s) = session { if !s.live() || s.operator != base { return Err("SPARK_UNLOCK: the Spark session expired; unlock the reader again".into()); } }
     let patience = std::time::Duration::from_secs(if method == "query_all_transfers" { 45 } else { 15 });
     crate::net::emit("spark", serde_json::json!({ "operator": base.trim_start_matches("https://"), "method": method }));
     let mut framed = vec![0u8];
     framed.extend_from_slice(&(body.len() as u32).to_be_bytes());
     framed.extend_from_slice(&body);
-    let url = format!("{}/spark.SparkService/{method}", base.trim_end_matches('/'));
+    let url = format!("{}/{service}/{method}", base.trim_end_matches('/'));
     static H: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
-    let http = H.get_or_init(|| reqwest::blocking::Client::builder().user_agent("anytwokeys/0.1").build().expect("an HTTP client"));
-    let res = http.post(&url).timeout(patience)
-        .header("content-type", "application/grpc-web+proto")
-        .header("x-grpc-web", "1")
-        .header("accept", "application/grpc-web+proto")
-        .body(framed).send().map_err(|e| format!("{base}: {e}"))?;
-    if !res.status().is_success() { return Err(format!("{base} answered {}", res.status())); }
-    let raw = res.bytes().map_err(|e| e.to_string())?.to_vec();
-    // frames: [flag][4-byte length][payload]; flag 0x80 marks the trailers, which carry grpc-status
-    let (mut i, mut msg, mut status) = (0usize, Vec::new(), None::<String>);
-    while i + 5 <= raw.len() {
-        let flag = raw[i];
-        let len = u32::from_be_bytes([raw[i + 1], raw[i + 2], raw[i + 3], raw[i + 4]]) as usize;
-        let (start, end) = (i + 5, i + 5 + len);
-        if end > raw.len() { break; }
-        if flag & 0x80 != 0 {
-            let t = String::from_utf8_lossy(&raw[start..end]).to_string();
-            for line in t.split("\r\n") { if let Some(v) = line.strip_prefix("grpc-status:") { status = Some(v.trim().to_string()); } }
-            if let Some(m) = t.split("grpc-message:").nth(1) { if status.as_deref() != Some("0") { return Err(format!("Spark refused: {}", m.split("\r\n").next().unwrap_or("").trim())); } }
-        } else { msg = raw[start..end].to_vec(); }
+    let http = H.get_or_init(|| reqwest::blocking::Client::builder().redirect(reqwest::redirect::Policy::none()).user_agent("anytwokeys/0.1").build().expect("an HTTP client"));
+    let mut request = http.post(&url).timeout(patience)
+        .header("content-type", "application/grpc-web+proto").header("x-grpc-web", "1").header("accept", "application/grpc-web+proto");
+    if let Some(s) = session { request = request.bearer_auth(s.token()); }
+    let res = request.body(framed).send().map_err(|_| format!("Spark connection failed at {base}; retry to use the next operator"))?;
+    if !res.status().is_success() { return Err(format!("Spark HTTP {} at {base}", res.status().as_u16())); }
+    let header_status = res.headers().get("grpc-status").and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let mut raw = zeroize::Zeroizing::new(Vec::new());
+    res.take(16 * 1024 * 1024 + 1).read_to_end(&mut raw).map_err(|_| "Spark response could not be read")?;
+    if raw.len() > 16 * 1024 * 1024 { return Err("Spark response is too large".into()); }
+    decode_frames(&raw, header_status)
+}
+
+fn decode_frames(raw: &[u8], mut status: Option<String>) -> Result<Vec<u8>, String> {
+    let (mut i, mut msg) = (0usize, None);
+    while i < raw.len() {
+        let head = raw.get(i..i + 5).ok_or("Spark returned a truncated frame")?;
+        let flag = head[0];
+        let len = u32::from_be_bytes(head[1..5].try_into().unwrap()) as usize;
+        let end = (i + 5).checked_add(len).ok_or("Spark frame overflow")?;
+        let payload = raw.get(i + 5..end).ok_or("Spark returned a truncated payload")?;
+        match flag {
+            0 => { if msg.is_some() { return Err("Spark returned multiple unary messages".into()); } msg = Some(payload.to_vec()); }
+            0x80 => {
+                let t = std::str::from_utf8(payload).map_err(|_| "Spark returned invalid trailers")?;
+                for line in t.split("\r\n") { if let Some((k, v)) = line.split_once(':') { if k.eq_ignore_ascii_case("grpc-status") { status = Some(v.trim().into()); } } }
+                if end != raw.len() { return Err("Spark returned data after its trailers".into()); }
+            }
+            _ => return Err("Spark returned an unsupported frame".into()),
+        }
         i = end;
     }
-    match status.as_deref() { None | Some("0") => Ok(msg), Some(s) => Err(format!("Spark answered with status {s}")) }
+    match status.as_deref() {
+        Some("0") => msg.ok_or_else(|| "Spark returned no message".into()),
+        Some(s) => Err(format!("Spark RPC status {s}")),
+        None => Err("Spark returned no completion status".into()),
+    }
+}
+
+fn call(base: &str, method: &str, body: Vec<u8>) -> Result<Vec<u8>, String> {
+    rpc(base, "spark.SparkService", method, body, None)
+}
+
+fn read_call(method: &str, body: Vec<u8>, session: Option<&crate::spark_auth::Session>) -> Result<Vec<u8>, String> {
+    match session {
+        Some(s) => rpc(&s.operator, "spark.SparkService", method, body, Some(s)),
+        None => try_operators(method, body),
+    }
 }
 
 fn net_id(network: &str) -> u64 { match network { "mainnet" => 1, "regtest" => 2, "testnet" => 3, _ => 4 } }
@@ -194,7 +200,8 @@ fn net_id(network: &str) -> u64 { match network { "mainnet" => 1, "regtest" => 2
 /// read-only client does it (`query_nodes` by owner, status AVAILABLE, paged), and NOT `query_balance`, which
 /// answered 0 for a wallet that WoS showed holding sats (2026-09-25). A stranger's key also answers 0, so that
 /// probe could never have told the two apart.
-pub fn balance(identity: &[u8], network: &str) -> Result<u64, String> {
+pub fn balance(identity: &[u8], network: &str) -> Result<u64, String> { balance_with(identity, network, None) }
+pub fn balance_with(identity: &[u8], network: &str, session: Option<&crate::spark_auth::Session>) -> Result<u64, String> {
     let (mut total, mut offset, mut seen) = (0u64, 0i64, std::collections::HashSet::new());
     // a person's wallet is a few leaves to a few hundred; a service's is tens of thousands and would page for ever
     // (the SSP's own key hung a probe past ten minutes, 2026-09-25). Forty pages is 4,000 leaves: past that the sum
@@ -208,13 +215,13 @@ pub fn balance(identity: &[u8], network: &str) -> Result<u64, String> {
         int_field(5, offset as u64, &mut req);         // offset
         int_field(6, net_id(network), &mut req);       // network
         int_field(7, 1, &mut req);                     // statuses: [AVAILABLE]
-        let out = try_operators("query_nodes", req)?;
+        let out = read_call("query_nodes", req, session)?;
         let (mut r, mut next, mut n) = (Reader::new(&out), -1i64, 0usize);
         while !r.done() {
             match r.field() {
                 Some((1, entry, _)) => {                // map<string, TreeNode>: key = 1, value = 2
                     let mut e = Reader::new(&entry);
-                    while !e.done() { match e.field() { Some((2, node, _)) => { total += node_value(&node); n += 1; } Some(_) => continue, None => break } }
+                    while !e.done() { match e.field() { Some((2, node, _)) => { total = total.checked_add(node_value(&node)).ok_or("Spark balance overflow")?; n += 1; } Some(_) => continue, None => break } }
                 }
                 Some((2, _, v)) => next = v as i64,
                 Some(_) => continue,
@@ -224,9 +231,10 @@ pub fn balance(identity: &[u8], network: &str) -> Result<u64, String> {
         if n == 0 { break; }
         offset = next;
     }
+    if offset >= 0 && seen.len() >= 40 { return Err("Spark balance exceeded 4,000 leaves; refusing to show an incomplete total".into()); }
     Ok(total)
 }
-fn node_value(b: &[u8]) -> u64 { let mut r = Reader::new(b); while !r.done() { if let Some((3, _, v)) = r.field() { return v; } } 0 }
+fn node_value(b: &[u8]) -> u64 { let mut r = Reader::new(b); while !r.done() { match r.field() { Some((3, _, v)) => return v, Some(_) => {}, None => break } } 0 }
 
 #[derive(serde::Serialize, Clone, Debug, Default)]
 pub struct Transfer {
@@ -245,7 +253,8 @@ pub struct Transfer {
 
 /// Every transfer this wallet was part of, newest page first. An empty page means either an empty wallet or a
 /// wallet withholding its history — see the note at the top of this file; the balance is what tells them apart.
-pub fn transfers(identity: &[u8], network: &str, limit: u64, offset: u64) -> Result<(Vec<Transfer>, i64), String> {
+pub fn transfers(identity: &[u8], network: &str, limit: u64, offset: u64) -> Result<(Vec<Transfer>, i64), String> { transfers_with(identity, network, limit, offset, None) }
+pub fn transfers_with(identity: &[u8], network: &str, limit: u64, offset: u64, session: Option<&crate::spark_auth::Session>) -> Result<(Vec<Transfer>, i64), String> {
     // asked twice, as sender and as receiver — the fields their own client uses. The newer "either side" field
     // (60) came back empty from the live operators for a wallet WoS showed holding sats (2026-09-25).
     let mut list: Vec<Transfer> = Vec::new();
@@ -256,7 +265,7 @@ pub fn transfers(identity: &[u8], network: &str, limit: u64, offset: u64) -> Res
         int_field(4, net_id(network), &mut req);
         int_field(40, limit, &mut req);
         int_field(50, offset, &mut req);
-        let out = try_operators("query_all_transfers", req)?;
+        let out = read_call("query_all_transfers", req, session)?;
         let mut r = Reader::new(&out);
         while !r.done() {
             match r.field() {
@@ -274,6 +283,31 @@ pub fn transfers(identity: &[u8], network: &str, limit: u64, offset: u64) -> Res
     list.retain(|t| matches!(t.kind, 0 | 1 | 2));
     list.sort_by(|a, b| b.at.cmp(&a.at));
     Ok((list, next))
+}
+
+/// Complete accounting history: page each direction independently so one side's
+/// cursor can never skip the other side's records. Refuse a truncated history.
+pub fn history_with(identity: &[u8], network: &str, session: Option<&crate::spark_auth::Session>) -> Result<Vec<Transfer>, String> {
+    let mut all = std::collections::HashMap::new();
+    for side in [2u64, 1] {
+        let mut offset = 0i64;
+        let mut seen = std::collections::HashSet::new();
+        while offset >= 0 {
+            if seen.len() >= 40 || !seen.insert(offset) { return Err("Spark history did not finish within 40 distinct pages; refusing incomplete accounting".into()); }
+            let mut req = Vec::new(); bytes_field(side, identity, &mut req); int_field(4, net_id(network), &mut req); int_field(40, 200, &mut req); int_field(50, offset as u64, &mut req);
+            let out = read_call("query_all_transfers", req, session)?;
+            let (mut r, mut next) = (Reader::new(&out), -1i64);
+            while !r.done() {
+                match r.field().ok_or("Spark returned a malformed transfer page")? {
+                    (1, v, _) => { let t = one_transfer(&v, identity); if t.id.is_empty() { return Err("Spark returned a transfer without an id".into()); } if matches!(t.kind, 0 | 1 | 2) { all.insert(t.id.clone(), t); } }
+                    (2, _, v) => next = v as i64,
+                    _ => {},
+                }
+            }
+            offset = next;
+        }
+    }
+    let mut list: Vec<_> = all.into_values().collect(); list.sort_by(|a,b| b.at.cmp(&a.at).then_with(|| a.id.cmp(&b.id))); Ok(list)
 }
 
 /// Status 5 is COMPLETED in their table; everything below it is still in flight, 6 expired, 7 returned.
@@ -301,7 +335,7 @@ fn one_transfer(b: &[u8], me: &[u8]) -> Transfer {
 /// google.protobuf.Timestamp: seconds in field 1
 fn timestamp(b: &[u8]) -> i64 {
     let mut r = Reader::new(b);
-    while !r.done() { if let Some((1, _, v)) = r.field() { return v as i64; } }
+    while !r.done() { match r.field() { Some((1, _, v)) => return v as i64, Some(_) => {}, None => break } }
     0
 }
 
@@ -319,6 +353,14 @@ fn try_operators(method: &str, req: Vec<u8>) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn incomplete_and_refused_grpc_frames_are_never_successful_empty_reads() {
+        assert!(decode_frames(&[], None).is_err());
+        assert!(decode_frames(&[0,0,0,0,2,1], Some("0".into())).is_err());
+        assert!(decode_frames(&[1,0,0,0,0], Some("0".into())).is_err());
+        assert!(decode_frames(&[0,0,0,0,0], Some("16".into())).is_err());
+        assert_eq!(decode_frames(&[0,0,0,0,0], Some("0".into())).unwrap(), Vec::<u8>::new());
+    }
     /// Real Spark addresses from their own SDK tests, with the networks their tests expect. A wrong offset into the
     /// payload would still yield 33 bytes, so the key is also required to be a point on the curve.
     #[test]

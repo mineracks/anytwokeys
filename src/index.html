@@ -351,21 +351,77 @@
                     <rect x="352" y="96" width="160" height="30" rx="6" class="sk-box sk-gold"/>
                     <text x="432" y="115" class="sk-t" text-anchor="middle">a signed session</text>
                   </svg>
-                  <figcaption><b>Read this before you type.</b> A private wallet answers an anonymous read with <b>nothing</b> — indistinguishable from empty. So entering the words here derives your wallet's identity, but it will likely read as empty: the wallet needs a signing session to open, which is coming (a key held on a YubiKey, so nothing on this computer can spend). For now the words prove the identity; they cannot yet open a private wallet from outside.</figcaption>
+                  <figcaption><b>Read this before you type.</b> A private wallet answers an anonymous read with <b>nothing</b> — indistinguishable from empty. Use authenticated discovery below to find a wallet you control, then register a YubiKey reader. Check the discovered balance against your wallet before enrolling.</figcaption>
                 </figure>
                 <div class="sk-warn">
-                  <b>Seed words unlock everything that wallet can spend.</b> Here they are used for one calculation — the wallet's public identity — then thrown away: never saved, never sent, wiped the moment they have worked. Even so, a computer that has seen them is a computer that could have kept them. Do this only on a machine you would trust with the wallet itself.
+                  <b>Seed words unlock everything that wallet can spend.</b> Enrolment uses them to derive the owner key and sign Spark's login challenge. The words and private keys are not saved or sent to Spark. Temporary owner sessions remain in memory for up to ten minutes while you review; they are cleared on completion, cancellation or app lock. Memory clearing is best effort, not proof that this computer never retained a copy. Even so, a computer that has seen them is a computer that could have kept them. Do this only on a machine you would trust with the wallet itself.
                 </div>
                 <div class="field"><div class="row" style="justify-content:space-between;align-items:center"><div class="label">Seed words</div><div class="pick tight" id="seed-len"><div class="opt on" data-n="12">12 words</div><div class="opt" data-n="24">24 words</div></div></div>
                   <div class="muted" style="font-size:13px">Only the word you are on is shown; the rest stay hidden. Type the first letters and pick, or paste the whole set into the first box.</div>
                   <div class="seed-grid" id="seed-grid"></div>
                   <div class="row" id="spark-suggest" style="gap:var(--s2);flex-wrap:wrap;min-height:34px" aria-live="polite"></div>
                   <div style="font-size:14px" id="spark-words-count" aria-live="polite"></div></div>
-                <div class="row"><button class="btn primary" id="spark-words-go">Read the wallet's identity from these words</button></div>
+                <div class="row"><button class="btn" id="spark-words-go">Try an anonymous read</button><button class="btn primary" id="spark-gate">Gate this wallet with a YubiKey</button></div>
+                <details id="spark-discovery-options"><summary>Account discovery options</summary><div class="stack">
+                  <div class="muted">Start with Spark accounts 0–5. Blitz uses a separate child-wallet scheme; that scheme is not confirmed for Wallet of Satoshi. Scan further ranges only when needed.</div>
+                  <label>Scheme<select id="spark-scheme"><option value="direct">Spark account</option><option value="blitz">Blitz derived wallet</option></select></label>
+                  <div class="row"><label>First account index<input id="spark-account-start" type="number" min="0" max="2147483647" value="0"></label><label>Number to check<input id="spark-account-count" type="number" min="1" max="20" value="6"></label></div>
+                  <div class="muted">Blitz indices: accounts start at 4, gifts 1001, pools 100000, savings 200000, children 300000. These create a child seed, then its Spark account 1.</div>
+                  <label>Known wallet identity or Spark address (optional)<input id="spark-expected" spellcheck="false" autocomplete="off" placeholder="Match a known owner identity before asking Spark"></label>
+                </div></details>
+                <button class="btn" id="spark-discovery-stop" hidden>Cancel discovery and clear owner sessions</button>
+                <div id="spark-candidates" class="stack" aria-live="polite"></div>
+                <div id="spark-enrollment" class="stack" hidden>
+                  <div class="sk-warn" id="spark-selected"></div>
+                  <label class="spark-check"><input type="checkbox" id="spark-owner-confirm"> I recognise this wallet's identity and balance/history and want to enrol this reader.</label>
+                  <label>Reader YubiKey<select id="spark-card"></select></label>
+                  <button class="btn" id="spark-cards-refresh">Refresh plugged-in keys</button>
+                  <div class="muted">Use a dedicated card with an empty signature slot, or an existing secp256k1 key with touch locked to FIXED. Only a key generated on the card here is known to have never left it. An existing key may also sign other vaults.</div>
+                  <details><summary>Create a reader key in an empty slot</summary><div class="stack">
+                    <div class="muted">Generates a non-exportable key and locks physical touch on. An occupied slot will be refused.</div>
+                    <label>Admin PIN<input type="password" autocomplete="off" id="spark-admin-pin"></label>
+                    <button class="btn" id="spark-generate">Generate in the selected empty slot</button>
+                  </div></details>
+                  <label class="spark-check"><input type="checkbox" id="spark-make-private"> Also make the wallet private (otherwise keep its existing privacy setting).</label>
+                  <label class="spark-check" id="spark-replace-row" hidden><input type="checkbox" id="spark-replace-reader"> Replace the existing designated reader. Its access to this private wallet will stop.</label>
+                  <label>Reader PIN<input type="password" autocomplete="off" id="spark-enroll-pin"></label>
+                  <div class="row"><button class="btn primary" id="spark-enroll">Register reader — PIN + touch</button><button class="btn" id="spark-cancel">Cancel enrolment</button></div>
+                  <div class="muted" id="spark-enroll-note" aria-live="polite"></div>
+                </div>
                 <div class="muted" style="font-size:13px" id="spark-words-note"></div>
               </div>
             </details>
 
+            <figure class="sk-fig"><svg viewBox="0 0 520 168" class="sk-svg" role="img"
+     aria-label="A YubiKey key opens a Spark session with a PIN and a touch and reads the wallet's balance and history; the same key cannot move funds, so the spend path is blocked.">
+  <!-- the card: the fork point -->
+  <rect x="12" y="60" width="104" height="48" rx="7" class="sk-box sk-gold"/>
+  <text x="64" y="82" class="sk-t" text-anchor="middle">YubiKey</text>
+  <text x="64" y="98" class="sk-t sk-mut" text-anchor="middle">PIN + touch</text>
+
+  <!-- allowed path: opens a session, reads -->
+  <path d="M116 74 C150 74 150 44 180 44" class="sk-line" fill="none" marker-end="url(#skr-a)"/>
+  <text x="140" y="34" class="sk-lbl" text-anchor="middle">opens</text>
+  <rect x="182" y="28" width="96" height="32" rx="6" class="sk-box"/>
+  <text x="230" y="48" class="sk-t" text-anchor="middle">a session</text>
+  <path d="M278 44 h30" class="sk-line" fill="none" marker-end="url(#skr-a)"/>
+  <rect x="308" y="28" width="176" height="32" rx="6" class="sk-box sk-node"/>
+  <text x="380" y="48" class="sk-t" text-anchor="middle">reads balance + history</text>
+  <text x="497" y="48" class="sk-ok" text-anchor="middle">&#10003;</text>
+
+  <!-- blocked path: cannot spend -->
+  <path d="M116 96 C150 96 150 128 180 128" class="sk-line sk-warn-s sk-dash" fill="none"/>
+  <text x="150" y="150" class="sk-lbl sk-warn-t" text-anchor="middle">spend</text>
+  <rect x="182" y="112" width="176" height="32" rx="6" class="sk-box sk-warn-b"/>
+  <text x="270" y="132" class="sk-t sk-mut" text-anchor="middle">move your funds</text>
+  <!-- the block: a small cross on the blocked arrow -->
+  <line x1="150" y1="106" x2="162" y2="118" class="sk-warn-s"/>
+  <line x1="162" y1="106" x2="150" y2="118" class="sk-warn-s"/>
+  <text x="373" y="132" class="sk-warn-t" text-anchor="middle">&#10007;</text>
+
+  <defs><marker id="skr-a" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><polygon points="0 1, 7 4, 0 7" class="sk-fill"/></marker></defs>
+</svg>
+<figcaption>The designated key reads this Spark wallet; it has no wallet spending keys. Spark enforces the reader permission. Figures remain Spark's word. A live session allows refreshes until it expires, even if the card is unplugged; locking the app clears it.</figcaption></figure>
             <div class="field"><div class="label">Call this vault</div><input id="spark-name" placeholder="Wallet of Satoshi" maxlength="60"></div>
             <div class="row"><button class="btn" id="spark-read">Watch this wallet</button></div>
             <div class="muted" style="font-size:13px" id="spark-note"></div>
@@ -509,6 +565,15 @@
 </div>
 </div>
 
+<div class="modal" id="spark-unlock-modal" role="dialog" aria-modal="true" aria-labelledby="spark-unlock-title"><form class="box" id="spark-unlock-form">
+  <h2 id="spark-unlock-title">Open the Spark reader</h2>
+  <p id="spark-unlock-description"></p>
+  <label>Registered YubiKey<select id="spark-unlock-card"></select></label>
+  <button type="button" class="btn" id="spark-unlock-refresh">Look for the key again</button>
+  <label>Key PIN<input id="spark-unlock-pin" type="password" autocomplete="off" required></label>
+  <div id="spark-unlock-note" class="muted" aria-live="polite"></div>
+  <div class="row"><button type="submit" class="btn primary" id="spark-unlock-go">Open reader — PIN + touch</button><button type="button" class="btn" id="spark-unlock-cancel">Cancel</button></div>
+</form></div>
 <div class="modal" id="single-modal"><div class="box">
   <div class="row" style="color:var(--no)"><svg width="18" height="18"><use href="#i-warn"/></svg><h2>One key means no way back</h2></div>
   <div>A single-key vault has exactly one copy of its private key, inside one YubiKey. There is no seed phrase and no backup. If that key is lost, damaged, wiped or its PIN is locked, the funds are gone for good.</div>

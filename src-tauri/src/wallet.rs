@@ -305,6 +305,9 @@ pub struct Spark {
     pub address: String,
     /// the identity public key inside it, hex — what an operator answers questions about
     pub identity: String,
+    #[serde(default)] pub reader_pubkey: String,
+    #[serde(default)] pub reader_card: String,
+    #[serde(default)] pub authenticated: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

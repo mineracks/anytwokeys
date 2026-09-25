@@ -257,7 +257,8 @@ pub fn generate(reader: &str, admin_pin: &str) -> Result<String, CardError> {
     let point = find(&resp, 0x7F49).and_then(|pk| find(pk, 0x86)).ok_or(CardError::Parse)?;
     let comp = compress(point).ok_or(CardError::Parse)?;
     // touch: FIXED (2), button (0x20). One-way: the card refuses to lower it afterwards.
-    apdu(&card, 0x00, 0xDA, 0x00, 0xD6, &[0x02, 0x20]).ok();
+    apdu(&card, 0x00, 0xDA, 0x00, 0xD6, &[0x02, 0x20])?;
+    if apdu(&card, 0x00, 0xCA, 0x00, 0xD6, &[])?.first() != Some(&2) { return Err(CardError::Unverified); }
     Ok(hex::encode(comp))
 }
 
@@ -266,6 +267,46 @@ pub fn generate(reader: &str, admin_pin: &str) -> Result<String, CardError> {
 pub fn sign_digest(reader: &str, pin: &str, digest: &[u8; 32]) -> Result<([u8; 32], [u8; 32]), CardError> {
     let ctx = Context::establish(Scope::User)?;
     let card = connect(&ctx, reader)?;
+    sign_on_card(&card, pin, digest)
+}
+
+/// Recheck the public key and uncached FIXED touch policy on the SAME connection
+/// that verifies the PIN and signs; never sign after a card swap or policy change.
+pub fn sign_digest_checked(reader: &str, pin: &str, digest: &[u8;32], expected: &[u8;33]) -> Result<([u8;32], [u8;32]), CardError> {
+    let ctx = Context::establish(Scope::User)?;
+    let card = connect(&ctx, reader)?;
+    if read_sig_pubkey(&card).as_ref() != Some(expected) { return Err(CardError::Changed); }
+    if apdu(&card, 0x00, 0xCA, 0x00, 0xD6, &[])?.first() != Some(&2) { return Err(CardError::Unverified); }
+    sign_on_card(&card, pin, digest)
+}
+
+/// Spark setup is never allowed to replace a slot, including a non-secp256k1 key.
+pub fn generate_empty(reader: &str, admin_pin: &str, serial: u32) -> Result<String, CardError> {
+    let ctx = Context::establish(Scope::User)?;
+    let card = connect(&ctx, reader)?;
+    let ad = app_data(&card)?;
+    if serial_of(&ad) != serial { return Err(CardError::Changed); }
+    let disc = find(&ad, 0x73).ok_or(CardError::Parse)?;
+    let fingerprints = find(disc, 0xC5).ok_or(CardError::Parse)?;
+    if fingerprints.len() < 20 || fingerprints[..20].iter().any(|b| *b != 0) { return Err(CardError::Changed); }
+    // Even a key with unset fingerprints is occupied if its public key can be read.
+    match apdu(&card, 0x00, 0x47, 0x81, 0x00, &[0xB6, 0x00]) {
+        Err(CardError::Sw { sw: 0x6A88, .. }) => {},
+        Ok(_) => return Err(CardError::Changed),
+        Err(e) => return Err(e),
+    }
+    apdu(&card, 0x00, 0x20, 0x00, 0x83, admin_pin.as_bytes())?;
+    let mut attrs = vec![0x13]; attrs.extend_from_slice(OID_SECP256K1);
+    apdu(&card, 0x00, 0xDA, 0x00, 0xC1, &attrs)?;
+    let resp = apdu(&card, 0x00, 0x47, 0x80, 0x00, &[0xB6, 0x00])?;
+    let point = find(&resp, 0x7F49).and_then(|pk| find(pk, 0x86)).ok_or(CardError::Parse)?;
+    let comp = compress(point).ok_or(CardError::Parse)?;
+    apdu(&card, 0x00, 0xDA, 0x00, 0xD6, &[0x02, 0x20])?;
+    if apdu(&card, 0x00, 0xCA, 0x00, 0xD6, &[])?.first() != Some(&2) || read_sig_pubkey(&card) != Some(comp) { return Err(CardError::Unverified); }
+    Ok(hex::encode(comp))
+}
+
+fn sign_on_card(card: &Card, pin: &str, digest: &[u8;32]) -> Result<([u8;32], [u8;32]), CardError> {
     apdu(&card, 0x00, 0x20, 0x00, 0x81, pin.as_bytes())?;
     let mut raw = None;
     for _ in 0..4 {

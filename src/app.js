@@ -66,6 +66,7 @@ function fail(e) { toast(String(e && e.message || e), 6000); console.error(e); }
 
 // ---------- screens ----------
 function show(name) {
+  if (name !== 'restore' && $('#s-restore').classList.contains('on')) { seedClear(); if (sparkSelected || sparkBusy) sparkCancel().catch(() => {}); }
   const first = ['setup', 'restore'].includes(name) && !vault;
   $('#welcome').hidden = true; $('#shell').hidden = false;
   $$('.screen').forEach(s => s.classList.toggle('on', s.id === 's-' + name));
@@ -337,6 +338,12 @@ async function renderTx() {
   fitNote(); if (renderTx.last !== name + txid) { renderTx.last = name + txid; recSaid(''); }
   renderFiles(); renderCtx();
   $('#tx-chain').open = (() => { try { return localStorage.getItem('a2k-chain-open') === '1'; } catch { return false; } })();
+  $('#tx-explorer').hidden = !!vault.spark; $('#tx-pdf').hidden = !!vault.spark; $('#tx-chain').hidden = !!vault.spark;
+  if (vault.spark) {
+    const t = facts.spark?.[txid], st = $('#tx-status'); st.className = 'state ' + (t?.status === 5 ? 'ok' : 'here'); st.querySelector('span').textContent = sparkTransferStatus(t?.status);
+    $('#tx-dl').innerHTML = [['Source', "Spark's word — not verified against the chain"], ['Transfer id', txid], ['From identity', t?.sender || 'unknown'], ['To identity', t?.receiver || 'unknown'], ['Amount', t ? sats(t.sats) + ' sats' : 'unknown'], ['Accounting', t?.status === 5 ? 'Completed transfer included' : 'Not completed; excluded from cost basis']].map(([k,v]) => `<dt>${esc(k)}</dt><dd class="mono">${esc(v)}</dd>`).join('');
+    $('#tx-proof').textContent = ''; $('#tx-chain-body').innerHTML = ''; return;
+  }
   let d; try { d = await invoke('tx_detail', { name, txid, height: txView.height }); } catch (e) { if (mine === txView.seq) { $('#tx-dl').innerHTML = `<dt>Details</dt><dd class="warn">${esc(e)}</dd>`; $('#tx-proof').textContent = ''; } return; }
   if (mine !== txView.seq || !vault || vault.name !== name) return;   // the person has moved on; this answer is for another screen
   const conf = d.height > 0 ? Math.max(1, d.tip - d.height + 1) : 0, st = $('#tx-status');
@@ -773,7 +780,8 @@ async function fillActivity(name, s) {
   let a; try { a = await invoke('vault_activity', { name, history: s.history.map(h => [h.txid, h.height]), ccy }); }
   catch (e) { clearTimeout(fillLater.t); if (vault && vault.name === name) { $$('#activity .when, #activity .amt, #act-all .when, #act-all .amt').forEach(td => { if (td.textContent === '…') td.textContent = '—'; }); $('#activity-note').textContent = 'Dates and amounts could not be fetched: ' + e; $('#activity-note').hidden = false; } return; }
   if (!vault || vault.name !== name) return;
-  txFacts[name] = { rows: Object.fromEntries(a.rows.map(r => [r.txid, r])), now: a.now, ccy: a.ccy, transfers: a.transfers || {} };   // kept by vault NAME and txid, never on the vault object, which is replaced on every store re-read
+  txFacts[name] = { rows: Object.fromEntries(a.rows.map(r => [r.txid, r])), now: a.now, ccy: a.ccy, transfers: a.transfers || {}, spark: Object.fromEntries((a.spark || []).map(t => [t.id, t])) };   // kept by vault NAME and txid, never on the vault object, which is replaced on every store re-read
+  if (vault.spark) { txList[name] = (a.spark || []).map(t => ({ txid: t.id, height: 0, index: 0 })); paintActivity(); }
   if ($('#s-tx').classList.contains('on')) renderTx();
   repaintFacts(txFacts[name]);
   vault._now = a.now ? { q: a.now, ccy: a.ccy } : null; paintBalance();
@@ -814,12 +822,13 @@ async function sync() {
   if (sync.shown !== me && vault._snap && vault._snapFor === liveKey(vault)) { sync.shown = me; paintSnap(vault._snap); const f = txFacts[me]; if (f) { repaintFacts(f); vault._now = f.now ? { q: f.now, ccy: f.ccy } : null; paintBalance(); } }   // last known, at once, while the chain is asked
   if (sync.shown !== me) { sync.shown = me; vault._balance = undefined; vault._now = null; $('#balance').innerHTML = '— <small>sats</small>'; $('#balance-fiat').hidden = true; $('#activity').innerHTML = '<tr><td class="muted" colspan="5">syncing…</td></tr>'; $('#activity-note').hidden = true; $('#conn').textContent = ''; }
   try {
+    if (vault.spark?.authenticated && !(await ensureSparkSession(vault))) { $('#scanbar').hidden = true; $('#balance-sub').textContent = 'reader locked — refresh to open'; return; }
     const s = await invoke('vault_sync', { name: me });
     if (!vault || vault.name !== me) return;
     vault._snap = s; vault._snapFor = liveKey(vault); vault._syncedAt = Date.now(); vault._stale = false;
     paintSnap(s);
     fillActivity(vault.name, s);   // dates, amounts and values arrive after the balance; the balance never waits for them
-  } catch (e) { { const b = $('#scanbar'); if (b) b.hidden = true; } if (!vault || vault.name !== me) return; checkNode(); $('#balance-sub').textContent = 'could not reach the server'; $('#conn').textContent = String(e); }
+  } catch (e) { { const b = $('#scanbar'); if (b) b.hidden = true; } if (!vault || vault.name !== me) return; checkNode(); $('#balance-sub').textContent = String(e).startsWith('SPARK_UNLOCK:') ? 'reader needs unlocking — refresh to retry' : 'could not reach the server'; $('#conn').textContent = String(e).replace(/^SPARK_UNLOCK: /, ''); }
 }
 /// Draw one vault_sync answer: balance, coins, history, where it came from.
 // Which keys sign this vault, on the card. Drawn wherever the vault is drawn — a snapshot shown without a fresh
@@ -848,6 +857,7 @@ function paintSnap(s) {
     const unconf = s.coins.filter(c => c.height === 0).reduce((a, c) => a + c.value, 0);
     $('#balance-sub').textContent = `${s.coins.length} coin${s.coins.length === 1 ? '' : 's'}` + (unconf ? ` · ${sats(unconf)} unconfirmed` : ' · all confirmed');
     $('#conn').textContent = `Connected to ${s.servers.electrum.replace(/^\w+:\/\//, '')} · block ${sats(s.height)}`;
+    if (vault.spark) { $('#balance-sub').textContent = vault.spark.authenticated ? 'Spark reports this balance · YubiKey reader' : 'Spark reports this balance · anonymous read'; $('#conn').textContent = 'Off-chain · figures supplied by Spark, not verified against the chain'; }
     $('#activity-note').hidden = true;
     txList[vault.name] = s.history.slice().reverse();
     paintActivity();
@@ -860,6 +870,10 @@ document.addEventListener('click', (e) => { const a = e.target.closest('[data-tx
 // One row builder for both, so a transaction reads the same wherever it is seen, and fillActivity fills both tables.
 const HOME_ACT = 10, ACT_PAGE = 60;
 function actRowHtml(h) {
+  if (vault?.spark) {
+    const t = txFacts[vault.name]?.spark?.[h.txid];
+    return `<td class="when muted">…</td><td class="mono">${esc(h.txid.slice(0, 10))}…</td><td>${lblHtml('tx:' + h.txid)}</td><td class="r amt muted">…</td><td class="r">${esc(sparkTransferStatus(t?.status))}</td>`;
+  }
   return `<td class="when muted">${h.height > 0 ? '…' : 'pending'}</td><td><span class="mono">${h.txid.slice(0, 10)}…${h.txid.slice(-6)}</span>${vault._rotating ? ' <span class="muted">· ' + fmtIndex(h.index) + '</span>' : ''}</td><td>${lblHtml('tx:' + h.txid)}<span class="xfer" data-xfer="${h.txid}"></span></td><td class="r amt muted">…</td><td class="r ${h.height > 0 ? 'ok' : 'muted'}">${h.height > 0 ? 'confirmed · ' + sats(h.height) : 'unconfirmed'}</td>`;
 }
 function actFill(tb, list) {
@@ -908,7 +922,7 @@ function paintFactRow(txid, r, facts) {
   for (const tr of $$(`#activity tr[data-txid="${txid}"], #act-all tr[data-txid="${txid}"]`)) {
     const when = tr.querySelector('.when'), amt = tr.querySelector('.amt');
     if (!when || !amt) continue;
-    if (r.time) { const d = new Date(r.time * 1000); when.classList.remove('muted'); when.innerHTML = `${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}<small>${d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</small>`; when.title = d.toISOString().replace('.000Z', ' UTC').replace('T', ' ') + ' · the time in the block header'; }
+    if (r.time) { const d = new Date(r.time * 1000); when.classList.remove('muted'); when.innerHTML = `${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}<small>${d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</small>`; when.title = d.toISOString().replace('.000Z', ' UTC').replace('T', ' ') + (vault?.spark ? ' · Spark transfer creation time' : ' · the time in the block header'); }
     else when.textContent = 'pending';
     if (r.net === null) { amt.textContent = '—'; continue; }
     const q = r.quote || (!r.time ? facts.now : null);
@@ -2876,7 +2890,7 @@ async function readSeals(force) {
 }
 
 // ---------- restore ----------
-function restoreTab(name) { restoreTab.now = name; $$('.tabs div').forEach(x => x.classList.toggle('on', x.dataset.tab === name)); for (const t of ['keys', 'scan', 'paste', 'muun', 'spark']) $('#tab-' + t).hidden = t !== name; $('#sheet-note').hidden = !['scan', 'paste'].includes(name);   // it is about a recovery sheet, and only two of these are
+function restoreTab(name) { if (name !== 'spark' && restoreTab.now === 'spark') { seedClear(); if (sparkSelected || sparkBusy) sparkCancel().catch(() => {}); } restoreTab.now = name; $$('.tabs div').forEach(x => x.classList.toggle('on', x.dataset.tab === name)); for (const t of ['keys', 'scan', 'paste', 'muun', 'spark']) $('#tab-' + t).hidden = t !== name; $('#sheet-note').hidden = !['scan', 'paste'].includes(name);   // it is about a recovery sheet, and only two of these are
   // a result from another way in is not about this one: it goes when the choice changes
   if (restoreTab.last && restoreTab.last !== name) { $('#restore-card').innerHTML = ''; parsed = null; }
   restoreTab.last = name;
@@ -2901,7 +2915,7 @@ $('#spark-read') && ($('#spark-read').onclick = async () => {
     note.textContent = '';
     toast(`Watching \u2018${v.name}\u2019. Its balance and transfers come from Spark, and cannot be checked against the chain.`, 8000);
     renderTabs(); show('home');
-  } catch (e) { note.textContent = ''; fail(e); }
+  } catch (e) { note.textContent = 'An anonymous read may be empty or private. Open the seed-word section to enrol a YubiKey reader.'; fail(e); }
 });
 
 // One box per seed word. Only the box being edited shows its word; every other is masked, so the whole phrase is
@@ -2966,13 +2980,14 @@ $('#spark-words-go') && ($('#spark-words-go').onclick = async () => {
   if (![12, 15, 18, 21, 24].includes(n)) return toast(`Seed words come in 12 or 24 (this has ${n})`);
   note.textContent = 'Working out the identity and asking Spark\u2026';
   try {
-    const v = await invoke('spark_restore_words', { name, words });
+    const request = invoke('spark_restore_words', { name, words }); seedClear();
+    const v = await request;
     seedClear();
     store = await invoke('store_get'); vault = store.vaults.find(x => x.name === v.name) || v;
     note.textContent = '';
     toast(`Watching \u2018${v.name}\u2019 as ${v.address.slice(0, 14)}\u2026 The words were not kept.`, 8000);
     renderTabs(); show('home');
-  } catch (e) { seedClear(); note.textContent = 'The words were cleared.'; fail(e); }
+  } catch (e) { seedClear(); note.textContent = 'The words were cleared. An empty anonymous answer can also mean private. Enter them again and choose Gate this wallet with a YubiKey for authenticated discovery.'; fail(e); }
 });
 
 // ---------- a Muun wallet, watched ----------
@@ -3363,3 +3378,141 @@ window.__TAURI__.event.listen('vault-changed', (ev) => {
 })();
 
 boot();
+
+// ---------- Spark authenticated discovery, enrolment and reader unlock ----------
+let sparkFound = [], sparkSelected = null, sparkCards = [], sparkBusy = false, sparkDiscoverySeq = 0;
+function sparkSetBusy(on) {
+  sparkBusy = on;
+  for (const id of ['spark-gate', 'spark-words-go', 'spark-enroll', 'spark-generate', 'spark-cards-refresh']) $('#' + id).disabled = on;
+}
+function sparkResetEnrollment() {
+  sparkSelected = null; sparkFound = [];
+  $('#spark-candidates').innerHTML = ''; $('#spark-enrollment').hidden = true;
+  $('#spark-discovery-stop').hidden = true;
+  $('#spark-enroll-pin').value = ''; $('#spark-admin-pin').value = '';
+  $('#spark-owner-confirm').checked = false; $('#spark-replace-reader').checked = false;
+}
+async function sparkCancel() {
+  ++sparkDiscoverySeq; seedClear(); sparkResetEnrollment();
+  await invoke('spark_discovery_cancel');
+  $('#spark-words-note').textContent = 'Discovery cancelled; temporary owner sessions cleared.';
+}
+$('#spark-cancel').onclick = () => sparkCancel().catch(fail);
+$('#spark-discovery-stop').onclick = () => sparkCancel().catch(fail);
+async function sparkLoadCards() {
+  const picked = $('#spark-card').value;
+  try { sparkCards = await invoke('cards_list'); } catch { sparkCards = []; }
+  $('#spark-card').innerHTML = sparkCards.length ? sparkCards.map(c => `<option value="${esc(c.reader)}">YubiKey ${c.serial} · ${c.pubkey ? 'key present · touch ' + c.touch : 'empty or unsupported slot'}</option>`).join('') : '<option value="">Plug in a YubiKey and refresh</option>';
+  if (sparkCards.some(c => c.reader === picked)) $('#spark-card').value = picked;
+}
+$('#spark-cards-refresh').onclick = () => sparkLoadCards().catch(fail);
+$('#spark-gate').onclick = async () => {
+  if (sparkBusy) return;
+  let words = seedPhrase();
+  if (![12,15,18,21,24].includes(words.split(/\s+/).filter(Boolean).length)) return toast('Enter the wallet’s seed words first');
+  const seq = ++sparkDiscoverySeq;
+  sparkResetEnrollment(); sparkSetBusy(true); $('#spark-discovery-stop').hidden = false;
+  $('#spark-words-note').textContent = 'Signing in as the owner to check the selected accounts. No wallet settings are changed during discovery.';
+  try {
+    const request = invoke('spark_discover', { words, start: Number($('#spark-account-start').value), count: Number($('#spark-account-count').value), scheme: $('#spark-scheme').value, expected: $('#spark-expected').value.trim() });
+    words = ''; seedClear();
+    const result = await request;
+    if (seq !== sparkDiscoverySeq) return;
+    sparkFound = result.wallets;
+    $('#spark-words-note').textContent = `Checked ${result.checked} account(s). The seed words were cleared. ` + (sparkFound.length ? 'Select the identity you recognise; temporary owner sessions expire within ten minutes.' : 'No wallet with funds or history matched. This does not prove your wallet is empty: check the identity and derivation options.') + (result.errors.length ? ` ${result.errors.length} checks failed: ${result.errors.join(' · ')}` : '');
+    $('#spark-candidates').innerHTML = sparkFound.map((c, i) => `<button class="btn" data-spark-candidate="${i}">Account ${c.account} · ${sats(c.balance)} sats · ${c.private ? 'private' : 'public'}<br><span class="mono">${esc(c.identity)}</span></button>`).join('');
+    $$('[data-spark-candidate]').forEach(b => b.onclick = async () => {
+      if (sparkBusy) return;
+      sparkSelected = sparkFound[Number(b.dataset.sparkCandidate)]; const c = sparkSelected;
+      $('#spark-selected').textContent = `Selected account ${c.account}: ${sats(c.balance)} sats. Identity ${c.identity}. ${c.balance === 0 ? 'This identity has transfer history but no available balance.' : 'Compare this with the wallet you control.'} ${c.existing_reader ? 'An existing designated reader is set: ' + c.existing_reader : 'No designated reader is set.'}`;
+      $('#spark-owner-confirm').checked = false; $('#spark-replace-reader').checked = false; $('#spark-make-private').checked = false;
+      $('#spark-replace-row').hidden = !c.existing_reader;
+      $('#spark-enrollment').hidden = false; $('#spark-enroll-note').textContent = '';
+      await sparkLoadCards();
+    });
+  } catch (e) { if (seq === sparkDiscoverySeq) $('#spark-words-note').textContent = 'The words were cleared. ' + String(e); }
+  finally { words = ''; seedClear(); sparkSetBusy(false); }
+};
+$('#spark-generate').onclick = async () => {
+  if (sparkBusy) return;
+  const c = sparkCards.find(c => c.reader === $('#spark-card').value);
+  if (!c) return toast('Plug in and select a YubiKey');
+  if (c.pubkey) return toast('That slot already holds a key. It will not be replaced.');
+  let adminPin = $('#spark-admin-pin').value; $('#spark-admin-pin').value = '';
+  if (!adminPin) return toast('Enter the card’s admin PIN');
+  sparkSetBusy(true); $('#spark-enroll-note').textContent = 'Checking the empty slot, generating its reader key and locking touch on…';
+  try { const request = invoke('spark_reader_generate', { reader: c.reader, serial: c.serial, adminPin }); adminPin = ''; await request; await sparkLoadCards(); $('#spark-enroll-note').textContent = 'Reader key generated on the card; physical touch is locked on.'; }
+  catch (e) { $('#spark-enroll-note').textContent = String(e); await sparkLoadCards(); }
+  finally { adminPin = ''; sparkSetBusy(false); }
+};
+$('#spark-enroll').onclick = async () => {
+  if (sparkBusy || !sparkSelected) return;
+  if (!$('#spark-owner-confirm').checked) return toast('First confirm that you recognise the discovered wallet');
+  const c = sparkCards.find(c => c.reader === $('#spark-card').value);
+  if (!c?.pubkey || c.touch !== 'FIXED') return toast('Choose a secp256k1 key with touch locked to FIXED');
+  if (sparkSelected.existing_reader && sparkSelected.existing_reader !== c.pubkey && !$('#spark-replace-reader').checked) return toast('This wallet already has a reader; explicitly allow its replacement to continue');
+  let pin = $('#spark-enroll-pin').value; $('#spark-enroll-pin').value = '';
+  if (!pin) return toast('Enter the reader PIN');
+  sparkSetBusy(true); $('#spark-cancel').disabled = true; $('#spark-discovery-stop').disabled = true;
+  $('#spark-enroll-note').textContent = 'Touch the YubiKey when it flashes. Then Spark will register the reader and verify its access.';
+  try {
+    const request = invoke('spark_enroll', { candidateId: sparkSelected.id, name: $('#spark-name').value.trim() || 'Wallet of Satoshi', reader: c.reader, pubkey: c.pubkey, pin, makePrivate: $('#spark-make-private').checked, replaceReader: $('#spark-replace-reader').checked });
+    pin = ''; const v = await request;
+    sparkResetEnrollment(); store = await invoke('store_get'); vault = store.vaults.find(x => x.name === v.name) || v;
+    toast('Reader enrolled and verified. Only public references were saved; the seed was not kept.', 8000);
+    renderTabs(); show('home');
+  } catch (e) { $('#spark-enroll-note').textContent = String(e) + ' For another attempt, enter the words and discover the wallet again.'; sparkSelected = null; }
+  finally { pin = ''; sparkSetBusy(false); $('#spark-cancel').disabled = false; $('#spark-discovery-stop').disabled = false; }
+};
+window.__TAURI__.event.listen('spark-discovery', ev => { if (sparkBusy) $('#spark-words-note').textContent = `Checking account ${ev.payload.account} (${ev.payload.checked} of ${ev.payload.count})… No wallet settings are changed during discovery.`; });
+let sparkUnlockPending = null;
+async function ensureSparkSession(v) {
+  if (!v.spark?.authenticated) return true;
+  if (await invoke('spark_session_status', { name: v.name })) return true;
+  if (sparkUnlockPending) return sparkUnlockPending.name === v.name ? sparkUnlockPending.promise : false;
+  let resolve; const promise = new Promise(r => { resolve = r; });
+  sparkUnlockPending = { name: v.name, v, promise, resolve, busy: false, focus: document.activeElement };
+  $('#spark-unlock-title').textContent = `Open ${v.name}’s reader`;
+  $('#spark-unlock-description').textContent = `Insert YubiKey ${v.spark.reader_card}. PIN + touch opens a temporary read session; it does not move funds. Refreshes use this session until expiry or app lock.`;
+  $('#spark-unlock-note').textContent = ''; $('#spark-unlock-pin').value = '';
+  $('#spark-unlock-modal').classList.add('on');
+  await sparkUnlockCards(); $('#spark-unlock-pin').focus();
+  return promise;
+}
+async function sparkUnlockCards() {
+  if (!sparkUnlockPending) return;
+  const sp = sparkUnlockPending.v.spark;
+  let cs = []; try { cs = await invoke('cards_list'); } catch {}
+  cs = cs.filter(c => c.pubkey === sp.reader_pubkey && String(c.serial) === sp.reader_card && c.touch === 'FIXED');
+  $('#spark-unlock-card').innerHTML = cs.length ? cs.map(c => `<option value="${esc(c.reader)}">YubiKey ${c.serial}</option>`).join('') : '<option value="">Registered key not found — insert it and look again</option>';
+}
+function sparkUnlockClose(ok) {
+  const p = sparkUnlockPending; if (!p || p.busy) return;
+  $('#spark-unlock-pin').value = ''; $('#spark-unlock-modal').classList.remove('on'); sparkUnlockPending = null;
+  if (p.focus?.isConnected) p.focus.focus(); p.resolve(ok);
+}
+$('#spark-unlock-refresh').onclick = () => sparkUnlockCards().catch(fail);
+$('#spark-unlock-cancel').onclick = () => sparkUnlockClose(false);
+$('#spark-unlock-form').onsubmit = async e => {
+  e.preventDefault(); const p = sparkUnlockPending; if (!p || p.busy) return;
+  const reader = $('#spark-unlock-card').value; let pin = $('#spark-unlock-pin').value; $('#spark-unlock-pin').value = '';
+  if (!reader || !pin) return toast('Select the registered key and enter its PIN');
+  p.busy = true; $('#spark-unlock-go').disabled = true; $('#spark-unlock-cancel').disabled = true;
+  $('#spark-unlock-note').textContent = 'Touch the YubiKey when it flashes…';
+  let opened = false;
+  try { const request = invoke('spark_unlock', { name: p.name, reader, pin }); pin = ''; await request; opened = true; }
+  catch (e) { $('#spark-unlock-note').textContent = String(e) + ' Check the key before trying again.'; }
+  finally { pin = ''; p.busy = false; $('#spark-unlock-go').disabled = false; $('#spark-unlock-cancel').disabled = false; if (opened) sparkUnlockClose(true); }
+};
+document.addEventListener('keydown', e => {
+  if (!sparkUnlockPending) return;
+  if (e.key === 'Escape') { e.preventDefault(); sparkUnlockClose(false); }
+  if (e.key === 'Tab') {
+    const focusable = [...$('#spark-unlock-form').querySelectorAll('button:not(:disabled),input,select')];
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+});
+
+function sparkTransferStatus(status) { return status === 5 ? "completed · Spark" : status === 6 ? "expired · Spark" : status === 7 ? "returned · Spark" : "not completed · Spark"; }

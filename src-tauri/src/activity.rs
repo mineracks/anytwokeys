@@ -24,7 +24,7 @@ pub struct Row { pub txid: String, pub time: Option<u32>, pub net: Option<i64>, 
     /// day it left — so a gain is measured against the coins actually spent, which the chain itself records.
     #[serde(default)] pub ins: Vec<(String, u64)>, #[serde(default)] pub outs: Vec<(u32, u64)> }
 #[derive(Debug, Serialize)]
-pub struct Activity { pub ccy: String, pub rows: Vec<Row>, pub now: Option<Quote>, pub note: Option<String>,
+pub struct Activity { #[serde(default, skip_serializing_if = "Vec::is_empty")] pub spark: Vec<crate::spark::Transfer>, pub ccy: String, pub rows: Vec<Row>, pub now: Option<Quote>, pub note: Option<String>,
     /// txid → this person's other vaults the same transaction belongs to (transfers between vaults)
     #[serde(default)] pub transfers: HashMap<String, Vec<String>> }
 
@@ -156,7 +156,7 @@ pub fn build(v: &wallet::Vault, servers: &Servers, history: &[(String, i32)], cc
     let note = if v.network != "mainnet" { Some("Test coins have no price.".into()) } else if !fiat { None }
         else if pending > 0 { Some(format!("Fetching {pending} past price{} in the background; they fill in as they arrive, and are kept.", if pending == 1 { "" } else { "s" })) }
         else if now.is_none() { Some("Today's price could not be fetched; values are left blank rather than guessed.".into()) } else { None };
-    Ok(Activity { ccy: ccy.to_string(), rows, now, note, transfers: HashMap::new() })
+    Ok(Activity { spark: Vec::new(), ccy: ccy.to_string(), rows, now, note, transfers: HashMap::new() })
 }
 
 /// Rows that arrive already made — a Spark wallet's transfers, which have no inputs, no outputs and no chain — given
@@ -183,7 +183,7 @@ pub fn priced(v: &wallet::Vault, mut rows: Vec<Row>, ccy: &str, prices_url: &str
         else if !fiat { None }
         else if pending > 0 { Some(format!("Fetching {pending} past price{} in the background; they fill in as they arrive, and are kept.", if pending == 1 { "" } else { "s" })) }
         else { None };
-    Ok(Activity { ccy: ccy.to_string(), rows, now, note, transfers: HashMap::new() })
+    Ok(Activity { spark: Vec::new(), ccy: ccy.to_string(), rows, now, note, transfers: HashMap::new() })
 }
 
 /// One address's own flow: for each transaction that touched it, when, and how many sats it gained or lost there —

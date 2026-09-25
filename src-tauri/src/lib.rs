@@ -1,4 +1,5 @@
 mod spark;
+mod spark_auth;
 mod muun;
 mod activity;
 mod net;
@@ -113,19 +114,19 @@ async fn vault_activity(name: String, history: Vec<(String, i32)>, ccy: String) 
         // own, and an id that is Spark's rather than a txid. Priced the same way every other row is.
         if let Some(sp) = &v.spark {
             let id = hex::decode(&sp.identity).map_err(|_| "this vault's Spark key is damaged")?;
-            let (list, _) = spark::transfers(&id, &v.network, 200, 0)?;
+            let session = spark_auth::session(sp, &v.network)?;
+            let list = spark_auth::read_result(sp, &v.network, spark::history_with(&id, &v.network, session.as_deref()))?;
             let rows: Vec<activity::Row> = list.iter().map(|t| activity::Row {
                 txid: t.id.clone(),
                 time: if t.at > 0 { Some(t.at as u32) } else { None },
-                net: Some(if t.direction == "out" { -(t.sats as i64) } else { t.sats as i64 }),
+                net: if spark::settled(t.status) { Some(if t.direction == "out" { -(t.sats as i64) } else { t.sats as i64 }) } else { None },
                 fee: None, quote: None, ins: Vec::new(), outs: Vec::new(),
             }).collect();
             let mut a = activity::priced(&v, rows, &ccy, &prices)?;
             // A wallet that holds sats but shows no transfers is not an empty wallet: it is one whose history Spark
             // is withholding (its owner turned on private mode). Said plainly rather than drawn as "nothing here".
-            if a.rows.is_empty() && spark::balance(&id, &v.network).unwrap_or(0) > 0 {
-                a.note = Some("Spark says this wallet holds a balance but will not list its transfers — its privacy setting is on, so the history cannot be read here.".into());
-            }
+            a.spark = list;
+            if a.rows.is_empty() { a.note = Some("Spark returned no transfers. This can mean no history, or that read access is unavailable; an empty response alone does not distinguish them.".into()); }
             return Ok(a);
         }
         let mut a = activity::build(&v, &servers, &history, &ccy, &prices)?;
@@ -198,6 +199,7 @@ async fn tx_detail(name: String, txid: String, height: i32) -> R<activity::Detai
     block(move || {
         let s = wallet::load()?;
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+        if v.spark.is_some() { return Err("Spark transfers are off-chain; their details come from the Spark activity list".into()); }
         let mut d = activity::detail(&v, &wallet::servers_for(&s, &v.network), &txid, height)?;
         mark_peers(&s, &v, &mut d);
         Ok(d)
@@ -471,9 +473,9 @@ async fn spark_restore(name: String, address: String) -> R<Vault> {
         let (list, _) = spark::transfers(&id, &network, 1, 0)?;
         if list.is_empty() {
             return Err(if balance > 0 { "Spark will not list this wallet's transfers — its privacy setting is on. The balance can be read but the history cannot, so there is nothing here to account with.".into() }
-                else { "Spark shows nothing under this address: no balance and no transfers. That is what an EMPTY wallet looks like — and also exactly what a wallet with its privacy setting on looks like, since a private wallet answers with nothing rather than with a refusal. If you know this wallet holds sats, its privacy setting is on (Wallet of Satoshi's wallets are), and it cannot be read from outside until that is turned off.".into() });
+                else { "Spark shows nothing under this address: no balance and no transfers. That is what an EMPTY wallet looks like — and also exactly what a wallet with its privacy setting on looks like, since a private wallet answers with nothing rather than with a refusal. If you know this wallet holds sats, its privacy setting is on (Wallet of Satoshi's wallets are), and authenticated reader enrolment can grant access without turning privacy off.".into() });
         }
-        let mut v = Vault { watch: None, spark: Some(wallet::Spark { address: address.trim().to_string(), identity }), muun: None,
+        let mut v = Vault { watch: None, spark: Some(wallet::Spark { address: address.trim().to_string(), identity, reader_pubkey: String::new(), reader_card: String::new(), authenticated: false }), muun: None,
             name, network, threshold: 1, keys: Vec::new(), descriptor: String::new(), address: address.trim().to_string(),
             created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
             labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
@@ -494,6 +496,7 @@ async fn spark_restore(name: String, address: String) -> R<Vault> {
 /// older SDK builds to 0, so both are tried and Spark itself says which one is a wallet with anything in it.
 #[tauri::command]
 async fn spark_restore_words(name: String, words: String) -> R<Vault> {
+    let words = zeroize::Zeroizing::new(words);
     block(move || {
         let s = wallet::load()?;
         if s.vaults.iter().any(|v| v.name == name) { return Err(format!("a vault called '{name}' already exists")); }
@@ -520,8 +523,8 @@ async fn spark_restore_words(name: String, words: String) -> R<Vault> {
                 }
             }
         }
-        { use zeroize::Zeroize; let mut w = words; w.zeroize(); }   // the words have done their one job
-        let (account, id) = chosen.ok_or_else(|| format!("those words derive a Spark identity, but Spark has nothing under it on either account ({}). Either the wallet is empty and has never received, or it was made with a different scheme.", seen.join("; ")))?;
+        drop(words);
+        let (account, id) = chosen.ok_or_else(|| format!("those words derive a Spark identity, but Spark has nothing under it on either account ({}). The wallet may be private, empty, or use another derivation scheme. Use “Gate this wallet with a YubiKey” for authenticated discovery.", seen.join("; ")))?;
         let _ = account;
         let address = spark::address_of(&id, &network)?;
         spark_vault(s, name, address, hex::encode(&id), network)
@@ -538,14 +541,49 @@ fn spark_vault(mut s: Store, name: String, address: String, identity: String, ne
     if let Some(v) = s.vaults.iter().find(|v| v.spark.as_ref().map(|x| x.identity == identity).unwrap_or(false)) {
         return Err(format!("this Spark wallet is already here, as '{}'", v.name));
     }
-    let v = Vault { watch: None, spark: Some(wallet::Spark { address: address.clone(), identity }), muun: None,
-        name, network, threshold: 1, keys: Vec::new(), descriptor: String::new(), address,
-        created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
-        labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
-        more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: Some("fifo".into()) };
+    let v = new_spark_vault(name, wallet::Spark { address, identity, reader_pubkey: String::new(), reader_card: String::new(), authenticated: false }, network);
     s.vaults.push(v.clone());
     wallet::save(&s)?;
     Ok(v)
+}
+
+fn new_spark_vault(name: String, spark: wallet::Spark, network: String) -> Vault {
+    let address = spark.address.clone();
+    Vault { watch: None, spark: Some(spark), muun: None,
+        name, network, threshold: 1, keys: Vec::new(), descriptor: String::new(), address,
+        created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
+        labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
+        more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: Some("fifo".into()) }
+}
+
+#[tauri::command]
+async fn spark_discover(words: String, start: u32, count: u32, scheme: String, expected: String) -> R<spark_auth::Discovery> {
+    let words = zeroize::Zeroizing::new(words);
+    block(move || { let network = wallet::load()?.settings.network; spark_auth::discover(words, start, count, scheme, expected, network) }).await
+}
+#[tauri::command]
+fn spark_discovery_cancel() { spark_auth::cancel_discovery(); }
+#[tauri::command]
+async fn spark_enroll(candidate_id: String, name: String, reader: String, pubkey: String, pin: String, make_private: bool, replace_reader: bool) -> R<Vault> {
+    let pin = zeroize::Zeroizing::new(pin);
+    block(move || spark_auth::enroll(candidate_id, name, reader, pubkey, pin, make_private, replace_reader)).await
+}
+#[tauri::command]
+async fn spark_unlock(name: String, reader: String, pin: String) -> R<spark_auth::Unlocked> {
+    let pin = zeroize::Zeroizing::new(pin);
+    block(move || spark_auth::unlock(name, reader, pin)).await
+}
+#[tauri::command]
+async fn spark_reader_generate(reader: String, admin_pin: String, serial: u32) -> R<String> {
+    let pin = zeroize::Zeroizing::new(admin_pin);
+    block(move || { wallet::load()?; cards::generate_empty(&reader, &pin, serial).map_err(|e| format!("{e}. If generation succeeded but touch setup failed, the slot may now hold a key; inspect it before continuing.")) }).await
+}
+#[tauri::command]
+fn spark_session_status(name: String) -> R<bool> {
+    let s = wallet::load()?;
+    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
+    let sp = v.spark.as_ref().ok_or("not a Spark wallet")?;
+    Ok(!sp.authenticated || spark_auth::session(sp, &v.network).is_ok())
 }
 
 /// What a kit's key says about itself before any code is typed: enough to tell someone they pasted the wrong thing.
@@ -691,6 +729,7 @@ fn vault_rename(name: String, new_name: String, key_names: Vec<String>) -> R<Sto
 
 #[tauri::command]
 fn vault_forget(name: String) -> R<Store> {
+    spark_auth::clear();
     let mut s = wallet::load()?;
     s.vaults.retain(|v| v.name != name);
     wallet::save(&s)?;
@@ -733,7 +772,8 @@ async fn vault_sync(name: String) -> R<Snapshot> {
         // and no block height of its own. Everything else on the screen is drawn from this same shape.
         if let Some(sp) = &v.spark {
             let id = hex::decode(&sp.identity).map_err(|_| "this vault's Spark key is damaged")?;
-            let balance = spark::balance(&id, &v.network)?;
+            let session = spark_auth::session(sp, &v.network)?;
+            let balance = spark_auth::read_result(sp, &v.network, spark::balance_with(&id, &v.network, session.as_deref()))?;
             return Ok(Snapshot { coins: Vec::new(), balance, height: 0, history: Vec::new(), servers,
                 receive: sp.address.clone(), receive_index: 0, rotating: false, next_change: 0, gap: 0 });
         }
@@ -2286,6 +2326,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            std::thread::spawn(|| loop { std::thread::sleep(std::time::Duration::from_secs(30)); spark_auth::prune(); });
             attach::clear_opened();
             net::attach(app.handle().clone());
             if let Ok(s) = wallet::load() { net::seed(s.settings.offline); }   // a store that cannot be read yet is seeded by the window's first store_get
@@ -2301,7 +2342,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
-            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, seed_wordlist, seed_check, xpub_restore,
+            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
         .build(tauri::generate_context!())
