@@ -2904,6 +2904,7 @@ function paintKeyPrivate() {
 }
 // ---------- where a key is kept: a place, chosen from the ones named or made here ----------
 const placeOf = (pub) => (store.places || []).find(p => p.id === (store.key_place || {})[pub]) || null;
+const placesSorted = () => (store.places || []).slice().sort((a, b) => a.name.localeCompare(b.name));
 // which keys are kept at a place, by vault, with what that means: how many of the vault's keys, against its threshold
 function placeHoldings(id) {
   const out = [];
@@ -2913,6 +2914,20 @@ function placeHoldings(id) {
   }
   return out;
 }
+// the keys of every vault with no place yet — one entry per public key, since a key may sign for several vaults
+function unplacedKeys() {
+  const seen = new Map();
+  for (const v of store.vaults) for (const k of v.keys) {
+    if (!k.pubkey || (store.key_place || {})[k.pubkey]) continue;
+    const e = seen.get(k.pubkey) || { key: k, vaults: [] }; e.vaults.push(v.name); seen.set(k.pubkey, e);
+  }
+  return [...seen.values()];
+}
+// the map of a place, or the tile that stands where the map would be, so the row keeps its shape either way
+function placeTile(p, id) {
+  if (p && p.lat != null) return `<div class="ctx-map" id="${id}"></div>`;
+  return `<div class="ctx-map nopin"><svg aria-hidden="true"><use href="#i-place"/></svg><b>${p ? 'No pin yet' : 'No place yet'}</b><span>${p ? 'Add an address to see the map' : 'Name where this key lives'}</span></div>`;
+}
 async function drawPlaceMap(box, p) {
   if (!box) return;
   if (p.lat == null || p.lon == null) { box.hidden = true; return; }
@@ -2921,53 +2936,65 @@ async function drawPlaceMap(box, p) {
   if (!box.isConnected) return;
   box.innerHTML = pic ? `<img alt="Map of the area around ${esc(p.place || p.name)}" src="${pic.png}"><span class="pin"></span><small>© OpenStreetMap</small>` : `<div class="nomap"><b>No map just now</b><span>${p.lat.toFixed(3)}, ${p.lon.toFixed(3)}</span></div>`;
 }
+// the chips: every place named, the current one pressed; New location opens the form in `slot`; `pick(id)` records it
+function placeChips(current, slot, pick) {
+  const wrap = document.createElement('div'); wrap.className = 'row'; wrap.style.cssText = 'gap:8px;align-items:center;flex-wrap:wrap';
+  wrap.innerHTML = `<span class="label" style="margin-right:2px">Kept at</span>${placesSorted().map(x => `<button type="button" class="vchip" data-place-pick="${esc(x.id)}" aria-pressed="${current === x.id ? 'true' : 'false'}">${esc(x.name)}</button>`).join('')}<button type="button" class="btn small" data-place-add>New location…</button>${current ? '<button type="button" class="linkish" data-place-clear style="margin-left:4px">Not recorded</button>' : ''}`;
+  $$('[data-place-pick]', wrap).forEach(b => b.onclick = () => pick(b.getAttribute('aria-pressed') === 'true' ? null : b.dataset.placePick));
+  wrap.querySelector('[data-place-add]').onclick = () => placeForm(slot, null, (saved) => pick(saved.id));
+  const c = wrap.querySelector('[data-place-clear]'); if (c) c.onclick = () => pick(null);
+  return wrap;
+}
 function paintKeyPlace(pub) {
   const box = $('#key-place'); if (!box) return;
-  const p = placeOf(pub), places = store.places || [];
-  const options = `<option value="">— not recorded —</option>${places.map(x => `<option value="${esc(x.id)}"${p && p.id === x.id ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}<option value="+">New location…</option>`;
-  box.innerHTML = `<div class="guide-row" style="align-items:stretch">
-      <div class="ctx-map" id="key-place-map" hidden></div>
-      <div class="guide-body">
-        ${p ? `<div class="cer-act-title" style="font-size:18px">${esc(p.name)}</div>${p.place ? `<div class="muted">${esc(p.place)}</div>` : ''}${p.note ? `<div style="font-size:13.5px;white-space:pre-wrap">${esc(p.note)}</div>` : ''}
-          ${(() => { const h = placeHoldings(p.id); const others = h.flatMap(x => x.keys.map(k => ({ k, v: x.vault }))).filter(x => x.k.pubkey !== pub); return others.length ? `<div class="muted" style="font-size:13px">Also kept here: ${others.map(x => `${esc(x.k.name)} <span class="muted">(${esc(x.v.name)})</span>`).join(' · ')}</div>` : '<div class="muted" style="font-size:13px">Nothing else is recorded here.</div>'; })()}`
-          : '<div class="muted">No place recorded for this key.</div>'}
-        <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap"><label style="margin:0;display:flex;gap:8px;align-items:center">Kept at <select id="key-place-pick">${options}</select></label>${p ? '<a href="#" class="linkish" id="key-place-open">Open Locations</a>' : ''}</div>
-        <div id="key-place-new"></div>
-      </div></div>`;
-  if (p) drawPlaceMap($('#key-place-map'), p);
-  $('#key-place-pick').onchange = async () => {
-    const v = $('#key-place-pick').value;
-    if (v === '+') { placeForm($('#key-place-new'), null, async (saved) => { await keyPlaceSet(pub, saved.id); }); return; }
-    await keyPlaceSet(pub, v || null);
-  };
-  const open = $('#key-place-open'); if (open) open.onclick = (e) => { e.preventDefault(); show('places'); };
+  const p = placeOf(pub);
+  const others = p ? placeHoldings(p.id).flatMap(x => x.keys.map(k => ({ k, v: x.vault }))).filter(x => x.k.pubkey !== pub) : [];
+  box.innerHTML = `<div class="guide-row" style="align-items:stretch">${placeTile(p, 'key-place-map')}<div class="guide-body" id="key-place-body">
+      ${p ? `<div class="cer-act-title" style="font-size:18px">${esc(p.name)}</div>${p.place ? `<div class="muted">${esc(p.place)}</div>` : ''}${p.note ? `<div style="font-size:13.5px;white-space:pre-wrap">${esc(p.note)}</div>` : ''}
+        <div class="muted" style="font-size:13px">${others.length ? 'Also kept here: ' + others.map(x => `<b>${esc(x.k.name)}</b> · ${esc(x.v.name)}`).join(' · ') : 'Nothing else is recorded here.'}</div>`
+      : `<div class="cer-act-title" style="font-size:18px">Where is this key?</div><div class="muted" style="font-size:13.5px">${placesSorted().length ? 'Pick a place, or name a new one. A place can hold keys of several vaults.' : 'Name the first place — the safe, the office, Mum’s. Other keys can be kept there too, and Locations shows what each place holds.'}</div>`}
+    </div></div><div id="key-place-form"></div>`;
+  const body = $('#key-place-body');
+  body.appendChild(placeChips(p ? p.id : null, $('#key-place-form'), (id) => keyPlaceSet(pub, id)));
+  if (p) {
+    const links = document.createElement('div'); links.className = 'row'; links.style.gap = '14px';
+    links.innerHTML = '<button type="button" class="linkish" id="key-place-edit">Edit this place</button><button type="button" class="linkish" id="key-place-open">Open Locations</button>';
+    body.appendChild(links);
+    $('#key-place-edit').onclick = () => placeForm($('#key-place-form'), p, () => paintKeyPlace(pub));
+    $('#key-place-open').onclick = () => show('places');
+    drawPlaceMap($('#key-place-map'), p);
+  }
 }
 async function keyPlaceSet(pub, id) { try { store = await invoke('key_place_set', { pubkey: pub, place: id }); if (vault) vault = store.vaults.find(x => x.name === vault.name) || vault; paintKeyPlace(pub); } catch (e) { fail(e); } }
-// The form for a place: a name, an address looked up as it is typed (position kept from the answer chosen), a note.
+// The form for a place: a name, an address looked up as it is typed (the pin from the match chosen — or, if none was
+// chosen, from the best match at save), a note. A narrow column: it is a small thing to fill in.
 function placeForm(slot, p, done) {
   const id = p ? p.id : '';
-  slot.innerHTML = `<form class="stack" id="place-form" style="margin-top:8px;padding:14px;border:1px solid var(--line);border-radius:8px;background:var(--ground)">
+  slot.innerHTML = `<form class="stack tight" id="place-form" style="margin-top:10px;padding:16px;border:1px solid var(--line);border-radius:8px;background:var(--ground);max-width:520px">
+      <div class="label">${p ? 'This place' : 'A new place'}</div>
       <div class="field"><div class="label">Name</div><input id="pf-name" maxlength="60" placeholder="the safe, the office, Mum’s" value="${esc(p ? p.name : '')}"></div>
-      <div class="field"><div class="label">Address <span class="muted" style="font-weight:400">— optional, for the map</span></div><input id="pf-place" autocomplete="off" spellcheck="false" placeholder="start typing; pick a match to place the pin" value="${esc(p ? p.place : '')}"><ul id="pf-list" class="place-list" role="listbox" hidden></ul><div class="muted" id="pf-pos" style="font-size:12.5px">${p && p.lat != null ? `pin at ${p.lat.toFixed(4)}, ${p.lon.toFixed(4)}` : 'no pin yet'}</div></div>
-      <div class="field"><div class="label">Note</div><textarea id="pf-note" rows="3" placeholder="who has access, how it is secured, what else is there">${esc(p ? p.note : '')}</textarea></div>
-      <div class="row"><button class="btn primary" type="submit">${p ? 'Save' : 'Add this place'}</button><button class="btn" type="button" id="pf-cancel">Cancel</button></div>
+      <div class="field" style="position:relative"><div class="label">Address <span style="font-weight:400;text-transform:none;letter-spacing:0">— optional, for the map</span></div><input id="pf-place" autocomplete="off" spellcheck="false" placeholder="start typing; pick a match to place the pin" value="${esc(p ? p.place : '')}"><ul id="pf-list" class="place-list" role="listbox" hidden></ul><div class="muted" id="pf-pos" style="font-size:12.5px">${p && p.lat != null ? `pin at ${p.lat.toFixed(4)}, ${p.lon.toFixed(4)}` : 'no pin yet'}</div></div>
+      <div class="field"><div class="label">Note</div><textarea id="pf-note" rows="2" style="min-height:64px" placeholder="who has access, how it is secured, what else is there">${esc(p ? p.note : '')}</textarea></div>
+      <div class="row" style="gap:8px"><button class="btn small primary" type="submit">${p ? 'Save' : 'Add this place'}</button><button class="btn small" type="button" id="pf-cancel">Cancel</button></div>
       <div class="muted" id="pf-note-line" aria-live="polite"></div></form>`;
   let pos = p && p.lat != null ? { lat: p.lat, lon: p.lon } : null, hits = [], timer = null, seq = 0;
   const list = $('#pf-list'), input = $('#pf-place');
   const showHits = (h) => { hits = h; list.innerHTML = h.map((x, i) => `<li role="option" data-i="${i}"><b>${esc(x.label)}</b><small>${esc(x.detail)}</small></li>`).join(''); list.hidden = !h.length; };
-  input.addEventListener('input', () => { pos = null; $('#pf-pos').textContent = 'no pin yet — pick a match below to place one'; clearTimeout(timer); const q = input.value.trim(), mine = ++seq; if (q.length < 4) return showHits([]);
+  input.addEventListener('input', () => { pos = null; $('#pf-pos').textContent = 'no pin yet — pick a match below, or the closest match is used when you save'; clearTimeout(timer); const q = input.value.trim(), mine = ++seq; if (q.length < 4) return showHits([]);
     timer = setTimeout(async () => { let h = []; try { h = await invoke('place_search', { q }); } catch {} if (mine === seq) showHits(h); }, 350); });
   list.addEventListener('mousedown', (e) => { const li = e.target.closest('li[role=option]'); if (!li) return; e.preventDefault(); const h = hits[+li.dataset.i]; input.value = [h.label, h.detail.replace(/ · /g, ', ')].filter(Boolean).join(', ').slice(0, 160); pos = { lat: h.lat, lon: h.lon }; $('#pf-pos').textContent = `pin at ${h.lat.toFixed(4)}, ${h.lon.toFixed(4)}`; showHits([]); });
   input.addEventListener('blur', () => setTimeout(() => showHits([]), 120));
   $('#pf-cancel').onclick = () => { slot.innerHTML = ''; };
   $('#place-form').onsubmit = async (e) => {
     e.preventDefault(); const name = $('#pf-name').value.trim(); if (!name) return toast('Give the place a name');
+    let at = pos; const addr = input.value.trim();
+    if (!at && addr) { $('#pf-note-line').textContent = 'Placing the pin…'; try { const h = await invoke('place_search', { q: addr }); if (h.length) at = { lat: h[0].lat, lon: h[0].lon }; } catch {} }
     try {
       const before = new Set((store.places || []).map(x => x.id));
-      store = await invoke('place_save', { id, name, note: $('#pf-note').value, place: input.value.trim(), lat: pos ? pos.lat : null, lon: pos ? pos.lon : null });
+      store = await invoke('place_save', { id, name, note: $('#pf-note').value, place: addr, lat: at ? at.lat : null, lon: at ? at.lon : null });
       if (vault) vault = store.vaults.find(x => x.name === vault.name) || vault;
       const saved = id ? store.places.find(x => x.id === id) : store.places.find(x => !before.has(x.id));
-      slot.innerHTML = ''; if (done) await done(saved);
+      slot.innerHTML = ''; if (addr && !at) toast('No match for that address, so the place has no pin yet'); if (done) await done(saved);
     } catch (err) { $('#pf-note-line').textContent = String(err); }
   };
   $('#pf-name').focus();
@@ -2988,18 +3015,33 @@ function renderLocations() {
     return;
   }
   gate.hidden = true; main.hidden = false;
+  const places = placesSorted(), un = unplacedKeys();
+  const placed = Object.keys(store.key_place || {}).filter(k => store.vaults.some(v => v.keys.some(x => x.pubkey === k)) && places.some(p => p.id === store.key_place[k])).length;
+  const n = (c, w) => `${sats(c)} ${w}${c === 1 ? '' : 's'}`;
+  $('#places-sum').textContent = places.length ? `${n(places.length, 'place')} · ${n(placed, 'key')} placed${un.length ? ` · ${un.length} not yet` : ''}` : '';
+  const set = async (pub, id) => { try { store = await invoke('key_place_set', { pubkey: pub, place: id }); renderLocations(); } catch (e) { fail(e); } };
+  // keys with no place yet: each a row with the chips, so the whole custody can be placed from here
+  const unbox = $('#places-unplaced'); unbox.innerHTML = ''; unbox.hidden = !un.length;
+  if (un.length) {
+    unbox.innerHTML = `<div class="label">Not yet placed</div><div class="muted" style="font-size:13px">${un.length === 1 ? 'One key has no place recorded.' : `${un.length} keys have no place recorded.`}</div><div class="tp-list" id="places-un-list"></div><div id="places-un-form"></div>`;
+    for (const u of un) {
+      const row = document.createElement('div'); row.className = 'tp'; row.style.alignItems = 'center';
+      row.innerHTML = `<div class="tp-what"><div class="tp-head"><b>${esc(u.key.name)}</b> <span class="muted">· ${u.vaults.map(esc).join(', ')}</span></div></div>`;
+      row.appendChild(placeChips(null, $('#places-un-form'), (id) => set(u.key.pubkey, id)));
+      $('#places-un-list').appendChild(row);
+    }
+  }
   const list = $('#places-list'); list.innerHTML = '';
-  const places = (store.places || []).slice().sort((a, b) => a.name.localeCompare(b.name));
-  if (!places.length) list.innerHTML = '<div class="sum-empty">No place named yet. Add one here, or from a key’s card.</div>';
+  if (!places.length) list.innerHTML = '<div class="sum-empty">No place named yet. Name one here, or from a key’s card.</div>';
   for (const p of places) {
     const h = placeHoldings(p.id), card = document.createElement('div'); card.className = 'card quiet'; card.dataset.place = p.id;
-    const held = h.length ? h.map(x => `<div class="row" style="gap:8px;align-items:baseline;flex-wrap:wrap"><b>${esc(x.vault.name)}</b><span class="muted">${x.keys.map(k => esc(k.name)).join(', ')} — ${sats(x.keys.length)} of its ${sats(x.vault.keys.length)} key${x.vault.keys.length === 1 ? '' : 's'}${x.vault.keys.length > 1 ? `, ${sats(x.vault.threshold)} sign` : ''}</span>${x.alone ? '<span class="warn">this place alone can spend it</span>' : ''}</div>`).join('') : '<div class="muted" style="font-size:13px">Nothing recorded here yet. Assign a key from its card on Keys.</div>';
-    card.innerHTML = `<div class="guide-row" style="align-items:stretch"><div class="ctx-map" id="place-map-${esc(p.id)}" hidden></div><div class="guide-body">
+    const held = h.length ? h.map(x => `<div class="row" style="gap:6px;align-items:baseline;flex-wrap:wrap"><b>${esc(x.vault.name)}</b>${x.keys.map(k => `<span class="tag ours">${esc(k.name)}</span>`).join('')}<span class="muted" style="font-size:13px">${x.vault.keys.length > 1 ? `${sats(x.keys.length)} of its ${sats(x.vault.keys.length)} keys · ${sats(x.vault.threshold)} sign` : 'its only key'}</span>${x.alone ? '<span class="warn">this place alone can spend it</span>' : ''}</div>`).join('') : '<div class="muted" style="font-size:13px">Nothing kept here yet.</div>';
+    card.innerHTML = `<div class="guide-row" style="align-items:stretch">${placeTile(p, 'place-map-' + esc(p.id))}<div class="guide-body">
         <div class="cer-act-title" style="font-size:20px">${esc(p.name)}</div>${p.place ? `<div class="muted">${esc(p.place)}</div>` : ''}${p.note ? `<div style="font-size:13.5px;white-space:pre-wrap">${esc(p.note)}</div>` : ''}
-        <div class="label" style="margin-top:6px">Kept here</div>${held}
-        <div class="row" style="gap:8px;margin-top:6px"><button class="btn small" type="button" data-place-edit="${esc(p.id)}">Edit</button><button class="btn small" type="button" data-place-del="${esc(p.id)}">Forget this place</button></div><div data-place-form="${esc(p.id)}"></div>
-      </div></div>`;
-    list.appendChild(card); drawPlaceMap($('#place-map-' + p.id), p);
+        <div class="label" style="margin-top:4px">Kept here</div><div class="stack" style="gap:6px">${held}</div>
+        <div class="row" style="gap:8px;margin-top:6px"><button class="btn small" type="button" data-place-edit="${esc(p.id)}">Edit</button><button class="btn small" type="button" data-place-del="${esc(p.id)}">Forget this place</button></div>
+      </div></div><div data-place-form="${esc(p.id)}"></div>`;
+    list.appendChild(card); if (p.lat != null) drawPlaceMap($('#place-map-' + p.id), p);
   }
   $$('[data-place-edit]', list).forEach(b => b.onclick = () => placeForm($(`[data-place-form="${b.dataset.placeEdit}"]`), store.places.find(x => x.id === b.dataset.placeEdit), () => renderLocations()));
   $$('[data-place-del]', list).forEach(b => askTwice(b, 'Forget this place? The keys kept there stay in their vaults; they just have no place recorded.', 'Yes, forget it', async () => { try { store = await invoke('place_delete', { id: b.dataset.placeDel }); renderLocations(); } catch (e) { fail(e); } }));

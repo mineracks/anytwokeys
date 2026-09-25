@@ -286,6 +286,8 @@
       <div id="places-main" hidden>
         <div class="card"><div class="label">Where the keys are kept</div>
           <div class="muted" style="font-size:13.5px;max-width:720px">One place often holds a key of several vaults — the safe has key 1 of this vault and key 1 of that one. Naming the place once shows what each place really holds, and warns when one place alone could spend a vault.</div>
+          <div class="muted" id="places-sum" style="font-size:13px"></div>
+          <div class="card quiet" id="places-unplaced" hidden></div>
           <div id="places-list" style="display:flex;flex-direction:column;gap:14px;margin-top:8px"></div>
           <div class="row" style="margin-top:12px"><button class="btn primary" type="button" id="place-new">New location</button></div>
           <div id="place-form-slot"></div>
