@@ -29,7 +29,7 @@ const PEN = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke=
 const labelOf = (key) => (vault && vault.labels && vault.labels[key]) || '';
 const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
 // an inline label: text plus a hover pencil; click → field; Enter/blur saves through label_set
-function lblHtml(key) { return `<span class="lbl" data-lkey="${esc(key)}"><span class="text">${esc(labelOf(key))}</span><button class="pencil" title="Label">${PEN}</button></span>`; }
+function lblHtml(key) { return `<span class="lbl" data-lkey="${esc(key)}"><span class="text" title="${esc(labelOf(key))}">${esc(labelOf(key))}</span><button class="pencil" title="Label">${PEN}</button></span>`; }
 document.addEventListener('click', (e) => {
   const b = e.target.closest('.lbl .pencil'); if (!b) return; e.preventDefault(); e.stopPropagation();
   const box = b.closest('.lbl'), key = box.dataset.lkey, cur = labelOf(key);

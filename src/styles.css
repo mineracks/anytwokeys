@@ -151,7 +151,10 @@ body.resizing{cursor:col-resize;-webkit-user-select:none;user-select:none}
 .tbl tr.rowpick{cursor:pointer}
 .tbl tr.rowpick:hover td{background:var(--gold-soft)}
 .tbl tr.future td{opacity:.6}
-.lbl{display:inline-flex;align-items:center;gap:6px;min-height:22px}
+.lbl{display:inline-flex;align-items:center;gap:6px;min-height:22px;max-width:100%}
+/* a label is one line however long it was typed or imported: the rest is in its title and on the row's own page */
+.lbl .text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:min(34vw,420px)}
+.tbl td.mono,.tbl td .mono,.act td .mono{white-space:nowrap}
 .lbl .pencil{padding:2px;color:transparent}
 tr:hover .lbl .pencil,.coin:hover .lbl .pencil,.lbl .pencil:focus-visible{color:var(--muted)}
 .lbl .pencil:hover{color:var(--gold)}
