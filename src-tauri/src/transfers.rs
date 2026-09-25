@@ -265,7 +265,8 @@ pub fn answer(key:&str,yes:bool)->Result<wallet::Store,String> {
     with_index(|i| {
         let s=wallet::load()?;i.reconcile(&s,false);
         let p=i.view.proposals.iter().find(|p|p.key==key).ok_or("this suggestion changed; check the refreshed list")?;
-        if yes && !p.unique {return Err("more than one transfer fits; this pair cannot be confirmed".into());}
+        // a Yes on a contested pair is the person choosing between the matches: once this leg is linked, the
+        // reconcile below drops every other candidate that shares it
         let answer=Answer{yes,pair:p.pair.clone()};
         let s=wallet::update(|s| {s.transfer_answers.insert(key.to_string(),answer);})?;
         i.reconcile(&s,false);Ok(s)

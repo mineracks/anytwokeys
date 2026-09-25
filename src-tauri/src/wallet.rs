@@ -148,6 +148,10 @@ pub struct Store {
     #[serde(default)] pub seen: std::collections::HashMap<String, Seen>,
     /// the address book: places this person pays more than once
     #[serde(default)] pub contacts: Vec<Contact>,
+    /// where keys are kept: one location may hold a key of several vaults, which is the point of naming it once
+    #[serde(default)] pub places: Vec<Place>,
+    /// key public key → the id of the place it is kept
+    #[serde(default)] pub key_place: std::collections::HashMap<String, String>,
     /// public key → YubiKey form factor, learnt when the card is plugged in, so a Nano is drawn as one
     #[serde(default)] pub forms: std::collections::HashMap<String, u8>,
     /// when this computer FIRST saw each key, by public key. A YubiKey carries no manufacture date, so this is the
@@ -321,6 +325,19 @@ pub struct SilentPay {
     pub from: u32,
     pub scanned: u32,
     #[serde(default)] pub found: Vec<crate::sp::Found>,
+}
+
+/// A place a key is kept. The name is the person's ("the safe", "Mum's"); the address and position are optional, for
+/// the map. Notes about it live here too, since the place is one thing however many keys it holds.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Place {
+    pub id: String,
+    pub name: String,
+    #[serde(default)] pub note: String,
+    #[serde(default)] pub place: String,
+    #[serde(default)] pub lat: Option<f64>,
+    #[serde(default)] pub lon: Option<f64>,
+    #[serde(default)] pub added: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

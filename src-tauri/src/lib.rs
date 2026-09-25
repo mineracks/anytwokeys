@@ -584,17 +584,18 @@ fn spark_vault(mut s: Store, name: String, address: String, identity: String, ne
 /// with its PIN and touch: proof the key is in hand, not just its name known. Everything is sealed on disk already;
 /// this is about the screen, in a room. Returns when the proof lapses (ten minutes), for the window's own clock.
 #[tauri::command]
-async fn key_card_open(name: String, reader: Option<String>, pin: Option<String>) -> R<u64> {
+async fn key_card_open(name: Option<String>, reader: Option<String>, pin: Option<String>) -> R<u64> {
     let pin = pin.map(zeroize::Zeroizing::new);
     block(move || {
         let s = wallet::load()?;
-        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
+        // a vault's card asks for one of ITS keys; the Locations screen, which spans vaults, for any key kept here
+        let mine: Vec<&wallet::Vault> = match &name { Some(n) => vec![s.vaults.iter().find(|v| &v.name == n).ok_or("no such vault")?], None => s.vaults.iter().collect() };
         match (reader, pin) {
             (Some(reader), Some(pin)) => {
                 use std::str::FromStr;
                 let card = cards::list().map_err(|e| e.to_string())?.into_iter().find(|c| c.reader == reader).ok_or("that key is no longer plugged in")?;
                 let pub_hex = card.pubkey.ok_or("this key has no signing key")?;
-                if !v.keys.iter().any(|k| k.pubkey == pub_hex) { return Err("that is not one of this vault's keys".into()); }
+                if !mine.iter().any(|v| v.keys.iter().any(|k| k.pubkey == pub_hex)) { return Err(if name.is_some() { "that is not one of this vault's keys" } else { "that key is not in any vault here" }.into()); }
                 let digest: [u8; 32] = lockbox::random();
                 let (r, sg) = cards::sign_digest(&reader, &pin, &digest).map_err(|e| e.to_string())?;
                 let mut compact = [0u8; 64]; compact[..32].copy_from_slice(&r); compact[32..].copy_from_slice(&sg);
@@ -607,6 +608,31 @@ async fn key_card_open(name: String, reader: Option<String>, pin: Option<String>
         }
         Ok(now() + 600)
     }).await
+}
+
+// ---------- places keys are kept ----------
+
+/// Save a place: new when `id` is empty, else the one it names. Words are the person's; the position is optional.
+#[tauri::command]
+fn place_save(id: String, name: String, note: String, place: String, lat: Option<f64>, lon: Option<f64>) -> R<Store> {
+    let name = name.trim().to_string();
+    if name.is_empty() || name.chars().count() > 60 { return Err("give the place a name of up to 60 characters".into()); }
+    if let (Some(a), Some(o)) = (lat, lon) { if !(-90.0..=90.0).contains(&a) || !(-180.0..=180.0).contains(&o) { return Err("that is not a position on Earth".into()); } }
+    let t = now();
+    wallet::update(|s| {
+        if let Some(p) = s.places.iter_mut().find(|p| p.id == id) { p.name = name.clone(); p.note = note.chars().take(2000).collect(); p.place = place.chars().take(200).collect(); p.lat = lat; p.lon = lon; }
+        else { s.places.push(wallet::Place { id: hex::encode(&lockbox::random::<8>()), name: name.clone(), note: note.chars().take(2000).collect(), place: place.chars().take(200).collect(), lat, lon, added: t }); }
+    })
+}
+/// Forget a place. The keys kept there are not touched; they simply have no place recorded any more.
+#[tauri::command]
+fn place_delete(id: String) -> R<Store> {
+    wallet::update(|s| { s.places.retain(|p| p.id != id); s.key_place.retain(|_, v| v != &id); })
+}
+/// Where a key is kept — by public key, since one key may sign for several vaults and is kept in one place.
+#[tauri::command]
+fn key_place_set(pubkey: String, place: Option<String>) -> R<Store> {
+    wallet::update(|s| match place { Some(id) if s.places.iter().any(|p| p.id == id) => { s.key_place.insert(pubkey, id); } _ => { s.key_place.remove(&pubkey); } })
 }
 
 // ---------- a Lightning node the person runs (node.rs) ----------
@@ -1094,12 +1120,13 @@ async fn vault_sync(name: String) -> R<Snapshot> {
             let fresh = node_read(n)?;
             let txs: std::collections::HashMap<String, i32> = fresh.events.iter().filter(|e| !e.txid.is_empty()).map(|e| (e.txid.clone(), 0)).collect();
             wallet::update(|s| { if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == name) { vm.node = Some(fresh.clone()); } let e = s.seen.entry(name.clone()).or_default(); e.txs = txs; e.primed = true; })?;
-            let history: Vec<HistoryRow> = fresh.events.iter().rev().map(|e| HistoryRow { txid: e.id.clone(), height: 0, index: 0 }).collect();
+            // oldest first, as Electrum's history is: the window turns every history newest-first itself
+            let history: Vec<HistoryRow> = fresh.events.iter().map(|e| HistoryRow { txid: e.id.clone(), height: 0, index: 0 }).collect();
             return Ok(Snapshot { coins: Vec::new(), balance: fresh.onchain + fresh.channels, height: 0, history, servers, receive: String::new(), receive_index: 0, rotating: false, next_change: 0, gap: 0 });
         }
         // A closed wallet read from its statement: no chain to ask; the balance is what its rows add up to
         if let Some(st) = &v.statement {
-            let history: Vec<HistoryRow> = st.rows.iter().rev().map(|r| HistoryRow { txid: r.id.clone(), height: 0, index: 0 }).collect();
+            let history: Vec<HistoryRow> = st.rows.iter().map(|r| HistoryRow { txid: r.id.clone(), height: 0, index: 0 }).collect();
             return Ok(Snapshot { coins: Vec::new(), balance: st.closes_at.max(0) as u64, height: 0, history, servers, receive: String::new(), receive_index: 0, rotating: false, next_change: 0, gap: 0 });
         }
         // A Spark wallet is not on the chain: its balance comes from an operator, and it has no coins, no addresses
@@ -2692,7 +2719,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
-            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
+            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
         .build(tauri::generate_context!())

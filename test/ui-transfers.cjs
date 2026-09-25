@@ -34,7 +34,7 @@ H.vault_activity=a=>({ccy:'AUD',now:{price:200000,basis:'fixture'},note:null,tra
  assert.match(await page.innerText('#home-summary'),/\$59(?:\.00)?/,'Home shows carried basis, not acquisition price');
  await page.screenshot({path:path.join(out,'confirmed-home.png'),fullPage:true});
  await page.evaluate(async()=>{window.__answer=null;window.__ambiguous=true;show('activity');await refreshTransferLinks();});
- assert.equal(await page.locator('[data-transfer-answer][data-yes="true"]').count(),0);assert.match(await page.innerText('#transfer-proposals'),/More than one/);
- await page.click('[data-transfer-answer][data-yes="false"]');await page.waitForTimeout(100);await page.evaluate(()=>refreshTransferLinks());assert.equal(await page.locator('[data-transfer-answer]').count(),0);
+ assert.equal(await page.locator('[data-transfer-answer][data-yes="true"]').count(),1,'a contested match can still be chosen');assert.match(await page.innerText('#transfer-proposals'),/Pick the one that is right, or none/);
+ await page.click('[data-transfer-none]');await page.waitForTimeout(100);await page.evaluate(()=>refreshTransferLinks());assert.equal(await page.locator('[data-transfer-answer]').count(),0);
  assert.deepEqual(errors,[]);console.log('PASS: proposals leave accounting unchanged, confirmation carries basis in all methods and Home, fee only, details, ambiguity, denial');await browser.close();
 })().catch(e=>{console.error(e);process.exit(1)});

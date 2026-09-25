@@ -89,9 +89,9 @@ function show(name) {
   for (const go of ['send', 'messages', 'keys']) $$(`.nav[data-go=${go}], #s-home [data-go=${go}]`).forEach(n => { n.hidden = watched; });
   // Receive is real for a watched wallet of one key — those addresses ARE its own — but means nothing for Muun or Spark
   $$('.nav[data-go=receive], #s-home [data-go=receive]').forEach(n => { n.hidden = !!(vault && (vault.muun || vault.spark || vault.statement || vault.node)); });
-  const inVault = vault && !['setup', 'restore', 'settings', 'overview'].includes(name);
+  const inVault = vault && !['setup', 'restore', 'settings', 'overview', 'places'].includes(name);
   $$('#vault-tabs .nav').forEach(n => n.classList.toggle('on', !!inVault && n.dataset.vault === vault.name));
-  $('#title').textContent = { overview: 'All vaults', home: vault ? vault.name : 'Vault', activity: 'Activity', send: 'Send', receive: 'Receive', coins: 'Coins', addresses: 'Addresses', vault: 'Vault settings', keys: 'Keys', settings: 'App settings', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
+  $('#title').textContent = { overview: 'All vaults', home: vault ? vault.name : 'Vault', activity: 'Activity', send: 'Send', receive: 'Receive', coins: 'Coins', addresses: 'Addresses', vault: 'Vault settings', keys: 'Keys', settings: 'App settings', places: 'Locations', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
   $('#title-edit').hidden = !(name === 'home' && vault); $('#title-input').hidden = true; $('#title').hidden = false;
   paintCrumbs(name); paintStaged(name);
   $('#side-vault').textContent = vault ? vault.name : 'No vault yet'; $('#side-vault').title = vault ? `These screens are about “${vault.name}”` : '';
@@ -115,6 +115,7 @@ function show(name) {
   if (name === 'setup') renderSetup();
   if (name === 'restore') restoreTab(restoreTab.now || 'keys');
   if (name === 'settings') renderSettings();
+  if (name === 'places') renderLocations();
   if (name === 'sign') renderSign();
   void first;
 }
@@ -123,15 +124,15 @@ document.addEventListener('click', (e) => { const go = e.target.closest('[data-g
 function paintCrumbs(name) {
   const trail = [];
   if (['setup', 'restore'].includes(name)) trail.push(['Vaults', store.vaults.length ? 'welcome' : null]);
-  else if (name !== 'settings' && vault) {
+  else if (!['settings', 'places'].includes(name) && vault) {
     if (name !== 'home') trail.push([vault.name, 'home']);
     if (name === 'sign') trail.push(paintCrumbs.via === 'messages' ? ['Messages', 'messages'] : ['Send', 'send']);
     if (name === 'tx') trail.push(['Activity', 'activity']);
     if ((name === 'coins' && recPage.kind === 'coin') || (name === 'addresses' && recPage.kind === 'addr')) trail.push([name === 'coins' ? 'Coins' : 'Addresses', name]);
     if (name === 'keys' && recPage.kind === 'key') trail.push(['Keys', 'keys']);
   }
-  if (name === 'settings') trail.push(['Any Two Keys', null]);
-  const here = { home: '', send: 'Send', receive: 'Receive', keys: recPage.kind === 'key' ? recPage.leaf : 'Keys', settings: 'App settings', setup: 'New vault', restore: 'Restore', sign: 'Sign', messages: 'Messages', tx: name === 'tx' && vault && txView.txid ? txHeadline() : '', coins: recPage.kind === 'coin' ? recPage.leaf : '', addresses: recPage.kind === 'addr' ? recPage.leaf : '' }[name] || '';
+  if (name === 'settings' || name === 'places') trail.push(['Any Two Keys', null]);
+  const here = { home: '', send: 'Send', receive: 'Receive', keys: recPage.kind === 'key' ? recPage.leaf : 'Keys', settings: 'App settings', places: 'Locations', setup: 'New vault', restore: 'Restore', sign: 'Sign', messages: 'Messages', tx: name === 'tx' && vault && txView.txid ? txHeadline() : '', coins: recPage.kind === 'coin' ? recPage.leaf : '', addresses: recPage.kind === 'addr' ? recPage.leaf : '' }[name] || '';
   const el = $('#crumbs'); el.hidden = !trail.length;
   const html = trail.map(([t, go]) => (go ? `<a tabindex="0" role="link" data-crumb="${go}">${esc(t)}</a>` : `<span>${esc(t)}</span>`) + '<span class="sep">›</span>').join('') + `<span class="here">${esc(here)}</span>`;
   if (el._html !== html) { el._html = html; el.innerHTML = html; }   // a poll must not take focus off a crumb
@@ -864,16 +865,34 @@ function paintTransferProposals() {
     box.className = 'card'; box.style.cssText = '';
     box.innerHTML='<div class="label">Possible transfers</div><p class="muted">Amounts and dates can suggest a move between your wallets. Your figures change only after you confirm it. Split payments are not matched.</p><button class="btn" id="transfer-check">Check other vaults</button><p id="transfer-check-note" class="muted"></p>';
   }
+  // proposals that share a leg (the same payment out, or the same arrival in) are one question: which of these, if
+  // any, is real. They are drawn together, and a Yes on one settles the rest.
+  const legs = (p) => [p.pair.from + '\u0000' + p.pair.from_id, p.pair.to + '\u0000' + p.pair.to_id];
+  const groups = [], byLeg = new Map();
   for (const p of proposals) {
-    const c=p.pair, line=document.createElement('div');line.className='card';
-    line.innerHTML=`<strong>${esc(c.from)} → ${esc(c.to)}</strong><p>${c.exact ? `That transaction pays <b>exactly ${sats(c.incoming)} sats</b> to one output \u2014 the amount that arrived; the rest of the ${sats(c.out)} sats it took from the vault is change and fee.` : `${sats(c.out)} sats out; ${sats(c.incoming)} sats in; difference ${sats(c.out-c.incoming)} sats.`}</p><p class="muted">${new Date(c.at*1000).toLocaleString()} → ${new Date(c.arrived*1000).toLocaleString()}</p><p class="mono muted" style="overflow-wrap:anywhere">${esc(c.from_id)} → ${esc(c.to_id)}</p>${p.unique ? '' : '<p class="warn">More than one transfer fits. These candidates stay unlinked.</p>'}`;
-    for (const yes of [true,false]) {
-      if (yes && !p.unique) continue;
-      const b=document.createElement('button'); b.className='btn'; b.textContent=yes ? 'Yes, that’s mine' : 'No'; b.dataset.transferAnswer=p.key; b.dataset.yes=String(yes);
-      b.onclick=async()=>{b.disabled=true;try {store=await invoke('transfer_answer',{key:p.key,yes}); await refreshTransferLinks(); if(vault){vault=store.vaults.find(v=>v.name===vault.name)||vault;repaintFacts(txFacts[vault.name]);renderHomeSummary();}} catch(e){fail(e);} finally {b.disabled=false;}};
-      line.appendChild(b);
-    }
-    box.appendChild(line);
+    let g = null; for (const l of legs(p)) { const h = byLeg.get(l); if (h && h !== g) { if (!g) g = h; else { g.push(...h); groups.splice(groups.indexOf(h), 1); for (const q of h) for (const m of legs(q)) byLeg.set(m, g); } } }
+    if (!g) { g = []; groups.push(g); } g.push(p); for (const l of legs(p)) byLeg.set(l, g);
+  }
+  const answerBtn = (p, yes, text, small) => { const b=document.createElement('button'); b.type='button'; b.className='btn' + (small ? ' small' : ''); b.textContent=text; b.dataset.transferAnswer=p.key; b.dataset.yes=String(yes);
+    b.onclick=async()=>{b.disabled=true;try {store=await invoke('transfer_answer',{key:p.key,yes}); await refreshTransferLinks(); if(vault){vault=store.vaults.find(v=>v.name===vault.name)||vault;repaintFacts(txFacts[vault.name]);renderHomeSummary();}} catch(e){fail(e);} finally {b.disabled=false;}}; return b; };
+  const sameDay = (a, b) => new Date(a*1000).toDateString() === new Date(b*1000).toDateString();
+  const whenOpts = { day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' }, timeOpts = { hour: 'numeric', minute: '2-digit' };
+  const shortId = (s) => s.length > 20 ? s.slice(0, 10) + '\u2026' + s.slice(-8) : s;
+  const row = (p) => { const c=p.pair, d=document.createElement('div'); d.className='tp';
+    const amount = c.exact ? `<b>exactly ${sats(c.incoming)} sats</b> to one output of a ${sats(c.out)} sat payment; the rest is change and fee` : c.out === c.incoming ? `<b>${sats(c.out)} sats</b> out and in` : `${sats(c.out)} sats out \u00b7 ${sats(c.incoming)} sats in \u00b7 ${sats(c.out-c.incoming)} sats apart`;
+    d.innerHTML=`<div class="tp-what"><div class="tp-head"><b>${esc(c.from)}</b> \u2192 <b>${esc(c.to)}</b> <span class="muted">\u00b7 ${new Date(c.at*1000).toLocaleString(undefined, whenOpts)} \u2192 ${new Date(c.arrived*1000).toLocaleString(undefined, sameDay(c.at, c.arrived) ? timeOpts : whenOpts)}</span></div><div>${amount}</div><div class="tp-ids mono muted" title="${esc(c.from_id)} \u2192 ${esc(c.to_id)}">${esc(shortId(c.from_id))} \u2192 ${esc(shortId(c.to_id))}</div></div>`;
+    const act=document.createElement('div'); act.className='tp-act'; d.appendChild(act); return { d, act }; };
+  const list=document.createElement('div'); list.className='tp-list'; box.appendChild(list);
+  for (const g of groups) {
+    if (g.length === 1 && g[0].unique) { const { d, act } = row(g[0]); act.append(answerBtn(g[0], true, 'Yes, that\u2019s mine', true), answerBtn(g[0], false, 'No', true)); list.appendChild(d); continue; }
+    const gd=document.createElement('div'); gd.className='tp-group';
+    const outs = new Set(g.map(p => p.pair.from + '\u0000' + p.pair.from_id)).size, ins = new Set(g.map(p => p.pair.to + '\u0000' + p.pair.to_id)).size;
+    const what = g.length === 1 ? 'Another match for the same payment sits in a vault not shown here, so this one is not assumed.' : outs === 1 ? `One payment out, ${g.length} possible arrivals. At most one is the real one.` : ins === 1 ? `One arrival, ${g.length} possible payments for it. At most one is the real one.` : `${g.length} matches share payments between them. At most one per payment is real.`;
+    gd.innerHTML = `<div class="tp-group-head">${what} Pick the one that is right, or none.</div>`;
+    for (const p of g) { const { d, act } = row(p); act.append(answerBtn(p, true, 'This one', true)); gd.appendChild(d); }
+    const none=document.createElement('button'); none.type='button'; none.className='btn small'; none.style.marginTop='8px'; none.textContent='None of these'; none.dataset.transferNone='1';
+    none.onclick=async()=>{none.disabled=true;try {for (const p of g) store=await invoke('transfer_answer',{key:p.key,yes:false}); await refreshTransferLinks(); if(vault){vault=store.vaults.find(v=>v.name===vault.name)||vault;repaintFacts(txFacts[vault.name]);renderHomeSummary();}} catch(e){fail(e);} finally {none.disabled=false;}};
+    gd.appendChild(none); list.appendChild(gd);
   }
   $('#transfer-check').disabled=checkingTransfers;
   $('#transfer-check').onclick=async()=>{
@@ -1026,10 +1045,15 @@ function actRowHtml(h) {
   }
   return `<td class="when muted">${h.height > 0 ? '…' : 'pending'}</td><td><span class="mono">${h.txid.slice(0, 10)}…${h.txid.slice(-6)}</span>${vault._rotating ? ' <span class="muted">· ' + fmtIndex(h.index) + '</span>' : ''}</td><td>${lblHtml('tx:' + h.txid)}<span class="xfer" data-xfer="${h.txid}"></span></td><td class="r amt muted">…</td><td class="r ${h.height > 0 ? 'ok' : 'muted'}">${h.height > 0 ? 'confirmed · ' + sats(h.height) : 'unconfirmed'}</td>`;
 }
-function actFill(tb, list) {
+function actFill(tb, list, key) {
   tb.innerHTML = '';
   if (!list.length) { tb.innerHTML = '<tr><td class="muted" colspan="5">nothing yet</td></tr>'; return; }
-  for (const h of list) { const tr = document.createElement('tr'); tr.dataset.txid = h.txid; tr.innerHTML = actRowHtml(h); tb.appendChild(tr); }
+  const rows = txFacts[vault.name]?.rows || {};
+  let i = 0;
+  while (i < list.length) {
+    if (key) { const g = key(list[i]); let j = i, net = 0, known = true; while (j < list.length && key(list[j]) === g) { const r = rows[list[j].txid]; if (r && r.net != null) net += r.net; else known = false; j++; } tb.appendChild(groupRow(g, j - i, net, known, 5)); for (; i < j; i++) { const tr = document.createElement('tr'); tr.dataset.txid = list[i].txid; tr.innerHTML = actRowHtml(list[i]); tb.appendChild(tr); } }
+    else { const tr = document.createElement('tr'); tr.dataset.txid = list[i].txid; tr.innerHTML = actRowHtml(list[i]); tb.appendChild(tr); i++; }
+  }
   tb.onclick = (e) => { if (e.target.closest('.lbl, a, button, input')) return; const tr = e.target.closest('tr[data-txid]'); if (tr) openTx(tr.dataset.txid); };
 }
 function paintActivity() {
@@ -1041,6 +1065,56 @@ function paintActivity() {
   renderActScreen();
 }
 let actShown = ACT_PAGE;
+// ---------- list controls: which rows, in what order, gathered how — the same on every list ----------
+const listPref = (list, k, d) => { try { return localStorage.getItem(`a2k-list-${list}-${k}`) || d; } catch { return d; } };
+const listSave = (list, k, v) => { try { localStorage.setItem(`a2k-list-${list}-${k}`, v); } catch {} };
+// spec: [{ key, label, def, options: [[value, words], …] }]; a choice is kept per list, not per vault, so every
+// vault's list answers the same way once the person has said how they like it
+function listControls(host, list, spec, onchange) {
+  if (!host) return;
+  host.innerHTML = ''; host.className = 'list-ctl';
+  for (const s of spec) {
+    const cur = listPref(list, s.key, s.def), item = document.createElement('div'); item.className = 'list-ctl-item';
+    const name = document.createElement('span'); name.className = 'list-ctl-name'; name.textContent = s.label; item.appendChild(name);
+    const seg = document.createElement('div'); seg.className = 'seg'; seg.setAttribute('role', 'radiogroup'); seg.setAttribute('aria-label', s.label);
+    for (const [k, n] of s.options) { const b = document.createElement('button'); b.type = 'button'; b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', k === cur ? 'true' : 'false'); b.dataset.ctl = s.key; b.dataset.val = k; b.textContent = n; b.onclick = () => { listSave(list, s.key, k); onchange(); }; seg.appendChild(b); }
+    item.appendChild(seg); host.appendChild(item);
+  }
+}
+// a group's header row: its name, how many, and what they add up to when that is known
+function groupRow(label, items, net, known, cols) {
+  const tr = document.createElement('tr'); tr.className = 'grp';
+  const sum = known ? `${sats(items)} \u00b7 ${net > 0 ? '+' : net < 0 ? '\u2212' : ''}${sats(Math.abs(net))} sats` : sats(items);
+  tr.innerHTML = `<td colspan="${cols}">${esc(label)}<span class="muted">${sum}</span></td>`; return tr;
+}
+const ACT_CTL = [
+  { key: 'show', label: 'Show', def: 'all', options: [['all', 'All'], ['in', 'In'], ['out', 'Out'], ['xfer', 'Transfers']] },
+  { key: 'sort', label: 'Sort', def: 'new', options: [['new', 'Newest'], ['old', 'Oldest'], ['big', 'Largest'], ['small', 'Smallest']] },
+  { key: 'group', label: 'Group', def: 'none', options: [['none', 'None'], ['month', 'Month'], ['year', 'Year'], ['kind', 'Kind']] },
+];
+const actNeedsFacts = () => listPref('act', 'show', 'all') !== 'all' || listPref('act', 'sort', 'new') !== 'new' || listPref('act', 'group', 'none') !== 'none';
+// what kind of row this is, in the words its Status column uses
+function actKind(h, f) {
+  if (vault?.node) { const e = nodeRow(h.txid); return e ? `${e.layer === 'chain' ? 'On-chain' : e.layer === 'fee' ? 'Fee' : 'Lightning'} \u00b7 ${e.kind}` : 'From the node'; }
+  if (vault?.statement) { const r = stmtRow(h.txid); return r ? `${r.layer === 'chain' ? 'On-chain' : 'Lightning'} \u00b7 ${r.kind === 'income' ? (r.pos ? 'sale' : 'reward') : r.kind}` : 'From the statement'; }
+  if (vault?.spark) { const t = f?.spark?.[h.txid]; return sparkTransferStatus(t?.status) || 'Spark'; }
+  const r = f?.rows?.[h.txid];
+  if (f?.transfers?.[h.txid]) return 'Transfers between your vaults';
+  if (!r || r.net === null) return h.height > 0 ? 'Confirmed' : 'Unconfirmed';
+  return r.net > 0 ? 'Deposits' : r.net < 0 ? 'Withdrawals' : 'No change';
+}
+// the rows to draw: filtered, sorted, and cut into groups when asked — from the list and whatever facts have arrived
+function actView(all, q) {
+  const f = txFacts[vault.name] || {}, rows = f.rows || {}, xf = f.transfers || {};
+  const show = listPref('act', 'show', 'all'), sort = listPref('act', 'sort', 'new'), group = listPref('act', 'group', 'none');
+  const xs = all.map((h, i) => ({ h, i, r: rows[h.txid] })).filter(x => actMatch(x.h, q))
+    .filter(x => show === 'all' || (show === 'in' && x.r?.net > 0) || (show === 'out' && x.r?.net < 0) || (show === 'xfer' && xf[x.h.txid]));
+  const tk = (x) => x.r?.time ?? (x.h.height > 0 ? 0 : 9e12), big = (x) => x.r?.net == null ? -1 : Math.abs(x.r.net), small = (x) => x.r?.net == null ? Infinity : Math.abs(x.r.net);
+  xs.sort({ new: (a, b) => (tk(b) - tk(a)) || (a.i - b.i), old: (a, b) => (tk(a) - tk(b)) || (b.i - a.i), big: (a, b) => (big(b) - big(a)) || (a.i - b.i), small: (a, b) => (small(a) - small(b)) || (a.i - b.i) }[sort]);
+  const key = group === 'none' ? null : group === 'kind' ? (x) => actKind(x.h, f)
+    : (x) => x.r?.time ? new Date(x.r.time * 1000).toLocaleDateString(undefined, group === 'month' ? { month: 'long', year: 'numeric' } : { year: 'numeric' }) : (x.h.height > 0 ? 'Not dated yet' : 'Pending');
+  return { hits: xs.map(x => x.h), key: key ? (h) => key({ h, r: rows[h.txid] }) : null };
+}
 function actMatch(h, q) {
   if (!q) return true;
   const k = 'tx:' + h.txid;
@@ -1050,18 +1124,26 @@ function renderActScreen() {
   if (!vault) return;
   paintTransferProposals();
   const all = txList[vault.name] || [], q = ($('#act-find').value || '').trim().toLowerCase();
-  const hits = all.filter(h => actMatch(h, q));
-  actFill($('#act-all'), hits.slice(0, actShown));
-  $('#act-count').textContent = q ? `${sats(hits.length)} of ${sats(all.length)}` : `${sats(all.length)} transaction${all.length === 1 ? '' : 's'}`;
+  listControls($('#act-ctl'), 'act', ACT_CTL, () => { actShown = ACT_PAGE; renderActScreen(); });
+  const { hits, key } = actView(all, q), narrowed = q || listPref('act', 'show', 'all') !== 'all';
+  actFill($('#act-all'), hits.slice(0, actShown), key);
+  $('#act-count').textContent = narrowed ? `${sats(hits.length)} of ${sats(all.length)}` : `${sats(all.length)} transaction${all.length === 1 ? '' : 's'}`;
   $('#act-more').hidden = hits.length <= actShown;
   $('#act-more').textContent = `Show ${sats(Math.min(ACT_PAGE, hits.length - actShown))} more`;
-  $('#act-foot').textContent = q && !hits.length ? 'Nothing here matches that. A label or a note you have written counts, as well as the id.'
+  $('#act-foot').textContent = narrowed && !hits.length ? (q ? 'Nothing here matches that. A label or a note you have written counts, as well as the id.' : 'Nothing of that kind here.')
     : `Showing ${sats(Math.min(actShown, hits.length))}. Amounts and dates arrive from the server a moment after the list.`;
   if (vault.name) fillLater();
 }
-const fillLater = () => { clearTimeout(fillLater.t); fillLater.t = setTimeout(() => { const f = txFacts[vault.name]; if (f) repaintFacts(f); }, 0); };
-// the amounts already fetched are put back into whichever rows have just been drawn
+// the cells are filled a tick later, so a fetch that fails in between can cancel it and show dashes instead of stale figures
+const fillLater = () => { clearTimeout(fillLater.t); fillLater.t = setTimeout(() => { const f = txFacts[vault.name]; if (f) paintFactCells(f); }, 0); };
+// facts arrived or changed: a list ordered or gathered by them is drawn again; otherwise its cells are filled in place
 function repaintFacts(facts) {
+  if (!facts) return;
+  if (vault && $('#s-activity').classList.contains('on') && actNeedsFacts()) { renderActScreen(); return; }
+  paintFactCells(facts);
+}
+// the amounts already fetched are put back into whichever rows have just been drawn
+function paintFactCells(facts) {
   if (!facts) return;
   for (const el of $$('[data-xfer]')) {
     const peers = (facts.transfers || {})[el.dataset.xfer], r = (facts.rows || {})[el.dataset.xfer];
@@ -1094,12 +1176,21 @@ function coinKey(c) { return `output:${c.txid}:${c.vout}`; }
 function coinAddr(c) { const r = (renderAddresses.rows || []).find(r => r.index === c.index); return r ? r.address : ''; }
 function renderCoins2() {
   if (!vault) return;
-  const all = (vault._coins || []).slice().sort((a, b) => b.value - a.value);
+  listControls($('#coin-ctl'), 'coin', [
+    { key: 'sort', label: 'Sort', def: 'big', options: [['big', 'Largest'], ['small', 'Smallest'], ['new', 'Newest'], ['old', 'Oldest']] },
+    { key: 'group', label: 'Group', def: 'none', options: [['none', 'None'], ['addr', 'Address'], ['status', 'Status']] }], renderCoins2);
+  const sort = listPref('coin', 'sort', 'big'), group = listPref('coin', 'group', 'none');
+  const hk = (c) => c.height > 0 ? c.height : 9e9;   // unconfirmed is the newest there is
+  const all = (vault._coins || []).slice().sort({ big: (a, b) => b.value - a.value, small: (a, b) => a.value - b.value, new: (a, b) => hk(b) - hk(a) || b.value - a.value, old: (a, b) => hk(a) - hk(b) || b.value - a.value }[sort]);
   const q = ($('#coin-find').value || '').trim().toLowerCase();
   const hits = all.filter(c => !q || (coinKey(c) + ' ' + coinAddr(c) + ' ' + labelOf(coinKey(c)) + ' ' + ((vault.notes || {})[coinKey(c)] || '')).toLowerCase().includes(q));
+  const gkey = group === 'addr' ? (c) => { const a = coinAddr(c); return a ? (labelOf('addr:' + a) ? labelOf('addr:' + a) + ' \u00b7 ' + shortAddr(a) : shortAddr(a)) : 'Address unknown'; } : group === 'status' ? (c) => c.height > 0 ? 'Confirmed' : 'Unconfirmed' : null;
+  if (gkey) hits.sort((a, b) => gkey(a).localeCompare(gkey(b)) || all.indexOf(a) - all.indexOf(b));
   const tb = $('#coin-rows'); tb.innerHTML = '';
   if (!hits.length) tb.innerHTML = `<tr><td class="muted" colspan="5">${all.length ? 'nothing here matches that' : 'no coins yet: nothing has arrived, or nothing is left unspent'}</td></tr>`;
+  let lastG = null;
   for (const c of hits) {
+    if (gkey) { const g = gkey(c); if (g !== lastG) { const mine = hits.filter(x => gkey(x) === g); tb.appendChild(groupRow(g, mine.length, mine.reduce((a, x) => a + x.value, 0), true, 5)); lastG = g; } }
     const k = coinKey(c), addr = coinAddr(c), tip = vault._height || 0, deep = c.height > 0 && tip ? tip - c.height + 1 : 0;
     const tr = document.createElement('tr'); tr.className = 'rowpick'; tr.dataset.coin = k;
     tr.innerHTML = `<td><span class="mono">${c.txid.slice(0, 8)}…:${c.vout}</span>${vault._rotating && c.index !== undefined ? ' <span class="muted">· ' + fmtIndex(c.index) + '</span>' : ''}</td><td class="mono" title="${esc(addr)}">${addr ? esc(addr.slice(0, 18)) + '…' : '—'}</td><td>${lblHtml(k)}</td><td class="r" style="font-variant-numeric:tabular-nums">${sats(c.value)} sats</td><td class="r ${c.height > 0 ? 'ok' : 'muted'}">${c.height > 0 ? (deep ? sats(deep) + ' deep' : 'confirmed') : 'unconfirmed'}</td>`;
@@ -1700,9 +1791,15 @@ async function renderSummary(box, names, opts = {}) {
   if (box.dataset.names !== undefined && box.dataset.names !== who) box.innerHTML = '';
   box.dataset.names = who;
   box.classList.add('sum-loading');   // refetch keeps the frame: the last drawing stays, dimmed, until the new one is ready
-  let inputs = [];
-  try { inputs = (await Promise.all(names.map(sumInput))).filter(Boolean); } catch (e) { if (me !== renderSummary.seq) return; box.classList.remove('sum-loading'); box.innerHTML = `<div class="label">Over time</div><div class="sum-empty">The history could not be fetched: ${esc(String(e))}</div>`; return; }
+  // one vault that cannot be read (its reader locked, its node away) must not blank the others: draw what came,
+  // say what did not, and mark it on its chip
+  const settled = await Promise.all(names.map(n => sumInput(n).then(v => ({ v }), e => ({ e, n }))));
   if (me !== renderSummary.seq) return;
+  const inputs = settled.filter(r => r.v).map(r => r.v);
+  const locked = settled.filter(r => r.e).map(r => ({ name: r.n, why: lockedWhy(r.e) }));
+  if (opts.chips) for (const b of opts.chips.querySelectorAll('.vchip')) { const l = locked.find(x => x.name === b.dataset.vault); b.classList.toggle('locked', !!l); b.title = l ? l.why : ''; const old = b.querySelector('svg'); if (old && !l) old.remove(); if (l && !old) b.insertAdjacentHTML('afterbegin', '<svg aria-hidden="true"><use href="#i-lock"/></svg>'); }
+  const lockedLine = () => { if (!locked.length) return null; const d = document.createElement('div'); d.className = 'sum-locked'; d.innerHTML = `<svg aria-hidden="true"><use href="#i-lock"/></svg><span>${locked.map(l => `<b>${esc(l.name)}</b> is not counted: ${esc(l.why)}.`).join(' ')} ${locked.length === 1 ? 'The figures are' : 'The figures are'} incomplete until ${locked.length === 1 ? 'it is' : 'they are'} unlocked and refreshed.</span>`; return d; };
+  if (!inputs.length && locked.length) { box.classList.remove('sum-loading'); box.innerHTML = ''; const lbl0 = document.createElement('div'); lbl0.className = 'label'; lbl0.textContent = opts.title || 'Over time'; box.append(lbl0); if (opts.chips) box.append(opts.chips); box.append(lockedLine()); return; }
   const priced = inputs.length && inputs.every(i => i.network === 'mainnet' && i.ccy);
   const ccy = priced ? inputs[0].ccy : '';
   const now = priced ? (inputs.find(i => i.now) || {}).now : null;
@@ -1730,6 +1827,7 @@ async function renderSummary(box, names, opts = {}) {
   const seg = document.createElement('div'); seg.className = 'seg'; seg.setAttribute('role', 'radiogroup'); seg.setAttribute('aria-label', 'Time range');
   for (const [k, n] of SUM_RANGES) { const b = document.createElement('button'); b.type = 'button'; b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', k === R[0] ? 'true' : 'false'); b.dataset.range = k; b.textContent = n; b.onclick = () => { sumSave('range', k); renderSummary(box, names, opts); }; seg.appendChild(b); }
   filters.appendChild(seg); topRow.append(lbl, filters); box.appendChild(topRow);
+  { const ll = lockedLine(); if (ll) box.appendChild(ll); }
   if (!L.timeline.length) { const e = document.createElement('div'); e.className = 'sum-empty'; e.textContent = opts.empty || 'Nothing has arrived yet, so there is nothing to draw.'; box.appendChild(e); return; }
   // stat tiles first: the numbers a reader came for, before any picture
   const k = document.createElement('div'); k.className = 'kpis';
@@ -1787,12 +1885,14 @@ async function renderSummary(box, names, opts = {}) {
 function renderHomeSummary() { if (vault && $('#s-home').classList.contains('on')) renderSummary($('#home-summary'), [vault.name]); }
 
 // ---------- all vaults: the same view, of everything that has a price ----------
+// why a vault's history could not be read just now, in the words the person needs
+function lockedWhy(e) { const s = String(e); if (s.startsWith('SPARK_UNLOCK:')) return 'its YubiKey reader is locked — open the vault, plug the key in and unlock it'; if (/timed out|timeout|connect|refused|unreachable|dns/i.test(s)) return 'it could not be reached just now'; return s.replace(/^[A-Z_]+:\s*/, '').replace(/\.$/, ''); }
 function renderOverview() {
   const main = store.vaults.filter(v => v.network === 'mainnet'), test = store.vaults.filter(v => v.network !== 'mainnet');
   let off = []; try { off = JSON.parse(sumPref('off', '[]')); } catch {}
   const names = main.map(v => v.name).filter(n => !off.includes(n));
   const chips = document.createElement('div'); chips.style.cssText = 'display:flex;gap:var(--s2);flex-wrap:wrap';
-  for (const v of main) { const b = document.createElement('button'); b.type = 'button'; b.className = 'vchip'; b.setAttribute('aria-pressed', off.includes(v.name) ? 'false' : 'true'); b.textContent = v.name;
+  for (const v of main) { const b = document.createElement('button'); b.type = 'button'; b.className = 'vchip'; b.dataset.vault = v.name; b.setAttribute('aria-pressed', off.includes(v.name) ? 'false' : 'true'); b.textContent = v.name;
     b.onclick = () => { const set = new Set(off); set.has(v.name) ? set.delete(v.name) : set.add(v.name); sumSave('off', JSON.stringify([...set])); renderOverview(); }; chips.appendChild(b); }
   $('#ov-note').textContent = test.length ? `Not counted: ${test.map(v => '“' + v.name + '”').join(', ')} — on a test network, whose coins are worth nothing and must never be added to real ones.` : '';
   if (!main.length) { $('#ov-summary').innerHTML = '<div class="label">All vaults</div><div class="sum-empty">No vault on mainnet yet. Test-network vaults are never added into a total of real coins.</div>'; return; }
@@ -2551,11 +2651,19 @@ async function renderAddresses() {
       for (const k of kinds) { const b = document.createElement('button'); b.type = 'button'; b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', k === pick ? 'true' : 'false'); b.textContent = (KIND_WORDS[k] || k) + (used.has(k) ? '' : ' \u00b7 unused'); b.onclick = () => { renderAddresses.kind = k; renderAddresses(); }; seg.appendChild(b); }
     } else { renderAddresses.kind = null; if (seg) seg.hidden = true; }
     const rows = renderAddresses.kind ? all.filter(r => r.kind === renderAddresses.kind) : all;
-    // the order ‹ › walks on an address's page: as listed — receive newest first, then change newest first
-    renderAddresses.order = ['receive', 'change'].flatMap(ch => rows.filter(r => r.chain === ch).slice().reverse());
+    listControls($('#addr-ctl'), 'addr', [
+      { key: 'sort', label: 'Sort', def: 'new', options: [['new', 'Newest'], ['old', 'Oldest'], ['bal', 'Balance'], ['coins', 'Coins']] },
+      { key: 'show', label: 'Show', def: 'all', options: [['all', 'All'], ['funded', 'Holding coins'], ['used', 'Used'], ['unused', 'Unused']] }], renderAddresses);
+    const sort = listPref('addr', 'sort', 'new'), show = listPref('addr', 'show', 'all');
+    const balOf = (r) => coins.filter(c => c.index === r.index).reduce((a, c) => a + c.value, 0), nOf = (r) => coins.filter(c => c.index === r.index).length, usedOf = (r) => hist.some(x => x.index === r.index);
+    const ordered = (ch) => { const xs = rows.filter(r => r.chain === ch).filter(r => show === 'all' || (show === 'funded' && nOf(r) > 0) || (show === 'used' && usedOf(r)) || (show === 'unused' && !usedOf(r)));
+      return sort === 'old' ? xs : sort === 'bal' ? xs.slice().sort((a, b) => balOf(b) - balOf(a) || b.position - a.position) : sort === 'coins' ? xs.slice().sort((a, b) => nOf(b) - nOf(a) || b.position - a.position) : xs.slice().reverse(); };
+    // the order ‹ › walks on an address's page: as listed — receive, then change
+    renderAddresses.order = ['receive', 'change'].flatMap(ordered);
     for (const [chain, sel] of [['receive', '#addr-recv tbody'], ['change', '#addr-chg tbody']]) {
       const tb = $(sel); tb.innerHTML = '';
-      for (const r of rows.filter(r => r.chain === chain).slice().reverse()) {
+      const list = ordered(chain); if (!list.length) tb.innerHTML = `<tr><td class="muted" colspan="5">${show === 'all' ? 'none yet' : 'none of that kind'}</td></tr>`;
+      for (const r of list) {
         const here = coins.filter(c => c.index === r.index), bal = here.reduce((a, c) => a + c.value, 0);
         const used = hist.some(x => x.index === r.index);
         const tr = document.createElement('tr'); tr.className = 'rowpick' + (r.current ? ' cur' : '') + (r.future ? ' future' : '');
@@ -2773,7 +2881,8 @@ function paintKeyPrivate() {
   const box = $('#key-private'); if (!box || recPage.kind !== 'key') return;
   const pub = recPage.id;
   if (Date.now() < keyCardOpenUntil) {
-    box.innerHTML = '<div class="label" style="margin-top:18px">Kept with this key</div><div class="muted" style="font-size:13px">Where it lives, who knows, photos of it and of its sheet. Sealed on this computer like everything else; shown for ten minutes after you proved you are the one looking.</div><div id="key-rec-slot"></div>';
+    box.innerHTML = '<div class="label" style="margin-top:18px">Where it is kept</div><div id="key-place"></div><div class="label" style="margin-top:18px">Kept with this key</div><div class="muted" style="font-size:13px">Who knows, photos of it and of its sheet, its PIN hint. Sealed on this computer like everything else; shown for ten minutes after you proved you are the one looking.</div><div id="key-rec-slot"></div>';
+    paintKeyPlace(pub);
     recPoint('key', 'key:' + pub, $('#key-rec-slot'));
     return;
   }
@@ -2792,6 +2901,109 @@ function paintKeyPrivate() {
     $('#key-open-note').textContent = 'Touch the key when it flashes…';
     try { const req = invoke('key_card_open', { name: vault.name, reader: f.dataset.reader, pin }); pin = ''; opened(await req); } catch (e) { $('#key-open-note').textContent = String(e); }
   });
+}
+// ---------- where a key is kept: a place, chosen from the ones named or made here ----------
+const placeOf = (pub) => (store.places || []).find(p => p.id === (store.key_place || {})[pub]) || null;
+// which keys are kept at a place, by vault, with what that means: how many of the vault's keys, against its threshold
+function placeHoldings(id) {
+  const out = [];
+  for (const v of store.vaults) {
+    const here = v.keys.filter(k => (store.key_place || {})[k.pubkey] === id);
+    if (here.length) out.push({ vault: v, keys: here, alone: v.keys.length > 1 && here.length >= v.threshold });
+  }
+  return out;
+}
+async function drawPlaceMap(box, p) {
+  if (!box) return;
+  if (p.lat == null || p.lon == null) { box.hidden = true; return; }
+  box.hidden = false; box.innerHTML = '<div class="nomap"><span>fetching the map…</span></div>';
+  let pic = null; try { pic = await invoke('tx_map', { lat: p.lat, lon: p.lon, dark: matchMedia('(prefers-color-scheme: dark)').matches }); } catch {}
+  if (!box.isConnected) return;
+  box.innerHTML = pic ? `<img alt="Map of the area around ${esc(p.place || p.name)}" src="${pic.png}"><span class="pin"></span><small>© OpenStreetMap</small>` : `<div class="nomap"><b>No map just now</b><span>${p.lat.toFixed(3)}, ${p.lon.toFixed(3)}</span></div>`;
+}
+function paintKeyPlace(pub) {
+  const box = $('#key-place'); if (!box) return;
+  const p = placeOf(pub), places = store.places || [];
+  const options = `<option value="">— not recorded —</option>${places.map(x => `<option value="${esc(x.id)}"${p && p.id === x.id ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}<option value="+">New location…</option>`;
+  box.innerHTML = `<div class="guide-row" style="align-items:stretch">
+      <div class="ctx-map" id="key-place-map" hidden></div>
+      <div class="guide-body">
+        ${p ? `<div class="cer-act-title" style="font-size:18px">${esc(p.name)}</div>${p.place ? `<div class="muted">${esc(p.place)}</div>` : ''}${p.note ? `<div style="font-size:13.5px;white-space:pre-wrap">${esc(p.note)}</div>` : ''}
+          ${(() => { const h = placeHoldings(p.id); const others = h.flatMap(x => x.keys.map(k => ({ k, v: x.vault }))).filter(x => x.k.pubkey !== pub); return others.length ? `<div class="muted" style="font-size:13px">Also kept here: ${others.map(x => `${esc(x.k.name)} <span class="muted">(${esc(x.v.name)})</span>`).join(' · ')}</div>` : '<div class="muted" style="font-size:13px">Nothing else is recorded here.</div>'; })()}`
+          : '<div class="muted">No place recorded for this key.</div>'}
+        <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap"><label style="margin:0;display:flex;gap:8px;align-items:center">Kept at <select id="key-place-pick">${options}</select></label>${p ? '<a href="#" class="linkish" id="key-place-open">Open Locations</a>' : ''}</div>
+        <div id="key-place-new"></div>
+      </div></div>`;
+  if (p) drawPlaceMap($('#key-place-map'), p);
+  $('#key-place-pick').onchange = async () => {
+    const v = $('#key-place-pick').value;
+    if (v === '+') { placeForm($('#key-place-new'), null, async (saved) => { await keyPlaceSet(pub, saved.id); }); return; }
+    await keyPlaceSet(pub, v || null);
+  };
+  const open = $('#key-place-open'); if (open) open.onclick = (e) => { e.preventDefault(); show('places'); };
+}
+async function keyPlaceSet(pub, id) { try { store = await invoke('key_place_set', { pubkey: pub, place: id }); if (vault) vault = store.vaults.find(x => x.name === vault.name) || vault; paintKeyPlace(pub); } catch (e) { fail(e); } }
+// The form for a place: a name, an address looked up as it is typed (position kept from the answer chosen), a note.
+function placeForm(slot, p, done) {
+  const id = p ? p.id : '';
+  slot.innerHTML = `<form class="stack" id="place-form" style="margin-top:8px;padding:14px;border:1px solid var(--line);border-radius:8px;background:var(--ground)">
+      <div class="field"><div class="label">Name</div><input id="pf-name" maxlength="60" placeholder="the safe, the office, Mum’s" value="${esc(p ? p.name : '')}"></div>
+      <div class="field"><div class="label">Address <span class="muted" style="font-weight:400">— optional, for the map</span></div><input id="pf-place" autocomplete="off" spellcheck="false" placeholder="start typing; pick a match to place the pin" value="${esc(p ? p.place : '')}"><ul id="pf-list" class="place-list" role="listbox" hidden></ul><div class="muted" id="pf-pos" style="font-size:12.5px">${p && p.lat != null ? `pin at ${p.lat.toFixed(4)}, ${p.lon.toFixed(4)}` : 'no pin yet'}</div></div>
+      <div class="field"><div class="label">Note</div><textarea id="pf-note" rows="3" placeholder="who has access, how it is secured, what else is there">${esc(p ? p.note : '')}</textarea></div>
+      <div class="row"><button class="btn primary" type="submit">${p ? 'Save' : 'Add this place'}</button><button class="btn" type="button" id="pf-cancel">Cancel</button></div>
+      <div class="muted" id="pf-note-line" aria-live="polite"></div></form>`;
+  let pos = p && p.lat != null ? { lat: p.lat, lon: p.lon } : null, hits = [], timer = null, seq = 0;
+  const list = $('#pf-list'), input = $('#pf-place');
+  const showHits = (h) => { hits = h; list.innerHTML = h.map((x, i) => `<li role="option" data-i="${i}"><b>${esc(x.label)}</b><small>${esc(x.detail)}</small></li>`).join(''); list.hidden = !h.length; };
+  input.addEventListener('input', () => { pos = null; $('#pf-pos').textContent = 'no pin yet — pick a match below to place one'; clearTimeout(timer); const q = input.value.trim(), mine = ++seq; if (q.length < 4) return showHits([]);
+    timer = setTimeout(async () => { let h = []; try { h = await invoke('place_search', { q }); } catch {} if (mine === seq) showHits(h); }, 350); });
+  list.addEventListener('mousedown', (e) => { const li = e.target.closest('li[role=option]'); if (!li) return; e.preventDefault(); const h = hits[+li.dataset.i]; input.value = [h.label, h.detail.replace(/ · /g, ', ')].filter(Boolean).join(', ').slice(0, 160); pos = { lat: h.lat, lon: h.lon }; $('#pf-pos').textContent = `pin at ${h.lat.toFixed(4)}, ${h.lon.toFixed(4)}`; showHits([]); });
+  input.addEventListener('blur', () => setTimeout(() => showHits([]), 120));
+  $('#pf-cancel').onclick = () => { slot.innerHTML = ''; };
+  $('#place-form').onsubmit = async (e) => {
+    e.preventDefault(); const name = $('#pf-name').value.trim(); if (!name) return toast('Give the place a name');
+    try {
+      const before = new Set((store.places || []).map(x => x.id));
+      store = await invoke('place_save', { id, name, note: $('#pf-note').value, place: input.value.trim(), lat: pos ? pos.lat : null, lon: pos ? pos.lon : null });
+      if (vault) vault = store.vaults.find(x => x.name === vault.name) || vault;
+      const saved = id ? store.places.find(x => x.id === id) : store.places.find(x => !before.has(x.id));
+      slot.innerHTML = ''; if (done) await done(saved);
+    } catch (err) { $('#pf-note-line').textContent = String(err); }
+  };
+  $('#pf-name').focus();
+}
+// ---------- Locations: every place, what it holds, and what that means ----------
+function renderLocations() {
+  const gate = $('#places-gate'), main = $('#places-main');
+  if (Date.now() >= keyCardOpenUntil) {
+    main.hidden = true; gate.hidden = false;
+    const here = cards.filter(c => c.pubkey && store.vaults.some(v => v.keys.some(k => k.pubkey === c.pubkey)));
+    gate.innerHTML = `<div class="label">Where the keys are kept</div><div class="muted" style="font-size:13.5px;max-width:640px">The places, what each holds, and the map — the whole custody on one screen. It is sealed on disk like everything else; putting it on a screen deserves a second look first.</div>
+      <div class="row" style="margin-top:12px"><button class="btn primary" type="button" id="places-open-mac">Show it — Touch ID</button></div>
+      ${here.length ? `<div class="muted" style="font-size:13px;margin-top:14px">Or with any key kept here, its PIN and a touch:</div><div style="display:flex;flex-direction:column;gap:8px;margin-top:6px;max-width:640px">${here.map(c => `<form class="lock-key" data-reader="${esc(c.reader)}"><b>${esc((store.vaults.flatMap(v => v.keys).find(k => k.pubkey === c.pubkey) || {}).name || 'key')}<small>plugged in · YubiKey ${esc(String(c.serial))}</small></b><input type="password" autocomplete="off" placeholder="Key PIN"><button class="btn" type="submit">Show it</button></form>`).join('')}</div>` : ''}
+      <div class="muted" id="places-open-note" aria-live="polite" style="margin-top:8px"></div>`;
+    const opened = (until) => { keyCardOpenUntil = until * 1000; renderLocations(); };
+    $('#places-open-mac').onclick = async () => { try { opened(await invoke('key_card_open', { name: null, reader: null, pin: null })); } catch (e) { $('#places-open-note').textContent = String(e); } };
+    $$('#places-gate form.lock-key').forEach(f => f.onsubmit = async (ev) => { ev.preventDefault(); const inp = f.querySelector('input'); let pin = inp.value; inp.value = ''; if (!pin) return toast('Enter the key’s PIN'); $('#places-open-note').textContent = 'Touch the key when it flashes…'; try { const req = invoke('key_card_open', { name: null, reader: f.dataset.reader, pin }); pin = ''; opened(await req); } catch (e) { $('#places-open-note').textContent = String(e); } });
+    return;
+  }
+  gate.hidden = true; main.hidden = false;
+  const list = $('#places-list'); list.innerHTML = '';
+  const places = (store.places || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+  if (!places.length) list.innerHTML = '<div class="sum-empty">No place named yet. Add one here, or from a key’s card.</div>';
+  for (const p of places) {
+    const h = placeHoldings(p.id), card = document.createElement('div'); card.className = 'card quiet'; card.dataset.place = p.id;
+    const held = h.length ? h.map(x => `<div class="row" style="gap:8px;align-items:baseline;flex-wrap:wrap"><b>${esc(x.vault.name)}</b><span class="muted">${x.keys.map(k => esc(k.name)).join(', ')} — ${sats(x.keys.length)} of its ${sats(x.vault.keys.length)} key${x.vault.keys.length === 1 ? '' : 's'}${x.vault.keys.length > 1 ? `, ${sats(x.vault.threshold)} sign` : ''}</span>${x.alone ? '<span class="warn">this place alone can spend it</span>' : ''}</div>`).join('') : '<div class="muted" style="font-size:13px">Nothing recorded here yet. Assign a key from its card on Keys.</div>';
+    card.innerHTML = `<div class="guide-row" style="align-items:stretch"><div class="ctx-map" id="place-map-${esc(p.id)}" hidden></div><div class="guide-body">
+        <div class="cer-act-title" style="font-size:20px">${esc(p.name)}</div>${p.place ? `<div class="muted">${esc(p.place)}</div>` : ''}${p.note ? `<div style="font-size:13.5px;white-space:pre-wrap">${esc(p.note)}</div>` : ''}
+        <div class="label" style="margin-top:6px">Kept here</div>${held}
+        <div class="row" style="gap:8px;margin-top:6px"><button class="btn small" type="button" data-place-edit="${esc(p.id)}">Edit</button><button class="btn small" type="button" data-place-del="${esc(p.id)}">Forget this place</button></div><div data-place-form="${esc(p.id)}"></div>
+      </div></div>`;
+    list.appendChild(card); drawPlaceMap($('#place-map-' + p.id), p);
+  }
+  $$('[data-place-edit]', list).forEach(b => b.onclick = () => placeForm($(`[data-place-form="${b.dataset.placeEdit}"]`), store.places.find(x => x.id === b.dataset.placeEdit), () => renderLocations()));
+  $$('[data-place-del]', list).forEach(b => askTwice(b, 'Forget this place? The keys kept there stay in their vaults; they just have no place recorded.', 'Yes, forget it', async () => { try { store = await invoke('place_delete', { id: b.dataset.placeDel }); renderLocations(); } catch (e) { fail(e); } }));
+  $('#place-new').onclick = () => placeForm($('#place-form-slot'), null, () => renderLocations());
 }
 function renderKeys(force) {
   if (!vault) return;
