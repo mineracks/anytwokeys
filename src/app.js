@@ -70,6 +70,8 @@ function fail(e) { toast(String(e && e.message || e), 6000); console.error(e); }
 // ---------- screens ----------
 function show(name) {
   if (name !== 'restore' && $('#s-restore').classList.contains('on')) { seedClear(); if (sparkSelected || sparkBusy) sparkCancel().catch(() => {}); }
+  // Restore entered from anywhere else starts clean: what the last restore read is not the next one's problem
+  if (name === 'restore' && !$('#s-restore').classList.contains('on')) restoreFresh();
   const first = ['setup', 'restore'].includes(name) && !vault;
   $('#welcome').hidden = true; $('#shell').hidden = false;
   $$('.screen').forEach(s => s.classList.toggle('on', s.id === 's-' + name));
@@ -3151,6 +3153,20 @@ async function readSeals(force) {
 }
 
 // ---------- restore ----------
+// Every tab of Restore, back to how it looks the first time: no line, no key, no words, no file, nothing read.
+// Called on the way in — never on a tab switch within the screen, where what was typed is still wanted.
+function restoreFresh() {
+  stopCam(); restoreParts.clear(); parsed = null;
+  $$('#s-restore input:not([type=checkbox]):not([type=number]):not([type=date]), #s-restore textarea').forEach(i => { if (!i.closest('.seed-grid')) i.value = ''; });
+  $$('#s-restore input[type=checkbox]').forEach(c => { c.checked = false; });
+  seedClear();
+  if (typeof sparkResetEnrollment === 'function') sparkResetEnrollment();
+  $$('#s-restore [id$="-note"], #s-restore [id$="-note-off"], #spark-words-count').forEach(n => { n.textContent = ''; });
+  $('#restore-card').innerHTML = '<div class="muted">Nothing read yet.</div>';
+  if ($('#stmt-preview')) { stmtText = ''; $('#stmt-preview').hidden = true; }
+  const adv = $('#spark-words-adv'); if (adv) adv.open = false;
+  restoreTab.now = 'keys';
+}
 function restoreTab(name) { if (name !== 'spark' && restoreTab.now === 'spark') { seedClear(); if (sparkSelected || sparkBusy) sparkCancel().catch(() => {}); } restoreTab.now = name; $$('.tabs div').forEach(x => x.classList.toggle('on', x.dataset.tab === name)); for (const t of ['keys', 'scan', 'paste', 'muun', 'spark', 'statement']) $('#tab-' + t).hidden = t !== name; $('#sheet-note').hidden = !['scan', 'paste'].includes(name);   // it is about a recovery sheet, and only two of these are
   // a result from another way in is not about this one: it goes when the choice changes
   if (restoreTab.last && restoreTab.last !== name) { $('#restore-card').innerHTML = ''; parsed = null; }
