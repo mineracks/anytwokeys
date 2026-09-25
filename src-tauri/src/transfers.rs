@@ -123,6 +123,9 @@ impl Index {
             if view.links.get(from).and_then(|m|m.get(&p.from_id)).is_some_and(|l|!l.forgotten) || view.links.get(to).and_then(|m|m.get(&p.to_id)).is_some_and(|l|!l.forgotten) {continue;}
             let mut p=p.clone();p.from=from.clone();p.to=to.clone();pending.push(p);
         } }
+        // one candidate is one proposal, however many times it was found: a pair seen twice is not two pairs, and
+        // must not be counted as ambiguity against itself
+        pending.sort_by_key(|p|p.key()); pending.dedup_by_key(|p|p.key());
         let mut counts:BTreeMap<(String,String),usize>=BTreeMap::new();
         for p in &pending { *counts.entry((p.from_key.clone(),p.from_id.clone())).or_default()+=1;*counts.entry((p.to_key.clone(),p.to_id.clone())).or_default()+=1; }
         view.proposals=pending.into_iter().map(|p|Proposal{key:p.key(),unique:counts[&(p.from_key.clone(),p.from_id.clone())]==1 && counts[&(p.to_key.clone(),p.to_id.clone())]==1,pair:p}).collect();
@@ -217,6 +220,14 @@ mod tests {
         b.rows[0].net=19000;b.muun=true;assert_eq!(candidates("a",&a,"b",&b).len(),1);
         b.rows[0].net=18999;assert!(candidates("a",&a,"b",&b).is_empty());
         b.rows[0].net=20000;b.network="signet".into();assert!(candidates("a",&a,"b",&b).is_empty());
+    }
+    #[test] fn a_row_that_arrives_twice_is_one_candidate_and_still_unique() {
+        let mut i=indexed();
+        let (ak,a)=i.cache.vaults.iter().find(|(_,v)|v.name=="A").map(|(k,v)|(k.clone(),v.clone())).unwrap();
+        let mut twice=a.clone(); let dup=twice.rows[0].clone(); twice.rows.push(dup); twice.fingerprint.push('x');
+        i.cache.vaults.insert(ak,twice); i.pairs.clear(); i.build();
+        assert_eq!(i.view.proposals.len(),1,"{:?}",i.view.proposals.iter().map(|p|&p.pair.from_id).collect::<Vec<_>>());
+        assert!(i.view.proposals[0].unique,"a duplicate of itself is not a second fit");
     }
     #[test] fn uniqueness_is_both_sides_and_answers_survive_rebuild() {
         let mut i=indexed();assert_eq!(i.view.proposals.len(),1);assert!(i.view.proposals[0].unique);assert!(i.view.links["A"].is_empty());

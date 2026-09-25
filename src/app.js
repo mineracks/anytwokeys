@@ -831,8 +831,14 @@ async function loadTransferPeers(start) {
 function paintTransferProposals() {
   const box=$('#transfer-proposals'); if (!box || !vault) return;
   const proposals=(transferView.proposals || []).filter(p=>p.pair.from===vault.name || p.pair.to===vault.name);
-  box.innerHTML='<div class="label">Possible transfers</div><p class="muted">Amounts and dates can suggest a move between your wallets. Your figures change only after you confirm it. Split payments are not matched.</p><button class="btn" id="transfer-check">Check other vaults</button><p id="transfer-check-note" class="muted"></p>';
-  if (!proposals.length) box.insertAdjacentHTML('beforeend','<p class="muted">No suggestions in the histories checked so far. Unlock and refresh the other vaults to include them.</p>');
+  // nothing to review: the box steps back to one quiet line, so the list is not led by an empty card
+  if (!proposals.length) {
+    box.className = 'muted'; box.style.cssText = 'font-size:13px;margin:0 0 4px 4px';
+    box.innerHTML = '<span>No possible transfers to review.</span> <button type="button" class="linkish" id="transfer-check">Check other vaults</button> <span id="transfer-check-note"></span>';
+  } else {
+    box.className = 'card'; box.style.cssText = '';
+    box.innerHTML='<div class="label">Possible transfers</div><p class="muted">Amounts and dates can suggest a move between your wallets. Your figures change only after you confirm it. Split payments are not matched.</p><button class="btn" id="transfer-check">Check other vaults</button><p id="transfer-check-note" class="muted"></p>';
+  }
   for (const p of proposals) {
     const c=p.pair, line=document.createElement('div');line.className='card';
     line.innerHTML=`<strong>${esc(c.from)} → ${esc(c.to)}</strong><p>${sats(c.out)} sats out; ${sats(c.incoming)} sats in; difference ${sats(c.out-c.incoming)} sats.</p><p class="muted">${new Date(c.at*1000).toLocaleString()} → ${new Date(c.arrived*1000).toLocaleString()}</p><p class="mono muted" style="overflow-wrap:anywhere">${esc(c.from_id)} → ${esc(c.to_id)}</p>${p.unique ? '' : '<p class="warn">More than one transfer fits. These candidates stay unlinked.</p>'}`;
