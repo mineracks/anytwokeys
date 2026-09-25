@@ -253,15 +253,28 @@ impl Lnd {
     pub fn post(&self, path: &str, body: serde_json::Value) -> R<serde_json::Value> { self.send(self.http.post(format!("{}{path}", self.url)).json(&body), path) }
     /// The macaroon must NOT carry a write permission. Each is checked with CheckMacaroonPermissions (a read) and
     /// must come back invalid. A macaroon without macaroon:read cannot be checked, and so cannot be kept.
+    /// LND answers a permission the macaroon lacks with a "permission denied" ERROR, and one it has with valid: true.
+    /// So the proof runs the other way round from CLN's: first a permission this macaroon must have (info:read) has
+    /// to pass — otherwise the macaroon cannot use the check at all and nothing can be proved — then each write
+    /// permission must be denied.
     pub fn prove_read_only(&self) -> R<Vec<String>> {
         use bitcoin::base64::{engine::general_purpose::STANDARD, Engine};
         let mac = STANDARD.encode(hex::decode(self.macaroon.as_str()).map_err(|_| "the macaroon is not hex")?);
+        let ask = |entity: &str, action: &str| self.post("/v1/macaroon/checkpermissions", serde_json::json!({ "macaroon": mac, "permissions": [{ "entity": entity, "action": action }] }));
+        let hint = "bake it with info:read onchain:read offchain:read invoices:read macaroon:read";
+        match ask("info", "read") {
+            Ok(v) if v.get("valid").and_then(|x| x.as_bool()) == Some(true) => {}
+            Ok(_) => return Err(format!("the macaroon cannot read the node's info, so nothing can be read with it — {hint}")),
+            Err(e) => return Err(format!("{e}. The macaroon needs macaroon:read so the app can prove what it cannot do — {hint}")),
+        }
         let mut refused = Vec::new();
         for (entity, action) in [("offchain", "write"), ("onchain", "write"), ("invoices", "write"), ("address", "write"), ("peers", "write"), ("message", "write"), ("macaroon", "write"), ("macaroon", "generate"), ("signer", "generate"), ("uri", "write")] {
-            let v = self.post("/v1/macaroon/checkpermissions", serde_json::json!({ "macaroon": mac, "permissions": [{ "entity": entity, "action": action }] }))
-                .map_err(|e| format!("{e}. The macaroon needs macaroon:read so the app can prove what it cannot do — bake it with info:read onchain:read offchain:read invoices:read macaroon:read"))?;
-            if v.get("valid").and_then(|x| x.as_bool()) == Some(true) { return Err(format!("this macaroon carries {entity}:{action}. Only a read-only macaroon can be kept here — bake one with info:read onchain:read offchain:read invoices:read macaroon:read.")); }
-            refused.push(format!("{entity}:{action}"));
+            match ask(entity, action) {
+                Ok(v) if v.get("valid").and_then(|x| x.as_bool()) == Some(true) => return Err(format!("this macaroon carries {entity}:{action}. Only a read-only macaroon can be kept here — {hint}.")),
+                Ok(_) => refused.push(format!("{entity}:{action}")),
+                Err(e) if e.contains("permission denied") || e.contains("permission") => refused.push(format!("{entity}:{action}")),
+                Err(e) => return Err(e),
+            }
         }
         Ok(refused)
     }
@@ -341,6 +354,22 @@ pub fn forget_cred(id: &str) { let _ = std::fs::remove_file(cred_path(id)); }
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The real LND, named by A2K_LND_URL, a macaroon hex file at A2K_LND_MAC and its pin at A2K_LND_PIN.
+    #[test] #[ignore]
+    fn the_real_lnd_reads_and_the_macaroon_cannot_spend() {
+        let (Ok(url), Ok(path)) = (std::env::var("A2K_LND_URL"), std::env::var("A2K_LND_MAC")) else { return };
+        let mac = std::fs::read_to_string(path).unwrap();
+        let c = Lnd::open(&url, mac.trim(), &std::env::var("A2K_LND_PIN").unwrap_or_default()).unwrap();
+        let refused = c.prove_read_only().unwrap();
+        assert!(refused.len() == 10, "{refused:?}");
+        let (alias, id, version, network, height) = c.info().unwrap();
+        assert!(!alias.is_empty() && id.len() == 66 && network == "mainnet" && height > 900_000, "{alias} {id} {version} {network} {height}");
+        let (onchain, channels, pending, n) = c.funds().unwrap();
+        let ev = c.events().unwrap();
+        assert!(!ev.is_empty()); assert!(ev.windows(2).all(|w| w[0].time <= w[1].time));
+        let kinds: std::collections::BTreeMap<&str, usize> = ev.iter().fold(Default::default(), |mut m, e| { *m.entry(e.kind.as_str()).or_default() += 1; m });
+        eprintln!("{alias} {version} height {height} · on-chain {onchain} · channels {channels} ({n}) · pending {pending} · events {} {:?} · pin {} · refused {}", ev.len(), kinds, c.seen_pin(), refused.len());
+    }
     /// The real node, named by A2K_CLN_URL and a rune file at A2K_CLN_RUNE: read-only proved, info, funds, the ledger.
     #[test] #[ignore]
     fn the_real_node_reads_and_the_rune_cannot_spend() {
