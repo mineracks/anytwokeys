@@ -1221,7 +1221,9 @@ fn spend_discard() -> R<()> {
 
 // ---------- signed messages ----------
 #[derive(Serialize)]
-struct AddrRow { index: u32, position: u32, chain: &'static str, address: String, current: bool, future: bool }
+struct AddrRow { index: u32, position: u32, chain: &'static str, address: String, current: bool, future: bool,
+    /// which of a watched wallet's kinds ("pkh"…"tr"), a Muun scheme, "sp" for a silent payment output, or empty
+    kind: String }
 
 /// The vault's addresses: index 0 for a fixed vault; for a rotating one, each chain from 0 to its next
 /// unused position plus `ahead` more, so the ones beyond can be seen and handed out early.
@@ -1229,12 +1231,23 @@ struct AddrRow { index: u32, position: u32, chain: &'static str, address: String
 fn vault_addresses(name: String, ahead: Option<u32>) -> R<Vec<AddrRow>> {
     let s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
-    if !wallet::rotates(v) { return Ok(vec![AddrRow { index: 0, position: 0, chain: "receive", address: wallet::address_at(v, 0)?, current: true, future: false }]); }
+    if !wallet::rotates(v) { return Ok(vec![AddrRow { index: 0, position: 0, chain: "receive", address: wallet::address_at(v, 0)?, current: true, future: false, kind: String::new() }]); }
     let ahead = ahead.unwrap_or(0).min(200);
     let mut out = Vec::new();
-    for (base, chain, next) in [(0u32, "receive", v.next), (wallet::CHANGE, "change", v.next_change)] {
-        for p in 0..=next + ahead {
-            out.push(AddrRow { index: base | p, position: p, chain, address: wallet::address_at(v, base | p)?, current: p == next, future: p > next });
+    // every scheme the vault walks (wallet.rs scan_bases): a plain xpub's kinds, Muun's schemes — each its own list
+    for s in 0..wallet::schemes(v) as u32 {
+        let kind = v.watch.as_ref().and_then(|w| w.kinds.get(s as usize).cloned()).or_else(|| v.muun.as_ref().map(|_| format!("{:?}", wallet::MUUN_SCHEMES[s as usize]).to_lowercase())).unwrap_or_default();
+        let scheme = s << wallet::SCHEME_SHIFT;
+        for (base, chain, next) in [(scheme, "receive", v.next), (scheme | wallet::CHANGE, "change", v.next_change)] {
+            for p in 0..=next + ahead {
+                out.push(AddrRow { index: base | p, position: p, chain, address: wallet::address_at(v, base | p)?, current: p == next, future: p > next, kind: kind.clone() });
+            }
+        }
+    }
+    // silent payment outputs found are addresses too — each one's, made by its sender, listed as it was found
+    if let Some(sp) = v.watch.as_ref().and_then(|w| w.sp.as_ref()) {
+        for i in 0..sp.found.len() as u32 {
+            out.push(AddrRow { index: wallet::SP_SCHEME | i, position: i, chain: "receive", address: wallet::address_at(v, wallet::SP_SCHEME | i)?, current: false, future: false, kind: "sp".into() });
         }
     }
     Ok(out)

@@ -22,7 +22,9 @@ let setup = { k: 2, n: 3, keys: [], network: null };
 
 const CHANGE = 0x80000000;
 // an index carries a scheme in its top bits (wallet.rs): scheme 7 is a silent payment output, numbered as found
-const fmtIndex = (i) => ((i >>> 28) & 7) === 7 ? 'silent payment #' + (i & 0x0fffffff) : (i >= CHANGE ? 'change ' : '') + '#' + (i & 0x0fffffff);
+const fmtIndex = (i) => ((i >>> 28) & 7) === 7 ? 'silent payment #' + (i & 0x0fffffff) : (i >= CHANGE ? 'change ' : '') + '#' + (i & 0x0fffffff) + kindTag(i);
+// a wallet watched for several kinds of address has a #14 of each kind: the kind is part of the name
+const kindTag = (i) => { const k = vault && vault.watch && vault.watch.kinds.length > 1 ? vault.watch.kinds[(i >>> 28) & 7] : null; return k ? ' \u00b7 ' + ((KIND_WORDS[k] || k).split(' \u00b7 ')[1] || k) : ''; };
 const PEN = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
 const labelOf = (key) => (vault && vault.labels && vault.labels[key]) || '';
 const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
@@ -1149,7 +1151,9 @@ async function addrBalance(row, id) {
 async function recSeries(H, ccy, now) {
   const born = H.filter(h => h.born || h.c.height === 0).map(h => ({ ...h, born: h.born || Math.floor(Date.now() / 1000) }));
   if (!born.length || !ccy || !now || vault.network !== 'mainnet') return null;
-  const from = Math.min(...born.map(h => h.born)), to = Math.floor(Date.now() / 1000);
+  // a coin that came today would otherwise be drawn across a few hours, every label the same day and hour: a week of
+  // context at least, the line starting where the coin does
+  const to = Math.floor(Date.now() / 1000), from = Math.min(...born.map(h => h.born), to - 7 * 86400);
   const run = await pricesRange(ccy, from, to);
   const days = Object.keys(run.prices || {}).sort().map(d => [Math.floor(Date.parse(d + 'T12:00:00Z') / 1000), run.prices[d]]).filter(([t, q]) => q && t >= from - 86400);
   const at = (t) => born.filter(h => h.born <= t);
@@ -2297,11 +2301,24 @@ async function renderAddresses() {
   // a vault with one fixed address has no list to show, but the screen must still say so rather than sit empty
   if (!vault || !vault._rotating) { card.hidden = true; $('#addr-fixed').hidden = !vault; return; }
   try {
-    const rows = await invoke('vault_addresses', { name: vault.name, ahead: addrAhead });
-    renderAddresses.rows = rows;
+    const all = await invoke('vault_addresses', { name: vault.name, ahead: addrAhead });
+    renderAddresses.rows = all;
+    const coins = vault._coins || [], hist = vault._history || [];
+    // a wallet watched for several kinds, or one with silent payments, lists one kind at a time — the one with
+    // history first, since only the wallet that holds the keys knows which kind it hands out
+    const kinds = [...new Set(all.map(r => r.kind))].filter(Boolean);
+    let seg = card.querySelector('#addr-kind-seg');
+    if (kinds.length > 1) {
+      const used = new Set(hist.map(h => (h.index >>> 28) & 7).map(s => s === 7 ? 'sp' : (vault.watch ? vault.watch.kinds[s] : null)).filter(Boolean));
+      const pick = renderAddresses.kind && kinds.includes(renderAddresses.kind) ? renderAddresses.kind : (kinds.find(k => used.has(k) && k !== 'sp') || (kinds.includes('wpkh') ? 'wpkh' : kinds[0]));
+      renderAddresses.kind = pick;
+      if (!seg) { seg = document.createElement('div'); seg.id = 'addr-kind-seg'; seg.className = 'seg'; seg.setAttribute('role', 'radiogroup'); seg.setAttribute('aria-label', 'Kind of address'); seg.style.marginBottom = '12px'; card.prepend(seg); }
+      seg.innerHTML = ''; seg.hidden = false;
+      for (const k of kinds) { const b = document.createElement('button'); b.type = 'button'; b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', k === pick ? 'true' : 'false'); b.textContent = (KIND_WORDS[k] || k) + (used.has(k) ? '' : ' \u00b7 unused'); b.onclick = () => { renderAddresses.kind = k; renderAddresses(); }; seg.appendChild(b); }
+    } else { renderAddresses.kind = null; if (seg) seg.hidden = true; }
+    const rows = renderAddresses.kind ? all.filter(r => r.kind === renderAddresses.kind) : all;
     // the order ‹ › walks on an address's page: as listed — receive newest first, then change newest first
     renderAddresses.order = ['receive', 'change'].flatMap(ch => rows.filter(r => r.chain === ch).slice().reverse());
-    const coins = vault._coins || [], hist = vault._history || [];
     for (const [chain, sel] of [['receive', '#addr-recv tbody'], ['change', '#addr-chg tbody']]) {
       const tb = $(sel); tb.innerHTML = '';
       for (const r of rows.filter(r => r.chain === chain).slice().reverse()) {
@@ -3308,7 +3325,7 @@ function renderSpCard() {
       ['Address', '<span class="mono" id="vs-sp-addr" style="font-size:12px;word-break:break-all">…</span>'],
       ['Read', behind ? `not yet — starts at block ${sats(sp.from)} on the next refresh` : `blocks ${sats(sp.from)} to ${sats(sp.scanned)}`],
       ['Found', n ? `${sats(n)} silent payment output${n === 1 ? '' : 's'}` : 'none yet'],
-    ].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+    ].concat(sp.found.map((f, i) => [`#${i}`, `<a href="#" class="mono" data-go-tx="${esc(f.txid)}" style="font-size:12px">${esc(f.txid.slice(0, 12))}\u2026:${f.vout}</a> \u00b7 ${sats(f.value)} sats \u00b7 block ${sats(f.height)}${f.label === 0 ? ' \u00b7 change' : ''}`])).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
     const me = vault.name; invoke('sp_address', { name: me }).then(a => { const el = $('#vs-sp-addr'); if (el && vault && vault.name === me) el.textContent = a; }).catch(() => {});
   } else {
     $('#vs-sp-oracle').textContent = (store.settings.sp_oracle || '').replace(/^https:\/\//, '') || 'no oracle set in App settings';
