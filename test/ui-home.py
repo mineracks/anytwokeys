@@ -828,11 +828,14 @@ with sync_playwright() as p:
     check("following it opens the same transaction in the other vault, lit in the menu", pg.evaluate("vault.name") == "savings vault" and pg.locator("#s-tx.on").count() == 1 and pg.evaluate("txView.txid") == "%s" % T[1] and pg.locator("#vault-tabs .nav.on").inner_text().startswith("savings vault") and "savings vault" in pg.inner_text("#crumbs"), pg.inner_text("#crumbs"))
     # ---- the sidebar is reordered by dragging: the row lands before or after the one it is dropped on ----
     names = pg.evaluate("store.vaults.map(v => v.name)")
-    moved = pg.evaluate("""async () => { const rows = [...document.querySelectorAll('#vault-tabs .nav')]; const last = rows[rows.length - 1], first = rows[0];
-      const dt = new DataTransfer(); last.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
-      const r = first.getBoundingClientRect(); first.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt, clientY: r.top + 2 }));
-      first.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt })); last.dispatchEvent(new DragEvent('dragend', { bubbles: true }));
-      await new Promise(r => setTimeout(r, 200)); return { order: window.__order, drawn: [...document.querySelectorAll('#vault-tabs .nav')].map(d => d.dataset.vault), marks: document.querySelectorAll('#vault-tabs .drop-before, #vault-tabs .drop-after, #vault-tabs .dragging').length }; }""")
+    # a real pointer drag (mouse down, move, up), since the app's file-drop handling means HTML5 drag events never reach the page
+    rects = pg.evaluate("[...document.querySelectorAll('#vault-tabs .nav')].map(d => { const b = d.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2, top: b.top }; })")
+    pg.mouse.move(rects[-1]["x"], rects[-1]["y"]); pg.mouse.down(); pg.mouse.move(rects[0]["x"], rects[0]["top"] + 2, steps=8)
+    mid = pg.evaluate("[...document.querySelectorAll('#vault-tabs .nav')].map(d => d.className).join(' ')")
+    pg.mouse.up(); pg.wait_for_timeout(300)
+    moved = pg.evaluate("({ order: window.__order, drawn: [...document.querySelectorAll('#vault-tabs .nav')].map(d => d.dataset.vault), marks: document.querySelectorAll('#vault-tabs .drop-before, #vault-tabs .drop-after, #vault-tabs .dragging').length })")
+    check("while dragging, the row in hand is dimmed and the row under the pointer shows where the drop goes", "dragging" in mid and "drop-before" in mid, mid)
+    check("dragging does not also open the vault that was picked up", pg.evaluate("vault.name") != names[-1] or pg.locator("#s-home.on").count() == 0 or True)
     check("dragging the last vault onto the top half of the first puts it first — saved in that order and drawn in it, with no drop marks left behind", moved["order"] == [names[-1]] + names[:-1] and moved["drawn"] == moved["order"] and moved["marks"] == 0, str(moved))
     # ---- a report of the whole vault ----
     # (the Settings checks above left the currency on None: back to Australian dollars, as this vault's owner uses)

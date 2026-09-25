@@ -154,17 +154,31 @@ function renderTabs() {
   for (const v of store.vaults) {
     const d = document.createElement('div'); d.className = 'nav' + (vault && v.name === vault.name ? ' on' : ''); d.style.fontWeight = '600'; d.dataset.vault = v.name;
     d.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${v.network === 'mainnet' ? 'var(--gold)' : 'var(--signal)'};display:inline-block;flex:0 0 8px"></span><span style="flex-grow:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v.name)}">${esc(v.name)}</span><span class="muted" style="font-size:11px;font-weight:400">${v.spark ? (v.spark.authenticated ? 'YubiKey reader' : 'Watched \u00b7 Spark') : v.muun || v.watch ? 'Watched' : v.keys.length === 1 ? '1 key' : v.threshold + ' of ' + v.keys.length}</span>`;
-    d.onclick = () => { vault = v; rememberVault(v); paintNet(); show('home'); };
-    // drag to reorder: the drop goes before or after the row it lands on, by which half of it the pointer is in
-    d.draggable = true;
-    d.addEventListener('dragstart', (e) => { tabs.dataset.dragging = v.name; d.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', v.name); } catch {} });
-    d.addEventListener('dragend', () => { d.classList.remove('dragging'); delete tabs.dataset.dragging; $$('#vault-tabs .nav').forEach(x => x.classList.remove('drop-before', 'drop-after')); });
-    d.addEventListener('dragover', (e) => { if (!tabs.dataset.dragging || tabs.dataset.dragging === v.name) return; e.preventDefault(); e.dataTransfer.dropEffect = 'move'; const r = d.getBoundingClientRect(), before = e.clientY < r.top + r.height / 2; d.classList.toggle('drop-before', before); d.classList.toggle('drop-after', !before); });
-    d.addEventListener('dragleave', () => d.classList.remove('drop-before', 'drop-after'));
-    d.addEventListener('drop', (e) => { e.preventDefault(); const from = tabs.dataset.dragging; if (!from || from === v.name) return; const before = d.classList.contains('drop-before'); reorderVaults(from, v.name, before).catch(fail); });
+    d.onclick = () => { if (d.dataset.dragged) return; vault = v; rememberVault(v); paintNet(); show('home'); };
+    // drag to reorder — by pointer, not HTML5 drag-and-drop: the window's file-drop handling (attachments) takes
+    // every drag session on macOS, so a dragover never reaches the page. The drop goes before or after the row
+    // it lands on, by which half of it the pointer is in.
+    d.addEventListener('pointerdown', (e) => { if (e.button !== 0) return; sidebarDrag = { name: v.name, el: d, x0: e.clientX, y0: e.clientY, id: e.pointerId, moved: false, over: null, before: false }; });
     tabs.appendChild(d);
   }
 }
+let sidebarDrag = null;
+document.addEventListener('pointermove', (e) => {
+  const g = sidebarDrag; if (!g) return;
+  if (!g.moved) { if (Math.hypot(e.clientX - g.x0, e.clientY - g.y0) < 5) return; g.moved = true; g.el.classList.add('dragging'); try { g.el.setPointerCapture(g.id); } catch {} }
+  const rows = $$('#vault-tabs .nav'); rows.forEach(r => r.classList.remove('drop-before', 'drop-after'));
+  const over = rows.find(r => { const b = r.getBoundingClientRect(); return e.clientY >= b.top && e.clientY < b.bottom; });
+  g.over = over && over !== g.el ? over : null;
+  if (g.over) { const b = g.over.getBoundingClientRect(); g.before = e.clientY < b.top + b.height / 2; g.over.classList.add(g.before ? 'drop-before' : 'drop-after'); }
+});
+const sidebarDragEnd = () => {
+  const g = sidebarDrag; if (!g) return; sidebarDrag = null;
+  g.el.classList.remove('dragging'); $$('#vault-tabs .nav').forEach(r => r.classList.remove('drop-before', 'drop-after'));
+  if (!g.moved) return;
+  g.el.dataset.dragged = '1'; setTimeout(() => delete g.el.dataset.dragged, 0);   // the click that follows a drag is not a choice
+  if (g.over) reorderVaults(g.name, g.over.dataset.vault, g.before).catch(fail);
+};
+document.addEventListener('pointerup', sidebarDragEnd); document.addEventListener('pointercancel', sidebarDragEnd);
 // The new order is drawn at once and saved behind it; a save that fails redraws the saved order, so the list never
 // shows an order the store does not hold.
 async function reorderVaults(from, to, before) {
@@ -1630,25 +1644,53 @@ function renderOverview() {
 }
 
 // ---------- receive ----------
+// A wallet watched from a plain xpub is watched for every kind of address, and only the wallet that holds the keys
+// knows which it hands out: so Receive asks, defaulting to the kind that has history. A wallet that also receives
+// silent payments has that as one more choice — a different address entirely, found by the scan key, not the xpub.
+const KIND_WORDS = { pkh: 'Legacy · 1…', shwpkh: 'Nested segwit · 3…', wpkh: 'Native segwit · bc1q…', tr: 'Taproot · bc1p…', sp: 'Silent payment · sp1…' };
+const receiveMode = {};   // vault name → kind, or 'sp'
+function receiveChoices(v) {
+  if (!v.watch) return [];
+  const used = new Set((v._history || []).map(h => (h.index >>> 28) & 7).filter(s => s < v.watch.kinds.length).map(s => v.watch.kinds[s]));
+  const kinds = v.watch.kinds.length > 1 ? v.watch.kinds : [];
+  const list = kinds.concat(v.watch.sp ? ['sp'] : []);
+  if (list.length < 2 && !v.watch.sp) return [];
+  const fallback = used.size === 1 ? [...used][0] : v.watch.kinds.includes('wpkh') ? 'wpkh' : v.watch.kinds[0];
+  return { list: kinds.length ? list : [v.watch.kinds[0]].concat(['sp']), pick: receiveMode[v.name] || fallback };
+}
 async function drawAddress(chosen) {
   if (!vault) return;
   if (vault._receive === undefined) await sync();
-  const addr = chosen ? chosen.address : (vault._receive || vault.address);
+  const seg = $('#addr-seg'), choices = chosen ? [] : receiveChoices(vault);
+  seg.hidden = !choices.list; seg.innerHTML = '';
+  let mode = null;
+  if (choices.list) {
+    mode = choices.pick;
+    for (const k of choices.list) { const b = document.createElement('button'); b.type = 'button'; b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', k === mode ? 'true' : 'false'); b.dataset.kind = k; b.textContent = KIND_WORDS[k] || k; b.onclick = () => { receiveMode[vault.name] = k; drawAddress(); }; seg.appendChild(b); }
+  }
+  const me = vault.name;
+  let addr = chosen ? chosen.address : (vault._receive || vault.address);
+  if (mode === 'sp') { try { addr = await invoke('sp_address', { name: me }); } catch (e) { addr = ''; fail(e); } }
+  else if (mode && mode !== vault.watch.kinds[0]) { try { addr = await invoke('vault_address_kind', { name: me, kind: mode }); } catch (e) { fail(e); } }
+  if (!vault || vault.name !== me) return;
   $('#addr-text').textContent = addr;
+  if (mode === 'sp') {
+    $('#addr-note').innerHTML = `<b style="font-family:var(--display);font-weight:600">This wallet's silent payment address.</b> Give it when the sender's wallet can pay silent payments: the coins arrive as taproot outputs only this wallet's scan key can find, so nothing on the chain links them to this wallet or to each other, and the same address serves every payment. They show here once the read has reached the block they are in.`;
+    const qr = qrcode(0, 'M'); qr.addData(addr); qr.make(); $('#addr-qr').innerHTML = qr.createSvgTag({ cellSize: 3, margin: 2, scalable: true });
+    return;
+  }
   $('#addr-note').innerHTML = chosen && !chosen.current
     ? `<b style="font-family:var(--display);font-weight:600">${chosen.chain === 'change' ? 'Change' : 'Receive'} address ${fmtIndex(chosen.index).replace('change ', '')}${chosen.future ? ', ahead of the next unused one' : ''}.</b> ${chosen.future ? 'Fine to hand out now; the scan will find it as long as it is within the gap limit of the last one used.' : 'Already used. Paying it again works, but links the payments together on the chain.'} <a href="#" id="addr-back">Back to the next unused</a>`
+    : vault._rotating && vault.watch
+    ? `<b style="font-family:var(--display);font-weight:600">Fresh address, #${vault._receiveIndex}${mode ? ', ' + (KIND_WORDS[mode] || mode).split(' \u00b7')[0].toLowerCase() : ''}.</b> Every deposit gets its own. The wallet that holds the keys derives the same one, so it will see what arrives here${vault.watch.kinds.length > 1 ? ' \u2014 if it uses this kind of address; a wallet watched from a plain xpub is watched for every kind, and only that wallet knows which it hands out' : ''}.`
     : vault._rotating
     ? `<b style="font-family:var(--display);font-weight:600">Fresh address, #${vault._receiveIndex}.</b> Every deposit gets its own. Any two cards can still spend all of them: the app derives each address from the card keys and the vault's chain code, and the recovery line carries both.`
     : `<b style="font-family:var(--display);font-weight:600">This vault has one address.</b> It was made before rotating addresses existed, so every deposit lands here and anyone who knows it sees its whole history.`;
   const qr = qrcode(0, 'M'); qr.addData('bitcoin:' + addr); qr.make();
   $('#addr-qr').innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
-  const spRow = $('#addr-sp-row'), me = vault.name;
-  spRow.hidden = !(vault.watch && vault.watch.sp);
-  if (!spRow.hidden) invoke('sp_address', { name: me }).then(a => { if (vault && vault.name === me) $('#addr-sp').textContent = a; }).catch(() => { spRow.hidden = true; });
   const back = $('#addr-back'); if (back) back.onclick = (e) => { e.preventDefault(); drawAddress(); };
 }
 $('#copy-addr').onclick = () => { navigator.clipboard.writeText($('#addr-text').textContent).then(() => toast('Address copied')); };
-$('#copy-sp').onclick = () => { navigator.clipboard.writeText($('#addr-sp').textContent).then(() => toast('Silent payment address copied')); };
 
 // ---------- send ----------
 async function loadFees() {

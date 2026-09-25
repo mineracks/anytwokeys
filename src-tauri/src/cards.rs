@@ -15,6 +15,8 @@ const ORDER: [u8; 32] = [
 pub enum CardError {
     #[error("smartcard service: {0}")]
     Pcsc(#[from] pcsc::Error),
+    #[error("another program reset the key part-way through (YubiKey Manager, or gpg-agent, was talking to it at the same time); it was tried again and reset again. Close YubiKey Manager, unplug and replug the key, and try once more")]
+    Reset,
     #[error("no YubiKey found")]
     NotFound,
     #[error("the card refused ({sw:04X}){hint}")]
@@ -43,6 +45,18 @@ pub struct CardInfo {
     pub form: u8,                 // YubiKey form factor: 1 USB-A · 2 USB-A Nano · 3 USB-C · 4 USB-C Nano · 5 USB-C/Lightning · 0 unknown
     pub nfc: bool,                // the key has an NFC antenna (management config tag 0x0D)
     pub firmware: String,         // e.g. 5.4.3, from the management applet; empty if it would not say
+}
+
+
+/// A shared card can be RESET under us by any other program that talks to it — YubiKey Manager polls, gpg-agent
+/// probes — and PC/SC then refuses every command on the old handle ("the smart card has been reset, so any shared
+/// state information is invalid"). Nothing is wrong with the key. The whole operation is done again from a fresh
+/// connection, once; PIN and touch are part of it, so a half-done sequence is never resumed.
+fn again<T>(f: impl Fn() -> Result<T, CardError>) -> Result<T, CardError> {
+    match f() {
+        Err(CardError::Pcsc(pcsc::Error::ResetCard)) => { std::thread::sleep(std::time::Duration::from_millis(250)); f().map_err(|e| if matches!(e, CardError::Pcsc(pcsc::Error::ResetCard)) { CardError::Reset } else { e }) }
+        r => r,
+    }
 }
 
 fn hint_for(sw: u16) -> String {
@@ -213,7 +227,8 @@ fn hardware(card: &Card) -> (u8, bool, String) {
     (form, nfc, firmware)
 }
 
-pub fn list() -> Result<Vec<CardInfo>, CardError> {
+pub fn list() -> Result<Vec<CardInfo>, CardError> { again(|| list_once()) }
+fn list_once() -> Result<Vec<CardInfo>, CardError> {
     let ctx = Context::establish(Scope::User)?;
     let mut out = Vec::new();
     for reader in readers(&ctx)? {
@@ -246,7 +261,8 @@ pub fn list() -> Result<Vec<CardInfo>, CardError> {
 
 /// Generate a fresh secp256k1 key in the SIGNATURE slot and lock touch to FIXED.
 /// Replaces whatever was in the slot. Needs the ADMIN PIN.
-pub fn generate(reader: &str, admin_pin: &str) -> Result<String, CardError> {
+pub fn generate(reader: &str, admin_pin: &str) -> Result<String, CardError> { again(|| generate_once(reader, admin_pin)) }
+fn generate_once(reader: &str, admin_pin: &str) -> Result<String, CardError> {
     let ctx = Context::establish(Scope::User)?;
     let card = connect(&ctx, reader)?;
     apdu(&card, 0x00, 0x20, 0x00, 0x83, admin_pin.as_bytes())?;
@@ -264,7 +280,8 @@ pub fn generate(reader: &str, admin_pin: &str) -> Result<String, CardError> {
 
 /// ECDSA over a 32-byte digest with the SIG key: user PIN, then a touch (waited for up to ~60 s).
 /// Returns (r, s) with low-S.
-pub fn sign_digest(reader: &str, pin: &str, digest: &[u8; 32]) -> Result<([u8; 32], [u8; 32]), CardError> {
+pub fn sign_digest(reader: &str, pin: &str, digest: &[u8; 32]) -> Result<([u8; 32], [u8; 32]), CardError> { again(|| sign_digest_once(reader, pin, digest)) }
+fn sign_digest_once(reader: &str, pin: &str, digest: &[u8; 32]) -> Result<([u8; 32], [u8; 32]), CardError> {
     let ctx = Context::establish(Scope::User)?;
     let card = connect(&ctx, reader)?;
     sign_on_card(&card, pin, digest)
@@ -272,7 +289,8 @@ pub fn sign_digest(reader: &str, pin: &str, digest: &[u8; 32]) -> Result<([u8; 3
 
 /// Recheck the public key and uncached FIXED touch policy on the SAME connection
 /// that verifies the PIN and signs; never sign after a card swap or policy change.
-pub fn sign_digest_checked(reader: &str, pin: &str, digest: &[u8;32], expected: &[u8;33]) -> Result<([u8;32], [u8;32]), CardError> {
+pub fn sign_digest_checked(reader: &str, pin: &str, digest: &[u8;32], expected: &[u8;33]) -> Result<([u8;32], [u8;32]), CardError> { again(|| sign_digest_checked_once(reader, pin, digest, expected)) }
+fn sign_digest_checked_once(reader: &str, pin: &str, digest: &[u8;32], expected: &[u8;33]) -> Result<([u8;32], [u8;32]), CardError> {
     let ctx = Context::establish(Scope::User)?;
     let card = connect(&ctx, reader)?;
     if read_sig_pubkey(&card).as_ref() != Some(expected) { return Err(CardError::Changed); }
@@ -281,7 +299,8 @@ pub fn sign_digest_checked(reader: &str, pin: &str, digest: &[u8;32], expected: 
 }
 
 /// Spark setup is never allowed to replace a slot, including a non-secp256k1 key.
-pub fn generate_empty(reader: &str, admin_pin: &str, serial: u32) -> Result<String, CardError> {
+pub fn generate_empty(reader: &str, admin_pin: &str, serial: u32) -> Result<String, CardError> { again(|| generate_empty_once(reader, admin_pin, serial)) }
+fn generate_empty_once(reader: &str, admin_pin: &str, serial: u32) -> Result<String, CardError> {
     let ctx = Context::establish(Scope::User)?;
     let card = connect(&ctx, reader)?;
     let ad = app_data(&card)?;
@@ -339,7 +358,8 @@ fn serial_of(ad: &[u8]) -> u32 {
 }
 
 /// The cardholder-certificate object (7F21) of every plugged-in card, and how many bytes it can hold.
-pub fn read_sealed() -> Result<Vec<Sealed>, CardError> {
+pub fn read_sealed() -> Result<Vec<Sealed>, CardError> { again(|| read_sealed_once()) }
+fn read_sealed_once() -> Result<Vec<Sealed>, CardError> {
     let ctx = Context::establish(Scope::User)?;
     let mut out = Vec::new();
     for reader in readers(&ctx)? {
@@ -358,7 +378,8 @@ pub fn read_sealed() -> Result<Vec<Sealed>, CardError> {
 
 /// Replace the certificate object. `expect` is what the caller read before deciding: if the card holds anything
 /// else by now, nothing is written. Needs the ADMIN PIN. The write is read back and compared before returning.
-pub fn write_sealed(reader: &str, admin_pin: &str, expect: &[u8], data: &[u8]) -> Result<(), CardError> {
+pub fn write_sealed(reader: &str, admin_pin: &str, expect: &[u8], data: &[u8]) -> Result<(), CardError> { again(|| write_sealed_once(reader, admin_pin, expect, data)) }
+fn write_sealed_once(reader: &str, admin_pin: &str, expect: &[u8], data: &[u8]) -> Result<(), CardError> {
     let ctx = Context::establish(Scope::User)?;
     let card = connect(&ctx, reader)?;
     if apdu(&card, 0x00, 0xCA, 0x7F, 0x21, &[])? != expect { return Err(CardError::Changed); }
@@ -376,7 +397,8 @@ pub fn write_sealed(reader: &str, admin_pin: &str, expect: &[u8], data: &[u8]) -
 /// after the USER PIN (VERIFY with P2 = 82, the mode for everything that is not a signature) and lets be written under
 /// the same PIN. `create`: make and store a fresh 32 random bytes if the object is empty. Anything else found there is
 /// left alone. The write is read back before it is trusted.
-pub fn seal_key(reader: &str, pin: &str, create: bool) -> Result<Option<[u8; 32]>, CardError> {
+pub fn seal_key(reader: &str, pin: &str, create: bool) -> Result<Option<[u8; 32]>, CardError> { again(|| seal_key_once(reader, pin, create)) }
+fn seal_key_once(reader: &str, pin: &str, create: bool) -> Result<Option<[u8; 32]>, CardError> {
     let ctx = Context::establish(Scope::User)?;
     let card = connect(&ctx, reader)?;
     apdu(&card, 0x00, 0x20, 0x00, 0x82, pin.as_bytes())?;
