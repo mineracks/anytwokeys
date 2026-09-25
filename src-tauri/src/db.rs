@@ -34,6 +34,7 @@ pub fn open_at(p: &Path, key: &[u8; 32]) -> Result<Connection, String> {
         c.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))?;
         c.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;
             CREATE TABLE IF NOT EXISTS tx (net TEXT NOT NULL, txid TEXT NOT NULL, raw BLOB NOT NULL, PRIMARY KEY (net, txid)) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS transfer_cache (id INTEGER PRIMARY KEY, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS spk (net TEXT NOT NULL, spk BLOB NOT NULL, status TEXT NOT NULL, history TEXT NOT NULL, coins TEXT, PRIMARY KEY (net, spk)) WITHOUT ROWID;")?;
         let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if v == 0 { c.execute_batch(&format!("PRAGMA user_version = {SCHEMA};"))?; }
@@ -166,3 +167,7 @@ mod tests {
         assert!(tx_get(&c, "signet", &wrong).unwrap().is_none(), "bytes under the wrong id are not handed out as that transaction");
     }
 }
+
+// Derived history evidence stays in the encrypted cache, never in the user-answer store.
+pub fn transfer_cache_get() -> Option<String> { with(|c| c.query_row("SELECT body FROM transfer_cache WHERE id=1", [], |r| r.get(0)).optional()).flatten() }
+pub fn transfer_cache_put(body: &str) { let _=with(|c| c.execute("INSERT OR REPLACE INTO transfer_cache (id,body) VALUES (1,?1)", [body])); }
