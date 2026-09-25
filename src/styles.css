@@ -633,3 +633,23 @@ a.tag{text-decoration:none;cursor:pointer} a.tag:hover{text-decoration:underline
 .seed-grid input{width:100%;padding:10px 12px 10px 36px;font-family:var(--mono);font-size:14px;color:var(--ink);border:1px solid var(--line);border-radius:6px;background:var(--panel)}
 .seed-grid label.bad input{border-color:var(--warn)} .seed-grid label.ok input{border-color:var(--signal)}
 .seed-grid input:focus{outline:none;border-color:var(--gold)}
+
+/* Spark recovery: a diagram-led flow rather than a wall of text. House tokens, one gold accent for the load-bearing part. */
+.sk-fig{margin:0;border:1px solid var(--line);border-radius:8px;background:var(--ground);padding:14px 16px}
+.sk-svg{width:100%;height:auto;display:block}
+.sk-fig figcaption{font-size:13px;color:var(--muted);line-height:1.5;margin-top:10px}
+.sk-fig figcaption b{color:var(--ink)}
+.sk-h{font-family:var(--display);font-size:10.5px;font-weight:700;letter-spacing:.08em;fill:var(--muted)}
+.sk-t{font-family:var(--display);font-size:12px;font-weight:600;fill:var(--ink)}
+.sk-t.sk-mut,.sk-mut{fill:var(--muted)} .sk-lbl{font-size:10.5px;fill:var(--muted)}
+.sk-box{fill:var(--panel);stroke:var(--line);stroke-width:1.5}
+.sk-node{stroke:var(--signal)} .sk-gold{stroke:var(--gold)}
+.sk-line{stroke:var(--muted);stroke-width:1.5;fill:none} .sk-dash{stroke-dasharray:3 3}
+.sk-gold-s{stroke:var(--gold);stroke-width:1.5} .sk-fill{fill:var(--muted)}
+.sk-step{display:flex;gap:14px;align-items:flex-start;border:1px solid var(--line);border-radius:8px;padding:16px;background:var(--panel)}
+.sk-step-d{display:block} .sk-step-d summary{display:flex;gap:14px;align-items:center;cursor:pointer;list-style:none}
+.sk-step-d summary::-webkit-details-marker{display:none}
+.sk-num{flex:0 0 26px;height:26px;border-radius:999px;background:var(--gold-soft);color:var(--ink);font-family:var(--display);font-weight:700;font-size:14px;display:flex;align-items:center;justify-content:center}
+.sk-lead{font-family:var(--display);font-weight:600;font-size:15px}
+.sk-warn{border-left:3px solid var(--gold);background:var(--gold-soft);border-radius:0 6px 6px 0;padding:12px 14px;font-size:13.5px;line-height:1.5}
+.sk-warn b{color:var(--ink)}
