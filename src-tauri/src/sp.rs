@@ -80,6 +80,10 @@ pub fn derive(words: &str, mainnet: bool) -> R<Derived> {
     Ok(out)
 }
 
+/// Two extended keys give the same addresses when their key and chain code agree; the depth, parent fingerprint
+/// and child number an exporter writes around them vary (some write none), so they are not what is compared.
+pub fn same_account(a: &Xpub, b: &Xpub) -> bool { a.public_key == b.public_key && a.chain_code == b.chain_code }
+
 /// The `sp1…` address: bech32m, version 0, B_scan ‖ B_spend.
 pub fn address(scan_pub: &PublicKey, spend_pub: &PublicKey, mainnet: bool) -> R<String> {
     use bech32::primitives::encode::Encoder;
@@ -388,6 +392,16 @@ mod tests {
         let a = address(&d.scan_pub, &d.spend_pub, true).unwrap();
         assert!(a.starts_with("sp1q") && a.len() == 116, "{a}");
         assert!(derive("abandon abandon zoo", true).is_err());
+    }
+
+    #[test]
+    fn an_exported_key_is_the_same_account_whatever_it_says_about_its_parent() {
+        let d = derive("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about", true).unwrap();
+        let mut bare = d.account84; bare.depth = 0; bare.parent_fingerprint = [0u8; 4].into(); bare.child_number = ChildNumber::from_normal_idx(0).unwrap();
+        assert_ne!(bare.to_string(), d.account84.to_string());
+        assert!(same_account(&bare, &d.account84));
+        let other = derive("zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong", true).unwrap();
+        assert!(!same_account(&other.account84, &d.account84));
     }
 
     #[test]

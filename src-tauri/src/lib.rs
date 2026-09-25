@@ -831,7 +831,10 @@ async fn sp_watch(name: String, words: String, from: String) -> R<Vault> {
         let when = sp_day(&from)?;
         let d = sp::derive(&words, v.network == "mainnet")?;
         drop(words);
-        if d.account84.to_string() != w.key { return Err("those words are not this wallet's: the account key they give (BIP 84) is not the key this vault watches. Nothing was kept.".into()); }
+        let watched = std::str::FromStr::from_str(&w.key).map(|k: bitcoin::bip32::Xpub| k).map_err(|_| "this vault's watched key is damaged")?;
+        if !sp::same_account(&watched, &d.account84) {
+            return Err(format!("those words are not this wallet's: the BIP 84 account key they give (fingerprint {}) is not the key this vault watches (fingerprint {}). Nothing was kept. If the wallet exported its key from another account or path, watch that key instead.", d.account84.fingerprint(), watched.fingerprint()));
+        }
         let servers = wallet::servers_for(&s, &v.network);
         let start = sp_height_at(&servers, when)?;
         let spend = hex::encode(d.spend_pub.serialize());
