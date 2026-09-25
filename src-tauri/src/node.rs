@@ -207,6 +207,124 @@ impl Cln {
     }
 }
 
+// ---------- LND over REST ----------
+/// What a credential for LND can arrive as: a macaroon in hex or base64, or an `lndconnect://host:port?cert=…&macaroon=…`
+/// link, which every node UI makes. The link's cert becomes the pin, its macaroon the credential.
+pub struct LndCred { pub macaroon_hex: String, pub url: Option<String>, pub pin: Option<String> }
+pub fn lnd_cred(text: &str) -> R<LndCred> {
+    use bitcoin::base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD, URL_SAFE}, Engine};
+    let t = text.trim();
+    if let Some(rest) = t.strip_prefix("lndconnect://") {
+        let (hostport, query) = rest.split_once('?').ok_or("an lndconnect link carries ?cert=…&macaroon=…")?;
+        let mut cert = None; let mut mac = None;
+        for kv in query.split('&') { if let Some((k, v)) = kv.split_once('=') { match k { "cert" => cert = Some(v.to_string()), "macaroon" => mac = Some(v.to_string()), _ => {} } } }
+        let mac = mac.ok_or("the lndconnect link has no macaroon")?;
+        let mac_b = URL_SAFE_NO_PAD.decode(&mac).or_else(|_| URL_SAFE.decode(&mac)).or_else(|_| STANDARD.decode(&mac)).map_err(|_| "the link's macaroon is not base64")?;
+        let pin = match cert { Some(c) => { let der = URL_SAFE_NO_PAD.decode(&c).or_else(|_| URL_SAFE.decode(&c)).or_else(|_| STANDARD.decode(&c)).map_err(|_| "the link's certificate is not base64")?; Some(hex::encode(Sha256::digest(&der))) } None => None };
+        return Ok(LndCred { macaroon_hex: hex::encode(mac_b), url: Some(format!("https://{hostport}")), pin });
+    }
+    if !t.is_empty() && t.len() % 2 == 0 && t.chars().all(|c| c.is_ascii_hexdigit()) { return Ok(LndCred { macaroon_hex: t.to_lowercase(), url: None, pin: None }); }
+    if let Ok(b) = STANDARD.decode(t).or_else(|_| URL_SAFE_NO_PAD.decode(t)) { return Ok(LndCred { macaroon_hex: hex::encode(b), url: None, pin: None }); }
+    Err("the macaroon is hex (what lncli bakemacaroon prints), base64, or an lndconnect:// link".into())
+}
+
+pub struct Lnd { url: String, macaroon: Zeroizing<String>, http: reqwest::blocking::Client, pinned: Arc<Pinned> }
+impl Lnd {
+    pub fn open(url: &str, macaroon_hex: &str, pin: &str) -> R<Self> {
+        let url = url.trim().trim_end_matches('/').to_string();
+        if !url.starts_with("https://") { return Err("LND's REST address is https://host:8080".into()); }
+        let (http, pinned) = client(pin_of(pin)?)?;
+        Ok(Lnd { url, macaroon: Zeroizing::new(macaroon_hex.trim().to_lowercase()), http, pinned })
+    }
+    pub fn seen_pin(&self) -> String { self.pinned.seen.lock().ok().and_then(|s| *s).map(hex::encode).unwrap_or_default() }
+    fn send(&self, req: reqwest::blocking::RequestBuilder, what: &str) -> R<serde_json::Value> {
+        crate::net::out("your node")?;
+        let res = req.header("Grpc-Metadata-macaroon", self.macaroon.as_str()).send()
+            .map_err(|e| if e.is_timeout() { "the node did not answer in time".to_string() } else if e.to_string().contains("not the one pinned") { "the node's certificate has changed since it was pinned; nothing was sent".to_string() } else { format!("the node could not be reached: {}", e.without_url()) })?;
+        let status = res.status();
+        let body: serde_json::Value = res.json().map_err(|_| format!("the node answered {} with something that is not JSON", status.as_u16()))?;
+        if !status.is_success() {
+            let msg = body.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
+            return Err(match status.as_u16() { 401 | 403 => format!("the node refused this credential for {what}: {msg}"), _ => format!("{what}: the node answered {} {msg}", status.as_u16()) });
+        }
+        Ok(body)
+    }
+    pub fn get(&self, path: &str) -> R<serde_json::Value> { self.send(self.http.get(format!("{}{path}", self.url)), path) }
+    pub fn post(&self, path: &str, body: serde_json::Value) -> R<serde_json::Value> { self.send(self.http.post(format!("{}{path}", self.url)).json(&body), path) }
+    /// The macaroon must NOT carry a write permission. Each is checked with CheckMacaroonPermissions (a read) and
+    /// must come back invalid. A macaroon without macaroon:read cannot be checked, and so cannot be kept.
+    pub fn prove_read_only(&self) -> R<Vec<String>> {
+        use bitcoin::base64::{engine::general_purpose::STANDARD, Engine};
+        let mac = STANDARD.encode(hex::decode(self.macaroon.as_str()).map_err(|_| "the macaroon is not hex")?);
+        let mut refused = Vec::new();
+        for (entity, action) in [("offchain", "write"), ("onchain", "write"), ("invoices", "write"), ("address", "write"), ("peers", "write"), ("message", "write"), ("macaroon", "write"), ("macaroon", "generate"), ("signer", "generate"), ("uri", "write")] {
+            let v = self.post("/v1/macaroon/checkpermissions", serde_json::json!({ "macaroon": mac, "permissions": [{ "entity": entity, "action": action }] }))
+                .map_err(|e| format!("{e}. The macaroon needs macaroon:read so the app can prove what it cannot do — bake it with info:read onchain:read offchain:read invoices:read macaroon:read"))?;
+            if v.get("valid").and_then(|x| x.as_bool()) == Some(true) { return Err(format!("this macaroon carries {entity}:{action}. Only a read-only macaroon can be kept here — bake one with info:read onchain:read offchain:read invoices:read macaroon:read.")); }
+            refused.push(format!("{entity}:{action}"));
+        }
+        Ok(refused)
+    }
+    pub fn info(&self) -> R<(String, String, String, String, u64)> {
+        let i = self.get("/v1/getinfo")?;
+        let s = |k: &str| i.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let network = i.get("chains").and_then(|c| c.as_array()).and_then(|a| a.first()).and_then(|c| c.get("network")).and_then(|n| n.as_str()).unwrap_or("").to_string();
+        Ok((s("alias"), s("identity_pubkey"), s("version"), network, i.get("block_height").and_then(|v| v.as_u64()).unwrap_or(0)))
+    }
+    pub fn funds(&self) -> R<(u64, u64, u64, usize)> {
+        let n = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str().and_then(|s| s.parse::<u64>().ok()).or_else(|| x.as_u64())).unwrap_or(0);
+        let b = self.get("/v1/balance/blockchain")?;
+        let c = self.get("/v1/balance/channels")?;
+        let local = c.get("local_balance").map(|l| n(l, "sat")).unwrap_or_else(|| n(&c, "balance"));
+        let pending_local = c.get("pending_open_local_balance").map(|l| n(l, "sat")).unwrap_or_else(|| n(&c, "pending_open_balance"));
+        let chans = self.get("/v1/channels")?;
+        let count = chans.get("channels").and_then(|a| a.as_array()).map(|a| a.len()).unwrap_or(0);
+        Ok((n(&b, "confirmed_balance"), local, n(&b, "unconfirmed_balance") + pending_local, count))
+    }
+    /// The ledger, assembled: on-chain transactions (channel opens and closes recognised by their outpoints and
+    /// counted as moves within the node, fee only), settled invoices, succeeded payments, and routing fees earned.
+    pub fn events(&self) -> R<Vec<Event>> {
+        use bitcoin::base64::{engine::general_purpose::STANDARD, Engine};
+        let n = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str().and_then(|s| s.parse::<i64>().ok()).or_else(|| x.as_i64())).unwrap_or(0);
+        let s = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let arr = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_array()).cloned().unwrap_or_default();
+        // which transactions are channels being opened or closed
+        let mut opens = std::collections::HashSet::new(); let mut closes = std::collections::HashSet::new();
+        for c in arr(&self.get("/v1/channels")?, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } }
+        for c in arr(&self.get("/v1/channels/closed")?, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } let ct = s(&c, "closing_tx_hash").to_lowercase(); if !ct.is_empty() { closes.insert(ct); } }
+        for c in arr(&self.get("/v1/channels/pending")?, "pending_open_channels") { if let Some(t) = c.get("channel").and_then(|x| x.get("channel_point")).and_then(|x| x.as_str()).and_then(|p| p.split(':').next()) { opens.insert(t.to_lowercase()); } }
+        let mut out = Vec::new();
+        for t in arr(&self.get("/v1/transactions")?, "transactions") {
+            let txid = s(&t, "tx_hash").to_lowercase(); let amount = n(&t, "amount"); let fee = n(&t, "total_fees").max(0) as u64; let time = n(&t, "time_stamp") as u32;
+            if txid.is_empty() { continue; }
+            let (layer, kind, net) = if opens.contains(&txid) { ("channel", "open", -(fee as i64)) } else if closes.contains(&txid) { ("channel", "close", 0) } else if amount >= 0 { ("chain", "deposit", amount) } else { ("chain", "withdrawal", amount) };
+            if net == 0 && fee == 0 && layer != "channel" { continue; }
+            out.push(Event { id: txid.clone(), time, net, fee: if amount < 0 || layer == "channel" { fee } else { 0 }, layer: layer.into(), txid, hash: String::new(), kind: kind.into(), memo: s(&t, "label") });
+        }
+        for i in arr(&self.get("/v1/invoices?num_max_invoices=100000")?, "invoices") {
+            if s(&i, "state") != "SETTLED" && i.get("settled").and_then(|x| x.as_bool()) != Some(true) { continue; }
+            let hash = STANDARD.decode(s(&i, "r_hash")).map(hex::encode).unwrap_or_default();
+            let amt = n(&i, "amt_paid_sat"); if amt <= 0 || hash.is_empty() { continue; }
+            out.push(Event { id: hash.clone(), time: n(&i, "settle_date") as u32, net: amt, fee: 0, layer: "lightning".into(), txid: String::new(), hash, kind: "received".into(), memo: s(&i, "memo") });
+        }
+        for p in arr(&self.get("/v1/payments?include_incomplete=false&max_payments=100000")?, "payments") {
+            if s(&p, "status") != "SUCCEEDED" { continue; }
+            let hash = s(&p, "payment_hash").to_lowercase(); let amt = n(&p, "value_sat"); let fee = n(&p, "fee_sat").max(0) as u64;
+            let time = { let ns = n(&p, "creation_time_ns"); if ns > 0 { (ns / 1_000_000_000) as u32 } else { n(&p, "creation_date") as u32 } };
+            if hash.is_empty() { continue; }
+            out.push(Event { id: format!("{hash}:out"), time, net: -(amt + fee as i64), fee, layer: "lightning".into(), txid: String::new(), hash, kind: "paid".into(), memo: String::new() });
+        }
+        let fw = self.post("/v1/switch", serde_json::json!({ "start_time": "0", "num_max_events": 50000 }))?;
+        for (k, f) in arr(&fw, "forwarding_events").iter().enumerate() {
+            let fee = n(f, "fee"); if fee <= 0 { continue; }
+            let time = { let ns = n(f, "timestamp_ns"); if ns > 0 { (ns / 1_000_000_000) as u32 } else { n(f, "timestamp") as u32 } };
+            out.push(Event { id: format!("routed:{time}:{k}"), time, net: fee, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "routed".into(), memo: String::new() });
+        }
+        out.sort_by_key(|e| (e.time, e.id.clone()));
+        Ok(out)
+    }
+}
+
 // ---------- the sealed credential ----------
 fn cred_path(id: &str) -> std::path::PathBuf { crate::lockbox::dir().join(format!("node-{id}.cred")) }
 pub fn id_of(url: &str, pubkey: &str) -> String { hex::encode(&Sha256::digest(format!("{}|{}", url.trim(), pubkey).as_bytes())[..8]) }
@@ -241,6 +359,15 @@ mod tests {
         let ln: Vec<_> = ev.iter().filter(|e| e.layer == "lightning" && e.kind != "routed").collect();
         let hashed = ln.iter().filter(|e| e.hash.len() == 64).count();
         assert!(hashed * 20 >= ln.len() * 19, "{hashed} of {} Lightning events name their payment hash (a channel push has none)", ln.len());
+    }
+    #[test]
+    fn an_lnd_credential_is_hex_base64_or_an_lndconnect_link() {
+        assert_eq!(lnd_cred("0201036c6e64").unwrap().macaroon_hex, "0201036c6e64");
+        assert_eq!(lnd_cred("AgEDbG5k").unwrap().macaroon_hex, "0201036c6e64", "base64 of the same bytes");
+        let link = lnd_cred("lndconnect://10.0.0.5:8080?cert=MIIB&macaroon=AgEDbG5k").unwrap();
+        assert_eq!((link.url.as_deref(), link.macaroon_hex.as_str()), (Some("https://10.0.0.5:8080"), "0201036c6e64"));
+        assert_eq!(link.pin.as_ref().map(|p| p.len()), Some(64), "the link's certificate becomes the pin");
+        assert!(lnd_cred("lndconnect://host:8080").is_err() && lnd_cred("not a credential!").is_err());
     }
     #[test]
     fn a_fingerprint_is_read_with_or_without_colons_and_shown_with_them() {

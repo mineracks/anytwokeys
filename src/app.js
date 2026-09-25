@@ -1800,14 +1800,17 @@ function renderOverview() {
 // ---------- a Lightning node the person runs ----------
 function nodeRow(id) { if (!vault || !vault.node) return null; if (!vault._node) vault._node = Object.fromEntries((vault.node.events || []).map(e => [e.id, e])); return vault._node[id] || null; }
 let nodeChecked = null;
-$('#node-kind').onclick = (e) => { const b = e.target.closest('[data-kind]'); if (!b || b.disabled) return; $$('#node-kind [data-kind]').forEach(x => x.setAttribute('aria-checked', x === b ? 'true' : 'false')); };
+const nodeKind = () => ($('#node-kind [aria-checked=true]') || {}).dataset?.kind || 'cln';
+$('#node-kind').onclick = (e) => { const b = e.target.closest('[data-kind]'); if (!b || b.disabled) return; $$('#node-kind [data-kind]').forEach(x => x.setAttribute('aria-checked', x === b ? 'true' : 'false')); const lnd = b.dataset.kind === 'lnd';
+  $('#node-cred-label').textContent = lnd ? 'Read-only macaroon, or an lndconnect link' : 'Read-only rune'; $('#node-cred').placeholder = lnd ? 'paste the macaroon (hex) or an lndconnect:// link' : 'paste the rune'; $('#node-url').placeholder = lnd ? 'https://your-node:8080' : 'https://your-node:3010  (or http:// on your own network)';
+  $('#node-help-cln').hidden = lnd; $('#node-help-lnd').hidden = !lnd; };
 $('#node-check').onclick = async () => {
-  const url = $('#node-url').value.trim(), cred = $('#node-cred').value.trim(); nodeChecked = null; $('#node-preview').hidden = true;
-  if (!url) return toast('Where is the node? Its address first.'); if (!cred) return toast('Paste the read-only rune');
+  const kind = nodeKind(), url = $('#node-url').value.trim(), cred = $('#node-cred').value.trim(); nodeChecked = null; $('#node-preview').hidden = true;
+  if (!url && !cred.startsWith('lndconnect://')) return toast('Where is the node? Its address first.'); if (!cred) return toast(kind === 'lnd' ? 'Paste the read-only macaroon' : 'Paste the read-only rune');
   $('#node-check').disabled = true; $('#node-note').textContent = 'Asking the node… first whether this credential could spend, then who it is and what it holds.';
   try {
-    const c = await invoke('node_check', { kind: 'cln', url, cred, pin: '' });
-    nodeChecked = { url, cred, pin: c.pin };
+    const c = await invoke('node_check', { kind, url, cred, pin: '' });
+    nodeChecked = { kind, url, cred, pin: c.pin };
     $('#node-note').textContent = '';
     $('#node-facts').innerHTML = [['Node', `${esc(c.alias)} · ${c.kind === 'cln' ? 'Core Lightning' : 'LND'} ${esc(c.version)}`], ['Identity', `<span class="mono" style="font-size:12px;word-break:break-all">${esc(c.pubkey)}</span>`], ['Height', sats(c.height)],
       ['On-chain', `${sats(c.onchain)} sats`], ['In channels', `${sats(c.channels)} sats across ${sats(c.channel_count)} channel${c.channel_count === 1 ? '' : 's'}`], ['Pending', c.pending ? `${sats(c.pending)} sats` : 'nothing'], ['Ledger', `${sats(c.events)} events from the bookkeeper`]].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
@@ -1825,7 +1828,7 @@ $('#node-add').onclick = async () => {
   const name = $('#node-name').value.trim() || 'My node';
   $('#node-add').disabled = true;
   try {
-    const v = await invoke('node_add', { name, kind: 'cln', url: nodeChecked.url, cred: nodeChecked.cred, pin: nodeChecked.pin });
+    const v = await invoke('node_add', { name, kind: nodeChecked.kind, url: nodeChecked.url, cred: nodeChecked.cred, pin: nodeChecked.pin });
     nodeChecked = null; $('#node-cred').value = ''; $('#node-preview').hidden = true;
     store = await invoke('store_get'); vault = store.vaults.find(x => x.name === v.name) || v; rememberVault(vault);
     toast('Watching the node. Its credential is sealed here and can only read.', 8000);

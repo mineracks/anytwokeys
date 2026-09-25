@@ -581,15 +581,19 @@ fn spark_vault(mut s: Store, name: String, address: String, identity: String, ne
 
 /// Open the node with a credential, prove the credential read-only, and read it. Nothing is kept.
 fn node_check_with(kind: &str, url: &str, cred: &str, pin: &str) -> R<(node::Check, node::Node)> {
-    if kind != "cln" { return Err("LND is next; Core Lightning for now".into()); }
-    let c = node::Cln::open(url, cred, pin)?;
-    let refused = c.prove_read_only(cred.trim())?;
-    let (alias, pubkey, version, network, height) = c.info()?;
-    if network != "bitcoin" { return Err(format!("this node is on {network}, not mainnet")); }
-    let (onchain, channels, pending, channel_count) = c.funds()?;
-    let events = c.events()?;
-    let pin_seen = c.seen_pin();
-    let n = node::Node { kind: kind.into(), url: url.trim().trim_end_matches('/').into(), pin: if pin.is_empty() { pin_seen.clone() } else { pin.replace(':', "").to_lowercase() }, alias: alias.clone(), pubkey: pubkey.clone(), version: version.clone(), onchain, channels, pending, read_at: now(), events: events.clone() };
+    let (refused, (alias, pubkey, version, network, height), (onchain, channels, pending, channel_count), events, pin_seen, url) = match kind {
+        "cln" => { let c = node::Cln::open(url, cred, pin)?; (c.prove_read_only(cred.trim())?, c.info()?, c.funds()?, c.events()?, c.seen_pin(), url.trim().trim_end_matches('/').to_string()) }
+        "lnd" => {
+            let lc = node::lnd_cred(cred)?;
+            let url = lc.url.clone().unwrap_or_else(|| url.trim().to_string());
+            let pin = if !pin.is_empty() { pin.to_string() } else { lc.pin.clone().unwrap_or_default() };
+            let c = node::Lnd::open(&url, &lc.macaroon_hex, &pin)?;
+            (c.prove_read_only()?, c.info()?, c.funds()?, c.events()?, c.seen_pin(), url.trim_end_matches('/').to_string())
+        }
+        _ => return Err("the node is Core Lightning or LND".into()),
+    };
+    if network != "bitcoin" && network != "mainnet" { return Err(format!("this node is on {network}, not mainnet")); }
+    let n = node::Node { kind: kind.into(), url: url.clone(), pin: if pin.is_empty() { pin_seen.clone() } else { pin.replace(':', "").to_lowercase() }, alias: alias.clone(), pubkey: pubkey.clone(), version: version.clone(), onchain, channels, pending, read_at: now(), events: events.clone() };
     Ok((node::Check { kind: kind.into(), alias, pubkey, version, network, height, onchain, channels, pending, channel_count, refused, pin: pin_seen, events: events.len() }, n))
 }
 #[tauri::command]
@@ -608,7 +612,8 @@ async fn node_add(name: String, kind: String, url: String, cred: String, pin: St
         if s.vaults.iter().any(|v| v.name == name) { return Err(format!("a vault called '{name}' already exists")); }
         let (_, n) = node_check_with(&kind, &url, &cred, &pin)?;
         if s.vaults.iter().any(|v| v.node.as_ref().map(|x| x.pubkey == n.pubkey).unwrap_or(false)) { return Err("this node is already here".into()); }
-        node::keep_cred(&node::id_of(&n.url, &n.pubkey), &cred)?;
+        let keep: zeroize::Zeroizing<String> = if kind == "lnd" { zeroize::Zeroizing::new(node::lnd_cred(&cred)?.macaroon_hex) } else { cred.clone() };
+        node::keep_cred(&node::id_of(&n.url, &n.pubkey), &keep)?;
         let txs: std::collections::HashMap<String, i32> = n.events.iter().filter(|e| !e.txid.is_empty()).map(|e| (e.txid.clone(), 0)).collect();
         let v = Vault { watch: None, spark: None, muun: None, statement: None, node: Some(n),
             name: name.clone(), network: "mainnet".into(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address: String::new(),
