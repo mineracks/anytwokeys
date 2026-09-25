@@ -1,4 +1,5 @@
 mod spark;
+mod sp;
 mod spark_auth;
 mod muun;
 mod activity;
@@ -440,7 +441,7 @@ fn xpub_restore(name: String, text: String, names: Vec<String>) -> R<Vault> {
     if x.depth == 0 {
         return Err("that is a MASTER key, not an account key. Hardened levels cannot be derived from a public key, so this app could only watch m/0/i — almost certainly not where your wallet keeps its coins. Export the account key (what a wallet calls its watch-only or xpub export).".into());
     }
-    let mut v = Vault { watch: Some(wallet::Watch { key, kinds, said }), spark: None, muun: None, name,
+    let mut v = Vault { watch: Some(wallet::Watch { key, kinds, said, sp: None }), spark: None, muun: None, name,
         network: network.to_string(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address: String::new(),
         created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
         labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
@@ -727,17 +728,26 @@ fn vault_rename(name: String, new_name: String, key_names: Vec<String>) -> R<Sto
     Ok(s)
 }
 
+/// The order the sidebar lists the vaults in, as the person dragged them. A name not in the list keeps its place
+/// after the named ones; a name that is not a vault is ignored. The store's own order IS the order, so nothing else
+/// needs to know.
+#[tauri::command]
+fn vault_order(names: Vec<String>) -> R<Store> {
+    wallet::update(|s| s.vaults.sort_by_key(|v| names.iter().position(|n| n == &v.name).unwrap_or(usize::MAX)))
+}
+
 #[tauri::command]
 fn vault_forget(name: String) -> R<Store> {
     spark_auth::clear();
     let mut s = wallet::load()?;
+    if let Some(sp) = s.vaults.iter().find(|v| v.name == name).and_then(|v| v.watch.as_ref()).and_then(|w| w.sp.as_ref()) { sp::forget_scan_key(&sp::id_of(&sp.spend)); }
     s.vaults.retain(|v| v.name != name);
     wallet::save(&s)?;
     Ok(s)
 }
 
 #[tauri::command]
-fn settings_set(app: tauri::AppHandle, network: String, custom: bool, electrum: String, explorer: String, gap: Option<u32>, fiat: Option<String>, prices: Option<String>, vss: Option<String>, tiles: Option<String>, geocode: Option<String>, location: Option<bool>, location_exact: Option<bool>) -> R<Store> {
+fn settings_set(app: tauri::AppHandle, network: String, custom: bool, electrum: String, explorer: String, gap: Option<u32>, fiat: Option<String>, prices: Option<String>, vss: Option<String>, tiles: Option<String>, geocode: Option<String>, location: Option<bool>, location_exact: Option<bool>, sp_oracle: Option<String>) -> R<Store> {
     let mut s = wallet::load()?;
     if network != "mainnet" && network != "signet" { return Err("network must be mainnet or signet".into()); }
     let gap = gap.unwrap_or(s.settings.gap);
@@ -749,12 +759,117 @@ fn settings_set(app: tauri::AppHandle, network: String, custom: bool, electrum: 
     let vss = vss.map(|v| v.trim().trim_end_matches('/').to_string()).unwrap_or_else(|| s.settings.vss.clone());
     if !(vss.is_empty() || vss.starts_with("https://") || vss.starts_with("http://")) { return Err("the label host is a web address, or empty to keep labels on this computer only".into()); }
     let (location, location_exact) = (location.unwrap_or(s.settings.location), location_exact.unwrap_or(s.settings.location_exact));
+    let sp_oracle = sp_oracle.map(|v| v.trim().trim_end_matches('/').to_string()).unwrap_or_else(|| s.settings.sp_oracle.clone());
+    if !(sp_oracle.is_empty() || sp_oracle.starts_with("https://")) { return Err("the silent payments oracle is an https address, or empty to switch silent payments off".into()); }
     let tiles = tiles.map(|v| v.trim().to_string()).unwrap_or_else(|| s.settings.tiles.clone());
     if !(tiles.is_empty() || tiles.starts_with("https://")) { return Err("the map host is an https address of a .pmtiles file, or empty for no maps".into()); }
-    s.settings = wallet::Settings { network, custom, electrum: electrum.trim().to_string(), explorer: explorer.trim().to_string(), gap, fiat, prices, vss, location, location_exact, tiles, geocode: geocode.map(|v| v.trim().trim_end_matches('/').to_string()).filter(|v| v.is_empty() || v.starts_with("https://")).unwrap_or_else(|| s.settings.geocode.clone()), offline: s.settings.offline, drill_days: s.settings.drill_days, cost_method: s.settings.cost_method.clone() };
+    s.settings = wallet::Settings { network, custom, electrum: electrum.trim().to_string(), explorer: explorer.trim().to_string(), gap, fiat, prices, vss, sp_oracle, location, location_exact, tiles, geocode: geocode.map(|v| v.trim().trim_end_matches('/').to_string()).filter(|v| v.is_empty() || v.starts_with("https://")).unwrap_or_else(|| s.settings.geocode.clone()), offline: s.settings.offline, drill_days: s.settings.drill_days, cost_method: s.settings.cost_method.clone() };
     wallet::save(&s)?;
     location_follow(&app, location);
     Ok(s)
+}
+
+// ---------- silent payments on a watched wallet (sp.rs) ----------
+
+/// Blocks the oracle has indexed since the last look, read for this wallet's silent payments; what is found is kept
+/// as it comes, so a scan that stops early is picked up where it stopped. An oracle that cannot be reached is said
+/// to the window and the sync goes on with what is already known — a missed oracle is not a missing balance.
+fn sp_discover(s: &Store, v: Vault, servers: &chain::Servers) -> R<Vault> {
+    let sp = match v.watch.as_ref().and_then(|w| w.sp.as_ref()) { Some(sp) => sp.clone(), None => return Ok(v) };
+    if s.settings.sp_oracle.is_empty() { return Ok(v); }
+    let oracle = sp::Oracle { base: s.settings.sp_oracle.clone() };
+    let said = |e: String| net::emit("sp-scan", serde_json::json!({ "vault": v.name, "error": e }));
+    let (net, indexed) = match oracle.info() { Ok(x) => x, Err(e) => { said(e); return Ok(v); } };
+    if (net == "main") != (v.network == "mainnet") { said(format!("the oracle indexes {net}, not this vault's network")); return Ok(v); }
+    let to = indexed.min(chain::height(servers).unwrap_or(indexed));
+    if sp.scanned >= to { return Ok(v); }
+    let key = sp::scan_key(&sp::id_of(&sp.spend))?;
+    let spend_pub = bitcoin::secp256k1::PublicKey::from_slice(&hex::decode(&sp.spend).map_err(|e| e.to_string())?).map_err(|_| "this wallet's spend key is damaged")?;
+    let labels = vec![(0, sp::label(&key, 0)?)];   // the change label every BIP 352 wallet has
+    let r = sp::discover(&oracle, &key, &spend_pub, sp.scanned + 1, to, &labels, &v.name);
+    let name = v.name.clone();
+    let store = wallet::update(|s| if let Some(w) = s.vaults.iter_mut().find(|x| x.name == name).and_then(|x| x.watch.as_mut()) { if let Some(sp) = w.sp.as_mut() {
+        for f in &r.found { if !sp.found.iter().any(|k| k.key == f.key) { sp.found.push(f.clone()); } }
+        sp.scanned = sp.scanned.max(r.reached);
+    } })?;
+    if let Some(e) = r.error { said(e); }
+    Ok(store.vaults.into_iter().find(|x| x.name == name).unwrap_or(v))
+}
+
+/// The first block at or after a day, by the headers' own times: taproot's activation is the floor, since nothing
+/// before it can be a silent payment.
+fn sp_height_at(servers: &chain::Servers, when: u32) -> R<u32> {
+    let (mut lo, mut hi) = (709_632u32, chain::height(servers)?);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let t = chain::header_times(servers, &[mid])?.first().copied().ok_or("no header time")?;
+        if t < when { lo = mid + 1; } else { hi = mid; }
+    }
+    Ok(lo)
+}
+/// "YYYY-MM-DD" at 00:00 UTC as unix time (days-from-civil, Hinnant).
+fn sp_day(day: &str) -> R<u32> {
+    let p: Vec<i64> = day.trim().split('-').filter_map(|x| x.parse().ok()).collect();
+    if p.len() != 3 || !(2021..=2100).contains(&p[0]) || !(1..=12).contains(&p[1]) || !(1..=31).contains(&p[2]) { return Err("give the day the wallet was made as YYYY-MM-DD".into()); }
+    let (y, m, d) = (if p[1] <= 2 { p[0] - 1 } else { p[0] }, p[1], p[2]);
+    let era = y.div_euclid(400); let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Ok(((era * 146097 + doe - 719468) * 86400) as u32)
+}
+
+/// The words once: proved to be this wallet's by the account key they give, then the scan key kept sealed and the
+/// spend PUBLIC key kept in the vault. The words and every private key but the scan key are gone by the return.
+#[tauri::command]
+async fn sp_watch(name: String, words: String, from: String) -> R<Vault> {
+    let words = zeroize::Zeroizing::new(words);
+    block(move || {
+        let s = wallet::load()?;
+        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+        let w = v.watch.as_ref().ok_or("silent payments are watched on a wallet imported from its extended key")?;
+        if !lockbox::sealed_mode() { return Err("silent payments need this computer's sealed store — seal it in App settings first, so the scan key is never written in the clear".into()); }
+        let when = sp_day(&from)?;
+        let d = sp::derive(&words, v.network == "mainnet")?;
+        drop(words);
+        if d.account84.to_string() != w.key { return Err("those words are not this wallet's: the account key they give (BIP 84) is not the key this vault watches. Nothing was kept.".into()); }
+        let servers = wallet::servers_for(&s, &v.network);
+        let start = sp_height_at(&servers, when)?;
+        let spend = hex::encode(d.spend_pub.serialize());
+        sp::keep_scan_key(&sp::id_of(&spend), &d.scan)?;
+        let rec = wallet::SilentPay { spend, scan_pub: hex::encode(d.scan_pub.serialize()), from: start, scanned: start - 1, found: Vec::new() };
+        let store = wallet::update(|s| if let Some(w) = s.vaults.iter_mut().find(|x| x.name == name).and_then(|x| x.watch.as_mut()) { w.sp = Some(rec.clone()); })?;
+        store.vaults.into_iter().find(|x| x.name == name).ok_or("no such vault".into())
+    }).await
+}
+/// Read again from a day: what was found stays found; the scan simply starts over from there.
+#[tauri::command]
+async fn sp_rescan(name: String, from: String) -> R<Vault> {
+    block(move || {
+        let s = wallet::load()?;
+        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+        let when = sp_day(&from)?;
+        let start = sp_height_at(&wallet::servers_for(&s, &v.network), when)?;
+        let store = wallet::update(|s| if let Some(sp) = s.vaults.iter_mut().find(|x| x.name == name).and_then(|x| x.watch.as_mut()).and_then(|w| w.sp.as_mut()) { sp.from = start; sp.scanned = start - 1; })?;
+        store.vaults.into_iter().find(|x| x.name == name).ok_or("no such vault".into())
+    }).await
+}
+#[tauri::command]
+fn sp_forget(name: String) -> R<Vault> {
+    let store = wallet::update(|s| if let Some(w) = s.vaults.iter_mut().find(|x| x.name == name).and_then(|x| x.watch.as_mut()) {
+        if let Some(sp) = w.sp.take() { sp::forget_scan_key(&sp::id_of(&sp.spend)); }
+    })?;
+    store.vaults.into_iter().find(|x| x.name == name).ok_or("no such vault".into())
+}
+#[tauri::command]
+fn sp_cancel() { sp::cancel(); }
+/// The wallet's `sp1…`, from the two public keys: shown, never needed for the scan.
+#[tauri::command]
+fn sp_address(name: String) -> R<String> {
+    let s = wallet::load()?;
+    let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
+    let sp = v.watch.as_ref().and_then(|w| w.sp.as_ref()).ok_or("this vault does not watch silent payments")?;
+    let key = |h: &str| bitcoin::secp256k1::PublicKey::from_slice(&hex::decode(h).map_err(|e| e.to_string())?).map_err(|_| "key is damaged".to_string());
+    sp::address(&key(&sp.scan_pub)?, &key(&sp.spend)?, v.network == "mainnet")
 }
 
 #[derive(Serialize)]
@@ -777,6 +892,7 @@ async fn vault_sync(name: String) -> R<Snapshot> {
             return Ok(Snapshot { coins: Vec::new(), balance, height: 0, history: Vec::new(), servers,
                 receive: sp.address.clone(), receive_index: 0, rotating: false, next_change: 0, gap: 0 });
         }
+        let v = sp_discover(&s, v, &servers)?;
         let sc = wallet::scan(&v, &servers, s.settings.gap)?;
         let balance = sc.coins.iter().map(|c| c.value).sum();
         let height = chain::height(&servers).unwrap_or(0);
@@ -2342,7 +2458,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify, 
-            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_forget, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
+            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
         .build(tauri::generate_context!())
@@ -2687,11 +2803,11 @@ mod signers_vault_tests {
         let key = signers::standard_xpub(ZPUB).unwrap();
         let mut v = signers_vault("m".into(), 2, &keys([0, 1, 2]), "mainnet").unwrap();
         v.ext = None; v.keys.clear(); v.threshold = 1;
-        v.watch = Some(wallet::Watch { key: key.clone(), kinds: vec!["wpkh".into()], said: "zpub".into() });
+        v.watch = Some(wallet::Watch { key: key.clone(), kinds: vec!["wpkh".into()], said: "zpub".into() , sp: None });
         assert_eq!(wallet::address_at(&v, 0).unwrap(), "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu", "BIP 84 first receiving address");
         assert_eq!(wallet::address_at(&v, wallet::CHANGE).unwrap(), "bc1q8c6fshw2dlwun7ekn9qwf37cu2rn755upcp6el", "BIP 84 first change address");
         // a plain xpub says nothing about its script type, so every kind is watched and each gives its own address
-        v.watch = Some(wallet::Watch { key, kinds: vec!["pkh".into(), "shwpkh".into(), "wpkh".into(), "tr".into()], said: String::new() });
+        v.watch = Some(wallet::Watch { key, kinds: vec!["pkh".into(), "shwpkh".into(), "wpkh".into(), "tr".into()], said: String::new(), sp: None });
         assert_eq!(wallet::schemes(&v), 4);
         let at = |k: u32| wallet::address_at(&v, k << wallet::SCHEME_SHIFT).unwrap();
         assert!(at(0).starts_with('1'), "legacy: {}", at(0));

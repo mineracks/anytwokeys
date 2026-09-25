@@ -83,6 +83,8 @@ pub struct Settings {
     #[serde(default)] pub prices: String,
     /// the VSS host the vaults' labels are backed up to, encrypted; empty = off
     #[serde(default = "default_vss")] pub vss: String,
+    /// the BlindBit oracle silent payment tweaks are read from (sp.rs); empty = silent payments off
+    #[serde(default = "default_sp_oracle")] pub sp_oracle: String,
     /// keep where each transaction was made (system Location Services); off until the person turns it on
     #[serde(default)] pub location: bool,
     /// keep the place exactly rather than to about 110 m
@@ -101,6 +103,7 @@ pub struct Settings {
 pub fn default_geocode() -> String { "https://geocode.mineracks.com".into() }
 pub fn default_tiles() -> String { "https://tiles.mineracks.com/planet.pmtiles".into() }
 pub fn default_vss() -> String { crate::labels::DEFAULT_VSS.into() }
+pub fn default_sp_oracle() -> String { "https://sp.mineracks.com".into() }
 pub fn default_fiat() -> String { "auto".into() }   // "auto" = from the device's region; "" = none; else an ISO code
 pub fn default_gap() -> u32 { GAP }
 /// 90 days. A key that has died, been wiped or had its PIN locked out fails SILENTLY: nothing tells you until the
@@ -297,6 +300,21 @@ pub struct Watch {
     pub kinds: Vec<String>,
     /// what the key said about itself, if anything: "zpub", "ypub", or empty when it was a plain xpub
     #[serde(default)] pub said: String,
+    /// silent payments (BIP 352) this wallet also receives, once its words have been shown once (sp.rs)
+    #[serde(default)] pub sp: Option<SilentPay>,
+}
+
+/// The public half of a wallet's silent payment keys, and what the scan has found so far. The scan PRIVATE key is
+/// not here: it lives in its own sealed file (sp.rs), because this whole store is handed to the window.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SilentPay {
+    /// B_spend and B_scan, compressed hex: together they are the `sp1…` address
+    pub spend: String,
+    pub scan_pub: String,
+    /// the block the scan starts from (the wallet's birthday) and the last block it has read
+    pub from: u32,
+    pub scanned: u32,
+    #[serde(default)] pub found: Vec<crate::sp::Found>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -328,6 +346,8 @@ pub struct Muun {
 pub const SCHEME_SHIFT: u32 = 28;
 pub const SCHEME_MASK: u32 = 0x7000_0000;
 pub const POS_MASK: u32 = 0x0FFF_FFFF;
+/// scheme 7 is no kind and no Muun scheme: a watched wallet's silent payment outputs, numbered as found
+pub const SP_SCHEME: u32 = 7 << SCHEME_SHIFT;
 /// What Muun's own recovery tool sweeps. v1 exists in their code but no tree generates it, so a v1 address would be
 /// unswept by Muun itself; it is left out here for the same reason, and said out loud rather than silently.
 pub const MUUN_SCHEMES: [crate::muun::Scheme; 4] = [crate::muun::Scheme::V2, crate::muun::Scheme::V3, crate::muun::Scheme::V4, crate::muun::Scheme::V5];
@@ -341,6 +361,13 @@ pub fn scan_bases(v: &Vault) -> Vec<u32> { (0..schemes(v) as u32).map(|s| s << S
 /// a wallet watched from a plain xpub has as many as the key could mean.
 pub fn schemes(v: &Vault) -> usize {
     if v.muun.is_some() { MUUN_SCHEMES.len() } else { v.watch.as_ref().map(|w| w.kinds.len().max(1)).unwrap_or(1) }
+}
+
+/// A silent payment output this wallet was found to own: pay-to-taproot of the key the sender derived for it.
+fn sp_script(w: &Watch, index: u32) -> Result<ScriptBuf, String> {
+    let f = w.sp.as_ref().and_then(|sp| sp.found.get((index & POS_MASK) as usize)).ok_or("no such silent payment output")?;
+    let key = bitcoin::XOnlyPublicKey::from_slice(&hex::decode(&f.key).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    Ok(ScriptBuf::new_p2tr_tweaked(bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(key)))
 }
 
 /// The address a watched extended key gives at one kind and position.
@@ -421,6 +448,7 @@ pub fn script_at(v: &Vault, index: u32) -> Result<ScriptBuf, String> {
     if let Some(s) = DERIVED.lock().map_err(|_| "derivation cache poisoned")?.as_ref().and_then(|m| m.get(&id)).and_then(|d| d.fwd.get(&index)) { return Ok(s.clone()); }
     if v.spark.is_some() { return Err("a Spark wallet has no addresses on the chain".into()); }
     let spk = match (&v.muun, &v.ext) {
+        _ if v.watch.is_some() && index & SCHEME_MASK == SP_SCHEME => sp_script(v.watch.as_ref().unwrap(), index)?,
         _ if v.watch.is_some() => watch_script(v.watch.as_ref().unwrap(), index, &v.network)?,
         (Some(m), _) => muun_script(m, index, &v.network)?,
         (None, Some(_)) => ext_definite_of(v, index)?.script_pubkey(),
@@ -702,6 +730,16 @@ pub fn scan(v: &Vault, servers: &Servers, gap: u32) -> Result<Scanned, String> {
         }
         (n, m, nc, mc)
     };
+    // silent payment outputs already found (sp.rs) are a fixed set of scripts, asked about like any address: what
+    // arrived there, and whether it has since left
+    if let Some(sp) = v.watch.as_ref().and_then(|w| w.sp.as_ref()) {
+        let idx: Vec<u32> = (0..sp.found.len() as u32).map(|i| SP_SCHEME | i).collect();
+        let spks = idx.iter().map(|&i| script_at(v, i)).collect::<Result<Vec<_>, _>>()?;
+        if !spks.is_empty() {
+            for (i, h) in idx.iter().zip(chain::histories(servers, &spks)?) { for item in h { history.push((item.txid, item.height, *i)); } }
+            for (i, list) in idx.iter().zip(chain::unspents(servers, &spks)?) { for c in list { coins.push(CoinAt { txid: c.txid, vout: c.vout, value: c.value, height: c.height, index: *i }); } }
+        }
+    }
     Ok(Scanned { coins, history, next, scan_max, next_change, scan_max_change })
 }
 
@@ -717,6 +755,7 @@ pub fn ours_table(v: &Vault) -> Result<impl Fn(&ScriptBuf) -> Option<u32>, Strin
             for i in 0..=chg { table.insert(script_at(v, base | CHANGE | i)?, base | CHANGE | i); }
         }
     }
+    for i in 0..v.watch.as_ref().and_then(|w| w.sp.as_ref()).map(|sp| sp.found.len() as u32).unwrap_or(0) { table.insert(script_at(v, SP_SCHEME | i)?, SP_SCHEME | i); }
     Ok(move |spk: &ScriptBuf| table.get(spk).copied())
 }
 

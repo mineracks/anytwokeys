@@ -21,7 +21,8 @@ let store = null, cards = [], cardsErr = '', fees = null, feeLevel = 'medium', b
 let setup = { k: 2, n: 3, keys: [], network: null };
 
 const CHANGE = 0x80000000;
-const fmtIndex = (i) => i >= CHANGE ? 'change #' + (i - CHANGE) : '#' + i;
+// an index carries a scheme in its top bits (wallet.rs): scheme 7 is a silent payment output, numbered as found
+const fmtIndex = (i) => ((i >>> 28) & 7) === 7 ? 'silent payment #' + (i & 0x0fffffff) : (i >= CHANGE ? 'change ' : '') + '#' + (i & 0x0fffffff);
 const PEN = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
 const labelOf = (key) => (vault && vault.labels && vault.labels[key]) || '';
 const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
@@ -154,8 +155,26 @@ function renderTabs() {
     const d = document.createElement('div'); d.className = 'nav' + (vault && v.name === vault.name ? ' on' : ''); d.style.fontWeight = '600'; d.dataset.vault = v.name;
     d.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${v.network === 'mainnet' ? 'var(--gold)' : 'var(--signal)'};display:inline-block;flex:0 0 8px"></span><span style="flex-grow:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v.name)}">${esc(v.name)}</span><span class="muted" style="font-size:11px;font-weight:400">${v.spark ? (v.spark.authenticated ? 'YubiKey reader' : 'Watched \u00b7 Spark') : v.muun || v.watch ? 'Watched' : v.keys.length === 1 ? '1 key' : v.threshold + ' of ' + v.keys.length}</span>`;
     d.onclick = () => { vault = v; rememberVault(v); paintNet(); show('home'); };
+    // drag to reorder: the drop goes before or after the row it lands on, by which half of it the pointer is in
+    d.draggable = true;
+    d.addEventListener('dragstart', (e) => { tabs.dataset.dragging = v.name; d.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', v.name); } catch {} });
+    d.addEventListener('dragend', () => { d.classList.remove('dragging'); delete tabs.dataset.dragging; $$('#vault-tabs .nav').forEach(x => x.classList.remove('drop-before', 'drop-after')); });
+    d.addEventListener('dragover', (e) => { if (!tabs.dataset.dragging || tabs.dataset.dragging === v.name) return; e.preventDefault(); e.dataTransfer.dropEffect = 'move'; const r = d.getBoundingClientRect(), before = e.clientY < r.top + r.height / 2; d.classList.toggle('drop-before', before); d.classList.toggle('drop-after', !before); });
+    d.addEventListener('dragleave', () => d.classList.remove('drop-before', 'drop-after'));
+    d.addEventListener('drop', (e) => { e.preventDefault(); const from = tabs.dataset.dragging; if (!from || from === v.name) return; const before = d.classList.contains('drop-before'); reorderVaults(from, v.name, before).catch(fail); });
     tabs.appendChild(d);
   }
+}
+// The new order is drawn at once and saved behind it; a save that fails redraws the saved order, so the list never
+// shows an order the store does not hold.
+async function reorderVaults(from, to, before) {
+  const names = store.vaults.map(v => v.name).filter(n => n !== from);
+  const at = names.indexOf(to) + (before ? 0 : 1); names.splice(at, 0, from);
+  const byName = Object.fromEntries(store.vaults.map(v => [v.name, v]));
+  store.vaults = names.map(n => byName[n]); renderTabs();
+  try { store = await invoke('vault_order', { names }); if (vault) vault = store.vaults.find(x => x.name === vault.name) || vault; }
+  catch (e) { try { store = await invoke('store_get'); } catch {} throw e; }
+  finally { renderTabs(); }
 }
 
 // ---------- locked: everything this app keeps on the computer is encrypted, and something you hold opens it ----------
@@ -1623,9 +1642,13 @@ async function drawAddress(chosen) {
     : `<b style="font-family:var(--display);font-weight:600">This vault has one address.</b> It was made before rotating addresses existed, so every deposit lands here and anyone who knows it sees its whole history.`;
   const qr = qrcode(0, 'M'); qr.addData('bitcoin:' + addr); qr.make();
   $('#addr-qr').innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
+  const spRow = $('#addr-sp-row'), me = vault.name;
+  spRow.hidden = !(vault.watch && vault.watch.sp);
+  if (!spRow.hidden) invoke('sp_address', { name: me }).then(a => { if (vault && vault.name === me) $('#addr-sp').textContent = a; }).catch(() => { spRow.hidden = true; });
   const back = $('#addr-back'); if (back) back.onclick = (e) => { e.preventDefault(); drawAddress(); };
 }
 $('#copy-addr').onclick = () => { navigator.clipboard.writeText($('#addr-text').textContent).then(() => toast('Address copied')); };
+$('#copy-sp').onclick = () => { navigator.clipboard.writeText($('#addr-sp').textContent).then(() => toast('Silent payment address copied')); };
 
 // ---------- send ----------
 async function loadFees() {
@@ -2928,16 +2951,17 @@ $('#spark-read') && ($('#spark-read').onclick = async () => {
 // never on the screen at once. Words complete from the BIP 39 list — the same list the parser checks against — and
 // each finished word is checked as it is left. When the set is full the checksum is checked and the verdict shown,
 // before anything is derived. A paste into any box fills the rest.
-let seedWords = null;
-const seedBoxes = () => [...$$('#seed-grid input')];
+let seedWords = null, seedRoot = null;   // the .seed-root the boxes were last built in: Spark's restore step, or a vault's settings
+const seedBoxes = () => seedRoot ? [...seedRoot.querySelectorAll('.seed-grid input')] : [];
 const seedPhrase = () => seedBoxes().map(i => i.value.trim().toLowerCase()).filter(Boolean).join(' ');
-function seedClear() { seedBoxes().forEach(i => { i.value = ''; i.parentElement.className = ''; }); $('#spark-suggest').innerHTML = ''; $('#spark-words-count').textContent = ''; }
-async function seedBuild(n) {
-  const grid = $('#seed-grid'); if (!grid) return;
+function seedClear() { for (const root of $$('.seed-root')) { root.querySelectorAll('.seed-grid input').forEach(i => { i.value = ''; i.parentElement.className = ''; }); const s = root.querySelector('.seed-suggest'), c = root.querySelector('.seed-count'); if (s) s.innerHTML = ''; if (c) c.textContent = ''; } }
+async function seedBuild(n, root) {
+  seedRoot = root || seedRoot || $('#spark-words-adv');
+  const grid = seedRoot && seedRoot.querySelector('.seed-grid'); if (!grid) return;
   if (!seedWords) { try { seedWords = await invoke('seed_wordlist'); } catch { seedWords = []; } }
   const set = new Set(seedWords);
   grid.innerHTML = Array.from({ length: n }, (_, i) => `<label><span>${i + 1}</span><input type="password" data-i="${i}" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" aria-label="word ${i + 1}"></label>`).join('');
-  const strip = $('#spark-suggest'), count = $('#spark-words-count');
+  const strip = seedRoot.querySelector('.seed-suggest'), count = seedRoot.querySelector('.seed-count');
   const boxes = seedBoxes();
   const mark = (box) => { const w = box.value.trim().toLowerCase(); box.parentElement.className = !w ? '' : set.has(w) ? 'ok' : 'bad'; };
   const verdict = async () => {
@@ -2974,8 +2998,8 @@ async function seedBuild(n) {
   });
   count.textContent = '';
 }
-$('#seed-len') && $('#seed-len').addEventListener('click', (e) => { const o = e.target.closest('.opt'); if (!o) return; $$('#seed-len .opt').forEach(x => x.classList.toggle('on', x === o)); seedBuild(+o.dataset.n); });
-$('#spark-words-adv') && $('#spark-words-adv').addEventListener('toggle', () => { if ($('#spark-words-adv').open && !seedBoxes().length) seedBuild(12); });
+document.addEventListener('click', (e) => { const o = e.target.closest('.seed-len .opt'); if (!o) return; const root = o.closest('.seed-root'); $$('.seed-len .opt', root).forEach(x => x.classList.toggle('on', x === o)); seedBuild(+o.dataset.n, root); });
+$('#spark-words-adv') && $('#spark-words-adv').addEventListener('toggle', () => { const root = $('#spark-words-adv'); if (root.open) { if (!root.querySelector('.seed-grid input')) seedBuild(12, root); else seedRoot = root; } });
 
 // The words unlock the wallet; what comes out is its public identity. They are cleared from the boxes on success
 // AND on failure — a failure is not a reason to leave them sitting on a screen.
@@ -3159,7 +3183,7 @@ function renderVaultSettings() {
   $('#vs-facts').innerHTML = [
     ['Name', esc(vault.name)],
     ['Network', vault.network === 'mainnet' ? 'mainnet \u2014 real coins' : esc(vault.network) + ' \u2014 a test network; these coins are worth nothing'],
-    ['Kind', single ? 'a single key' : `${vault.threshold} of ${n} keys \u2014 any ${vault.threshold} of them sign`],
+    ['Kind', vault.watch ? `watched \u2014 one exported key, ${vault.watch.kinds.length > 1 ? 'every kind of address' : vault.watch.kinds[0]}${vault.watch.sp ? ', and silent payments' : ''}` : vault.spark ? (vault.spark.authenticated ? 'watched \u2014 Spark, through a YubiKey reader' : 'watched \u2014 Spark') : vault.muun ? 'watched \u2014 a Muun wallet' : single ? 'a single key' : `${vault.threshold} of ${n} keys \u2014 any ${vault.threshold} of them sign`],
     ['Keys', vault.keys.map(k => esc(k.name)).join(' \u00b7 ')],
     ['Made', vault.created ? new Date(vault.created * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' }) : '\u2014'],
   ].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
@@ -3171,6 +3195,7 @@ function renderVaultSettings() {
   $('#vs-desc').textContent = shown ? line : standIn(line); $('#vs-desc').setAttribute('aria-hidden', String(!shown));
   $('#vs-desc-wrap').dataset.hidden = shown ? '0' : '1'; $('#vs-desc-reveal').hidden = shown;
   $('#vs-rewrite').hidden = !vault.ext;
+  renderSpCard();
   const ds = drillState(vault);
   $('#vs-drill-when').innerHTML = ds.never
     ? '<b>This vault has never been drilled.</b> Until it has, "the keys can recover it" is something you believe rather than something you have seen.'
@@ -3228,6 +3253,57 @@ async function runDrill() {
     try { store = await invoke('note_set', { name: vault.name, key: 'vault:drill', note: when }); vault = store.vaults.find(v => v.name === vault.name) || vault; paintDrillNudge.hidden = null; renderVaultSettings(); paintDrillNudge(); drillSay(html); } catch {} }
 }
 $('#vs-drill').onclick = () => { drillFound = []; runDrill(); };
+
+// ---------- silent payments on a watched wallet ----------
+function renderSpCard() {
+  const card = $('#vs-sp-card'); card.hidden = !(vault && vault.watch);
+  if (card.hidden) return;
+  const sp = vault.watch.sp;
+  $('#vs-sp-on').hidden = !sp; $('#vs-sp-off').hidden = !!sp; $('#vs-sp-note').textContent = ''; $('#vs-sp-note-off').textContent = '';
+  if (sp) {
+    const n = sp.found.length, behind = sp.scanned < sp.from;
+    $('#vs-sp-facts').innerHTML = [
+      ['Address', '<span class="mono" id="vs-sp-addr" style="font-size:12px;word-break:break-all">…</span>'],
+      ['Read', behind ? `not yet — starts at block ${sats(sp.from)} on the next refresh` : `blocks ${sats(sp.from)} to ${sats(sp.scanned)}`],
+      ['Found', n ? `${sats(n)} silent payment output${n === 1 ? '' : 's'}` : 'none yet'],
+    ].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+    const me = vault.name; invoke('sp_address', { name: me }).then(a => { const el = $('#vs-sp-addr'); if (el && vault && vault.name === me) el.textContent = a; }).catch(() => {});
+  } else {
+    $('#vs-sp-oracle').textContent = (store.settings.sp_oracle || '').replace(/^https:\/\//, '') || 'no oracle set in App settings';
+    const root = $('#vs-sp-off');
+    if (!root.querySelector('.seed-grid input')) seedBuild(12, root); else seedRoot = root;
+    if (!$('#vs-sp-made').value) $('#vs-sp-made').value = new Date(Date.now() - 120 * 86400000).toISOString().slice(0, 10);
+  }
+}
+$('#vs-sp-watch').onclick = async () => {
+  if (!vault) return;
+  seedRoot = $('#vs-sp-off');
+  let words = seedPhrase();
+  if (![12, 15, 18, 21, 24].includes(words.split(/\s+/).filter(Boolean).length)) return toast('Enter the wallet’s seed words first');
+  const made = $('#vs-sp-made').value; if (!made) return toast('Say when the wallet was made');
+  $('#vs-sp-watch').disabled = true; $('#vs-sp-note-off').textContent = 'Checking the words are this wallet’s and sealing its scan key…';
+  try {
+    const request = invoke('sp_watch', { name: vault.name, words, from: made }); words = ''; seedClear();
+    const v = await request; store = await invoke('store_get'); vault = store.vaults.find(x => x.name === v.name) || v;
+    renderVaultSettings(); toast('Watching silent payments: the words were cleared, the scan key is sealed. The first read starts now.', 8000);
+    vault._coins = undefined; show('home');
+  } catch (e) { words = ''; seedClear(); $('#vs-sp-note-off').textContent = String(e); }
+  finally { $('#vs-sp-watch').disabled = false; }
+};
+$('#vs-sp-rescan').onclick = async () => {
+  if (!vault) return; const from = $('#vs-sp-from').value; if (!from) return toast('Pick the day to read again from');
+  try { const v = await invoke('sp_rescan', { name: vault.name, from }); store = await invoke('store_get'); vault = store.vaults.find(x => x.name === v.name) || v; renderVaultSettings(); toast('Reading again from that day on the next refresh'); } catch (e) { fail(e); }
+};
+askTwice($('#vs-sp-forget'), 'Stop watching this wallet’s silent payments? Its scan key is deleted from this computer; the words would be needed to start again. What was found stays in the vault’s history.', 'Yes, stop', async () => {
+  try { const v = await invoke('sp_forget', { name: vault.name }); store = await invoke('store_get'); vault = store.vaults.find(x => x.name === v.name) || v; renderVaultSettings(); vault._coins = undefined; toast('No longer watching silent payments'); } catch (e) { fail(e); }
+});
+window.__TAURI__.event.listen('sp-scan', (ev) => {
+  const p = ev.payload || {}; if (!vault || p.vault !== vault.name) return;
+  if (p.error) { toast('Silent payments: ' + p.error, 8000); return; }
+  const bar = $('#scanbar'); if (bar) bar.hidden = false;
+  const done = p.at - p.from + 1, total = p.to - p.from + 1;
+  $('#balance-sub').textContent = `reading blocks for silent payments — ${sats(done)} of ${sats(total)}${p.found ? ', ' + sats(p.found) + ' found' : ''}`;
+});
 $('#vs-desc-reveal').onclick = () => { renderVaultSettings.shown = vault.name; renderVaultSettings(); };
 // the recovery line as SSKR shares: any k of n, one printable sheet each
 function paintShares() {
@@ -3273,6 +3349,7 @@ function renderSettings() {
   $('#gap-in').value = store.settings.gap || 20;
   $('#c-prices').value = store.settings.prices || '';
   $('#c-vss').value = store.settings.vss ?? '';
+  $('#c-sp').value = store.settings.sp_oracle ?? '';
   const dev = deviceCurrency(), cur = store.settings.fiat ?? 'auto';
   $('#fiat-pick').innerHTML = `<option value="auto">Automatic: ${dev.ccy} · ${CCYS[dev.ccy] || ''}</option><option value="">None: show sats only</option>` + Object.entries(CCYS).map(([c, n]) => `<option value="${c}">${c} · ${n}</option>`).join('');
   $('#fiat-pick').value = cur;
@@ -3281,7 +3358,7 @@ function renderSettings() {
 }
 $('#net-pick').addEventListener('click', async (e) => { const o = e.target.closest('.opt'); if (!o) return; store = await invoke('settings_set', { network: o.dataset.net, custom: store.settings.custom, electrum: store.settings.electrum, explorer: store.settings.explorer }); toast('New vaults will use ' + o.dataset.net); renderSettings(); $('#welcome-net').textContent = store.settings.network; });
 $('#own-servers').onclick = async () => { store = await invoke('settings_set', { network: netName(), custom: !store.settings.custom, electrum: $('#c-electrum').value, explorer: $('#c-explorer').value }); renderSettings(); };
-$('#save-settings').onclick = async () => { try { store = await invoke('settings_set', { network: netName(), custom: true, electrum: $('#c-electrum').value, explorer: $('#c-explorer').value, prices: $('#c-prices').value, vss: $('#c-vss').value }); renderSettings(); toast('Using your servers'); } catch (e) { fail(e); } };
+$('#save-settings').onclick = async () => { try { store = await invoke('settings_set', { network: netName(), custom: true, electrum: $('#c-electrum').value, explorer: $('#c-explorer').value, prices: $('#c-prices').value, vss: $('#c-vss').value, spOracle: $('#c-sp').value }); renderSettings(); toast('Using your servers'); } catch (e) { fail(e); } };
 $('#fiat-pick').onchange = async () => { try { store = await invoke('settings_set', { network: netName(), custom: store.settings.custom, electrum: store.settings.electrum, explorer: store.settings.explorer, fiat: $('#fiat-pick').value }); renderSettings(); toast($('#fiat-pick').value ? 'Values shown in ' + fiatCcy() : 'Values hidden'); } catch (e) { fail(e); } };
 $('#test-servers').onclick = async () => { $('#test-out').textContent = 'testing…'; try { $('#test-out').textContent = await invoke('servers_test', { electrum: $('#c-electrum').value, explorer: $('#c-explorer').value }); } catch (e) { $('#test-out').textContent = String(e); } };
 

@@ -54,6 +54,7 @@ const H = {
       inputs: spend ? [{ outpoint: '%(t0)s:1', address: 'bc1qvaultaddr', sats: 20000, ours: 0, sequence: 4294967293, witness: 4, signers: ['laptop', 'off-site'] }] : [{ outpoint: 'ee'.repeat(32) + ':0', address: 'bc1psender', sats: 723914, ours: null, sequence: 4294967295, witness: 1, signers: [] }],
       outputs: spend ? [{ n: 0, address: 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4', sats: 5000, kind: 'P2WPKH', ours: null, peer: window.__peer ? ['savings vault', 3] : null }, { n: 1, address: 'bc1qvaultchange', sats: 14810, kind: 'P2WSH', ours: 2147483648 }] : [{ n: 0, address: 'bc1pother', sats: 703272, kind: 'P2TR', ours: null }, { n: 1, address: 'bc1qvaultaddr', sats: 20000, kind: 'P2WSH', ours: 0 }],
       peers: spend && window.__peer ? ['savings vault'] : [] }; },
+  vault_order: (a) => { window.__order = a.names; const s = store(); const by = Object.fromEntries(s.vaults.map(v => [v.name, v])); s.vaults = a.names.map(n => by[n]).filter(Boolean); return s; },
   store_get: store, node_status: (a) => { (window.__nodeAsked = window.__nodeAsked || []).push(a.network); if (window.__nodeDown) throw 'electrum ssl://electrum.mineracks.com:50002: connection refused'; return { electrum: 'ssl://electrum.mineracks.com:50002', height: 967686, ms: 84, ours: true }; },
   contact_save: (a) => { if (!/^(bc1|tb1)/.test(a.address)) throw 'that is not a Bitcoin address'; const c = __contacts.find(c => c.address === a.address); if (c) c.name = a.name; else __contacts.push({ name: a.name, address: a.address, network: a.network, added: 1, used: 0, last_used: 0 }); return store(); },
   contact_delete: (a) => { __contacts = __contacts.filter(c => c.address !== a.address); return store(); }, contact_used: (a) => { __contacts.find(c => c.address === a.address).used += 1; return store(); },
@@ -825,6 +826,14 @@ with sync_playwright() as p:
     check("this vault's own address on it is a link to that address's page", pg.locator("#tx-dl a[data-go-addr='bc1qvaultchange']").count() == 1)
     pg.locator("#tx-dl a[data-go-vault-tx='savings vault']").first.click(); pg.wait_for_timeout(900)
     check("following it opens the same transaction in the other vault, lit in the menu", pg.evaluate("vault.name") == "savings vault" and pg.locator("#s-tx.on").count() == 1 and pg.evaluate("txView.txid") == "%s" % T[1] and pg.locator("#vault-tabs .nav.on").inner_text().startswith("savings vault") and "savings vault" in pg.inner_text("#crumbs"), pg.inner_text("#crumbs"))
+    # ---- the sidebar is reordered by dragging: the row lands before or after the one it is dropped on ----
+    names = pg.evaluate("store.vaults.map(v => v.name)")
+    moved = pg.evaluate("""async () => { const rows = [...document.querySelectorAll('#vault-tabs .nav')]; const last = rows[rows.length - 1], first = rows[0];
+      const dt = new DataTransfer(); last.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+      const r = first.getBoundingClientRect(); first.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt, clientY: r.top + 2 }));
+      first.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt })); last.dispatchEvent(new DragEvent('dragend', { bubbles: true }));
+      await new Promise(r => setTimeout(r, 200)); return { order: window.__order, drawn: [...document.querySelectorAll('#vault-tabs .nav')].map(d => d.dataset.vault), marks: document.querySelectorAll('#vault-tabs .drop-before, #vault-tabs .drop-after, #vault-tabs .dragging').length }; }""")
+    check("dragging the last vault onto the top half of the first puts it first — saved in that order and drawn in it, with no drop marks left behind", moved["order"] == [names[-1]] + names[:-1] and moved["drawn"] == moved["order"] and moved["marks"] == 0, str(moved))
     # ---- a report of the whole vault ----
     # (the Settings checks above left the currency on None: back to Australian dollars, as this vault's owner uses)
     pg.evaluate("(async () => { __state.fiat = 'AUD'; store = await window.__TAURI__.core.invoke('store_get'); vault = store.vaults.find(v => v.name !== 'savings vault'); await sync(); show('home'); })()"); pg.wait_for_timeout(1500)

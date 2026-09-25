@@ -94,6 +94,9 @@
           <div class="card" style="flex-direction:row;gap:12px;align-items:flex-start"><svg width="18" height="18" style="color:var(--gold);flex:0 0 18px;margin-top:2px"><use href="#i-warn"/></svg><div style="font-size:14px" id="addr-note"></div></div>
           <div class="muted" style="font-size:13px">Deposits show on Home after one confirmation, usually within 10 to 30 minutes.</div>
         </div>
+          <div class="field" id="addr-sp-row" hidden><div class="label">Silent payment address</div><div class="mono" id="addr-sp" style="padding:11px 14px;border:1px solid var(--line);border-radius:6px;background:var(--panel);word-break:break-all;font-size:12.5px"></div>
+            <div class="muted" style="font-size:13px;margin-top:8px">Give this one when the sender's wallet can pay silent payments: the coins arrive as taproot outputs only this wallet's scan key can find, so nothing on the chain links them to it or to each other. They show here once the read has reached the block they are in.</div>
+            <div class="row" style="margin-top:8px"><button class="btn small" id="copy-sp">Copy silent payment address</button></div></div>
       </div>
 </section>
 
@@ -146,6 +149,26 @@
           <div class="card"><div class="label">How what leaves is costed</div>
             <div class="field"><label class="cap" for="vs-method">Cost method</label><select id="vs-method" style="max-width:420px"><option value="">The app's own</option><option value="utxo">The coins actually spent</option><option value="fifo">First in, first out</option><option value="average">Average cost (for reference)</option></select></div>
             <div class="muted" style="font-size:13px" id="vs-method-note"></div></div>
+          <div class="card" id="vs-sp-card" hidden><div class="label">Silent payments</div>
+            <div id="vs-sp-on" class="stack" hidden>
+              <dl class="tx-dl" id="vs-sp-facts"></dl>
+              <div class="muted" style="font-size:13px">Payments to the wallet's <span class="mono">sp1…</span> address are taproot outputs no exported key can see: the sender derives each from their own inputs. The scan key finds them — it can read every payment ever made to this wallet and cannot spend one — and it stays sealed on this computer. Each block is read once; a refresh reads the new ones.</div>
+              <div class="row" style="gap:10px;align-items:flex-end;flex-wrap:wrap"><label>Read again from<input type="date" id="vs-sp-from"></label><button class="btn small" id="vs-sp-rescan">Read again</button><button class="btn small" id="vs-sp-forget">Stop watching silent payments</button></div>
+              <div class="muted" id="vs-sp-note" aria-live="polite"></div>
+            </div>
+            <div id="vs-sp-off" class="stack seed-root" hidden>
+              <div class="muted" style="font-size:13px">If this wallet also receives <b>silent payments</b> (it has an <span class="mono">sp1…</span> address), those coins are taproot outputs its exported key cannot see: the sender derives each one from their own inputs. Finding them needs the wallet's <b>scan key</b> — a key that can read every payment ever made to it, and cannot spend one. Enter the seed words once: the app checks they are this wallet's by the account key they give, keeps the scan key sealed on this computer, and keeps nothing else.</div>
+              <div class="sk-warn"><b>Seed words unlock everything that wallet can spend.</b> They are used once, here, to derive the scan key and the spend <i>public</i> key, then cleared. Do this only on a computer you trust with that wallet.</div>
+              <div class="field"><div class="row" style="justify-content:space-between;align-items:center"><div class="label">Seed words</div><div class="pick tight seed-len"><div class="opt on" data-n="12">12 words</div><div class="opt" data-n="24">24 words</div></div></div>
+                <div class="muted" style="font-size:13px">Only the word you are on is shown; the rest stay hidden. Type the first letters and pick, or paste the whole set into the first box.</div>
+                <div class="seed-grid"></div>
+                <div class="row seed-suggest" style="gap:var(--s2);flex-wrap:wrap;min-height:34px" aria-live="polite"></div>
+                <div class="seed-count" style="font-size:14px" aria-live="polite"></div></div>
+              <label>The wallet was made on or after<input type="date" id="vs-sp-made" style="max-width:220px"></label>
+              <div class="muted" style="font-size:13px">The read starts at that day's first block and asks the oracle at <span class="mono" id="vs-sp-oracle"></span> for each block's tweaks — the oracle learns nothing about the wallet, since every client asks for every block. Earlier is safe, only slower: about a minute per ten thousand blocks.</div>
+              <div class="row"><button class="btn primary" id="vs-sp-watch">Watch silent payments</button></div>
+              <div class="muted" id="vs-sp-note-off" aria-live="polite"></div>
+            </div></div>
           <div class="card"><div class="label">Where it looks</div><dl class="tx-dl" id="vs-servers"></dl>
             <div class="muted" style="font-size:13px">A vault belongs to the network it was made on and cannot be moved to another. The servers come from App settings, and apply to every vault on this network.</div>
             <div class="row"><button class="btn small" data-go="settings">Open App settings</button></div></div>
@@ -329,7 +352,7 @@
               </div>
             </div>
 
-            <details class="sk-step sk-step-d" id="spark-words-adv">
+            <details class="sk-step sk-step-d seed-root" id="spark-words-adv">
               <summary><div class="sk-num">2</div><div class="sk-lead">No Spark code — only Lightning, on-chain, and seed words? <span class="muted" style="font-weight:400">(Wallet of Satoshi)</span></div></summary>
               <div class="stack" style="margin-top:14px">
                 <figure class="sk-fig" role="img" aria-label="A public Spark wallet answers anyone who asks by address; a private wallet answers with nothing unless the request carries a signed session, so it reads as empty from outside.">
@@ -356,11 +379,11 @@
                 <div class="sk-warn">
                   <b>Seed words unlock everything that wallet can spend.</b> Enrolment uses them to derive the owner key and sign Spark's login challenge. The words and private keys are not saved or sent to Spark. Temporary owner sessions remain in memory for up to ten minutes while you review; they are cleared on completion, cancellation or app lock. Memory clearing is best effort, not proof that this computer never retained a copy. Even so, a computer that has seen them is a computer that could have kept them. Do this only on a machine you would trust with the wallet itself.
                 </div>
-                <div class="field"><div class="row" style="justify-content:space-between;align-items:center"><div class="label">Seed words</div><div class="pick tight" id="seed-len"><div class="opt on" data-n="12">12 words</div><div class="opt" data-n="24">24 words</div></div></div>
+                <div class="field"><div class="row" style="justify-content:space-between;align-items:center"><div class="label">Seed words</div><div class="pick tight seed-len" id="seed-len"><div class="opt on" data-n="12">12 words</div><div class="opt" data-n="24">24 words</div></div></div>
                   <div class="muted" style="font-size:13px">Only the word you are on is shown; the rest stay hidden. Type the first letters and pick, or paste the whole set into the first box.</div>
                   <div class="seed-grid" id="seed-grid"></div>
-                  <div class="row" id="spark-suggest" style="gap:var(--s2);flex-wrap:wrap;min-height:34px" aria-live="polite"></div>
-                  <div style="font-size:14px" id="spark-words-count" aria-live="polite"></div></div>
+                  <div class="row seed-suggest" id="spark-suggest" style="gap:var(--s2);flex-wrap:wrap;min-height:34px" aria-live="polite"></div>
+                  <div class="seed-count" style="font-size:14px" id="spark-words-count" aria-live="polite"></div></div>
                 <div class="row"><button class="btn" id="spark-words-go">Try an anonymous read</button><button class="btn primary" id="spark-gate">Gate this wallet with a YubiKey</button></div>
                 <details id="spark-discovery-options" class="adv"><summary>Account discovery options</summary><div class="stack">
                   <div class="muted">Start with Spark accounts 0–5. Blitz uses a separate child-wallet scheme; that scheme is not confirmed for Wallet of Satoshi. Scan further ranges only when needed.</div>
@@ -536,7 +559,7 @@
         <div style="display:flex;flex-direction:column;gap:18px">
           <div class="card" id="custom-card"><div class="label">Your own servers</div>
             <div class="field"><div class="label">Electrum server</div><input id="c-electrum" class="mono" placeholder="ssl://my-node.local:50002" spellcheck="false"></div>
-            <div class="field"><div class="label">Block explorer</div><input id="c-explorer" class="mono" placeholder="http://umbrel.local:3006" spellcheck="false"></div><div class="field"><div class="label">Label host (VSS)</div><input id="c-vss" class="mono" placeholder="https://vss.mineracks.com/vss" spellcheck="false"><div class="muted" style="font-size:13px">Every sealed vault's labels are kept here encrypted under a key only its own keys can rebuild, so any two keys bring the labels back with the vault. The host cannot read them or tie them to an address. Empty keeps labels on this computer only.</div></div><div class="field"><div class="label">Price server</div><input id="c-prices" class="mono" placeholder="https://prices.example  (blank = no fiat values)" spellcheck="false"></div>
+            <div class="field"><div class="label">Block explorer</div><input id="c-explorer" class="mono" placeholder="http://umbrel.local:3006" spellcheck="false"></div><div class="field"><div class="label">Label host (VSS)</div><input id="c-vss" class="mono" placeholder="https://vss.mineracks.com/vss" spellcheck="false"><div class="muted" style="font-size:13px">Every sealed vault's labels are kept here encrypted under a key only its own keys can rebuild, so any two keys bring the labels back with the vault. The host cannot read them or tie them to an address. Empty keeps labels on this computer only.</div></div><div class="field"><div class="label">Silent payments oracle (BlindBit)</div><input id="c-sp" class="mono" placeholder="https://sp.mineracks.com" spellcheck="false"><div class="muted" style="font-size:13px">Serves, per block, the tweak of every transaction that pays to taproot, so a watched wallet can find its silent payments. Every client asks for every block, so the oracle learns nothing about a wallet. Empty switches silent payments off.</div></div><div class="field"><div class="label">Price server</div><input id="c-prices" class="mono" placeholder="https://prices.example  (blank = no fiat values)" spellcheck="false"></div>
             <div class="row"><button class="btn" id="test-servers">Test connection</button><button class="btn primary" id="save-settings">Save</button></div>
             <div class="muted" style="font-size:13px" id="test-out"></div></div>
           <div class="card"><div class="label">Currency</div><div class="field"><select id="fiat-pick" style="max-width:420px"></select></div><div class="muted" style="font-size:13px" id="fiat-note"></div></div>
