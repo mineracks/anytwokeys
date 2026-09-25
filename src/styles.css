@@ -267,6 +267,7 @@ table.act .amt.in{color:var(--signal)}
 .guide-row{display:flex;flex-wrap:wrap;gap:24px;align-items:flex-start}   /* pinned to the top: the heading and the picture never move as the words change */
 .guide{flex:0 0 232px;line-height:0;border:1px solid var(--line);border-radius:8px;background:var(--ground);overflow:hidden}
 .guide svg{width:100%;height:auto;display:block}
+#key-detail .guide svg{width:auto;height:auto;max-height:160px;max-width:90%}   /* a key drawn at its own size, not stretched to the box */
 .guide[hidden] + .guide-body{flex:1}
 .guide-body{display:flex;flex-direction:column;gap:10px;min-width:0;flex:1 1 280px}
 .linkish{align-self:flex-start;background:none;border:0;padding:0;font:inherit;font-size:13px;color:var(--muted);text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:3px;cursor:pointer}

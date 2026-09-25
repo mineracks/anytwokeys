@@ -2702,12 +2702,12 @@ function extKeyRow(k, i) {
   // a card in a mixed vault is a fixed key, kept bare: shown as the card it is, plugged in or not
   if (/^0[23][0-9a-f]{64}$/i.test(k.pubkey)) {
     const card = cards.find(c => c.pubkey === k.pubkey), d = deviceOf(k.device && k.device !== 'card' ? k.device : 'yubikey');
-    return `<div class="keyrow vk"><span class="devart">${d.svg}</span><div class="who"><div class="name"><span class="name-text">${esc(k.name)}</span><button class="pencil" data-edit-idx="${i}" title="Rename this key">${PENCIL}</button></div><div class="muted" style="font-size:13px">${esc(d.name)} · a fixed key in this vault · <span class="mono">${esc(k.pubkey.slice(0, 12))}…</span></div></div>`
+    return `<div class="keyrow vk" data-key-open="${esc(k.pubkey)}" title="Open this key\u2019s card"><span class="devart">${d.svg}</span><div class="who"><div class="name"><span class="name-text">${esc(k.name)}</span><button class="pencil" data-edit-idx="${i}" title="Rename this key">${PENCIL}</button></div><div class="muted" style="font-size:13px">${esc(d.name)} · a fixed key in this vault · <span class="mono">${esc(k.pubkey.slice(0, 12))}…</span></div></div>`
       + `<div class="kright"><div class="state ${card ? 'here' : ''}"><i></i>${card ? 'plugged in' : 'not plugged in'}</div></div></div>`;
   }
   const m = /^\[([0-9a-f]{8})\/([^\]]+)\](\S+)$/i.exec(k.pubkey) || [];
   const art = k.device ? `<span class="devart">${deviceOf(k.device).svg}</span>` : '<span class="keyart"><svg width="24" height="24"><use href="#ring"/></svg></span>';
-  return `<div class="keyrow vk">${art}<div class="who"><div class="name"><span class="name-text">${esc(k.name)}</span><button class="pencil" data-edit-idx="${i}" title="Rename this key">${PENCIL}</button></div><div class="muted" style="font-size:13px">${k.device ? esc(deviceOf(k.device).name) + ' \u00b7 ' : ''}fingerprint <span class="mono">${esc(m[1] || '?')}</span> \u00b7 m/${esc(m[2] || '?')} \u00b7 <span class="mono">${esc((m[3] || '').slice(0, 14))}\u2026</span></div></div>`
+  return `<div class="keyrow vk" data-key-open="${esc(k.pubkey)}" title="Open this key\u2019s card">${art}<div class="who"><div class="name"><span class="name-text">${esc(k.name)}</span><button class="pencil" data-edit-idx="${i}" title="Rename this key">${PENCIL}</button></div><div class="muted" style="font-size:13px">${k.device ? esc(deviceOf(k.device).name) + ' \u00b7 ' : ''}fingerprint <span class="mono">${esc(m[1] || '?')}</span> \u00b7 m/${esc(m[2] || '?')} \u00b7 <span class="mono">${esc((m[3] || '').slice(0, 14))}\u2026</span></div></div>`
     + `<div class="kright"><div class="state"><i></i>signs on another device</div></div></div>`;
 }
 function vaultKeyRow(k, i) {
@@ -2737,19 +2737,31 @@ function openKeyCard(pub) {
   const k = vault.keys[i];
   recPage.kind = 'key'; recPage.id = pub; recPage.leaf = k.name;
   $('#keys-main').hidden = true; const d = $('#key-detail'); d.hidden = false;
-  const card = cards.find(c => c.pubkey === pub), pf = packedForm(pub);
-  const art = card ? keyArt(card.form || 3, !!card.nfc, 64) : pf ? keyArt(pf, !!(pf & 0x80), 64) : '<svg width="24" height="24"><use href="#ring"/></svg>';
-  const model = card ? modelName(card.form, card.nfc) : pf ? modelName(pf, !!(pf & 0x80), !!(pf & 0x40)) : 'YubiKey';
+  // a card's key, or a device's (a SeedSigner, a Coldcard) named by fingerprint and path
+  const bare = /^0[23][0-9a-f]{64}$/i.test(pub), ext = bare ? [] : (/^\[([0-9a-f]{8})\/([^\]]+)\](\S+)$/i.exec(pub) || []);
+  const card = bare ? cards.find(c => c.pubkey === pub) : null, pf = bare ? packedForm(pub) : 0;
+  const dev = k.device && k.device !== 'card' && k.device !== 'yubikey' ? deviceOf(k.device) : null;
+  const art = dev ? `<span class="devart" style="transform:scale(2.2);display:inline-block">${dev.svg}</span>` : card ? keyArt(card.form || 3, !!card.nfc, 132) : pf ? keyArt(pf, !!(pf & 0x80), 132) : '<svg width="64" height="64"><use href="#ring"/></svg>';
+  const model = dev ? dev.name : card ? modelName(card.form, card.nfc) : pf ? modelName(pf, !!(pf & 0x80), !!(pf & 0x40)) : 'YubiKey';
   const fw = card && card.firmware ? card.firmware : ((store && store.key_fw) || {})[pub] || '';
   const elsewhere = store.vaults.filter(v => v.name !== vault.name && v.keys.some(x => x.pubkey === pub)).map(v => v.name);
-  const seen = firstSeenWords(pub);
-  const facts = [['Name', esc(k.name)], ['Key', `${model}${k.serial ? ' · serial ' + esc(String(k.serial)) : ''}${fw ? ' · firmware ' + esc(fw) : ''}`],
-    ['Public key', `<span class="mono" style="font-size:12px;word-break:break-all;-webkit-user-select:text;user-select:text">${esc(pub)}</span>`],
-    ['Now', card ? `plugged in${card.touch ? ' · touch ' + esc(String(card.touch).toLowerCase()) : ''}` : 'not plugged in'],
-    ['Signs for', [vault.name].concat(elsewhere).map(esc).join(' · ') + (elsewhere.length ? ` — ${sats(elsewhere.length + 1)} vaults share this key` : '')],
+  const seen = bare ? firstSeenWords(pub) : '';
+  const sub = bare ? [model, k.serial ? 'serial ' + k.serial : '', fw ? 'firmware ' + fw : '', vault.ext ? 'a fixed key in this vault' : ''].filter(Boolean).join(' · ') : `${model} · signs on its own device, from its seed words`;
+  const facts = [
+    bare ? ['Public key', `<span class="mono" style="font-size:12px;word-break:break-all;-webkit-user-select:text;user-select:text">${esc(pub)}</span>`] : ['Fingerprint', `<span class="mono">${esc(ext[1] || '?')}</span> · m/${esc(ext[2] || '?')}`],
+    !bare ? ['Extended key', `<span class="mono" style="font-size:12px;word-break:break-all;-webkit-user-select:text;user-select:text">${esc(ext[3] || pub)}</span>`] : null,
+    ['Now', bare ? (card ? `<span class="ok">✓ plugged in</span>${card.touch ? ' · touch ' + esc(String(card.touch).toLowerCase()) : ''}` : 'not plugged in') : 'on its own device'],
+    ['Signs for', [vault.name].concat(elsewhere).map(esc).join(' · ') + (elsewhere.length ? `<small class="muted"> · ${sats(elsewhere.length + 1)} vaults share this key</small>` : '')],
     seen ? ['Seen', esc(seen)] : null].filter(Boolean);
   d.innerHTML = `<div class="txnav"><button class="btn small" type="button" id="key-back">‹ All keys</button><span class="muted">${esc(k.name)}</span><span></span></div>
-    <div class="row" style="gap:18px;align-items:flex-start"><span class="keyart" style="flex:0 0 auto">${art}</span><dl class="tx-dl" style="flex:1 1 320px;min-width:0">${facts.map(([a, b]) => `<dt>${a}</dt><dd>${b}</dd>`).join('')}</dl></div>
+    <div class="guide-row">
+      <div class="guide" style="display:flex;align-items:center;justify-content:center;min-height:196px;line-height:0">${art}</div>
+      <div class="guide-body">
+        <div class="cer-act-title">${esc(k.name)}</div>
+        <div class="muted">${esc(sub)}</div>
+        <dl class="tx-dl" style="margin-top:6px">${facts.map(([a, b]) => `<dt>${a}</dt><dd>${b}</dd>`).join('')}</dl>
+      </div>
+    </div>
     <div id="key-private"></div>`;
   $('#key-back').onclick = () => closeKeyCard();
   paintKeyPrivate();
@@ -2761,22 +2773,25 @@ function paintKeyPrivate() {
   const box = $('#key-private'); if (!box || recPage.kind !== 'key') return;
   const pub = recPage.id;
   if (Date.now() < keyCardOpenUntil) {
-    box.innerHTML = '<div class="label" style="margin-top:8px">Kept with this key</div><div class="muted" style="font-size:13px">Where it lives, who knows, photos of it and of its sheet. Sealed on this computer like everything else; shown here for ten minutes after you proved you are the one looking.</div><div id="key-rec-slot"></div>';
+    box.innerHTML = '<div class="label" style="margin-top:18px">Kept with this key</div><div class="muted" style="font-size:13px">Where it lives, who knows, photos of it and of its sheet. Sealed on this computer like everything else; shown for ten minutes after you proved you are the one looking.</div><div id="key-rec-slot"></div>';
     recPoint('key', 'key:' + pub, $('#key-rec-slot'));
     return;
   }
   const here = cards.filter(c => c.pubkey && vault.keys.some(k => k.pubkey === c.pubkey));
-  box.innerHTML = `<div class="sk-warn" style="margin-top:8px"><b>What this card holds is a map to the custody.</b> Where the key is kept, photos of it and its sheet, notes on who knows. It is sealed on disk like everything else; showing it on a screen deserves a second look, so it opens with Touch ID — or with one of this vault’s keys, PIN and touch.</div>
-    <div class="row" style="gap:10px;flex-wrap:wrap;align-items:flex-end"><button class="btn primary" type="button" id="key-open-mac">Show it — Touch ID</button>${here.length ? `<label style="margin:0">or with <select id="key-open-card">${here.map(c => `<option value="${esc(c.reader)}">${esc((vault.keys.find(k => k.pubkey === c.pubkey) || {}).name || 'key')} · ${esc(String(c.serial))}</option>`).join('')}</select></label><label style="margin:0">PIN<input id="key-open-pin" type="password" autocomplete="off" style="width:120px"></label><button class="btn" type="button" id="key-open-with">Show it — key</button>` : '<span class="muted" style="font-size:13px">Plug in one of this vault’s keys to open it with a PIN and touch instead.</span>'}</div>
-    <div class="muted" id="key-open-note" aria-live="polite"></div>`;
+  const nameOfCard = (c) => (vault.keys.find(k => k.pubkey === c.pubkey) || {}).name || 'key';
+  box.innerHTML = `<div class="label" style="margin-top:18px">Kept with this key</div>
+    <div class="muted" style="font-size:13.5px;max-width:640px">Where it is kept, photos of it and its sheet, notes on who knows — a map to the custody. It is sealed on disk like everything else; putting it on a screen deserves a second look first.</div>
+    <div class="row" style="margin-top:12px"><button class="btn primary" type="button" id="key-open-mac">Show it — Touch ID</button></div>
+    ${here.length ? `<div class="muted" style="font-size:13px;margin-top:14px">Or with one of this vault’s keys, its PIN and a touch:</div><div style="display:flex;flex-direction:column;gap:8px;margin-top:6px;max-width:640px">${here.map((c, i) => `<form class="lock-key" data-reader="${esc(c.reader)}"><b>${esc(nameOfCard(c))}<small>plugged in · YubiKey ${esc(String(c.serial))}</small></b><input type="password" autocomplete="off" placeholder="Key PIN" aria-label="PIN of ${esc(nameOfCard(c))}"><button class="btn" type="submit">Show it</button></form>`).join('')}</div>` : `<div class="muted" style="font-size:13px;margin-top:10px">Or plug in one of this vault’s keys to open it with a PIN and a touch.</div>`}
+    <div class="muted" id="key-open-note" aria-live="polite" style="margin-top:8px"></div>`;
   const opened = (until) => { keyCardOpenUntil = until * 1000; paintKeyPrivate(); setTimeout(() => { if (recPage.kind === 'key' && Date.now() >= keyCardOpenUntil) paintKeyPrivate(); }, Math.max(0, keyCardOpenUntil - Date.now()) + 50); };
   $('#key-open-mac').onclick = async () => { $('#key-open-note').textContent = ''; try { opened(await invoke('key_card_open', { name: vault.name, reader: null, pin: null })); } catch (e) { $('#key-open-note').textContent = String(e); } };
-  const withKey = $('#key-open-with'); if (withKey) withKey.onclick = async () => {
-    let pin = $('#key-open-pin').value; $('#key-open-pin').value = ''; if (!pin) return toast('Enter the key’s PIN');
-    if (/^[cbdefghijklnrtuv]{32,}$/.test(pin)) { pin = ''; return toast('That was the key typing a one-time code, not a PIN. Nothing was sent to the card.', 8000); }
+  $$('#key-private form.lock-key').forEach(f => f.onsubmit = async (ev) => {
+    ev.preventDefault(); const inp = f.querySelector('input'); let pin = inp.value; inp.value = ''; if (!pin) return toast('Enter the key’s PIN');
+    if (/^[cbdefghijklnrtuv]{32,}$/.test(pin)) { pin = ''; return toast('That was the key typing a one-time code, not a PIN. Nothing was sent to the card and no PIN try was used.', 8000); }
     $('#key-open-note').textContent = 'Touch the key when it flashes…';
-    try { const req = invoke('key_card_open', { name: vault.name, reader: $('#key-open-card').value, pin }); pin = ''; opened(await req); } catch (e) { $('#key-open-note').textContent = String(e); }
-  };
+    try { const req = invoke('key_card_open', { name: vault.name, reader: f.dataset.reader, pin }); pin = ''; opened(await req); } catch (e) { $('#key-open-note').textContent = String(e); }
+  });
 }
 function renderKeys(force) {
   if (!vault) return;
