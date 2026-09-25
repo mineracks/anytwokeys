@@ -194,7 +194,9 @@ pub fn cancel() { CANCEL.fetch_add(1, Ordering::SeqCst); }
 /// Blocks `from..=to`, in chunks so that `reached` is always a height every block up to which was read: a chunk
 /// that fails leaves the ones before it counted and is picked up next time. Six fetches at once, since the oracle
 /// round trip is what the scan waits on; the arithmetic is nothing beside it.
-pub fn discover(oracle: &Oracle, scan: &ScanKey, spend_pub: &PublicKey, from: u32, to: u32, labels: &[(u32, Scalar)], vault: &str) -> Scan {
+/// `kept` is told after every chunk what was reached and what that chunk found, so the caller can write it down
+/// as it goes: a read that is killed, or a sync that starts while this one runs, then carries on from there.
+pub fn discover(oracle: &Oracle, scan: &ScanKey, spend_pub: &PublicKey, from: u32, to: u32, labels: &[(u32, Scalar)], vault: &str, kept: &dyn Fn(u32, &[Found])) -> Scan {
     let secp = Secp256k1::new();
     let gen = CANCEL.load(Ordering::SeqCst);
     let mut out = Scan { found: Vec::new(), reached: from.saturating_sub(1), error: None };
@@ -222,7 +224,9 @@ pub fn discover(oracle: &Oracle, scan: &ScanKey, spend_pub: &PublicKey, from: u3
         let f = failed.into_inner().unwrap_or(None);
         if CANCEL.load(Ordering::SeqCst) != gen { out.error = Some("scan cancelled".into()); return out; }
         if let Some(e) = f { out.error = Some(e); return out; }
-        out.found.extend(found.into_inner().unwrap_or_default());
+        let chunk = found.into_inner().unwrap_or_default();
+        kept(end, &chunk);
+        out.found.extend(chunk);
         out.reached = end;
         crate::net::emit("sp-scan", serde_json::json!({ "vault": vault, "at": end, "from": from, "to": to, "found": out.found.len() }));
         start = end + 1;

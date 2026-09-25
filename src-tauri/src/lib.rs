@@ -774,9 +774,14 @@ fn settings_set(app: tauri::AppHandle, network: String, custom: bool, electrum: 
 /// Blocks the oracle has indexed since the last look, read for this wallet's silent payments; what is found is kept
 /// as it comes, so a scan that stops early is picked up where it stopped. An oracle that cannot be reached is said
 /// to the window and the sync goes on with what is already known — a missed oracle is not a missing balance.
+static SP_BUSY: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 fn sp_discover(s: &Store, v: Vault, servers: &chain::Servers) -> R<Vault> {
     let sp = match v.watch.as_ref().and_then(|w| w.sp.as_ref()) { Some(sp) => sp.clone(), None => return Ok(v) };
     if s.settings.sp_oracle.is_empty() { return Ok(v); }
+    // one read per wallet at a time: a sync that arrives while one runs goes on with what that read has written so far
+    { let mut b = SP_BUSY.lock().map_err(|_| "scan lock poisoned")?; if b.contains(&v.name) { return Ok(v); } b.push(v.name.clone()); }
+    struct Done(String); impl Drop for Done { fn drop(&mut self) { if let Ok(mut b) = SP_BUSY.lock() { b.retain(|n| n != &self.0); } } }
+    let _done = Done(v.name.clone());
     let oracle = sp::Oracle { base: s.settings.sp_oracle.clone() };
     let said = |e: String| net::emit("sp-scan", serde_json::json!({ "vault": v.name, "error": e }));
     let (net, indexed) = match oracle.info() { Ok(x) => x, Err(e) => { said(e); return Ok(v); } };
@@ -786,14 +791,16 @@ fn sp_discover(s: &Store, v: Vault, servers: &chain::Servers) -> R<Vault> {
     let key = sp::scan_key(&sp::id_of(&sp.spend))?;
     let spend_pub = bitcoin::secp256k1::PublicKey::from_slice(&hex::decode(&sp.spend).map_err(|e| e.to_string())?).map_err(|_| "this wallet's spend key is damaged")?;
     let labels = vec![(0, sp::label(&key, 0)?)];   // the change label every BIP 352 wallet has
-    let r = sp::discover(&oracle, &key, &spend_pub, sp.scanned + 1, to, &labels, &v.name);
     let name = v.name.clone();
-    let store = wallet::update(|s| if let Some(w) = s.vaults.iter_mut().find(|x| x.name == name).and_then(|x| x.watch.as_mut()) { if let Some(sp) = w.sp.as_mut() {
-        for f in &r.found { if !sp.found.iter().any(|k| k.key == f.key) { sp.found.push(f.clone()); } }
-        sp.scanned = sp.scanned.max(r.reached);
-    } })?;
+    let keep = |reached: u32, found: &[sp::Found]| {
+        let _ = wallet::update(|s| if let Some(sp) = s.vaults.iter_mut().find(|x| x.name == name).and_then(|x| x.watch.as_mut()).and_then(|w| w.sp.as_mut()) {
+            for f in found { if !sp.found.iter().any(|k| k.key == f.key) { sp.found.push(f.clone()); } }
+            sp.scanned = sp.scanned.max(reached);
+        });
+    };
+    let r = sp::discover(&oracle, &key, &spend_pub, sp.scanned + 1, to, &labels, &v.name, &keep);
     if let Some(e) = r.error { said(e); }
-    Ok(store.vaults.into_iter().find(|x| x.name == name).unwrap_or(v))
+    Ok(wallet::load()?.vaults.into_iter().find(|x| x.name == name).unwrap_or(v))
 }
 
 /// The first block at or after a day, by the headers' own times: taproot's activation is the floor, since nothing
