@@ -841,7 +841,7 @@ function paintTransferProposals() {
   }
   for (const p of proposals) {
     const c=p.pair, line=document.createElement('div');line.className='card';
-    line.innerHTML=`<strong>${esc(c.from)} → ${esc(c.to)}</strong><p>${sats(c.out)} sats out; ${sats(c.incoming)} sats in; difference ${sats(c.out-c.incoming)} sats.</p><p class="muted">${new Date(c.at*1000).toLocaleString()} → ${new Date(c.arrived*1000).toLocaleString()}</p><p class="mono muted" style="overflow-wrap:anywhere">${esc(c.from_id)} → ${esc(c.to_id)}</p>${p.unique ? '' : '<p class="warn">More than one transfer fits. These candidates stay unlinked.</p>'}`;
+    line.innerHTML=`<strong>${esc(c.from)} → ${esc(c.to)}</strong><p>${c.exact ? `That transaction pays <b>exactly ${sats(c.incoming)} sats</b> to one output \u2014 the amount that arrived; the rest of the ${sats(c.out)} sats it took from the vault is change and fee.` : `${sats(c.out)} sats out; ${sats(c.incoming)} sats in; difference ${sats(c.out-c.incoming)} sats.`}</p><p class="muted">${new Date(c.at*1000).toLocaleString()} → ${new Date(c.arrived*1000).toLocaleString()}</p><p class="mono muted" style="overflow-wrap:anywhere">${esc(c.from_id)} → ${esc(c.to_id)}</p>${p.unique ? '' : '<p class="warn">More than one transfer fits. These candidates stay unlinked.</p>'}`;
     for (const yes of [true,false]) {
       if (yes && !p.unique) continue;
       const b=document.createElement('button'); b.className='btn'; b.textContent=yes ? 'Yes, that’s mine' : 'No'; b.dataset.transferAnswer=p.key; b.dataset.yes=String(yes);

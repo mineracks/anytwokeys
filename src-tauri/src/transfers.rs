@@ -6,7 +6,9 @@ use std::collections::{BTreeMap};
 use std::sync::Mutex;
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-struct Fact { id: String, net: i64, time: u32, counter: String, own: bool, #[serde(default)] known: bool }
+struct Fact { id: String, net: i64, time: u32, counter: String, own: bool, #[serde(default)] known: bool,
+    /// for an on-chain outflow: every output value of its transaction — what it PAID, as distinct from the vault's net
+    #[serde(default)] paid: Vec<u64> }
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Snapshot { name: String, network: String, identity: String, #[serde(default)] muun: bool, fingerprint: String, rows: Vec<Fact> }
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -16,7 +18,7 @@ pub struct Link { pub peer: String, pub peer_id: String, pub event: String, pub 
 #[derive(Clone, Default, Serialize)]
 pub struct View { pub links: BTreeMap<String, BTreeMap<String, Link>>, pub proposals: Vec<Proposal> }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Candidate { from_key:String, to_key:String, pub from:String, pub to:String, pub from_id:String, pub to_id:String, pub out:u64, pub incoming:u64, pub at:u32, pub arrived:u32 }
+pub struct Candidate { #[serde(default)] pub exact:bool, from_key:String, to_key:String, pub from:String, pub to:String, pub from_id:String, pub to_id:String, pub out:u64, pub incoming:u64, pub at:u32, pub arrived:u32 }
 impl Candidate { fn key(&self)->String { pair_key(&self.from_key,&self.from_id,&self.to_key,&self.to_id) } }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Answer { pub yes:bool, pub pair:Candidate }
@@ -40,9 +42,17 @@ fn candidates(ak:&str,a:&Snapshot,bk:&str,b:&Snapshot)->Vec<Candidate> {
         while let Some((&(n,_),_))=buckets.range((amount,0)..=(out,u32::MAX)).next() {
             for (_,rs) in buckets.range((n,r.time.saturating_sub(3600))..=(n,r.time.saturating_add(after))) { for other in rs {
                 if r.id == other.id { continue; } // already handled by shared-id evidence
-                result.push(Candidate {from_key:ak.into(),to_key:bk.into(),from:a.name.clone(),to:b.name.clone(),from_id:r.id.clone(),to_id:other.id.clone(),out,incoming:other.net as u64,at:r.time,arrived:other.time});
+                result.push(Candidate {exact:false,from_key:ak.into(),to_key:bk.into(),from:a.name.clone(),to:b.name.clone(),from_id:r.id.clone(),to_id:other.id.clone(),out,incoming:other.net as u64,at:r.time,arrived:other.time});
             } }
             if n>=out {break;} amount=n+1;
+        }
+        // an on-chain transaction paying exactly what arrived off-chain: the deposit itself, whatever change and fee
+        // the vault's net also carried — so the fee allowance does not apply
+        for &o in &r.paid { if o == 0 { continue; }
+            for (_,rs) in buckets.range((o,r.time.saturating_sub(3600))..=(o,r.time.saturating_add(after))) { for other in rs {
+                if r.id == other.id { continue; }
+                result.push(Candidate {exact:true,from_key:ak.into(),to_key:bk.into(),from:a.name.clone(),to:b.name.clone(),from_id:r.id.clone(),to_id:other.id.clone(),out,incoming:other.net as u64,at:r.time,arrived:other.time});
+            } }
         }
     } result
 }
@@ -125,7 +135,7 @@ impl Index {
         } }
         // one candidate is one proposal, however many times it was found: a pair seen twice is not two pairs, and
         // must not be counted as ambiguity against itself
-        pending.sort_by_key(|p|p.key()); pending.dedup_by_key(|p|p.key());
+        pending.sort_by_key(|p|(p.key(),!p.exact)); pending.dedup_by_key(|p|p.key());   // the exact reading of a pair wins
         let mut counts:BTreeMap<(String,String),usize>=BTreeMap::new();
         for p in &pending { *counts.entry((p.from_key.clone(),p.from_id.clone())).or_default()+=1;*counts.entry((p.to_key.clone(),p.to_id.clone())).or_default()+=1; }
         view.proposals=pending.into_iter().map(|p|Proposal{key:p.key(),unique:counts[&(p.from_key.clone(),p.from_id.clone())]==1 && counts[&(p.to_key.clone(),p.to_id.clone())]==1,pair:p}).collect();
@@ -139,8 +149,14 @@ impl Index {
             let t = raw.get(r.txid.as_str());
             let own = t.map(|t| !identity.is_empty() && t.sender.eq_ignore_ascii_case(&identity) && t.receiver.eq_ignore_ascii_case(&identity)).unwrap_or(false);
             let counter = t.map(|t| if t.direction == "out" {t.receiver.to_lowercase()} else {t.sender.to_lowercase()}).unwrap_or_default();
-            Some(Fact { id:r.txid.clone(),net,time:r.time.unwrap_or(0),counter,own,known:a.transfers.contains_key(&r.txid) })
+            Some(Fact { id:r.txid.clone(),net,time:r.time.unwrap_or(0),counter,own,known:a.transfers.contains_key(&r.txid), paid:Vec::new() })
         }).collect();
+        if identity.is_empty() {
+            use std::str::FromStr;
+            let ids: Vec<(usize, bitcoin::Txid)> = rows.iter().enumerate().filter(|(_, r)| r.net < 0).filter_map(|(i, r)| bitcoin::Txid::from_str(&r.id).ok().map(|t| (i, t))).collect();
+            let txs = crate::db::txs(&v.network, &ids.iter().map(|(_, t)| *t).collect::<Vec<_>>());
+            for ((i, _), t) in ids.iter().zip(txs) { if let Some(t) = t { let mut paid: Vec<u64> = t.output.iter().map(|o| o.value.to_sat()).collect(); paid.sort(); paid.dedup(); rows[*i].paid = paid; } }
+        }
         rows.sort_by(|a,b| a.id.cmp(&b.id));
         let fingerprint = digest(&serde_json::to_vec(&rows).unwrap());
         let id=key(v);
@@ -220,6 +236,22 @@ mod tests {
         b.rows[0].net=19000;b.muun=true;assert_eq!(candidates("a",&a,"b",&b).len(),1);
         b.rows[0].net=18999;assert!(candidates("a",&a,"b",&b).is_empty());
         b.rows[0].net=20000;b.network="signet".into();assert!(candidates("a",&a,"b",&b).is_empty());
+    }
+    #[test] fn an_output_of_exactly_the_amount_that_arrived_is_a_candidate_whatever_the_net() {
+        let mut i=Index::default();i.active=BTreeMap::from([("c".into(),"Chain".into()),("s".into(),"Spark".into())]);
+        let mut chain=snap("Chain","",&[(-50000,10000,"tx")]); chain.rows[0].paid=vec![1095,48000];
+        i.cache.vaults.insert("c".into(),chain); i.cache.vaults.insert("s".into(),snap("Spark","ss",&[(1095,10500,"dep")])); i.build();
+        assert_eq!(i.view.proposals.len(),1,"the 48,905-sat difference is change and fee, not a reason to refuse");
+        assert!(i.view.proposals[0].pair.exact && i.view.proposals[0].unique);
+        // the same rows with nothing known about what the transaction paid: outside the allowance, not a candidate
+        let mut j=Index::default();j.active=i.active.clone();
+        j.cache.vaults.insert("c".into(),snap("Chain","",&[(-50000,10000,"tx")])); j.cache.vaults.insert("s".into(),snap("Spark","ss",&[(1095,10500,"dep")])); j.build();
+        assert!(j.view.proposals.is_empty());
+        // found both ways — within the allowance AND by an exact output — it is one proposal, and the exact reading
+        let mut k=Index::default();k.active=i.active.clone();
+        let mut near=snap("Chain","",&[(-2532,10000,"tx")]); near.rows[0].paid=vec![1095,1000];
+        k.cache.vaults.insert("c".into(),near); k.cache.vaults.insert("s".into(),snap("Spark","ss",&[(1095,10500,"dep")])); k.build();
+        assert_eq!(k.view.proposals.len(),1); assert!(k.view.proposals[0].pair.exact && k.view.proposals[0].unique);
     }
     #[test] fn a_row_that_arrives_twice_is_one_candidate_and_still_unique() {
         let mut i=indexed();
