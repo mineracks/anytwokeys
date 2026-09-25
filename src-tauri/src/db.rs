@@ -33,7 +33,8 @@ pub fn open_at(p: &Path, key: &[u8; 32]) -> Result<Connection, String> {
         // the first read is what proves the key: SQLCipher says "file is not a database" otherwise
         c.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))?;
         c.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;
-            CREATE TABLE IF NOT EXISTS tx (net TEXT NOT NULL, txid TEXT NOT NULL, raw BLOB NOT NULL, PRIMARY KEY (net, txid)) WITHOUT ROWID;")?;
+            CREATE TABLE IF NOT EXISTS tx (net TEXT NOT NULL, txid TEXT NOT NULL, raw BLOB NOT NULL, PRIMARY KEY (net, txid)) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS spk (net TEXT NOT NULL, spk BLOB NOT NULL, status TEXT NOT NULL, history TEXT NOT NULL, coins TEXT, PRIMARY KEY (net, spk)) WITHOUT ROWID;")?;
         let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if v == 0 { c.execute_batch(&format!("PRAGMA user_version = {SCHEMA};"))?; }
         Ok(c)
@@ -60,6 +61,32 @@ fn with<T>(f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Option<T> {
         *g = open_at(&path(), &db_key(&key)).ok();
     }
     f(g.as_ref()?).ok()
+}
+
+/// What a script's history and coins were when its status was last this: Electrum's status is a hash of the whole
+/// history, so the same status means the same answer, and a refresh in which nothing moved fetches nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Known { pub status: String, pub history: Vec<crate::chain::HistoryItem>, pub coins: Option<Vec<crate::chain::Coin>> }
+
+pub fn spk_get(net: &str, spks: &[bitcoin::ScriptBuf]) -> Vec<Option<Known>> {
+    with(|c| {
+        let mut st = c.prepare_cached("SELECT status, history, coins FROM spk WHERE net = ?1 AND spk = ?2")?;
+        spks.iter().map(|s| {
+            let row: Option<(String, String, Option<String>)> = st.query_row(params![net, s.as_bytes()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+            Ok(row.and_then(|(status, h, c)| Some(Known { status, history: serde_json::from_str(&h).ok()?, coins: c.and_then(|c| serde_json::from_str(&c).ok()) })))
+        }).collect::<rusqlite::Result<Vec<_>>>()
+    }).unwrap_or_else(|| vec![None; spks.len()])
+}
+
+pub fn spk_put(net: &str, spks: &[bitcoin::ScriptBuf], known: &[Known]) {
+    let _ = with(|c| {
+        let tx = c.unchecked_transaction()?;
+        { let mut st = tx.prepare_cached("INSERT OR REPLACE INTO spk (net, spk, status, history, coins) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+          for (s, k) in spks.iter().zip(known) {
+              st.execute(params![net, s.as_bytes(), k.status, serde_json::to_string(&k.history).unwrap_or_default(), k.coins.as_ref().map(|c| serde_json::to_string(c).unwrap_or_default())])?;
+          } }
+        tx.commit()
+    });
 }
 
 /// Close it: the app locked, and the key has left memory.
@@ -94,6 +121,24 @@ mod tests {
         let raw = include_bytes!("../../test/fixtures/sample.psbt");
         bitcoin::psbt::Psbt::deserialize(raw).unwrap().unsigned_tx
     }
+    #[test]
+    fn a_scripts_status_history_and_coins_are_kept_and_come_back_by_status() {
+        let p = tmp("spk"); let c = open_at(&p, &db_key(&[3; 32])).unwrap();
+        let spk = bitcoin::ScriptBuf::from(vec![0x00u8, 0x14, 7, 7, 7]);
+        let put = |c: &Connection, k: &Known| {
+            let mut st = c.prepare("INSERT OR REPLACE INTO spk (net, spk, status, history, coins) VALUES (?1, ?2, ?3, ?4, ?5)").unwrap();
+            st.execute(params!["signet", spk.as_bytes(), k.status, serde_json::to_string(&k.history).unwrap(), k.coins.as_ref().map(|x| serde_json::to_string(x).unwrap())]).unwrap();
+        };
+        let get = |c: &Connection| -> Option<Known> {
+            let row: Option<(String, String, Option<String>)> = c.query_row("SELECT status, history, coins FROM spk WHERE net = 'signet' AND spk = ?1", params![spk.as_bytes()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional().unwrap();
+            row.map(|(status, h, co)| Known { status, history: serde_json::from_str(&h).unwrap(), coins: co.map(|x| serde_json::from_str(&x).unwrap()) })
+        };
+        let k = Known { status: "ab".into(), history: vec![crate::chain::HistoryItem { txid: "t1".into(), height: 5 }], coins: None };
+        put(&c, &k); assert_eq!(get(&c), Some(k.clone()), "history kept without coins");
+        let k2 = Known { coins: Some(vec![crate::chain::Coin { txid: "t1".into(), vout: 0, value: 9, height: 5 }]), ..k };
+        put(&c, &k2); assert_eq!(get(&c), Some(k2), "coins kept beside it, replacing the row");
+    }
+
     #[test]
     fn a_kept_transaction_comes_back_only_under_its_key_and_the_file_holds_nothing_readable() {
         let p = tmp("seal"); let (k1, k2) = (db_key(&[1; 32]), db_key(&[2; 32]));

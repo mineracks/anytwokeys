@@ -661,7 +661,7 @@ pub fn scan(v: &Vault, servers: &Servers, gap: u32) -> Result<Scanned, String> {
             let idx: Vec<u32> = (i..end).collect();
             let spks = idx.iter().map(|&p| script_at(v, base | p)).collect::<Result<Vec<_>, _>>()?;
             // a failed query is a failed scan, never "no history": an empty answer resets the next address and the watcher's memory
-            let answers = chain::histories(servers, &spks)?;
+            let answers = chain::histories_known(servers, &v.network, &spks)?;
             crate::net::emit("scan", serde_json::json!({ "vault": v.name, "checked": end, "used": used.len(), "change": base & CHANGE != 0 }));
             for ((p, spk), h) in idx.iter().zip(spks).zip(answers) {
                 if !h.is_empty() {
@@ -673,7 +673,7 @@ pub fn scan(v: &Vault, servers: &Servers, gap: u32) -> Result<Scanned, String> {
             i = end;
         }
         let spks: Vec<ScriptBuf> = used.iter().map(|(_, s)| s.clone()).collect();
-        for ((index, _), list) in used.iter().zip(chain::unspents(servers, &spks)?) {
+        for ((index, _), list) in used.iter().zip(chain::unspents_known(servers, &v.network, &spks)?) {
             for c in list { coins.push(CoinAt { txid: c.txid, vout: c.vout, value: c.value, height: c.height, index: *index }); }
         }
         let last = i.saturating_sub(1);
@@ -691,7 +691,7 @@ pub fn scan(v: &Vault, servers: &Servers, gap: u32) -> Result<Scanned, String> {
             if i >= end { break; }
             let idx: Vec<u32> = (i..end).flat_map(|pos| (0..MUUN_SCHEMES.len() as u32).map(move |s| (s << SCHEME_SHIFT) | flag | pos)).collect();
             let spks = idx.iter().map(|&x| script_at(v, x)).collect::<Result<Vec<_>, _>>()?;
-            let answers = chain::histories(servers, &spks)?;
+            let answers = chain::histories_known(servers, &v.network, &spks)?;
             crate::net::emit("scan", serde_json::json!({ "vault": v.name, "checked": end, "used": used.len(), "change": flag & CHANGE != 0, "each": MUUN_SCHEMES.len() }));
             for ((x, spk), h) in idx.iter().zip(spks).zip(answers) {
                 let pos = x & POS_MASK;
@@ -707,7 +707,7 @@ pub fn scan(v: &Vault, servers: &Servers, gap: u32) -> Result<Scanned, String> {
         let seen: std::collections::HashSet<u32> = used.iter().map(|(x, _)| x & POS_MASK).collect();
         for pos in 0..i { if !seen.contains(&pos) { next = Some(pos); break; } }
         let spks: Vec<ScriptBuf> = used.iter().map(|(_, s)| s.clone()).collect();
-        for ((index, _), list) in used.iter().zip(chain::unspents(servers, &spks)?) {
+        for ((index, _), list) in used.iter().zip(chain::unspents_known(servers, &v.network, &spks)?) {
             for c in list { coins.push(CoinAt { txid: c.txid, vout: c.vout, value: c.value, height: c.height, index: *index }); }
         }
         Ok((next.unwrap_or(i), i.saturating_sub(1)))
@@ -736,8 +736,8 @@ pub fn scan(v: &Vault, servers: &Servers, gap: u32) -> Result<Scanned, String> {
         let idx: Vec<u32> = (0..sp.found.len() as u32).map(|i| SP_SCHEME | i).collect();
         let spks = idx.iter().map(|&i| script_at(v, i)).collect::<Result<Vec<_>, _>>()?;
         if !spks.is_empty() {
-            for (i, h) in idx.iter().zip(chain::histories(servers, &spks)?) { for item in h { history.push((item.txid, item.height, *i)); } }
-            for (i, list) in idx.iter().zip(chain::unspents(servers, &spks)?) { for c in list { coins.push(CoinAt { txid: c.txid, vout: c.vout, value: c.value, height: c.height, index: *i }); } }
+            for (i, h) in idx.iter().zip(chain::histories_known(servers, &v.network, &spks)?) { for item in h { history.push((item.txid, item.height, *i)); } }
+            for (i, list) in idx.iter().zip(chain::unspents_known(servers, &v.network, &spks)?) { for c in list { coins.push(CoinAt { txid: c.txid, vout: c.vout, value: c.value, height: c.height, index: *i }); } }
         }
     }
     Ok(Scanned { coins, history, next, scan_max, next_change, scan_max_change })

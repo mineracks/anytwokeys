@@ -20,7 +20,7 @@ pub fn defaults(network: Network) -> Servers {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Coin {
     pub txid: String,
     pub vout: u32,
@@ -90,7 +90,7 @@ pub fn height_fresh(servers: &Servers) -> Result<u32, String> {
     open(servers)?.block_headers_subscribe().map(|h| h.height as u32).map_err(|e| format!("headers: {e}"))
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HistoryItem { pub txid: String, pub height: i32 }
 
 #[cfg(test)]
@@ -104,6 +104,68 @@ pub fn histories(servers: &Servers, spks: &[ScriptBuf]) -> Result<Vec<Vec<Histor
         out.extend(lists.into_iter().map(|l| l.into_iter().map(|i| HistoryItem { txid: i.tx_hash.to_string(), height: i.height }).collect()));
     }
     Ok(out)
+}
+
+/// Each script's STATUS: Electrum's hash of its whole history, mempool included, or None for a script never seen.
+/// One small answer per script, in one request per hundred — the cheap first question, before any history is asked.
+pub fn statuses(servers: &Servers, spks: &[ScriptBuf]) -> Result<Vec<Option<String>>, String> {
+    let mut out = Vec::new();
+    for chunk in spks.chunks(BATCH) {
+        let list = read(servers, |c| c.batch_script_subscribe(chunk.iter().map(|s| s.as_script()))).map_err(|e| format!("status: {e}"))?;
+        out.extend(list.into_iter().map(|s| s.map(|h| hex::encode(*h))));
+    }
+    Ok(out)
+}
+
+/// Histories, asked for only where the status has changed since they were last kept (db.rs): a refresh in which
+/// nothing moved asks each script one small question and fetches nothing. A script never seen has no history and
+/// is not asked at all. Without the cache (locked, or none) every history is fetched, as before.
+pub fn histories_known(servers: &Servers, net: &str, spks: &[ScriptBuf]) -> Result<Vec<Vec<HistoryItem>>, String> {
+    let status = statuses(servers, spks)?;
+    let known = crate::db::spk_get(net, spks);
+    let (mut out, ask) = plan(&status, &known);
+    if !ask.is_empty() {
+        let fetched = histories(servers, &ask.iter().map(|&i| spks[i].clone()).collect::<Vec<_>>())?;
+        let mut keep = Vec::new();
+        for (&i, h) in ask.iter().zip(fetched) {
+            if let Some(s) = &status[i] { keep.push(crate::db::Known { status: s.clone(), history: h.clone(), coins: None }); }
+            out[i] = Some(h);
+        }
+        crate::db::spk_put(net, &ask.iter().map(|&i| spks[i].clone()).collect::<Vec<_>>(), &keep);
+    }
+    Ok(out.into_iter().map(|h| h.unwrap_or_default()).collect())
+}
+
+/// Which scripts need their history fetched: a script never seen has none; one whose status is what it was when its
+/// history was kept has that history; every other is asked.
+fn plan(status: &[Option<String>], known: &[Option<crate::db::Known>]) -> (Vec<Option<Vec<HistoryItem>>>, Vec<usize>) {
+    let mut out: Vec<Option<Vec<HistoryItem>>> = vec![None; status.len()];
+    let mut ask = Vec::new();
+    for (i, st) in status.iter().enumerate() {
+        match (st, known.get(i).and_then(|k| k.as_ref())) {
+            (None, _) => out[i] = Some(Vec::new()),
+            (Some(s), Some(k)) if &k.status == s => out[i] = Some(k.history.clone()),
+            _ => ask.push(i),
+        }
+    }
+    (out, ask)
+}
+
+/// Unspent coins, from the cache where it holds them for the script's current status, fetched otherwise.
+pub fn unspents_known(servers: &Servers, net: &str, spks: &[ScriptBuf]) -> Result<Vec<Vec<Coin>>, String> {
+    let known = crate::db::spk_get(net, spks);
+    let mut out: Vec<Option<Vec<Coin>>> = known.iter().map(|k| k.as_ref().and_then(|k| k.coins.clone())).collect();
+    let ask: Vec<usize> = (0..spks.len()).filter(|&i| out[i].is_none()).collect();
+    if !ask.is_empty() {
+        let fetched = unspents(servers, &ask.iter().map(|&i| spks[i].clone()).collect::<Vec<_>>())?;
+        let (mut put_spks, mut put) = (Vec::new(), Vec::new());
+        for (&i, c) in ask.iter().zip(fetched) {
+            if let Some(k) = &known[i] { put_spks.push(spks[i].clone()); put.push(crate::db::Known { status: k.status.clone(), history: k.history.clone(), coins: Some(c.clone()) }); }
+            out[i] = Some(c);
+        }
+        crate::db::spk_put(net, &put_spks, &put);
+    }
+    Ok(out.into_iter().map(|c| c.unwrap_or_default()).collect())
 }
 
 /// Whole transactions, in one request per hundred, in the order asked.
@@ -150,4 +212,38 @@ pub fn fees(servers: &Servers) -> Result<Fees, String> {
 
 pub fn tx_link(servers: &Servers, txid: &str) -> String {
     format!("{}/tx/{txid}", servers.explorer.trim_end_matches('/'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Known;
+    fn h(t: &str) -> Vec<HistoryItem> { vec![HistoryItem { txid: t.into(), height: 1 }] }
+    #[test]
+    fn only_a_changed_status_asks_for_history() {
+        let status = vec![None, Some("s1".to_string()), Some("s2".to_string()), Some("s3".to_string())];
+        let known = vec![None, Some(Known { status: "s1".into(), history: h("kept"), coins: None }), Some(Known { status: "old".into(), history: h("stale"), coins: None }), None];
+        let (out, ask) = plan(&status, &known);
+        assert_eq!(out[0], Some(vec![]), "never seen: no history, nothing asked");
+        assert_eq!(out[1], Some(h("kept")), "same status: the kept history");
+        assert_eq!(out[2], None); assert_eq!(out[3], None);
+        assert_eq!(ask, vec![2, 3], "a changed status and an unknown script are asked, nothing else");
+    }
+    #[test]
+    fn a_status_is_never_taken_for_history_when_the_cache_is_empty() {
+        let (out, ask) = plan(&[Some("s".into()), Some("t".into())], &[]);
+        assert_eq!(out, vec![None, None]); assert_eq!(ask, vec![0, 1]);
+    }
+    /// Our own server, two mainnet scripts: one with history (the genesis coinbase address), one that has never existed.
+    #[test] #[ignore]
+    fn statuses_live() {
+        use std::str::FromStr;
+        let s = defaults(Network::Bitcoin);
+        let used = bitcoin::Address::from_str("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa").unwrap().assume_checked().script_pubkey();
+        let fresh = ScriptBuf::from(vec![0x00u8, 0x14, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9]);
+        let st = statuses(&s, &[used.clone(), fresh.clone()]).unwrap();
+        assert!(st[0].as_ref().map(|x| x.len() == 64).unwrap_or(false), "{st:?}"); assert!(st[1].is_none());
+        let hs = histories_known(&s, "mainnet", &[used, fresh]).unwrap();
+        assert!(hs[0].len() > 100 && hs[1].is_empty());
+    }
 }
