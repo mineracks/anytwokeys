@@ -3760,43 +3760,80 @@ async function ensureSparkSession(v) {
   if (sparkUnlockPending) return sparkUnlockPending.name === v.name ? sparkUnlockPending.promise : false;
   let resolve; const promise = new Promise(r => { resolve = r; });
   sparkUnlockPending = { name: v.name, v, promise, resolve, busy: false, focus: document.activeElement };
-  $('#spark-unlock-title').textContent = `Open ${v.name}’s reader`;
-  $('#spark-unlock-description').textContent = `Insert YubiKey ${v.spark.reader_card}. PIN + touch opens a temporary read session; it does not move funds. Refreshes use this session until expiry or app lock.`;
+  $('#spark-unlock-title').textContent = `Open the reader for ${v.name}`;
+  $('#spark-unlock-description').textContent = `This wallet is read through a YubiKey registered as its reader. Its PIN and a touch open a temporary read session \u2014 it can look, not spend \u2014 which refreshes use until it expires or the app locks.`;
   $('#spark-unlock-note').textContent = ''; $('#spark-unlock-pin').value = '';
   $('#spark-unlock-modal').classList.add('on');
-  await sparkUnlockCards(); $('#spark-unlock-pin').focus();
+  sparkUnlockStage('plug', null);
+  await sparkUnlockCards();
+  // the key is looked for on its own, the way the lock screen does: no "look again" button to find
+  sparkUnlockPending.timer = setInterval(() => { if (sparkUnlockPending && !sparkUnlockPending.busy) sparkUnlockCards().catch(() => {}); }, 1500);
   return promise;
 }
+// The same three steps as signing — plug in, PIN, touch — with the same pictures, so opening a reader looks like
+// every other thing a key does here. The software steps back for the touch: no PIN box, no buttons, one line.
+function sparkUnlockStage(step, card) {
+  const p = sparkUnlockPending; if (!p) return;
+  const sp = p.v.spark, form = (card && card.form) || p.form || 3, nano = [2, 4].includes(form & 0x0F);
+  $$('#spark-unlock-steps li').forEach(li => { const order = ['plug', 'pin', 'touch'], i = order.indexOf(li.dataset.step), n = order.indexOf(step); li.classList.toggle('now', i === n); li.classList.toggle('done', i < n); });
+  const g = $('#spark-unlock-guide'), sig = step + ':' + (form & 0x0F); if (g._sig !== sig) { g._sig = sig; g.innerHTML = guideArt(step, form); }
+  const name = store.vaults.flatMap(v => v.keys).find(k => k.pubkey === sp.reader_pubkey)?.name || ((lockInfo && lockInfo.cards) || []).find(k => k.pubkey === sp.reader_pubkey)?.name || 'The reader key';
+  const keyBox = $('#spark-unlock-key');
+  if (card) {
+    keyBox.className = 'lock-key'; keyBox.style.gridTemplateColumns = 'auto minmax(0,1fr)';
+    keyBox.innerHTML = `${keyArt(form, !!card.nfc, 40)}<b>${esc(name)}<small>YubiKey ${esc(String(card.serial))} \u00b7 <span style="color:var(--signal)">\u2713 plugged in \u2014 the registered reader</span></small></b>`;
+  } else {
+    keyBox.className = 'lock-key off'; keyBox.style.gridTemplateColumns = 'auto minmax(0,1fr)';
+    keyBox.innerHTML = `${keyArt(form, false, 40)}<b>${esc(name)}<small>YubiKey ${esc(String(sp.reader_card))} \u00b7 not plugged in${p.other ? ` \u2014 the key that is (${esc(String(p.other))}) is not this wallet\u2019s reader` : ''}</small></b>`;
+  }
+  $('#spark-unlock-pin-row').hidden = step === 'touch'; $('#spark-unlock-actions').hidden = step === 'touch'; $('#spark-unlock-warn').hidden = step !== 'pin';
+  $('#spark-unlock-pin').disabled = step !== 'pin';
+  $('#spark-unlock-go').disabled = step !== 'pin' || !$('#spark-unlock-pin').value;
+  $('#spark-unlock-act').textContent = step === 'plug' ? `Plug in ${name === 'The reader key' ? 'the registered key' : name}` : step === 'pin' ? 'Enter its PIN' : `Touch the ${nano ? 'nano' : 'key'} now`;
+  $('#spark-unlock-text').textContent = step === 'plug' ? `The reader is YubiKey ${sp.reader_card}. It is looked for as soon as it is in.`
+    : step === 'pin' ? 'Then press Open: the key will ask for a touch.'
+    : `${nano ? 'It runs along the key\u2019s top edge. Touch it' : 'Touch it'} when its light flashes. Keep the key plugged in.`;
+}
 async function sparkUnlockCards() {
-  if (!sparkUnlockPending) return;
-  const sp = sparkUnlockPending.v.spark;
+  const p = sparkUnlockPending; if (!p) return;
+  const sp = p.v.spark;
   let cs = []; try { cs = await invoke('cards_list'); } catch {}
-  cs = cs.filter(c => c.pubkey === sp.reader_pubkey && String(c.serial) === sp.reader_card && c.touch === 'FIXED');
-  $('#spark-unlock-card').innerHTML = cs.length ? cs.map(c => `<option value="${esc(c.reader)}">YubiKey ${c.serial}</option>`).join('') : '<option value="">Registered key not found — insert it and look again</option>';
+  if (!sparkUnlockPending || sparkUnlockPending !== p || p.busy) return;
+  const mine = cs.find(c => c.pubkey === sp.reader_pubkey && String(c.serial) === sp.reader_card && c.touch === 'FIXED');
+  p.other = !mine && cs.length ? cs[0].serial : null;
+  if (mine) p.form = mine.form || p.form;
+  $('#spark-unlock-card').innerHTML = mine ? `<option value="${esc(mine.reader)}">YubiKey ${mine.serial}</option>` : '';
+  const was = p.present; p.present = !!mine;
+  sparkUnlockStage(mine ? 'pin' : 'plug', mine || null);
+  if (mine && !was) $('#spark-unlock-pin').focus();
 }
 function sparkUnlockClose(ok) {
   const p = sparkUnlockPending; if (!p || p.busy) return;
+  clearInterval(p.timer);
   $('#spark-unlock-pin').value = ''; $('#spark-unlock-modal').classList.remove('on'); sparkUnlockPending = null;
   if (p.focus?.isConnected) p.focus.focus(); p.resolve(ok);
 }
-$('#spark-unlock-refresh').onclick = () => sparkUnlockCards().catch(fail);
+$('#spark-unlock-pin').addEventListener('input', () => { const p = sparkUnlockPending; if (p && !p.busy) $('#spark-unlock-go').disabled = !p.present || !$('#spark-unlock-pin').value; });
 $('#spark-unlock-cancel').onclick = () => sparkUnlockClose(false);
 $('#spark-unlock-form').onsubmit = async e => {
   e.preventDefault(); const p = sparkUnlockPending; if (!p || p.busy) return;
   const reader = $('#spark-unlock-card').value; let pin = $('#spark-unlock-pin').value; $('#spark-unlock-pin').value = '';
-  if (!reader || !pin) return toast('Select the registered key and enter its PIN');
-  p.busy = true; $('#spark-unlock-go').disabled = true; $('#spark-unlock-cancel').disabled = true;
-  $('#spark-unlock-note').textContent = 'Touch the YubiKey when it flashes…';
+  if (!reader) return toast('Plug in the registered key first');
+  if (!pin) return toast('Enter the key\u2019s PIN');
+  // a brushed key with Yubico OTP on types a code, not a PIN: nothing is sent, no try is used
+  if (/^[cbdefghijklnrtuv]{32,}$/.test(pin)) { pin = ''; return toast('That was the key typing a one-time code, not a PIN. Nothing was sent to the card and no PIN try was used. Turn off Yubico OTP on this key to stop it happening.', 9000); }
+  p.busy = true; $('#spark-unlock-note').textContent = '';
+  sparkUnlockStage('touch', { serial: p.v.spark.reader_card, form: p.form, nfc: false });
   let opened = false;
   try { const request = invoke('spark_unlock', { name: p.name, reader, pin }); pin = ''; await request; opened = true; }
   catch (e) { $('#spark-unlock-note').textContent = String(e) + ' Check the key before trying again.'; }
-  finally { pin = ''; p.busy = false; $('#spark-unlock-go').disabled = false; $('#spark-unlock-cancel').disabled = false; if (opened) sparkUnlockClose(true); }
+  finally { pin = ''; p.busy = false; if (opened) sparkUnlockClose(true); else { sparkUnlockStage(p.present ? 'pin' : 'plug', p.present ? { serial: p.v.spark.reader_card, form: p.form, nfc: false } : null); $('#spark-unlock-pin').focus(); } }
 };
 document.addEventListener('keydown', e => {
   if (!sparkUnlockPending) return;
   if (e.key === 'Escape') { e.preventDefault(); sparkUnlockClose(false); }
   if (e.key === 'Tab') {
-    const focusable = [...$('#spark-unlock-form').querySelectorAll('button:not(:disabled),input,select')];
+    const focusable = [...$('#spark-unlock-form').querySelectorAll('button:not(:disabled),input:not(:disabled)')].filter(el => !el.closest('[hidden]'));
     const first = focusable[0], last = focusable[focusable.length - 1];
     if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }

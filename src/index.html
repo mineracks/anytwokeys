@@ -591,12 +591,21 @@
 
 <div class="modal" id="spark-unlock-modal" role="dialog" aria-modal="true" aria-labelledby="spark-unlock-title"><form class="box" id="spark-unlock-form">
   <h2 id="spark-unlock-title">Open the Spark reader</h2>
-  <p id="spark-unlock-description"></p>
-  <label>Registered YubiKey<select id="spark-unlock-card"></select></label>
-  <button type="button" class="btn" id="spark-unlock-refresh">Look for the key again</button>
-  <label>Key PIN<input id="spark-unlock-pin" type="password" autocomplete="off" required></label>
-  <div id="spark-unlock-note" class="muted" aria-live="polite"></div>
-  <div class="row"><button type="submit" class="btn primary" id="spark-unlock-go">Open reader — PIN + touch</button><button type="button" class="btn" id="spark-unlock-cancel">Cancel</button></div>
+  <p class="muted" id="spark-unlock-description" style="margin:0;font-size:13.5px"></p>
+  <ol class="gsteps" id="spark-unlock-steps" aria-label="The three steps of opening the reader"><li data-step="plug">Plug in</li><li data-step="pin">Enter PIN</li><li data-step="touch">Touch</li></ol>
+  <div class="guide-row">
+    <div class="guide" id="spark-unlock-guide" aria-hidden="true"></div>
+    <div class="guide-body">
+      <div class="cer-act-title" id="spark-unlock-act">Plug in the registered key</div>
+      <div class="muted" id="spark-unlock-text" style="font-size:13.5px"></div>
+      <div id="spark-unlock-key" class="lock-key off" aria-live="polite"></div>
+      <div class="hold" id="spark-unlock-warn" hidden>Wait for the touch prompt before touching your key. A key with Yubico OTP switched on types a one-time code into whatever has the focus when it is brushed early.</div>
+      <label id="spark-unlock-pin-row">Key PIN<input id="spark-unlock-pin" type="password" autocomplete="off" disabled></label>
+      <div id="spark-unlock-note" class="muted" aria-live="polite"></div>
+    </div>
+  </div>
+  <select id="spark-unlock-card" hidden aria-hidden="true" tabindex="-1"></select>
+  <div class="row" id="spark-unlock-actions"><button type="submit" class="btn primary" id="spark-unlock-go" disabled>Open the reader</button><button type="button" class="btn" id="spark-unlock-cancel">Cancel</button></div>
 </form></div>
 <div class="modal" id="single-modal"><div class="box">
   <div class="row" style="color:var(--no)"><svg width="18" height="18"><use href="#i-warn"/></svg><h2>One key means no way back</h2></div>
