@@ -522,6 +522,20 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .tbl tr.grp td,table.act tr.grp td{padding:16px 8px 5px;border-bottom:1px solid var(--line);background:none;font-family:var(--display);font-weight:600;font-size:13px;color:var(--ink);vertical-align:baseline}
 .tbl tr.grp td .muted,table.act tr.grp td .muted{font-family:var(--serif);font-weight:400;font-size:12.5px;margin-left:10px}
 .tbl tr.grp:first-child td,table.act tr.grp:first-child td{padding-top:6px}
+/* coins chosen on Coins: the bar that says what they add up to and what can be done with them; it stays in view */
+.pickbar{position:sticky;bottom:0;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-top:14px;padding:14px 18px;border:1px solid var(--gold);border-radius:8px;background:var(--panel);box-shadow:0 8px 24px rgba(30,27,23,.08)}
+.pickbar .pb-what{display:flex;flex-direction:column;gap:2px} .pickbar .pb-what b{font-family:var(--display);font-weight:800;font-size:18px;font-variant-numeric:tabular-nums}
+.pickbar .pb-act{display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap} .pickbar .pb-one{display:flex;flex-direction:column;align-items:center;gap:2px} .pickbar .pb-one small{font-size:11.5px}
+.tbl td.tick{width:34px} .tbl td.tick input{width:auto;min-height:0;margin:0;cursor:pointer} .tbl tr.picked td{background:var(--gold-soft)}
+.fromchip{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 14px;border:1px solid var(--gold);border-radius:6px;background:var(--gold-soft);font-size:14px} .fromchip b{font-family:var(--display);font-weight:600} .fromchip .linkish{margin-left:auto}
+/* a combine or a split: the figures first, in one quiet band */
+.strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));padding:14px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.strip > div{padding:0 18px;min-width:0} .strip > div+div{border-left:1px solid var(--line)} .strip > div:first-child{padding-left:0}
+.strip .k{font-family:var(--display);font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)} .strip .v{font-family:var(--display);font-weight:800;font-size:22px;letter-spacing:-.01em;font-variant-numeric:tabular-nums;margin-top:4px} .strip .v small{display:block;font-family:var(--serif);font-weight:400;font-size:12.5px;color:var(--muted)}
+.inlist{display:flex;flex-direction:column;gap:4px} .inlist > div{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap} .inlist .amt{margin-left:auto;font-family:var(--display);font-weight:600;font-variant-numeric:tabular-nums}
+.outs{display:flex;gap:10px;flex-wrap:wrap} .outc{padding:10px 14px;border:1px solid var(--line);border-radius:6px;background:var(--ground);font-family:var(--display);font-weight:600;font-variant-numeric:tabular-nums;font-size:15px;min-width:150px} .outc small{display:block;font-weight:400;font-family:var(--serif);font-size:12.5px;color:var(--muted)}
+.dest{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;gap:6px 14px;align-items:center;font-size:13px} .dest .mono{font-size:12px;word-break:break-all}
+.own-amts{display:flex;gap:8px;flex-wrap:wrap;align-items:center} .own-amts input{width:130px;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);font:inherit;font-variant-numeric:tabular-nums}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
 .seg button{background:none;border:0;padding:6px 11px;font:600 12.5px var(--display);color:var(--muted);cursor:pointer}
 .seg button+button{border-left:1px solid var(--line)}

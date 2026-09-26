@@ -93,6 +93,7 @@ function show(name) {
   $$('#vault-tabs .nav').forEach(n => n.classList.toggle('on', !!inVault && n.dataset.vault === vault.name));
   $('#title').textContent = { overview: 'All vaults', home: vault ? vault.name : 'Vault', activity: 'Activity', send: 'Send', receive: 'Receive', coins: 'Coins', addresses: 'Addresses', vault: 'Vault settings', keys: 'Keys', settings: 'App settings', places: 'Locations', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
   $('#title-edit').hidden = !(name === 'home' && vault); $('#title-input').hidden = true; $('#title').hidden = false;
+  if (name === 'own') $('#title').textContent = ownState.kind === 'split' ? 'Split coin' : 'Combine coins';
   paintCrumbs(name); paintStaged(name);
   $('#side-vault').textContent = vault ? vault.name : 'No vault yet'; $('#side-vault').title = vault ? `These screens are about “${vault.name}”` : '';
   if (checkNode.net !== (vault ? vault.network : store.settings.network)) checkNode();
@@ -108,7 +109,7 @@ function show(name) {
   if (name === 'coins') { recPageClose('coin'); if (vault && !vault._coins) sync().then(() => Promise.resolve(renderAddresses()).then(renderCoins2)); else Promise.resolve(renderAddresses()).then(renderCoins2); }
   if (name === 'vault') renderVaultSettings();
   if (name === 'overview') renderOverview();
-  if (name === 'send') { closeBook(); paintTo(); loadFees(); if (vault && !vault._coins) sync().then(() => { renderCoins(); sendPreview(); }); else { renderCoins(); sendPreview(); } paintExtSend(); }
+  if (name === 'send') { closeBook(); paintTo(); loadFees(); if (vault && !vault._coins) sync().then(() => { renderCoins(); sendPreview(); }); else { renderCoins(); sendPreview(); } paintExtSend(); paintSendFrom(); }
   if (name === 'messages') renderMessages();
   if (name === 'keys') renderKeys();
   if (name === 'tx') renderTx();
@@ -116,6 +117,7 @@ function show(name) {
   if (name === 'restore') restoreTab(restoreTab.now || 'keys');
   if (name === 'settings') renderSettings();
   if (name === 'places') renderLocations();
+  if (name === 'own') renderOwn();
   if (name === 'sign') renderSign();
   void first;
 }
@@ -126,13 +128,14 @@ function paintCrumbs(name) {
   if (['setup', 'restore'].includes(name)) trail.push(['Vaults', store.vaults.length ? 'welcome' : null]);
   else if (!['settings', 'places'].includes(name) && vault) {
     if (name !== 'home') trail.push([vault.name, 'home']);
-    if (name === 'sign') trail.push(paintCrumbs.via === 'messages' ? ['Messages', 'messages'] : ['Send', 'send']);
+    if (name === 'sign') trail.push(paintCrumbs.via === 'messages' ? ['Messages', 'messages'] : paintCrumbs.via === 'own' ? ['Coins', 'coins'] : ['Send', 'send']);
+    if (name === 'own') trail.push(['Coins', 'coins']);
     if (name === 'tx') trail.push(['Activity', 'activity']);
     if ((name === 'coins' && recPage.kind === 'coin') || (name === 'addresses' && recPage.kind === 'addr')) trail.push([name === 'coins' ? 'Coins' : 'Addresses', name]);
     if (name === 'keys' && recPage.kind === 'key') trail.push(['Keys', 'keys']);
   }
   if (name === 'settings' || name === 'places') trail.push(['Any Two Keys', null]);
-  const here = { home: '', send: 'Send', receive: 'Receive', keys: recPage.kind === 'key' ? recPage.leaf : 'Keys', settings: 'App settings', places: 'Locations', setup: 'New vault', restore: 'Restore', sign: 'Sign', messages: 'Messages', tx: name === 'tx' && vault && txView.txid ? txHeadline() : '', coins: recPage.kind === 'coin' ? recPage.leaf : '', addresses: recPage.kind === 'addr' ? recPage.leaf : '' }[name] || '';
+  const here = { home: '', send: 'Send', receive: 'Receive', keys: recPage.kind === 'key' ? recPage.leaf : 'Keys', settings: 'App settings', places: 'Locations', own: ownState.kind === 'split' ? 'Split coin' : 'Combine coins', setup: 'New vault', restore: 'Restore', sign: 'Sign', messages: 'Messages', tx: name === 'tx' && vault && txView.txid ? txHeadline() : '', coins: recPage.kind === 'coin' ? recPage.leaf : '', addresses: recPage.kind === 'addr' ? recPage.leaf : '' }[name] || '';
   const el = $('#crumbs'); el.hidden = !trail.length;
   const html = trail.map(([t, go]) => (go ? `<a tabindex="0" role="link" data-crumb="${go}">${esc(t)}</a>` : `<span>${esc(t)}</span>`) + '<span class="sep">›</span>').join('') + `<span class="here">${esc(here)}</span>`;
   if (el._html !== html) { el._html = html; el.innerHTML = html; }   // a poll must not take focus off a crumb
@@ -1190,16 +1193,143 @@ function renderCoins2() {
   if (!hits.length) tb.innerHTML = `<tr><td class="muted" colspan="5">${all.length ? 'nothing here matches that' : 'no coins yet: nothing has arrived, or nothing is left unspent'}</td></tr>`;
   let lastG = null;
   for (const c of hits) {
-    if (gkey) { const g = gkey(c); if (g !== lastG) { const mine = hits.filter(x => gkey(x) === g); tb.appendChild(groupRow(g, mine.length, mine.reduce((a, x) => a + x.value, 0), true, 5)); lastG = g; } }
-    const k = coinKey(c), addr = coinAddr(c), tip = vault._height || 0, deep = c.height > 0 && tip ? tip - c.height + 1 : 0;
-    const tr = document.createElement('tr'); tr.className = 'rowpick'; tr.dataset.coin = k;
-    tr.innerHTML = `<td><span class="mono">${c.txid.slice(0, 8)}…:${c.vout}</span>${vault._rotating && c.index !== undefined ? ' <span class="muted">· ' + fmtIndex(c.index) + '</span>' : ''}</td><td class="mono" title="${esc(addr)}">${addr ? esc(addr.slice(0, 18)) + '…' : '—'}</td><td>${lblHtml(k)}</td><td class="r" style="font-variant-numeric:tabular-nums">${sats(c.value)} sats</td><td class="r ${c.height > 0 ? 'ok' : 'muted'}">${c.height > 0 ? (deep ? sats(deep) + ' deep' : 'confirmed') : 'unconfirmed'}</td>`;
-    tr.addEventListener('click', (e) => { if (e.target.closest('.lbl')) return; openCoin(c); });
+    if (gkey) { const g = gkey(c); if (g !== lastG) { const mine = hits.filter(x => gkey(x) === g); tb.appendChild(groupRow(g, mine.length, mine.reduce((a, x) => a + x.value, 0), true, 6)); lastG = g; } }
+    const k = coinKey(c), addr = coinAddr(c), tip = vault._height || 0, deep = c.height > 0 && tip ? tip - c.height + 1 : 0, op = c.txid + ':' + c.vout;
+    const tr = document.createElement('tr'); tr.className = 'rowpick' + (coinSel.has(op) ? ' picked' : ''); tr.dataset.coin = k; tr.dataset.op = op;
+    tr.innerHTML = `<td class="tick"><input type="checkbox" data-sel="${op}" ${coinSel.has(op) ? 'checked' : ''} aria-label="Tick this coin"></td><td>${lblHtml(k)}</td><td class="r" style="font-variant-numeric:tabular-nums">${sats(c.value)} sats${(() => { const f = txFacts[vault.name]; return f && f.now && f.ccy ? `<small class="muted" style="display:block;font-size:11.5px">${worth(c.value, f.now, f.ccy)} now</small>` : ''; })()}</td><td><span class="mono">${c.txid.slice(0, 8)}…:${c.vout}</span>${vault._rotating && c.index !== undefined ? ' <span class="muted">· ' + fmtIndex(c.index) + '</span>' : ''}</td><td class="mono" title="${esc(addr)}">${addr ? esc(addr.slice(0, 18)) + '…' : '—'}</td><td class="r ${c.height > 0 ? 'ok' : 'muted'}">${c.height > 0 ? (deep ? sats(deep) + ' deep' : 'confirmed') : 'unconfirmed'}</td>`;
+    tr.addEventListener('click', (e) => { if (e.target.closest('.lbl, input')) return; openCoin(c); });
     tb.appendChild(tr);
   }
   renderCoins2.hits = hits;   // the order ‹ › walks on a coin's page: as listed, filter and all
   const tot = hits.reduce((a, c) => a + c.value, 0);
   $('#coin-count').textContent = `${sats(hits.length)} coin${hits.length === 1 ? '' : 's'} · ${sats(tot)} sats`;
+  const live = new Set(all.map(c => c.txid + ':' + c.vout)); for (const op of [...coinSel]) if (!live.has(op)) coinSel.delete(op);
+  $('#coin-tick-all').checked = hits.length > 0 && hits.every(c => coinSel.has(c.txid + ':' + c.vout));
+  paintCoinBar();
+}
+// ---------- coins ticked on Coins: what they add up to, and what can be done with them ----------
+const coinSel = new Set();
+let sendFrom = false;   // Send was reached from Coins with these coins: say so at the top of the form
+function coinSelList() { return ((vault && vault._coins) || []).filter(c => coinSel.has(c.txid + ':' + c.vout)); }
+function paintCoinBar() {
+  const bar = $('#coin-bar'); if (!bar) return;
+  const cs = coinSelList(), n = cs.length, tot = cs.reduce((a, c) => a + c.value, 0);
+  bar.hidden = !n; if (!n) return;
+  const f = txFacts[vault.name] || {};
+  $('#coin-bar-sum').textContent = `${n} coin${n === 1 ? '' : 's'} · ${sats(tot)} sats`;
+  const labels = cs.map(c => labelOf(coinKey(c))).filter(Boolean);
+  $('#coin-bar-sub').textContent = [f.now && f.ccy ? worth(tot, f.now, f.ccy) + ' now' : '', labels.length ? [...new Set(labels)].slice(0, 3).join(', ') + (labels.length < n ? ` and ${n - labels.length} without a label` : '') : ''].filter(Boolean).join(' · ');
+  $('#coin-combine').disabled = n < 2; $('#coin-combine').title = n < 2 ? 'Tick two or more coins to combine them' : '';
+  $('#coin-split').disabled = n !== 1; $('#coin-split-why').textContent = n === 1 ? '' : 'one coin at a time';
+  $$('#coin-rows tr[data-op]').forEach(tr => tr.classList.toggle('picked', coinSel.has(tr.dataset.op)));
+}
+$('#coin-rows').addEventListener('change', (e) => { const i = e.target.closest('input[data-sel]'); if (!i) return; if (i.checked) coinSel.add(i.dataset.sel); else coinSel.delete(i.dataset.sel); $('#coin-tick-all').checked = (renderCoins2.hits || []).every(c => coinSel.has(c.txid + ':' + c.vout)); paintCoinBar(); });
+$('#coin-tick-all').addEventListener('change', () => { for (const c of renderCoins2.hits || []) { if ($('#coin-tick-all').checked) coinSel.add(c.txid + ':' + c.vout); else coinSel.delete(c.txid + ':' + c.vout); } renderCoins2(); });
+$('#coin-sel-all').onclick = () => { for (const c of renderCoins2.hits || []) coinSel.add(c.txid + ':' + c.vout); renderCoins2(); };
+$('#coin-sel-none').onclick = () => { coinSel.clear(); renderCoins2(); };
+$('#coin-send').onclick = () => { coinPick.clear(); for (const op of coinSel) coinPick.add(op); sendFrom = true; show('send'); };
+$('#coin-combine').onclick = () => openOwn('combine');
+$('#coin-split').onclick = () => openOwn('split');
+// Send, reached from Coins: the coins are ticked in Advanced, Send all is on, and a line at the top says so
+function paintSendFrom() {
+  const box = $('#send-from'); if (!box) return;
+  const cs = ((vault && vault._coins) || []).filter(c => coinPick.has(c.txid + ':' + c.vout));
+  box.hidden = !(sendFrom && cs.length); if (box.hidden) return;
+  const tot = cs.reduce((a, c) => a + c.value, 0), labels = [...new Set(cs.map(c => labelOf(coinKey(c))).filter(Boolean))];
+  $('#send-from-text').innerHTML = `<b>From these ${cs.length} coin${cs.length === 1 ? '' : 's'}</b> · ${sats(tot)} sats${labels.length ? ' · ' + esc(labels.slice(0, 3).join(', ')) : ''}`;
+  $('#coins-adv').open = true; $('#send-all').checked = true; $('#send-amount').disabled = true;
+}
+$('#send-from-change').onclick = () => { for (const op of coinPick) coinSel.add(op); show('coins'); };
+// ---------- combine coins, or split one: back into this vault ----------
+let ownState = { kind: 'combine', count: 4, equal: true, amounts: [], plan: null, err: '', seq: 0 }, ownDone = null;
+function openOwn(kind) {
+  ownState = { kind, count: kind === 'split' ? 4 : 1, equal: true, amounts: [], plan: null, err: '', seq: 0 };
+  show('own');
+}
+const ownCoins = () => coinSelList();
+function ownCountFor() { return ownState.kind === 'split' ? ownState.count : 1; }
+async function renderOwn() {
+  const card = $('#own-card'); if (!vault) return;
+  const cs = ownCoins(), split = ownState.kind === 'split';
+  if (!cs.length || (split && cs.length !== 1) || (!split && cs.length < 2)) { card.innerHTML = `<div class="label">${split ? 'Split coin' : 'Combine coins'}</div><div class="muted">${split ? 'Tick one coin on Coins to split it.' : 'Tick two or more coins on Coins to combine them.'}</div><div class="row"><button class="btn" type="button" data-go="coins">Back to Coins</button></div>`; return; }
+  if (!fees) { try { await loadFees(); } catch {} }
+  const tot = cs.reduce((a, c) => a + c.value, 0);
+  const inRows = cs.slice().sort((a, b) => b.value - a.value).map(c => `<div>${labelOf(coinKey(c)) ? `<b style="font-family:var(--display);font-weight:600">${esc(labelOf(coinKey(c)))}</b>` : '<span class="muted">no label</span>'}<span class="muted"><span class="mono">${c.txid.slice(0, 10)}…:${c.vout}</span>${vault._rotating && c.index !== undefined ? ' · ' + fmtIndex(c.index) : ''}</span><span class="amt">${sats(c.value)} sats</span></div>`).join('');
+  const feeSeg = `<div class="seg" role="radiogroup" aria-label="Fee" id="own-fee">${['slow', 'medium', 'fast', 'custom'].map(l => `<button type="button" role="radio" aria-checked="${feeLevel === l ? 'true' : 'false'}" data-fee-own="${l}">${l === 'custom' ? 'Custom' : l[0].toUpperCase() + l.slice(1)}${fees && l !== 'custom' ? ` · ${fees[l]}` : ''}</button>`).join('')}</div><input id="own-rate" type="text" inputmode="decimal" placeholder="sat/vB" style="width:90px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);font:inherit" ${feeLevel === 'custom' ? '' : 'hidden'} value="${esc($('#fee-custom').value || '')}">`;
+  card.innerHTML = `<div class="strip" id="own-strip"><div><span class="k">Selected amount</span><div class="v">${sats(tot)} sats<small>${cs.length} coin${cs.length === 1 ? '' : 's'}</small></div></div><div><span class="k">Remaining in this vault</span><div class="v" id="own-back">…</div></div><div><span class="k">Network fee</span><div class="v" id="own-fee-v">…</div></div></div>
+    <dl class="tx-dl" style="margin:8px 0 0">
+      <dt>Going in</dt><dd><div class="inlist">${inRows}</div></dd>
+      ${split ? `<dt>Into</dt><dd><div class="row" style="gap:14px"><div class="seg" role="radiogroup" aria-label="How many coins" id="own-count">${[2, 3, 4, 5].map(n => `<button type="button" role="radio" aria-checked="${ownState.count === n && !ownState.custom ? 'true' : 'false'}" data-count="${n}">${n}</button>`).join('')}<button type="button" role="radio" aria-checked="${ownState.custom ? 'true' : 'false'}" data-count="custom">Custom</button></div><input id="own-count-n" type="number" min="2" max="10" value="${ownState.count}" style="width:70px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);font:inherit" ${ownState.custom ? '' : 'hidden'} aria-label="Number of coins"><div class="seg" role="radiogroup" aria-label="Amounts" id="own-mode"><button type="button" role="radio" aria-checked="${ownState.equal ? 'true' : 'false'}" data-mode="equal">Equal after the fee</button><button type="button" role="radio" aria-checked="${ownState.equal ? 'false' : 'true'}" data-mode="mine">Amounts I choose</button></div></div><div class="own-amts" id="own-amts" style="margin-top:8px"></div></dd>` : ''}
+      <dt>Coming out</dt><dd><div class="outs" id="own-outs"></div><div class="muted" id="own-outs-note" style="font-size:12.5px;margin-top:6px"></div></dd>
+      <dt>Fee</dt><dd><div class="row" style="gap:10px;align-items:center">${feeSeg}</div></dd>
+    </dl>
+    <div class="warn" id="own-err" hidden></div>
+    <details class="adv" open id="own-dest-box"><summary>Destination addresses</summary><div class="dest" id="own-dest" style="margin-top:10px"></div><div class="muted" style="font-size:12.5px;margin-top:8px">${vault._rotating ? 'Each is a fresh receive address of this vault, the next ones Receive would hand out.' : 'This vault has one fixed address, so every coin goes back to it.'}</div></details>
+    <div style="font-size:15px;max-width:720px" id="own-say"></div>
+    <div class="muted" style="font-size:13px;max-width:720px">The amount returned to this vault keeps its cost basis${split ? ', shared across the coins by their amounts' : ''}. The network fee is recorded separately. ${vault.ext ? 'A signer with a screen will show every output as this vault\u2019s own.' : 'A YubiKey has no screen of its own, so this card and the review that follows are where you check the destinations and amounts.'}</div>
+    <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-start;margin-top:4px"><div class="row" style="gap:10px"><button class="btn primary" type="button" id="own-build">Build transaction</button><button class="btn" type="button" data-go="coins">Back to Coins</button></div><span class="muted" style="font-size:13px">Next: review, sign with ${vault.keys.length === 1 ? 'the key' : `${vault.threshold} of ${vault.keys.length} keys`}, then broadcast.</span></div>`;
+  $$('#own-fee [data-fee-own]').forEach(b => b.onclick = () => { feeLevel = b.dataset.feeOwn; $$('#fee-pick .opt').forEach(x => x.classList.toggle('on', x.dataset.fee === feeLevel)); $$('#own-fee [data-fee-own]').forEach(x => x.setAttribute('aria-checked', x === b ? 'true' : 'false')); $('#own-rate').hidden = feeLevel !== 'custom'; if (feeLevel === 'custom') $('#own-rate').focus(); ownPreview(); });
+  $('#own-rate').addEventListener('input', () => { $('#fee-custom').value = $('#own-rate').value; paintCustomFee(); ownPreviewSoon(); });
+  if (split) {
+    $$('#own-count [data-count]').forEach(b => b.onclick = () => { if (b.dataset.count === 'custom') { ownState.custom = true; $('#own-count-n').hidden = false; $('#own-count-n').focus(); } else { ownState.custom = false; ownState.count = +b.dataset.count; $('#own-count-n').hidden = true; $('#own-count-n').value = ownState.count; } $$('#own-count [data-count]').forEach(x => x.setAttribute('aria-checked', x === b ? 'true' : 'false')); paintOwnAmounts(); ownPreview(); });
+    $('#own-count-n').addEventListener('input', () => { const n = Math.min(10, Math.max(2, +$('#own-count-n').value || 2)); ownState.count = n; paintOwnAmounts(); ownPreviewSoon(); });
+    $$('#own-mode [data-mode]').forEach(b => b.onclick = () => { ownState.equal = b.dataset.mode === 'equal'; $$('#own-mode [data-mode]').forEach(x => x.setAttribute('aria-checked', x === b ? 'true' : 'false')); paintOwnAmounts(); ownPreview(); });
+    paintOwnAmounts();
+  }
+  $('#own-build').onclick = ownBuild;
+  ownPreview();
+}
+// the amounts of the person's choosing: one field for every coin but the last, which takes the remainder
+function paintOwnAmounts() {
+  const box = $('#own-amts'); if (!box) return;
+  if (ownState.equal) { box.innerHTML = ''; return; }
+  const n = ownCountFor();
+  ownState.amounts = ownState.amounts.slice(0, n - 1); while (ownState.amounts.length < n - 1) ownState.amounts.push(0);
+  box.innerHTML = ownState.amounts.map((a, i) => `<input type="text" inputmode="numeric" data-amt="${i}" value="${a ? sats(a) : ''}" placeholder="coin ${i + 1}, sats" aria-label="Amount of coin ${i + 1}">`).join('') + `<span class="muted" style="font-size:13px">the last coin takes the remainder</span>`;
+  $$('#own-amts [data-amt]').forEach(i => i.addEventListener('input', () => { ownState.amounts[+i.dataset.amt] = +(i.value.replace(/[^0-9]/g, '') || 0); ownPreviewSoon(); }));
+}
+const ownPreviewSoon = () => { clearTimeout(ownPreviewSoon.t); ownPreviewSoon.t = setTimeout(ownPreview, 350); };
+function ownArgs() { return { name: vault.name, coins: [...coinSel], count: ownCountFor(), amounts: ownState.kind === 'split' && !ownState.equal ? ownState.amounts : null, rate: feeRate() }; }
+async function ownPreview() {
+  if (!vault || !$('#s-own').classList.contains('on')) return;
+  const me = ++ownState.seq, a = ownArgs();
+  if (!a.rate) { paintOwnPlan(null, 'Give a fee rate in sats per virtual byte, or choose Slow, Medium or Fast'); return; }
+  if (a.amounts && a.amounts.some(x => !x)) { paintOwnPlan(null, 'Give an amount for every coin but the last'); return; }
+  try { const p = await invoke('spend_preview_own', a); if (me !== ownState.seq) return; paintOwnPlan(p, ''); }
+  catch (e) { if (me !== ownState.seq) return; paintOwnPlan(null, String(e && e.message ? e.message : e)); }
+}
+function paintOwnPlan(p, err) {
+  ownState.plan = p; ownState.err = err;
+  const f = txFacts[vault.name] || {}, split = ownState.kind === 'split';
+  $('#own-err').hidden = !err; $('#own-err').textContent = err;
+  $('#own-build').disabled = !p;
+  if (!p) { $('#own-back').textContent = '—'; $('#own-fee-v').textContent = '—'; $('#own-outs').innerHTML = ''; $('#own-outs-note').textContent = ''; $('#own-dest').innerHTML = ''; $('#own-say').textContent = ''; return; }
+  $('#own-back').innerHTML = `${sats(p.back)} sats<small>as ${p.outs.length === 1 ? 'one coin' : p.outs.length + ' coins'}</small>`;
+  $('#own-fee-v').innerHTML = `${sats(p.fee)} sats<small>${feeRate()} sat/vB · ${sats(p.vsize)} vB${f.now && f.ccy ? ' · about ' + worth(p.fee, f.now, f.ccy) : ''}</small>`;
+  $('#own-outs').innerHTML = p.outs.map((o, i) => `<div class="outc">${sats(o.sats)} sats<small>${vault._rotating ? '#' + o.index : 'the vault\u2019s address'}${!ownState.equal && i === p.outs.length - 1 && split ? ' · the remainder' : ''}</small></div>`).join('');
+  const lo = Math.min(...p.outs.map(o => o.sats)), hi = Math.max(...p.outs.map(o => o.sats));
+  $('#own-outs-note').textContent = split ? (ownState.equal ? (hi > lo ? 'The amount did not divide evenly, so they differ by one sat.' : 'Equal, after the fee.') : 'The last coin takes what is left after the fee.') : 'Everything, less the fee, as one coin.';
+  $('#own-dest').innerHTML = p.outs.map(o => `<span class="muted">#${o.index}</span><span class="mono">${esc(o.address)}</span><span style="font-family:var(--display);font-weight:600;font-variant-numeric:tabular-nums">${sats(o.sats)} sats</span><button class="btn small" type="button" data-copy="${encodeURIComponent(o.address)}">Copy</button>`).join('');
+  const cs = ownCoins(), labels = [...new Set(cs.map(c => labelOf(coinKey(c))).filter(Boolean))], change = cs.filter(c => c.index !== undefined && c.index >= CHANGE).length;
+  $('#own-say').textContent = split ? 'Smaller coins give you more control over how much you spend later. They will still share a visible history: anyone who sees one can see the split it came from.'
+    : `Spending these coins together publicly links them, and can show that they are controlled together.${labels.length > 1 ? ` They carry different labels — ${labels.slice(0, 3).join(', ')}.` : ''}${change ? ` ${change === 1 ? 'One came' : change + ' came'} back as change from another payment.` : ''}`;
+}
+async function ownBuild() {
+  if (!ownState.plan) return;
+  $('#own-build').disabled = true;
+  try {
+    built = await invoke('spend_build_own', ownArgs());
+    ownDone = { kind: ownState.kind, n: ownCoins().length, count: built ? ownState.plan.outs.length : 0, spending: ownState.plan.spending, txid: built.txid, vault: vault.name };
+    paintCrumbs.via = 'own'; show('sign');
+  } catch (e) { fail(e); $('#own-build').disabled = false; }
+}
+// after a combine or a split is broadcast, its coins and its row say what they are
+async function ownLabels(txid) {
+  if (!ownDone || ownDone.txid !== txid || !vault || vault.name !== ownDone.vault) return;
+  const d = ownDone; ownDone = null; coinSel.clear();
+  const tx = d.kind === 'split' ? `Split one coin into ${d.count}` : `Combined ${d.n} coins into one`;
+  const out = d.kind === 'split' ? `Split from one coin of ${sats(d.spending)} sats` : `Combined from ${d.n} coins`;
+  try { if (!labelOf('tx:' + txid)) store = await invoke('label_set', { name: d.vault, key: 'tx:' + txid, label: tx }); for (let k = 0; k < d.count; k++) store = await invoke('label_set', { name: d.vault, key: 'output:' + txid + ':' + k, label: out }); labelsSync(); vault = store.vaults.find(x => x.name === vault.name) || vault; } catch {}
 }
 $('#coin-find').addEventListener('input', renderCoins2);
 // ---------- a report of the whole vault, to print or keep ----------
@@ -2148,7 +2278,7 @@ function paintCustomFee() {
 }
 $('#fee-custom').addEventListener('input', paintCustomFee);
 $('#fee-pick').addEventListener('click', (e) => { const o = e.target.closest('.opt'); if (!o) return; feeLevel = o.dataset.fee; $$('#fee-pick .opt').forEach(x => x.classList.toggle('on', x === o)); paintCustomFee(); if (feeLevel === 'custom') $('#fee-custom').focus(); });
-$('#send-all').onchange = () => { $('#send-amount').disabled = $('#send-all').checked; };
+$('#send-all').onchange = () => { $('#send-amount').disabled = $('#send-all').checked; if (!$('#send-all').checked) $('#send-amount').value = ''; };
 // ---------- what this spend would do, worked out before anything is built ----------
 // The same choice `build` makes (wallet::select answers both), so what is shown here and what gets signed cannot
 // drift apart. Two questions matter and only one of them is on the chain: where the money goes, and what it cost.
@@ -2189,11 +2319,12 @@ function paintReview() {
   if (sendPrevErr) { box.innerHTML = `<div class="warn" style="font-size:14px">${esc(sendPrevErr)}</div>`; return; }
   if (!sendPrev) { box.innerHTML = '<div class="muted">Fill in the destination and amount to see what this spend would do.</div>'; return; }
   const ch = sendPrev.choice, ours = sendPrev.to_ours, k = leavingCost();
+  if (f.all && $('#send-amount').disabled) $('#send-amount').value = sats(ch.send);   // what the recipient gets, read only while Send all is on
   const money_ = (v) => k && k.ccy && v !== null && v !== undefined ? money(v, k.ccy) : null;
   const row = (a, b) => `<div class="row" style="justify-content:space-between;gap:12px"><span class="muted">${a}</span><span style="text-align:right">${b}</span></div>`;
   let out = `<div style="display:flex;flex-direction:column;gap:8px;font-size:14px">
     ${row('To', `<span class="mono">${esc(f.to.slice(0, 10))}…${esc(f.to.slice(-6))}</span>`)}
-    ${row('Amount', f.all ? 'everything' : sats(ch.send) + ' sats')}
+    ${row('Amount', f.all ? sats(ch.send) + ' sats — everything, less the fee' : sats(ch.send) + ' sats')}
     ${row('Coins', `${ch.chosen.length}${coinPick.size ? ' chosen by you' : ' picked by the app'} · ${sats(ch.spending)} sats`)}
     ${row('Fee', `${sats(ch.fee)} sats · ${ch.vsize} vB`)}
     ${row('Change back to vault', sats(ch.change) + ' sats')}`;
@@ -2522,12 +2653,12 @@ $('#psbt-paste-toggle').onclick = () => { $('#psbt-paste').hidden = !$('#psbt-pa
 $('#psbt-load').onclick = () => { const t = $('#psbt-text').value.trim(); if (!t) return toast('Paste the PSBT first'); loadPsbt(t); };
 $('#copy-psbt').onclick = async () => { try { const st = await invoke('store_get'); if (!st.last_psbt) return toast('No spend in progress'); await navigator.clipboard.writeText(st.last_psbt); toast('PSBT copied (base64)'); } catch (e) { fail(e); } };
 askTwice($('#staged-discard'), 'Discard the transaction that is waiting for signatures? Nothing has been sent; any signatures on it are lost.', 'Yes, discard it', async () => { await invoke('spend_discard'); built = null; location.reload(); });
-$('#sign-cancel').onclick = async () => { await invoke('spend_discard'); built = null; coinPick.clear(); $('#build-btn').textContent = 'Build transaction'; $('#build-btn').onclick = null; show('send'); location.reload(); };
+$('#sign-cancel').onclick = async () => { await invoke('spend_discard'); built = null; ownDone = null; coinPick.clear(); $('#build-btn').textContent = 'Build transaction'; $('#build-btn').onclick = null; show('send'); location.reload(); };
 $('#broadcast-btn').onclick = async () => {
   $('#broadcast-btn').disabled = true;
   try { // who is being paid is read from the transaction itself, not from what the Send form remembered: a spend loaded from a file, or finished after a relaunch, counts too
     let dests = []; try { dests = (await invoke('spend_ceremony', { name: vault.name })).pays.filter(p => !p.ours).map(p => p.address.toLowerCase()); } catch {}
-    const r = await invoke('spend_broadcast', { name: vault.name }); vault._stale = true; const paid = bookOf().find(c => dests.includes(c.address.toLowerCase()));
+    const r = await invoke('spend_broadcast', { name: vault.name }); vault._stale = true; await ownLabels(r.txid); const paid = bookOf().find(c => dests.includes(c.address.toLowerCase()));
     if (paid) { try { store = await invoke('contact_used', { address: paid.address, network: vault.network }); if (!labelOf('tx:' + r.txid)) await invoke('label_set', { name: vault.name, key: 'tx:' + r.txid, label: 'to ' + paid.name }); } catch {} }
     built = null; coinPick.clear(); toast('Sent. ' + r.txid.slice(0, 16) + '…', 8000); $('#broadcast-text').innerHTML = `Broadcast. <a href="#" data-tx="${r.txid}">${r.txid}</a>`; setTimeout(() => show('home'), 2500); }
   catch (e) { fail(e); $('#broadcast-btn').disabled = false; }
@@ -2618,7 +2749,7 @@ function planPick(plan) {
 function coinSum() { const n = coinPick.size; const tot = ((vault && vault._coins) || []).filter(c => coinPick.has(c.txid + ':' + c.vout)).reduce((a, c) => a + c.value, 0); $('#coin-sum').textContent = n ? `${n} coin${n === 1 ? '' : 's'} ticked · ${sats(tot)} sats` : 'none ticked: the app picks'; }
 $('#coin-list').addEventListener('change', (e) => { const i = e.target.closest('[data-op]'); if (!i) return; if (i.checked) coinPick.add(i.dataset.op); else coinPick.delete(i.dataset.op); coinSum(); sendPreview(); });
 $('#coins-all').onclick = () => { ((vault && vault._coins) || []).forEach(c => coinPick.add(c.txid + ':' + c.vout)); renderCoins(); sendPreview(); };
-$('#coins-none').onclick = () => { coinPick.clear(); renderCoins(); sendPreview(); };
+$('#coins-none').onclick = () => { coinPick.clear(); sendFrom = false; paintSendFrom(); renderCoins(); sendPreview(); };
 $('#coin-plans') && $('#coin-plans').addEventListener('click', (e) => { const b = e.target.closest('[data-plan]'); if (b) planPick(b.dataset.plan); });
 $('#consolidate').onclick = () => {
   if (!coinPick.size) ((vault && vault._coins) || []).forEach(c => coinPick.add(c.txid + ':' + c.vout));

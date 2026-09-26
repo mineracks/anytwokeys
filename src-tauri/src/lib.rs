@@ -1200,6 +1200,35 @@ async fn spend_build(name: String, to: String, amount: u64, rate: f64, send_all:
     }).await
 }
 
+/// Coins spent back into this vault — combine (count 1) or split (count 2..10): what it would do, before anything is built.
+#[tauri::command]
+async fn spend_preview_own(name: String, coins: Vec<String>, count: u32, amounts: Option<Vec<u64>>, rate: f64) -> R<wallet::OwnPlan> {
+    block(move || {
+        let s = wallet::load()?;
+        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+        watch_only(&v)?;
+        let servers = wallet::servers_for(&s, &v.network);
+        let sc = wallet::scan(&v, &servers, s.settings.gap)?;
+        wallet::plan_own(&v, &sc.coins, sc.next, &coins, count, amounts.as_deref(), rate)
+    }).await
+}
+/// The same, built: the PSBT is kept as the spend in progress, and Sign takes it from there like any other.
+#[tauri::command]
+async fn spend_build_own(name: String, coins: Vec<String>, count: u32, amounts: Option<Vec<u64>>, rate: f64) -> R<wallet::Built> {
+    block(move || {
+        let s = wallet::load()?;
+        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+        watch_only(&v)?;
+        let servers = wallet::servers_for(&s, &v.network);
+        let sc = wallet::scan(&v, &servers, s.settings.gap)?;
+        let plan = wallet::plan_own(&v, &sc.coins, sc.next, &coins, count, amounts.as_deref(), rate)?;
+        let b = wallet::build_own(&v, &sc.coins, &plan)?;
+        let (n, sm, nc, smc, psbt) = (sc.next, sc.scan_max.max(sc.next), sc.next_change, sc.scan_max_change.max(sc.next_change), b.psbt.clone());
+        wallet::update(|s| { if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == v.name) { vm.next = n; vm.scan_max = sm; vm.next_change = nc; vm.scan_max_change = smc; } s.last_psbt = Some(psbt); s.last_message = None; })?;
+        Ok(b)
+    }).await
+}
+
 /// An address that belongs to a vault this app holds: the spend stays with the owner, so nothing is disposed of.
 #[derive(Serialize)]
 struct Owned { vault: String, index: u32, chain: String, this_vault: bool }
@@ -2267,7 +2296,7 @@ fn seal_restore(id: String, name: String, found: Vec<Found>) -> R<Vault> {
 // ---------- labels (BIP 329) ----------
 #[tauri::command]
 async fn label_set(name: String, key: String, label: String) -> R<Store> {
-    if !(key.starts_with("addr:") || key.starts_with("tx:") || key.starts_with("out:") || key.starts_with("key:")) { return Err("label key must be addr:, tx:, out: or key:".into()); }
+    if !(key.starts_with("addr:") || key.starts_with("tx:") || key.starts_with("out:") || key.starts_with("output:") || key.starts_with("key:")) { return Err("label key must be addr:, tx:, out:, output: or key:".into()); }
     let nm = name.clone();
     wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) {
         let label = label.trim().to_string();
@@ -2297,7 +2326,7 @@ async fn note_set(name: String, key: String, note: String) -> R<Store> {
 #[derive(Serialize)]
 struct Attached { store: Store, added: usize, notes: Vec<String>, errors: Vec<String> }
 
-fn record_key_ok(key: &str) -> R<()> { if key.starts_with("addr:") || key.starts_with("tx:") || key.starts_with("out:") || key.starts_with("key:") { Ok(()) } else { Err("the record key must be addr:, tx: or out:".into()) } }
+fn record_key_ok(key: &str) -> R<()> { if key.starts_with("addr:") || key.starts_with("tx:") || key.starts_with("out:") || key.starts_with("output:") || key.starts_with("key:") { Ok(()) } else { Err("the record key must be addr:, tx: or out:".into()) } }
 
 async fn attach_into(name: String, key: String, items: Vec<(String, Vec<u8>)>, keep_original: bool, mut errors: Vec<String>) -> R<Attached> {
     record_key_ok(&key)?;
@@ -2719,7 +2748,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
-            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
+            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
         .build(tauri::generate_context!())

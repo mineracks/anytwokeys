@@ -934,6 +934,86 @@ pub fn build(vault: &Vault, coins: &[CoinAt], change_index: u32, to: &str, amoun
     Ok(Built { txid: psbt.unsigned_tx.compute_txid().to_string(), psbt: psbt.to_string(), fee, vsize, change, inputs: chosen.len(), chosen: ch.chosen })
 }
 
+// ---------- coins spent back into the vault: combine many into one, or split one into several ----------
+
+/// One output back into the vault: the receive index it goes to, its address, and its amount.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct OwnOut { pub index: u32, pub address: String, pub sats: u64 }
+/// What a combine or a split would do, worked out before anything is built — the same arithmetic `build_own` uses.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct OwnPlan { pub chosen: Vec<String>, pub spending: u64, pub fee: u64, pub vsize: u64, pub outs: Vec<OwnOut>, pub back: u64 }
+
+/// The smallest coin worth making: below this a P2WSH output is dust to most nodes.
+pub const OWN_DUST: u64 = 546;
+fn sats_text(n: u64) -> String { let d: Vec<char> = n.to_string().chars().collect(); let mut o = String::new(); for (i, c) in d.iter().enumerate() { if i > 0 && (d.len() - i) % 3 == 0 { o.push(','); } o.push(*c); } o }
+
+/// Plan the coins in `pick` spent back into this vault as `count` coins, at `rate` sat/vB, to the vault's next fresh
+/// receive addresses from `receive_index`. `amounts`: for a split of the person's own amounts, one for every coin but
+/// the last, which takes the remainder; `None` means equal after the fee — the division's remainder is spread one sat
+/// at a time from the first, so no two coins differ by more than one sat. Every coin must clear dust.
+pub fn plan_own(vault: &Vault, coins: &[CoinAt], receive_index: u32, pick: &[String], count: u32, amounts: Option<&[u64]>, rate: f64) -> Result<OwnPlan, String> {
+    if !(1..=10).contains(&count) { return Err("between one and ten coins".into()); }
+    if pick.is_empty() { return Err("choose at least one coin".into()); }
+    if !(rate > 0.0) { return Err("give a fee rate".into()); }
+    let mut chosen: Vec<&CoinAt> = Vec::new();
+    for op in pick { chosen.push(coins.iter().find(|c| format!("{}:{}", c.txid, c.vout) == *op).ok_or_else(|| format!("coin {op} is not in the vault any more; sync and choose again"))?); }
+    let have: u64 = chosen.iter().map(|c| c.value).sum();
+    let network = network_of(&vault.network);
+    let rot = rotates(vault);
+    let (mut outs, mut out_vb) = (Vec::new(), 0u64);
+    for k in 0..count {
+        // a vault with one fixed address has nowhere else to put them: every coin goes back to that address
+        let index = if rot { receive_index + k } else { 0 };
+        let spk = parse(&descriptor_at(vault, index)?)?.at_derivation_index(0).map_err(|e| e.to_string())?.script_pubkey();
+        out_vb += 9 + spk.len() as u64;
+        outs.push(OwnOut { index, address: Address::from_script(&spk, network).map_err(|e| e.to_string())?.to_string(), sats: 0 });
+    }
+    let vsize = 11 + in_vbytes(vault.threshold, vault.keys.len()) * chosen.len() as u64 + out_vb;
+    let fee = (rate * vsize as f64).ceil() as u64;
+    if have < fee + OWN_DUST * count as u64 { return Err(format!("{} sats does not cover a {} sat fee and {count} coin{} worth keeping", sats_text(have), sats_text(fee), if count == 1 { "" } else { "s" })); }
+    let back = have - fee;
+    match amounts {
+        None => { let (each, rem) = (back / count as u64, back % count as u64); for (k, o) in outs.iter_mut().enumerate() { o.sats = each + u64::from((k as u64) < rem); } }
+        Some(a) => {
+            if a.len() + 1 != count as usize { return Err("give an amount for every coin but the last".into()); }
+            let given: u64 = a.iter().sum();
+            if given + OWN_DUST > back { return Err(format!("those amounts leave less than {OWN_DUST} sats for the last coin: {} sats comes back after the fee", sats_text(back))); }
+            for (k, o) in outs.iter_mut().enumerate() { o.sats = if k < a.len() { a[k] } else { back - given }; }
+            if outs.iter().any(|o| o.sats < OWN_DUST) { return Err(format!("every coin must be at least {OWN_DUST} sats")); }
+        }
+    }
+    Ok(OwnPlan { chosen: pick.to_vec(), spending: have, fee, vsize, outs, back })
+}
+
+/// The transaction a plan describes: the chosen coins in, the planned coins out, every output described to the
+/// signers as the vault's own where the vault's descriptor allows it (a signer with a screen then shows them as yours).
+pub fn build_own(vault: &Vault, coins: &[CoinAt], plan: &OwnPlan) -> Result<Built, String> {
+    let n = vault.keys.len();
+    let mut chosen: Vec<&CoinAt> = Vec::new();
+    for op in &plan.chosen { chosen.push(coins.iter().find(|c| format!("{}:{}", c.txid, c.vout) == *op).ok_or("a chosen coin went missing")?); }
+    let mut tx = Transaction { version: transaction::Version::TWO, lock_time: absolute::LockTime::ZERO, input: vec![], output: vec![] };
+    for c in &chosen {
+        let txid = bitcoin::Txid::from_str(&c.txid).map_err(|e| e.to_string())?;
+        tx.input.push(TxIn { previous_output: OutPoint { txid, vout: c.vout }, script_sig: ScriptBuf::new(), sequence: Sequence::from_consensus(0xFFFFFFFD), witness: Witness::new() });
+    }
+    for o in &plan.outs {
+        let spk = parse(&descriptor_at(vault, o.index)?)?.at_derivation_index(0).map_err(|e| e.to_string())?.script_pubkey();
+        tx.output.push(TxOut { value: Amount::from_sat(o.sats), script_pubkey: spk });
+    }
+    let mut psbt = Psbt::from_unsigned_tx(tx).map_err(|e| e.to_string())?;
+    for (i, c) in chosen.iter().enumerate() {
+        let d = parse(&descriptor_at(vault, c.index)?)?.at_derivation_index(0).map_err(|e| e.to_string())?;
+        psbt.inputs[i].witness_utxo = Some(TxOut { value: Amount::from_sat(c.value), script_pubkey: d.script_pubkey() });
+        if n > 1 { psbt.inputs[i].witness_script = Some(d.explicit_script().map_err(|e| e.to_string())?); }
+    }
+    if let Some(ext) = &vault.ext {
+        for (i, c) in chosen.iter().enumerate() { psbt.update_input_with_descriptor(i, &ext_definite(ext, c.index)?).map_err(|e| format!("input {}: {e}", i + 1))?; }
+        for (k, o) in plan.outs.iter().enumerate() { psbt.update_output_with_descriptor(k, &ext_definite(ext, o.index)?).map_err(|e| format!("output {}: {e}", k + 1))?; }
+    }
+    strip_pathless(&mut psbt);
+    Ok(Built { txid: psbt.unsigned_tx.compute_txid().to_string(), psbt: psbt.to_string(), fee: plan.fee, vsize: plan.vsize, change: 0, inputs: chosen.len(), chosen: plan.chosen.clone() })
+}
+
 pub struct ToSign { pub input: usize, pub digest: [u8; 32], pub tweak: Option<[u8; 32]>, pub child: String }
 
 /// Which inputs a card with this base pubkey can still sign, with the digest and, for a
@@ -1179,6 +1259,46 @@ mod ext_tests {
         }
     }
     // expected addresses computed by embit, the library SeedSigner uses — not by this app
+    // ---- coins spent back into the vault ----
+    fn coin(n: u8, value: u64, index: u32) -> CoinAt { CoinAt { txid: format!("{:02x}", n).repeat(32), vout: 0, value, height: 900_000, index } }
+    fn sm_vault() -> Vault { vault_of(fixtures()["sortedmulti"]["descriptor"].as_str().unwrap()) }
+    #[test] fn a_split_into_equal_parts_is_equal_after_the_fee_to_within_one_sat_and_sums_exactly() {
+        let v = sm_vault(); let coins = vec![coin(1, 2_000_000, 0)];
+        let p = plan_own(&v, &coins, 7, &["01".repeat(32) + ":0"], 4, None, 3.1).unwrap();
+        assert_eq!(p.outs.len(), 4); assert_eq!(p.outs.iter().map(|o| o.sats).sum::<u64>(), 2_000_000 - p.fee); assert_eq!(p.back, 2_000_000 - p.fee);
+        let (lo, hi) = (p.outs.iter().map(|o| o.sats).min().unwrap(), p.outs.iter().map(|o| o.sats).max().unwrap()); assert!(hi - lo <= 1, "{lo}..{hi}");
+        assert_eq!(p.outs.iter().map(|o| o.index).collect::<Vec<_>>(), vec![7, 8, 9, 10], "fresh receive addresses from the next unused, in order");
+        let addrs: std::collections::HashSet<_> = p.outs.iter().map(|o| o.address.clone()).collect(); assert_eq!(addrs.len(), 4);
+        // a remainder that does not divide: the first coins take the extra sat, one each
+        let q = plan_own(&v, &coins, 7, &["01".repeat(32) + ":0"], 3, None, 3.1).unwrap();
+        let rem = q.back % 3; assert_eq!(q.outs.iter().filter(|o| o.sats == q.back / 3 + 1).count() as u64, rem); assert_eq!(q.outs.iter().map(|o| o.sats).sum::<u64>(), q.back);
+    }
+    #[test] fn amounts_of_the_persons_choosing_leave_the_remainder_to_the_last_and_refuse_dust() {
+        let v = sm_vault(); let coins = vec![coin(1, 2_000_000, 0)]; let pick = ["01".repeat(32) + ":0"];
+        let p = plan_own(&v, &coins, 0, &pick, 4, Some(&[500_000, 400_000, 300_000]), 3.1).unwrap();
+        assert_eq!(p.outs.iter().map(|o| o.sats).collect::<Vec<_>>(), vec![500_000, 400_000, 300_000, p.back - 1_200_000]);
+        assert!(plan_own(&v, &coins, 0, &pick, 4, Some(&[500_000, 400_000]), 3.1).unwrap_err().contains("every coin but the last"));
+        assert!(plan_own(&v, &coins, 0, &pick, 2, Some(&[1_999_900]), 3.1).unwrap_err().contains("less than 546"));
+        assert!(plan_own(&v, &coins, 0, &pick, 2, Some(&[100]), 3.1).unwrap_err().contains("at least 546"));
+        assert!(plan_own(&v, &[coin(2, 900, 0)], 0, &["02".repeat(32) + ":0"], 1, None, 3.1).unwrap_err().contains("does not cover"));
+        assert!(plan_own(&v, &coins, 0, &pick, 11, None, 3.1).is_err() && plan_own(&v, &coins, 0, &pick, 0, None, 3.1).is_err());
+    }
+    #[test] fn a_combine_is_one_coin_of_everything_less_the_fee_and_the_psbt_describes_every_output_as_the_vaults_own() {
+        let v = sm_vault(); let coins = vec![coin(1, 212_450, 0), coin(2, 118_900, 1), coin(3, 81_530, CHANGE | 0)];
+        let pick: Vec<String> = coins.iter().map(|c| format!("{}:0", c.txid)).collect();
+        let p = plan_own(&v, &coins, 23, &pick, 1, None, 3.1).unwrap();
+        assert_eq!(p.outs.len(), 1); assert_eq!(p.outs[0].sats, 412_880 - p.fee); assert_eq!(p.outs[0].index, 23); assert!(p.fee > 0 && p.vsize > 0);
+        let b = build_own(&v, &coins, &p).unwrap();
+        let psbt = Psbt::from_str(&b.psbt).unwrap();
+        assert_eq!(psbt.unsigned_tx.input.len(), 3); assert_eq!(psbt.unsigned_tx.output.len(), 1); assert_eq!(psbt.unsigned_tx.output[0].value.to_sat(), p.outs[0].sats);
+        assert!(psbt.inputs.iter().all(|i| i.witness_utxo.is_some() && i.witness_script.is_some()));
+        assert!(!psbt.outputs[0].bip32_derivation.is_empty(), "the output carries its derivation, so a signer with a screen knows it is the vault's own");
+        assert_eq!(b.change, 0); assert_eq!(b.fee, p.fee); assert_eq!(b.txid, psbt.unsigned_tx.compute_txid().to_string());
+        // a split's PSBT likewise, one described output per coin
+        let q = plan_own(&v, &coins, 23, &pick[..1], 4, None, 2.0).unwrap(); let bb = build_own(&v, &coins, &q).unwrap();
+        let ps = Psbt::from_str(&bb.psbt).unwrap(); assert_eq!(ps.unsigned_tx.output.len(), 4); assert!(ps.outputs.iter().all(|o| !o.bip32_derivation.is_empty()));
+        assert!(ps.unsigned_tx.output.iter().map(|o| o.value.to_sat()).sum::<u64>() == 212_450 - q.fee);
+    }
     #[test] fn a_sortedmulti_xpub_wallet_derives_what_embit_derives() { check_against_embit("sortedmulti"); }
     #[test] fn a_multi_wallet_keeps_its_key_order_and_derives_what_embit_derives() { check_against_embit("multi"); }
     #[test] fn a_single_key_xpub_wallet_derives_what_embit_derives() { check_against_embit("wpkh"); }

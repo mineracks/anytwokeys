@@ -125,9 +125,14 @@
           <div class="row" style="gap:10px;align-items:center"><input id="coin-find" placeholder="Find a label or an address" autocomplete="off" spellcheck="false" style="max-width:260px" aria-label="Find a coin"><span class="muted" style="font-size:13px" id="coin-count"></span></div>
         </div>
         <div id="coin-ctl"></div>
-        <table class="tbl" id="coin-table" style="margin-top:12px"><thead><tr><th>Coin</th><th>Address</th><th>Label</th><th class="r">Amount</th><th class="r">Status</th></tr></thead><tbody id="coin-rows"><tr><td class="muted" colspan="5">syncing…</td></tr></tbody></table>
-        <div class="muted" style="font-size:13px;margin-top:12px">A coin is one unspent output — one arrival that has not been spent on. Click one to keep a note, a photo or a file with it: an invoice for what it paid for, where it came from, why it is being kept back. Which coins a spend uses is chosen on Send, under Advanced.</div>
+        <table class="tbl" id="coin-table" style="margin-top:12px"><thead><tr><th style="width:34px"><input type="checkbox" id="coin-tick-all" aria-label="Tick every coin listed" style="width:auto;min-height:0;margin:0"></th><th>Label</th><th class="r">Amount</th><th>Coin</th><th>Address</th><th class="r">Status</th></tr></thead><tbody id="coin-rows"><tr><td class="muted" colspan="6">syncing…</td></tr></tbody></table>
+        <div class="row" style="justify-content:space-between;align-items:flex-start;margin-top:10px;gap:14px"><div class="row" style="gap:12px;flex:0 0 auto"><button class="linkish" type="button" id="coin-sel-all">Select all</button><button class="linkish" type="button" id="coin-sel-none">Clear</button></div><div class="muted" style="font-size:13px">A coin is one unspent output — one arrival that has not been spent on. Click one to keep a note, a photo or a file with it. Tick coins to send them, combine them into one, or split one into several.</div></div>
+        <div class="pickbar" id="coin-bar" hidden><div class="pb-what"><b id="coin-bar-sum"></b><span class="muted" id="coin-bar-sub" style="font-size:13px"></span></div><div class="pb-act"><button class="btn" type="button" id="coin-send">Send these</button><button class="btn" type="button" id="coin-combine">Combine coins</button><span class="pb-one"><button class="btn" type="button" id="coin-split">Split coin</button><small class="muted" id="coin-split-why"></small></span></div></div>
       </div>
+    </section>
+
+    <section id="s-own" class="screen">
+      <div class="card" id="own-card" style="max-width:940px"></div>
     </section>
 
     <section id="s-addresses" class="screen">
@@ -200,6 +205,7 @@
     <section id="s-send" class="screen">
       <div class="split">
         <div style="display:flex;flex-direction:column;gap:18px">
+          <div class="fromchip" id="send-from" hidden><span id="send-from-text"></span><button class="linkish" type="button" id="send-from-change">Change selected coins</button></div>
           <div class="field"><div class="label">To</div><div class="row" style="gap:8px;flex-wrap:nowrap"><input id="send-to" class="mono" placeholder="bc1q… or tb1q…" spellcheck="false" style="flex-grow:1"><button class="btn icon" id="book-to" title="Address book" aria-expanded="false" aria-controls="book"><svg width="18" height="18"><use href="#i-book"/></svg></button><button class="btn icon" id="paste-to" title="Paste address"><svg width="18" height="18"><use href="#i-paste"/></svg></button><button class="btn icon" id="scan-to" title="Scan a QR code"><svg width="18" height="18"><use href="#i-camera"/></svg></button></div><div class="to-who" id="to-who" hidden></div><div class="book" id="book" hidden></div></div>
           <div class="grid2">
             <div class="field"><div class="label">Amount, sats</div><input id="send-amount" inputmode="numeric" placeholder="5000"><label class="muted" style="display:flex;gap:8px;align-items:center;font-size:13px"><input type="checkbox" id="send-all" style="width:auto;min-height:0"> send everything</label></div>
