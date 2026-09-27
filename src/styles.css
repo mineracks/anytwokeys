@@ -551,6 +551,9 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .tp .tp-act{display:flex;gap:6px;flex:0 0 auto}
 .tp-group{margin-top:12px;border:1px solid var(--line);border-radius:8px;padding:6px 12px 10px} .tp-group .tp-group-head{font-size:13px;color:var(--muted);padding:6px 0 4px} .tp-group .tp{padding:8px 0}
 .tp-list{margin-top:6px}
+.tp.rowpick{cursor:pointer} .tp.rowpick:hover{background:var(--gold-soft);margin:0 -10px;padding-left:10px;padding-right:10px;border-radius:6px}
+.tp .tp-art{flex:0 0 40px;width:40px;display:flex;align-items:center;justify-content:center;color:var(--gold)} .tp .tp-art svg{width:26px;height:26px}
+.ent-kind{font-family:var(--display);font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:14px 0 4px}
 .kpi{padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
 .kpi .k{font:600 11px var(--display);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
