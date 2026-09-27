@@ -399,6 +399,25 @@ mod tests {
         assert!(j.view.links.get("Cold").map(|m| m.is_empty()).unwrap_or(true));
         assert_eq!(j.view.proposals.len(), 2); assert!(j.view.proposals.iter().all(|p| p.pair.exact && !p.unique), "{:?}", j.view.proposals.iter().map(|p| (p.pair.exact, p.unique)).collect::<Vec<_>>());
     }
+    #[test] fn a_snapshot_taken_before_withdrawals_carried_their_amount_links_at_the_next_reconcile() {
+        // the cache on disk: the exchange's rows with no `paid` (an older app wrote them); the store: the account itself
+        let mut i = Index::default();
+        let mut ex = snap("Bitaroo", "", &[(-10_010_000, 1_694_260_000, "w1")]); ex.exchange = true;
+        i.cache.vaults.insert("x".into(), ex); i.cache.vaults.insert("c".into(), snap("Cold", "", &[(10_000_000, 1_694_261_000, "d1")]));
+        let mut s: wallet::Store = serde_json::from_value(serde_json::json!({ "vaults": [
+            { "name": "Bitaroo", "network": "mainnet", "threshold": 1, "keys": [], "descriptor": "", "address": "", "created": 1, "exchange": { "provider": "Bitaroo", "ccy": "AUD", "rows": [{ "id": "w1", "time": 1_694_260_000, "kind": "btc_out", "sats": -10_000_000, "fiat": 0, "fee_sats": 10_000, "fee_fiat": 0 }], "imports": [], "btc_now": 0, "fiat_now": 0 } },
+            { "name": "Cold", "network": "mainnet", "threshold": 2, "keys": [], "descriptor": "", "address": "", "created": 1 }
+        ], "settings": { "network": "mainnet", "custom": false, "electrum": "", "explorer": "", "gap": 20 } })).unwrap();
+        // the snapshot keys are what `key(v)` gives; make the cache's entries answer to the store's vaults
+        let (kx, kc) = (key(&s.vaults[0]), key(&s.vaults[1]));
+        let ex = i.cache.vaults.remove("x").unwrap(); let cold = i.cache.vaults.remove("c").unwrap();
+        i.cache.vaults.insert(kx.clone(), ex); i.cache.vaults.insert(kc.clone(), cold);
+        i.reconcile(&s, false);
+        assert_eq!(i.cache.vaults[&kx].rows[0].paid, vec![10_000_000], "filled in from the account");
+        assert_eq!(i.view.links["Cold"]["d1"].peer, "Bitaroo"); assert_eq!(i.view.links["Bitaroo"]["w1"].tier, 2);
+        s.vaults.truncate(0); // and a store with nothing in it links nothing, quietly
+        i.reconcile(&s, false); assert!(i.view.links.values().all(|m| m.is_empty()));
+    }
     #[test] fn a_statements_lightning_rows_are_proposed_to_spark_and_muun_only_and_its_chain_rows_never() {
         let mut i=Index::default();i.active=BTreeMap::from([("s".into(),"Statement".into()),("k".into(),"Spark".into()),("c".into(),"Chain".into())]);
         let mut st=snap("Statement","",&[(-70,10000,"ln"),(-21000,20000,"chain")]); st.statement=true; st.rows[1].paid_to=vec![("bc1qx".into(),20000)];

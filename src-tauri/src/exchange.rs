@@ -561,6 +561,7 @@ mod tests {
         let p = preview(&ex, None);
         let mut kinds: std::collections::BTreeMap<&str, usize> = Default::default(); for r in &ex.rows { *kinds.entry(r.kind.as_str()).or_default() += 1; }
         if std::env::var("A2K_EX_BREAKS").is_ok() { for (name, text) in texts(&files).unwrap() { if let Ok((ccy, rows, ok)) = bitaroo_file(&name, &text) { if !ok { let i = rows.windows(2).position(|w| (w[1].balance - (w[0].balance + w[1].amount)).abs() > if ccy == "BTC" { 0 } else { 1 }); match i { Some(i) => println!("BREAK {name} [{ccy}] at row {i}: ({}, {}, {}, {}) then ({}, {}, {}, {})", rows[i].time, rows[i].kind, rows[i].amount, rows[i].balance, rows[i+1].time, rows[i+1].kind, rows[i+1].amount, rows[i+1].balance), None => println!("BREAK {name} [{ccy}]: opening {} − {} < 0", rows[0].balance, rows[0].amount) } } } } }
+        if std::env::var("A2K_EX_OUTS").is_ok() { for r in ex.rows.iter().filter(|r| r.kind == "btc_out") { println!("OUT {} sats {} fee {}", r.time, r.sats, r.fee_sats); } }
         println!("REAL {} · {} rows · kinds {:?} · buys {} for {} c · withdrawals {} of {} sats · held {} sats / {} c · stated {} · agrees {:?} · unknown {:?}", ex.provider, ex.rows.len(), kinds, p.buys, p.spent_fiat, p.withdrawals, p.withdrawn_sats, ex.btc_now, ex.fiat_now, ex.stated, ex.agrees, p.unknown);
     }
     fn crc32(b: &[u8]) -> u32 { let mut c = !0u32; for &x in b { c ^= x as u32; for _ in 0..8 { c = if c & 1 != 0 { 0xEDB88320 ^ (c >> 1) } else { c >> 1 }; } } !c }
