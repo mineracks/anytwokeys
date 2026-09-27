@@ -484,6 +484,12 @@ static DERIVED: std::sync::Mutex<Option<HashMap<String, Derived>>> = std::sync::
 static CHAINS: std::sync::Mutex<Option<HashMap<String, Vec<Descriptor<DescriptorPublicKey>>>>> = std::sync::Mutex::new(None);
 /// What a vault's scripts depend on, and nothing else: the same text always derives the same scripts.
 pub(crate) fn identity(v: &Vault) -> String {
+    // a vault with no keys and no descriptor must still be itself: an exchange account by its provider and first
+    // row, a statement by its source and first row, a node by its public key — or every such vault would share one
+    // identity ("c|1||") and overwrite each other wherever identity is the key
+    if let Some(ex) = &v.exchange { return format!("e|{}|{}", ex.provider, ex.rows.first().map(|r| r.id.as_str()).unwrap_or("")); }
+    if let Some(st) = &v.statement { return format!("s|{}|{}", st.source, st.rows.first().map(|r| r.id.as_str()).unwrap_or("")); }
+    if let Some(n) = &v.node { return format!("n|{}", n.pubkey); }
     if let Some(w) = &v.watch { return format!("w|{}|{}", w.key, w.kinds.join(",")); }
     if let Some(m) = &v.muun { return format!("m|{}|{}", m.user, m.cosign); }
     match &v.ext { Some(e) => format!("x|{e}"), None => format!("c|{}|{}|{}", v.threshold, v.chain_code.as_deref().unwrap_or(""), v.keys.iter().map(|k| k.pubkey.as_str()).collect::<Vec<_>>().join(",")) }

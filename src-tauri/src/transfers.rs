@@ -84,8 +84,18 @@ fn pair_key(a: &str, ai: &str, b: &str, bi: &str) -> String {
 impl Index {
     fn reconcile(&mut self, s: &wallet::Store, changed: bool) {
         let active: BTreeMap<_, _> = s.vaults.iter().map(|v| (key(v), v.name.clone())).collect();
-        if !changed && active == self.active && self.answers == s.transfer_answers { return; }
-        self.answers=s.transfer_answers.clone();
+        // an answer names its vaults as well as keying them: a vault whose key has changed (its identity was widened
+        // after the answer was given) is found again by name, so a Yes once given still holds
+        let by_name: BTreeMap<&str, &str> = active.iter().map(|(k, n)| (n.as_str(), k.as_str())).collect();
+        let mut answers: BTreeMap<String, Answer> = BTreeMap::new();
+        for a in s.transfer_answers.values() {
+            let mut p = a.pair.clone();
+            if !active.contains_key(&p.from_key) { if let Some(k) = by_name.get(p.from.as_str()) { p.from_key = k.to_string(); } }
+            if !active.contains_key(&p.to_key) { if let Some(k) = by_name.get(p.to.as_str()) { p.to_key = k.to_string(); } }
+            answers.insert(p.key(), Answer { yes: a.yes, pair: p });
+        }
+        if !changed && active == self.active && self.answers == answers { return; }
+        self.answers = answers;
         self.active = active;
         for v in &s.vaults {
             let snap = self.cache.vaults.entry(key(v)).or_default();
@@ -417,6 +427,16 @@ mod tests {
         assert_eq!(i.view.links["Cold"]["d1"].peer, "Bitaroo"); assert_eq!(i.view.links["Bitaroo"]["w1"].tier, 2);
         s.vaults.truncate(0); // and a store with nothing in it links nothing, quietly
         i.reconcile(&s, false); assert!(i.view.links.values().all(|m| m.is_empty()));
+    }
+    #[test] fn vaults_with_no_keys_and_no_descriptor_are_each_their_own_in_the_matcher() {
+        let mk = |extra: serde_json::Value| -> wallet::Vault { let mut v = serde_json::json!({ "name": "v", "network": "mainnet", "threshold": 1, "keys": [], "descriptor": "", "address": "", "created": 1 }); for (k, x) in extra.as_object().unwrap() { v[k] = x.clone(); } serde_json::from_value(v).unwrap() };
+        let ex = mk(serde_json::json!({ "exchange": { "provider": "Bitaroo", "ccy": "AUD", "rows": [{ "id": "r1", "time": 1, "kind": "buy", "sats": 1, "fiat": -1 }], "imports": [], "btc_now": 0, "fiat_now": 0 } }));
+        let ex2 = mk(serde_json::json!({ "exchange": { "provider": "Bitaroo", "ccy": "AUD", "rows": [{ "id": "r9", "time": 1, "kind": "buy", "sats": 1, "fiat": -1 }], "imports": [], "btc_now": 0, "fiat_now": 0 } }));
+        let st = mk(serde_json::json!({ "statement": { "source": "Wallet of Satoshi", "rows": [], "credits": 0, "debits": 0, "fees": 0, "closes_at": 0, "imported": 0 } }));
+        let node = mk(serde_json::json!({ "node": { "kind": "lnd", "url": "", "pin": "", "alias": "", "pubkey": "02ab", "version": "", "onchain": 0, "channels": 0, "pending": 0, "read_at": 0, "events": [], "marks": {} } }));
+        let plain = mk(serde_json::json!({}));
+        let keys: std::collections::HashSet<String> = [&ex, &ex2, &st, &node, &plain].into_iter().map(key).collect();
+        assert_eq!(keys.len(), 5, "five vaults, five keys: {:?}", [&ex, &ex2, &st, &node, &plain].iter().map(|v| wallet::identity(v)).collect::<Vec<_>>());
     }
     #[test] fn a_statements_lightning_rows_are_proposed_to_spark_and_muun_only_and_its_chain_rows_never() {
         let mut i=Index::default();i.active=BTreeMap::from([("s".into(),"Statement".into()),("k".into(),"Spark".into()),("c".into(),"Chain".into())]);
