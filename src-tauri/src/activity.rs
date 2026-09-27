@@ -523,7 +523,7 @@ mod lineage_tests {
         let info = crate::wallet::ext_parse(&std::env::var("EXT_DESC").unwrap()).unwrap().unwrap();
         let v = crate::wallet::Vault { watch: None, spark: None, muun: None, statement: None, node: None, name: "real".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
             chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(),
-            files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: Some(info.descriptor), cost_method: None, entity: None };
+            files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: Some(info.descriptor), cost_method: None, entity: None, exchange: None };
         let servers = crate::chain::Servers { electrum: "ssl://electrum.mineracks.com:50002".into(), explorer: String::new() };
         let sc = crate::wallet::scan(&v, &servers, 20).unwrap();
         let mut hist: Vec<(String, i32)> = sc.history.iter().map(|h| (h.0.clone(), h.1)).collect(); hist.sort(); hist.dedup();
@@ -539,7 +539,7 @@ mod lineage_tests {
         let info = crate::wallet::ext_parse(&std::env::var("EXT_DESC").unwrap()).unwrap().unwrap();
         let v = crate::wallet::Vault { watch: None, spark: None, muun: None, statement: None, node: None, name: "x".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
             chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(),
-            files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: Some(info.descriptor), cost_method: None, entity: None };
+            files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: Some(info.descriptor), cost_method: None, entity: None, exchange: None };
         let servers = crate::chain::Servers { electrum: "ssl://electrum.mineracks.com:50002".into(), explorer: String::new() };
         let sc = crate::wallet::scan(&v, &servers, 20).unwrap();
         let mut hist: Vec<(String, i32)> = sc.history.iter().map(|h| (h.0.clone(), h.1)).collect(); hist.sort(); hist.dedup();

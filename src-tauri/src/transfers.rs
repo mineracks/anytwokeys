@@ -15,7 +15,7 @@ struct Fact { id: String, net: i64, time: u32, counter: String, own: bool, #[ser
     /// a Lightning payment hash: the one identifier both ends of a Lightning payment know
     #[serde(default)] hash: String }
 #[derive(Clone, Default, Serialize, Deserialize)]
-struct Snapshot { name: String, network: String, identity: String, #[serde(default)] muun: bool, #[serde(default)] statement: bool, #[serde(default)] node: bool, fingerprint: String, rows: Vec<Fact> }
+struct Snapshot { name: String, network: String, identity: String, #[serde(default)] muun: bool, #[serde(default)] statement: bool, #[serde(default)] node: bool, #[serde(default)] exchange: bool, fingerprint: String, rows: Vec<Fact> }
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Cache { vaults: BTreeMap<String, Snapshot> }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -37,11 +37,14 @@ fn candidates(ak:&str,a:&Snapshot,bk:&str,b:&Snapshot)->Vec<Candidate> {
     // a statement's Lightning rows can only have gone to, or come from, a wallet that speaks Lightning: Spark, or Muun
     // (whose Lightning shows on-chain). Its on-chain rows are matched by address, never here.
     if a.statement || b.statement { let (s, o) = if a.statement { (a, b) } else { (b, a) }; if s.statement && o.statement { return vec![]; } if o.identity.is_empty() && !o.muun && !o.node { return vec![]; } }
+    // an exchange's withdrawals land in any wallet of the person's; two exchanges never pay each other here
+    else if a.exchange || b.exchange { if a.exchange && b.exchange { return vec![]; } }
     else if (a.node || b.node) && a.identity.is_empty() && b.identity.is_empty() && !(a.muun || b.muun) && !(a.node && b.node) { return vec![]; }
     else if a.identity.is_empty() && b.identity.is_empty() { return vec![]; }
     let both_spark=!a.identity.is_empty() && !b.identity.is_empty();
     let allowance=if both_spark {0} else if a.muun || b.muun {1000} else {10000};
-    let after=if both_spark {3600} else {86400};
+    // an exchange's withdrawal can take a working day or three to be sent, so its window is longer
+    let after=if both_spark {3600} else if a.exchange || b.exchange {259200} else {86400};
     let mut buckets:BTreeMap<(u64,u32),Vec<&Fact>>=BTreeMap::new();
     let lightning = |s: &Snapshot, f: &Fact| !s.statement || (f.paid_to.is_empty() && f.got.is_empty());   // a statement's chain rows sit this out
     for r in &b.rows { if r.net>0 && r.time>0 && !r.own && !r.known && lightning(b, r) { buckets.entry((r.net as u64,r.time)).or_default().push(r); } }
@@ -87,7 +90,7 @@ impl Index {
         for v in &s.vaults {
             let snap = self.cache.vaults.entry(key(v)).or_default();
             snap.name = v.name.clone(); snap.network = v.network.clone();
-            snap.muun = v.muun.is_some(); snap.statement = v.statement.is_some(); snap.node = v.node.is_some();
+            snap.muun = v.muun.is_some(); snap.statement = v.statement.is_some(); snap.node = v.node.is_some(); snap.exchange = v.exchange.is_some();
             snap.identity = v.spark.as_ref().map(|sp| sp.identity.to_lowercase()).unwrap_or_default();
         }
         self.build();
@@ -240,7 +243,7 @@ impl Index {
         let fingerprint = digest(&serde_json::to_vec(&rows).unwrap());
         let id=key(v);
         let changed = self.cache.vaults.get(&id).map(|p| &p.fingerprint) != Some(&fingerprint);
-        if changed { self.cache.vaults.insert(id, Snapshot {name:v.name.clone(),network:v.network.clone(),identity,muun:v.muun.is_some(),statement:v.statement.is_some(),node:v.node.is_some(),fingerprint,rows}); }
+        if changed { self.cache.vaults.insert(id, Snapshot {name:v.name.clone(),network:v.network.clone(),identity,muun:v.muun.is_some(),statement:v.statement.is_some(),node:v.node.is_some(),exchange:v.exchange.is_some(),fingerprint,rows}); }
         self.reconcile(s,changed); changed
     }
 }

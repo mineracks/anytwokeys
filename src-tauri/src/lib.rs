@@ -1,6 +1,7 @@
 mod spark;
 mod sp;
 mod statement;
+mod exchange;
 mod node;
 mod spark_auth;
 mod muun;
@@ -122,6 +123,17 @@ async fn vault_activity(name: String, history: Vec<(String, i32)>, ccy: String) 
             for e in n.events.iter().filter(|e| !e.txid.is_empty()) {
                 let peers: Vec<String> = s.seen.iter().filter(|(nm, seen)| *nm != &v.name && seen.txs.contains_key(&e.txid) && s.vaults.iter().any(|o| &o.name == *nm && o.network == v.network)).map(|(nm, _)| nm.clone()).collect();
                 if !peers.is_empty() { a.transfers.insert(e.id.clone(), peers); }
+            }
+            transfers::record(&v, &mut a, &s);
+            return Ok(a);
+        }
+        // An exchange account's history is its statements: sats in and out, and a buy priced at what it really cost,
+        // fee included, rather than at the feed — the one place the app has a true cost basis.
+        if let Some(ex) = &v.exchange {
+            let mut a = activity::priced(&v, exchange::activity_rows(ex), &ccy, &prices)?;
+            if !ccy.is_empty() && ccy == ex.ccy {
+                let by: std::collections::HashMap<&str, &exchange::ExRow> = ex.rows.iter().map(|r| (r.id.as_str(), r)).collect();
+                for r in a.rows.iter_mut() { if let Some(p) = by.get(r.txid.as_str()).and_then(|x| exchange::real_price(x)) { r.quote = Some(activity::Quote { price: p, basis: format!("paid at {}", ex.provider) }); } }
             }
             transfers::record(&v, &mut a, &s);
             return Ok(a);
@@ -323,7 +335,7 @@ fn vault_create(name: String, threshold: usize, keys: Vec<NewKey>, rotating: Opt
     let mut v = Vault { watch: None, spark: None, muun: None, statement: None, node: None, name, network: s.settings.network.clone(), threshold,
         keys: keys.into_iter().map(|k| wallet::KeyRef { name: k.name, serial: k.serial, pubkey: k.pubkey.to_lowercase(), device: None }).collect(),
         descriptor, address: String::new(), created: now(),
-        chain_code: if rotating.unwrap_or(true) { Some(fresh_chain_code()) } else { None }, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None, entity: None };
+        chain_code: if rotating.unwrap_or(true) { Some(fresh_chain_code()) } else { None }, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None, entity: None, exchange: None };
     v.address = wallet::address_at(&v, 0)?;
     let _ = network;
     s.vaults.push(v.clone());
@@ -369,7 +381,7 @@ fn descriptor_parse(text: String) -> R<Parsed> {
     let (threshold, keys) = wallet::keys_of(&desc_text)?;
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
     let tmp = Vault { watch: None, spark: None, muun: None, statement: None, node: None, name: String::new(), network: s.settings.network.clone(), threshold, keys: keys.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.clone(), device: None }).collect(),
-        descriptor: descriptor.clone(), address: String::new(), created: 0, chain_code: cc.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None, entity: None };
+        descriptor: descriptor.clone(), address: String::new(), created: 0, chain_code: cc.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None, entity: None, exchange: None };
     let address = wallet::address_at(&tmp, 0)?;
     Ok(Parsed { threshold, keys, descriptor: wallet::recovery_line(&tmp), address, rotating: cc.is_some(), ext: None, kind: "cards".into(), name: ur_name })
 }
@@ -429,7 +441,7 @@ fn muun_restore(name: String, key1: String, key2: String, code: String, expect: 
         keys: Vec::new(), descriptor: String::new(), address: String::new(), created: now(), chain_code: None,
         next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(),
         notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0,
-        seal: Default::default(), ext: None, cost_method: None, entity: None };
+        seal: Default::default(), ext: None, cost_method: None, entity: None, exchange: None };
     v.address = wallet::address_at(&v, 0)?;
     s.vaults.push(v.clone());
     wallet::save(&s)?;
@@ -474,7 +486,7 @@ fn xpub_restore(name: String, text: String, names: Vec<String>) -> R<Vault> {
         network: network.to_string(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address: String::new(),
         created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
         labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
-        more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None, entity: None };
+        more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None, entity: None, exchange: None };
     v.address = wallet::address_at(&v, 0)?;
     s.vaults.push(v.clone());
     wallet::save(&s)?;
@@ -512,7 +524,7 @@ async fn spark_restore(name: String, address: String) -> R<Vault> {
             more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None,
             // a Spark wallet has no coins to identify, so the method that counts the coins actually spent cannot
             // apply to it; it counts first in, first out, and the screen says which
-            cost_method: Some("fifo".into()), entity: None };
+            cost_method: Some("fifo".into()), entity: None, exchange: None };
         v.address = v.spark.as_ref().unwrap().address.clone();
         s.vaults.push(v.clone());
         wallet::save(&s)?;
@@ -635,6 +647,55 @@ fn key_place_set(pubkey: String, place: Option<String>) -> R<Store> {
     wallet::update(|s| match place { Some(id) if s.places.iter().any(|p| p.id == id) => { s.key_place.insert(pubkey, id); } _ => { s.key_place.remove(&pubkey); } })
 }
 
+// ---------- an exchange account, from the statements the exchange gives (exchange.rs) ----------
+
+static EX_PENDING: std::sync::Mutex<Option<exchange::Exchange>> = std::sync::Mutex::new(None);
+/// The files are chosen here and read here — CSVs, or the zips an exchange hands out — and the reading is held for
+/// the import that follows; nothing is kept until then. Against a vault already here (`existing`), the preview says
+/// how many rows are new.
+#[tauri::command]
+fn exchange_pick_preview(existing: Option<String>) -> R<exchange::Preview> {
+    let paths = rfd::FileDialog::new().set_title("Choose the exchange's export (CSV, or the zip it gave)").add_filter("Statements", &["csv", "zip", "txt"]).pick_files().ok_or("cancelled")?;
+    let mut files = Vec::new();
+    for p in paths {
+        let bytes = std::fs::read(&p).map_err(|e| format!("{} could not be read: {e}", p.display()))?;
+        if bytes.len() > 64 << 20 { return Err(format!("{} is too large to be a statement", p.display())); }
+        files.push((p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), bytes));
+    }
+    let ex = exchange::parse(&files)?;
+    let s = wallet::load()?;
+    let have = existing.and_then(|n| s.vaults.iter().find(|v| v.name == n).and_then(|v| v.exchange.clone()));
+    let p = exchange::preview(&ex, have.as_ref());
+    *EX_PENDING.lock().map_err(|_| "busy")? = Some(ex);
+    Ok(p)
+}
+/// A new vault from the reading held, or a later export merged into the exchange vault of that name.
+#[tauri::command]
+fn exchange_import(name: String, entity: Option<String>) -> R<(Vault, usize)> {
+    let name = name.trim().to_string();
+    if name.is_empty() || name.chars().count() > 60 { return Err("give the account a name of up to 60 characters".into()); }
+    let mut ex = EX_PENDING.lock().map_err(|_| "busy")?.take().ok_or("choose the export first")?;
+    let t = now();
+    if let Some(i) = ex.imports.last_mut() { i.at = t; i.added = ex.rows.len(); }
+    let mut s = wallet::load()?;
+    if let Some(v) = s.vaults.iter_mut().find(|v| v.name == name) {
+        let have = v.exchange.as_mut().ok_or(format!("a vault called '{name}' already exists, and it is not an exchange account"))?;
+        if have.provider != ex.provider { return Err(format!("'{name}' is a {} account; this export is from {}", have.provider, ex.provider)); }
+        let n = exchange::merge(have, ex, t);
+        let out = v.clone(); wallet::save(&s)?; return Ok((out, n));
+    }
+    let n = ex.rows.len();
+    let entity = entity.filter(|id| s.entities.iter().any(|e| &e.id == id));
+    let v = Vault { watch: None, spark: None, muun: None, statement: None, node: None, exchange: Some(ex),
+        name, network: "mainnet".into(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address: String::new(),
+        created: t, chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
+        labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
+        more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: Some("fifo".into()), entity };
+    s.vaults.push(v.clone());
+    wallet::save(&s)?;
+    Ok((v, n))
+}
+
 // ---------- entities: who owns what ----------
 
 const ENTITY_KINDS: [&str; 5] = ["person", "company", "trust", "smsf", "other"];
@@ -716,7 +777,7 @@ async fn node_add(name: String, kind: String, url: String, cred: String, pin: St
             name: name.clone(), network: "mainnet".into(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address: String::new(),
             created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
             labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
-            more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: Some("fifo".into()), entity: None };
+            more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: Some("fifo".into()), entity: None, exchange: None };
         s.vaults.push(v.clone());
         let e = s.seen.entry(name).or_default(); e.txs = txs; e.primed = true;
         wallet::save(&s)?;
@@ -783,7 +844,7 @@ fn statement_import(name: String, text: String) -> R<(Vault, usize)> {
         name, network: "mainnet".into(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address: String::new(),
         created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
         labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
-        more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: Some("fifo".into()), entity: None };
+        more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: Some("fifo".into()), entity: None, exchange: None };
     for (k, m) in memos { v.labels.insert(k, m); }
     s.vaults.push(v.clone());
     wallet::save(&s)?;
@@ -796,7 +857,7 @@ fn new_spark_vault(name: String, spark: wallet::Spark, network: String) -> Vault
         name, network, threshold: 1, keys: Vec::new(), descriptor: String::new(), address,
         created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
         labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
-        more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: Some("fifo".into()), entity: None }
+        more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: Some("fifo".into()), entity: None, exchange: None }
 }
 
 #[tauri::command]
@@ -857,7 +918,7 @@ fn vault_restore(name: String, text: String, names: Vec<String>) -> R<Vault> {
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
     let mut v = Vault { watch: None, spark: None, muun: None, statement: None, node: None, name, network: s.settings.network.clone(), threshold,
         keys: keys.iter().enumerate().map(|(i, k)| wallet::KeyRef { name: names.get(i).cloned().unwrap_or_else(|| format!("key {}", i + 1)), serial: 0, pubkey: k.clone(), device: None }).collect(),
-        descriptor, address: String::new(), created: now(), chain_code: cc, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None, entity: None };
+        descriptor, address: String::new(), created: now(), chain_code: cc, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None, entity: None, exchange: None };
     v.address = wallet::address_at(&v, 0)?;
     s.vaults.push(v.clone());
     wallet::save(&s)?;
@@ -943,7 +1004,7 @@ pub(crate) fn ext_vault(name: String, info: &wallet::ExtInfo, names: &[String]) 
             serial: 0, pubkey: if k.fixed { k.xpub.clone() } else { format!("[{}/{}]{}", k.fingerprint, k.path.trim_start_matches("m/").replace('\'', "h"), k.xpub) }, device: if k.fixed { Some("card".into()) } else { None } }).collect(),
         descriptor: info.descriptor.clone(), address: String::new(), created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
         labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0,
-        seal: Default::default(), ext: Some(info.descriptor.clone()), cost_method: None, entity: None }
+        seal: Default::default(), ext: Some(info.descriptor.clone()), cost_method: None, entity: None, exchange: None }
 }
 
 #[tauri::command]
@@ -1158,6 +1219,11 @@ async fn vault_sync(name: String) -> R<Snapshot> {
             let history: Vec<HistoryRow> = fresh.events.iter().map(|e| HistoryRow { txid: e.id.clone(), height: 0, index: 0 }).collect();
             return Ok(Snapshot { coins: Vec::new(), balance: fresh.onchain + fresh.channels, height: 0, history, servers, receive: String::new(), receive_index: 0, rotating: false, next_change: 0, gap: 0 });
         }
+        // An exchange account: no chain to ask; the balance is what the newest statement states, or the rows' sum
+        if let Some(ex) = &v.exchange {
+            let history: Vec<HistoryRow> = ex.rows.iter().map(|r| HistoryRow { txid: r.id.clone(), height: 0, index: 0 }).collect();
+            return Ok(Snapshot { coins: Vec::new(), balance: ex.btc_now.max(0) as u64, height: 0, history, servers, receive: String::new(), receive_index: 0, rotating: false, next_change: 0, gap: 0 });
+        }
         // A closed wallet read from its statement: no chain to ask; the balance is what its rows add up to
         if let Some(st) = &v.statement {
             let history: Vec<HistoryRow> = st.rows.iter().map(|r| HistoryRow { txid: r.id.clone(), height: 0, index: 0 }).collect();
@@ -1208,6 +1274,7 @@ async fn servers_test(electrum: String, explorer: String) -> R<String> {
 fn watch_only(v: &Vault) -> R<()> {
     if v.node.is_some() { return Err(format!("‘{}’ is a node watched with a read-only credential. Nothing here can spend it; use the node itself.", v.name)); }
     if v.statement.is_some() { return Err(format!("‘{}’ is a closed wallet read from its statement. There is nothing in it to spend.", v.name)); }
+    if v.exchange.is_some() { return Err(format!("‘{}’ is an exchange account read from its statements. Nothing here can spend it; use the exchange.", v.name)); }
     if v.muun.is_some() { return Err(format!("‘{}’ is a watched Muun wallet. Its keys stayed in Muun — nothing here can sign for it, so spend it in the Muun app.", v.name)); }
     Ok(())
 }
@@ -1791,7 +1858,7 @@ fn seal_vault(rec: &seal::Record, name: String, shares: Vec<String>, sealed: Vec
     let mut v = Vault { watch: None, spark: None, muun: None, statement: None, node: None, name, network: rec.network.clone(), threshold: rec.threshold,
         keys: rec.pubkeys.iter().zip(&rec.key_names).map(|(p, n)| wallet::KeyRef { name: n.clone(), serial: 0, pubkey: p.clone(), device: None }).collect(),
         descriptor, address: String::new(), created: now(), chain_code: rec.chain_code.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0,
-        seal: wallet::Seal { shares, sealed }, ext: None, cost_method: None, entity: None };
+        seal: wallet::Seal { shares, sealed }, ext: None, cost_method: None, entity: None, exchange: None };
     v.address = wallet::address_at(&v, 0)?;
     Ok(v)
 }
@@ -2782,7 +2849,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
-            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
+            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, exchange_pick_preview, exchange_import, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
         .build(tauri::generate_context!())
@@ -3228,7 +3295,7 @@ mod shares_tests {
         let cards = ["03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2", "032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe", "038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47"];
         let d = wallet::descriptor_for(2, &cards.iter().map(|c| c.to_string()).collect::<Vec<_>>()).unwrap();
         let card = Vault { watch: None, spark: None, muun: None, statement: None, node: None, name: "c".into(), network: "mainnet".into(), threshold: 2, keys: cards.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.to_string(), device: None }).collect(),
-            descriptor: d, address: String::new(), created: 0, chain_code: Some("ab".repeat(32)), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None, entity: None };
+            descriptor: d, address: String::new(), created: 0, chain_code: Some("ab".repeat(32)), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None, entity: None, exchange: None };
         let dir = std::env::temp_dir().join(format!("a2k-shares-{}", std::process::id())); let _ = std::fs::remove_dir_all(&dir);
         unsafe { std::env::set_var("A2K_DATA_DIR", &dir); }
         let mut s = wallet::Store::default(); s.settings.network = "mainnet".into(); wallet::save(&s).unwrap();

@@ -69,6 +69,7 @@ pub struct Preview {
 
 // ---------- the CSV ----------
 /// RFC 4180: fields split on commas, quoted fields may hold commas, quotes ("") and newlines.
+pub fn csv_rows_pub(text: &str) -> Vec<Vec<String>> { csv_rows(text) }
 fn csv_rows(text: &str) -> Vec<Vec<String>> {
     let (mut rows, mut row, mut field) = (Vec::new(), Vec::new(), String::new());
     let (mut quoted, mut chars) = (false, text.chars().peekable());

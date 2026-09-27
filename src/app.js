@@ -79,16 +79,16 @@ function show(name) {
   $$('.nav[data-go]').forEach(n => n.classList.toggle('on', n.dataset.go === navName));
   // the vault you are in stays lit on every screen that is about it, matching the breadcrumb; not while making another, nor in app settings
   // a watched wallet has no keys here: the screens that would sign are not offered at all
-  const watched = !!(vault && (vault.muun || vault.spark || vault.watch || vault.statement || vault.node));
+  const watched = !!(vault && (vault.muun || vault.spark || vault.watch || vault.statement || vault.node || vault.exchange));
   // a Spark wallet has no addresses and no coins at all — not hidden screens, absent ones. Only ever HIDDEN here:
   // whether the Coins tab is shown at all is the person's own setting, and this must not undo it.
-  if (vault && (vault.spark || vault.statement || vault.node)) for (const go of ['coins', 'addresses']) $$(`.nav[data-go=${go}]`).forEach(n => { n.hidden = true; });
+  if (vault && (vault.spark || vault.statement || vault.node || vault.exchange)) for (const go of ['coins', 'addresses']) $$(`.nav[data-go=${go}]`).forEach(n => { n.hidden = true; });
   else { paintCoinsTab(); $$('.nav[data-go=addresses]').forEach(n => { n.hidden = false; }); }
   // only the ways IN to those screens — the sidebar and Home's own actions. A blanket [data-go] would also
   // un-hide buttons that are hidden for their own reasons elsewhere.
   for (const go of ['send', 'messages', 'keys']) $$(`.nav[data-go=${go}], #s-home [data-go=${go}]`).forEach(n => { n.hidden = watched; });
   // Receive is real for a watched wallet of one key — those addresses ARE its own — but means nothing for Muun or Spark
-  $$('.nav[data-go=receive], #s-home [data-go=receive]').forEach(n => { n.hidden = !!(vault && (vault.muun || vault.spark || vault.statement || vault.node)); });
+  $$('.nav[data-go=receive], #s-home [data-go=receive]').forEach(n => { n.hidden = !!(vault && (vault.muun || vault.spark || vault.statement || vault.node || vault.exchange)); });
   const inVault = vault && !APP_LEVEL.has(name);
   $$('#vault-tabs .nav').forEach(n => n.classList.toggle('on', !!inVault && n.dataset.vault === vault.name));
   $('#title').textContent = { overview: 'All vaults', home: vault ? vault.name : 'Vault', activity: 'Activity', send: 'Send', receive: 'Receive', coins: 'Coins', addresses: 'Addresses', vault: 'Vault settings', keys: 'Keys', settings: 'App settings', places: 'Locations', entities: 'Entities', allkeys: 'Keys', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
@@ -175,7 +175,7 @@ function renderTabs() {
   const tabs = $('#vault-tabs'); tabs.innerHTML = '';
   for (const v of store.vaults) {
     const d = document.createElement('div'); d.className = 'nav' + (vault && v.name === vault.name ? ' on' : ''); d.style.fontWeight = '600'; d.dataset.vault = v.name;
-    d.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${v.network === 'mainnet' ? 'var(--gold)' : 'var(--signal)'};display:inline-block;flex:0 0 8px"></span><span style="flex-grow:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v.name)}">${esc(v.name)}</span><span class="muted" style="font-size:11px;font-weight:400">${v.node ? 'Node' : v.statement ? 'Statement' : v.spark ? (v.spark.authenticated ? 'YubiKey reader' : 'Watched \u00b7 Spark') : v.muun || v.watch ? 'Watched' : v.keys.length === 1 ? '1 key' : v.threshold + ' of ' + v.keys.length}</span>`;
+    d.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${v.network === 'mainnet' ? 'var(--gold)' : 'var(--signal)'};display:inline-block;flex:0 0 8px"></span><span style="flex-grow:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v.name)}">${esc(v.name)}</span><span class="muted" style="font-size:11px;font-weight:400">${v.node ? 'Node' : v.statement ? 'Statement' : v.exchange ? 'Exchange' : v.spark ? (v.spark.authenticated ? 'YubiKey reader' : 'Watched \u00b7 Spark') : v.muun || v.watch ? 'Watched' : v.keys.length === 1 ? '1 key' : v.threshold + ' of ' + v.keys.length}</span>`;
     d.onclick = () => { if (d.dataset.dragged) return; vault = v; rememberVault(v); paintNet(); show('home'); };
     // drag to reorder — by pointer, not HTML5 drag-and-drop: the window's file-drop handling (attachments) takes
     // every drag session on macOS, so a dragover never reaches the page. The drop goes before or after the row
@@ -321,6 +321,8 @@ function deviceCurrency(os = osLocale, langs = navigator.languages || [navigator
   return { ccy: 'USD', why: 'this computer names no region' };
 }
 const fiatCcy = () => { const f = (store.settings.fiat ?? 'auto'); return f === 'auto' ? deviceCurrency().ccy : f; };
+// a figure the exchange wrote, to the cent: never rounded the way a worth is
+const moneyExact = (amount, ccy) => { try { return new Intl.NumberFormat(undefined, { style: 'currency', currency: ccy, minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount); } catch { return amount.toFixed(2) + ' ' + ccy; } };
 const money = (amount, ccy) => { try { return new Intl.NumberFormat(undefined, { style: 'currency', currency: ccy, maximumFractionDigits: Math.abs(amount) >= 100 ? 0 : 2 }).format(amount); } catch { return amount.toFixed(2) + ' ' + ccy; } };
 const worth = (satsN, q, ccy) => money(satsN / 1e8 * q.price, ccy);
 const basisWords = (q, ccy) => `1 BTC = ${money(q.price, ccy)} · ${q.basis} · Bitstamp price × ECB reference rate`;
@@ -393,8 +395,8 @@ async function renderTx() {
   fitNote(); if (renderTx.last !== name + txid) { renderTx.last = name + txid; recSaid(''); }
   renderFiles(); renderCtx();
   $('#tx-chain').open = (() => { try { return localStorage.getItem('a2k-chain-open') === '1'; } catch { return false; } })();
-  const offchain = !!(vault.spark || vault.statement || (vault.node && !(nodeRow(txid) || {}).txid));
-  $('#tx-explorer').hidden = offchain; $('#tx-pdf').hidden = !!(vault.spark || vault.statement || vault.node); $('#tx-chain').hidden = offchain;
+  const offchain = !!(vault.spark || vault.statement || vault.exchange || (vault.node && !(nodeRow(txid) || {}).txid));
+  $('#tx-explorer').hidden = offchain; $('#tx-pdf').hidden = !!(vault.spark || vault.statement || vault.node || vault.exchange); $('#tx-chain').hidden = offchain;
   if (vault.node) {
     const e = nodeRow(txid), st = $('#tx-status'); st.className = 'state ok'; st.querySelector('span').textContent = e ? `${e.layer === 'chain' ? 'on-chain' : e.layer === 'fee' ? 'fee' : 'Lightning'} \u00b7 ${e.kind} \u00b7 from the node` : 'from the node';
     $('#tx-dl').innerHTML = [['Transfer', transferText(facts, txid) || 'Outside the watched vaults'], ['Source', `${esc(vault.node.alias)}\u2019s bookkeeper \u2014 the node\u2019s own ledger`],
@@ -403,6 +405,16 @@ async function renderTx() {
       e && e.txid ? ['Transaction', `<a href="#" class="mono" data-go-tx="${esc(e.txid)}" style="font-size:12px;word-break:break-all">${esc(e.txid)}</a>`] : null,
       e && e.hash ? ['Payment hash', `<span class="mono" style="font-size:12px;word-break:break-all">${esc(e.hash)}</span>`] : null,
       e && e.memo ? ['Memo', esc(e.memo)] : null].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+    $('#tx-proof').textContent = ''; $('#tx-chain-body').innerHTML = ''; return;
+  }
+  if (vault.exchange) {
+    const r = exRow(txid), st = $('#tx-status'), ex = vault.exchange; st.className = 'state ok'; st.querySelector('span').textContent = r ? `${EX_WORDS[r.kind] || r.kind} \u00b7 from the statement` : 'from the statement';
+    const price = r ? exRealPrice(r) : null;
+    $('#tx-dl').innerHTML = [['Transfer', transferText(facts, txid) || (r && r.kind === 'btc_out' ? 'Not yet linked to a vault it landed in' : 'Within the exchange')], ['Source', `${esc(ex.provider)}\u2019s statement \u2014 the exchange\u2019s word; nothing on the chain to check it against`], r ? ['Kind', esc(exKindWords(r))] : null,
+      r && r.sats ? ['Coins', `${sats(Math.abs(r.sats))} sats${r.fee_sats ? ` + ${sats(r.fee_sats)} sats fee` : ''}`] : null,
+      r && (r.fiat || r.fee_fiat) ? ['Money', `${moneyExact(Math.abs(r.fiat) / 100, ex.ccy)}${r.fee_fiat ? ` + ${moneyExact(r.fee_fiat / 100, ex.ccy)} fee` : ''}`] : null,
+      price ? ['Price', `${moneyExact(price, ex.ccy)} per bitcoin, fee included${r.rate ? ` \u00b7 the exchange quoted ${moneyExact(r.rate / 100, ex.ccy)}` : ''}`] : null,
+      r && r.memo ? ['As written', esc(r.memo)] : null].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
     $('#tx-proof').textContent = ''; $('#tx-chain-body').innerHTML = ''; return;
   }
   if (vault.statement) {
@@ -1010,8 +1022,8 @@ async function sync() {
 function paintVaultCard() {
   if (!vault) return;
   // a watched wallet has no keys HERE, so the card must not read as though it had ("2 of 0 keys sign")
-  $('#vault-kind').textContent = vault.node ? `Node \u00b7 ${vault.node.kind === 'cln' ? 'Core Lightning' : 'LND'}` : vault.statement ? 'Closed wallet \u00b7 from its statement' : vault.spark ? (vault.spark.authenticated ? 'Watched \u00b7 YubiKey reader' : 'Watched \u00b7 Spark') : vault.muun ? 'Watched' : vault.watch ? 'Watched \u00b7 one key' : vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
-  $('#vault-keys').textContent = vault.node ? `${esc(vault.node.alias)} \u00b7 on-chain ${sats(vault.node.onchain)} \u00b7 in channels ${sats(vault.node.channels)}${vault.node.pending ? ' \u00b7 pending ' + sats(vault.node.pending) : ''} \u00b7 read only` : vault.statement ? `Read from the statement ${vault.statement.source} gave \u00b7 ${sats(vault.statement.rows.length)} rows \u00b7 nothing here can be spent` : vault.watch ? `From one exported key \u00b7 ${vault.watch.kinds.length > 1 ? 'every kind of address watched' : vault.watch.kinds[0]}` : vault.spark ? 'Told to us by Spark \u2014 these figures are not checked against the chain' : vault.muun ? 'Its keys stay in Muun; this vault only reads the chain' : vault.keys.map(k => k.name).join(' · ');
+  $('#vault-kind').textContent = vault.node ? `Node \u00b7 ${vault.node.kind === 'cln' ? 'Core Lightning' : 'LND'}` : vault.exchange ? `Exchange \u00b7 ${vault.exchange.provider}` : vault.statement ? 'Closed wallet \u00b7 from its statement' : vault.spark ? (vault.spark.authenticated ? 'Watched \u00b7 YubiKey reader' : 'Watched \u00b7 Spark') : vault.muun ? 'Watched' : vault.watch ? 'Watched \u00b7 one key' : vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
+  $('#vault-keys').textContent = vault.node ? `${esc(vault.node.alias)} \u00b7 on-chain ${sats(vault.node.onchain)} \u00b7 in channels ${sats(vault.node.channels)}${vault.node.pending ? ' \u00b7 pending ' + sats(vault.node.pending) : ''} \u00b7 read only` : vault.exchange ? `Read from ${vault.exchange.provider}\u2019s statements \u00b7 ${sats(vault.exchange.rows.length)} rows \u00b7 ${moneyExact(vault.exchange.fiat_now / 100, vault.exchange.ccy)} in cash there \u00b7 nothing here can be spent` : vault.statement ? `Read from the statement ${vault.statement.source} gave \u00b7 ${sats(vault.statement.rows.length)} rows \u00b7 nothing here can be spent` : vault.watch ? `From one exported key \u00b7 ${vault.watch.kinds.length > 1 ? 'every kind of address watched' : vault.watch.kinds[0]}` : vault.spark ? 'Told to us by Spark \u2014 these figures are not checked against the chain' : vault.muun ? 'Its keys stay in Muun; this vault only reads the chain' : vault.keys.map(k => k.name).join(' · ');
 }
 function paintSnap(s) {
   { const b = $('#scanbar'); if (b) b.hidden = true; }
@@ -1032,6 +1044,7 @@ function paintSnap(s) {
     $('#balance-sub').textContent = `${s.coins.length} coin${s.coins.length === 1 ? '' : 's'}` + (unconf ? ` · ${sats(unconf)} unconfirmed` : ' · all confirmed');
     $('#conn').textContent = `Connected to ${s.servers.electrum.replace(/^\w+:\/\//, '')} · block ${sats(s.height)}`;
     if (vault.node) { $('#balance-sub').textContent = `on-chain ${sats(vault.node.onchain)} + in channels ${sats(vault.node.channels)}${vault.node.pending ? ` \u00b7 ${sats(vault.node.pending)} pending` : ''} \u2014 as the node reports them`; $('#conn').textContent = `Read from ${esc(vault.node.alias)} with a read-only credential`; }
+    if (vault.exchange) { const ex = vault.exchange; $('#balance-sub').textContent = `held at ${ex.provider}, ${ex.stated ? 'as its newest statement states' : 'as the rows add up'} \u2014 with ${moneyExact(ex.fiat_now / 100, ex.ccy)} in cash beside it${ex.agrees === false ? ' \u00b7 the running balance did not chain in every file' : ''}`; $('#conn').textContent = 'Off-chain \u00b7 the exchange\u2019s own statements, nothing on the chain to check them against'; }
     if (vault.statement) { $('#balance-sub').textContent = `closed wallet \u2014 the statement leaves ${sats(vault.statement.closes_at)} sats; its history is kept for the coins that left it`; $('#conn').textContent = 'Off-chain \u00b7 figures from the custodian\u2019s statement, nothing on the chain to check them against'; }
     if (vault.spark) { $('#balance-sub').textContent = vault.spark.authenticated ? 'Spark reports this balance · YubiKey reader' : 'Spark reports this balance · anonymous read'; $('#conn').textContent = 'Off-chain · figures supplied by Spark, not verified against the chain'; }
     $('#activity-note').hidden = true;
@@ -1048,6 +1061,10 @@ const HOME_ACT = 10, ACT_PAGE = 60;
 function actRowHtml(h) {
   if (vault?.node) {
     const e = nodeRow(h.txid), how = e ? `${e.layer === 'chain' ? 'on-chain' : e.layer === 'fee' ? 'fee' : 'Lightning'} \u00b7 ${e.kind}` : 'from the node';
+    return `<td class="when muted">…</td><td class="mono">${esc(h.txid.slice(0, 10))}…</td><td>${lblHtml('tx:' + h.txid)}<span class="xfer" data-xfer="${esc(h.txid)}"></span></td><td class="r amt muted">…</td><td class="r">${esc(how)}</td>`;
+  }
+  if (vault?.exchange) {
+    const r = exRow(h.txid), how = r ? `${EX_WORDS[r.kind] || r.kind}${r.fiat || r.fee_fiat ? ' \u00b7 ' + moneyExact((Math.abs(r.fiat) + (r.kind === 'buy' ? r.fee_fiat : 0)) / 100, vault.exchange.ccy) : ''}` : 'from the statement';
     return `<td class="when muted">…</td><td class="mono">${esc(h.txid.slice(0, 10))}…</td><td>${lblHtml('tx:' + h.txid)}<span class="xfer" data-xfer="${esc(h.txid)}"></span></td><td class="r amt muted">…</td><td class="r">${esc(how)}</td>`;
   }
   if (vault?.statement) {
@@ -1111,6 +1128,7 @@ const actNeedsFacts = () => listPref('act', 'show', 'all') !== 'all' || listPref
 // what kind of row this is, in the words its Status column uses
 function actKind(h, f) {
   if (vault?.node) { const e = nodeRow(h.txid); return e ? `${e.layer === 'chain' ? 'On-chain' : e.layer === 'fee' ? 'Fee' : 'Lightning'} \u00b7 ${e.kind}` : 'From the node'; }
+  if (vault?.exchange) { const r = exRow(h.txid); return r ? (EX_WORDS[r.kind] || r.kind).replace(/^./, c => c.toUpperCase()) : 'From the statement'; }
   if (vault?.statement) { const r = stmtRow(h.txid); return r ? `${r.layer === 'chain' ? 'On-chain' : 'Lightning'} \u00b7 ${r.kind === 'income' ? (r.pos ? 'sale' : 'reward') : r.kind}` : 'From the statement'; }
   if (vault?.spark) { const t = f?.spark?.[h.txid]; return sparkTransferStatus(t?.status) || 'Spark'; }
   const r = f?.rows?.[h.txid];
@@ -2088,6 +2106,71 @@ $('#node-add').onclick = async () => {
 
 // ---------- a closed custodial wallet, from its statement ----------
 // The rows live in the vault (store_get hands them over); one map per vault object, built once, never on draw.
+// ---------- an exchange account: its rows, its words, and the import ----------
+const EX_WORDS = { buy: 'bought', sell: 'sold', fiat_in: 'money in', fiat_out: 'money out', btc_out: 'withdrawn', btc_in: 'received', other: 'other' };
+function exRow(id) { if (!vault || !vault.exchange) return null; if (!vault._ex) vault._ex = Object.fromEntries((vault.exchange.rows || []).map(r => [r.id, r])); return vault._ex[id] || null; }
+const exRealPrice = (r) => { if (!r.sats) return null; const paid = r.kind === 'buy' ? Math.abs(r.fiat) + r.fee_fiat : r.kind === 'sell' ? Math.max(0, Math.abs(r.fiat) - r.fee_fiat) : 0; return paid ? paid / 100 / (Math.abs(r.sats) / 1e8) : null; };
+const exKindWords = (r) => ({ buy: 'a purchase — its cost is what was paid, fee included', sell: 'a sale — a disposal at what was received', fiat_in: 'money deposited at the exchange', fiat_out: 'money withdrawn from the exchange', btc_out: 'coins withdrawn to a wallet', btc_in: 'coins received at the exchange', other: 'a row this app did not recognise, kept as written' })[r.kind] || r.kind;
+let exEntity = null;
+// what an export says, before anything is kept — the same facts for a new account and for a later export
+function exFactsHtml(p) {
+  const day = t => new Date(t * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }), m = (c) => moneyExact(c / 100, p.ccy);
+  return [
+    ['Statements', `${esc(p.provider)} · ${sats(p.rows)} rows · ${p.files.length === 1 ? esc(p.files[0]) : sats(p.files.length) + ' files'}`],
+    ['Covers', p.rows ? `${day(p.first)} to ${day(p.last)}` : '—'],
+    p.buys ? ['Buys', `${sats(p.buys)} · ${sats(p.bought_sats)} sats for ${m(p.spent_fiat)}${p.buy_fees_fiat ? ` including ${m(p.buy_fees_fiat)} in fees` : ''}`] : null,
+    p.sells ? ['Sells', `${sats(p.sells)} · ${sats(p.sold_sats)} sats for ${m(p.got_fiat)}`] : null,
+    p.withdrawals ? ['Withdrawals', `${sats(p.withdrawals)} · ${sats(p.withdrawn_sats)} sats to wallets${p.wd_fee_sats ? ` (fees ${sats(p.wd_fee_sats)} sats)` : ''}`] : null,
+    p.rewards_sats ? ['Received', `${sats(p.rewards_sats)} sats in rewards or deposits`] : null,
+    p.deposits || p.fiat_out ? ['Money', `${p.deposits ? `${sats(p.deposits)} deposit${p.deposits === 1 ? '' : 's'} of ${m(p.deposited_fiat)}` : ''}${p.deposits && p.fiat_out ? ' · ' : ''}${p.fiat_out ? `${m(p.fiat_out)} withdrawn` : ''}`] : null,
+    ['Held now', `${sats(Math.max(0, p.btc_now))} sats · ${m(p.fiat_now)} — ${p.stated ? 'as the newest statement states' : 'as the rows add up'}`],
+    p.unknown.length ? ['Not understood', `${p.unknown.map(esc).join(', ')} — kept as written, with the amount the statement gives`] : null,
+    p.new !== null && p.new !== undefined ? ['New here', `${sats(p.new)} row${p.new === 1 ? '' : 's'} this account does not have yet`] : null,
+  ].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+}
+function exReconHtml(p) {
+  if (!p.stated) return ['<b>No balance is stated in this export</b>, so what is held is the sum of its rows. If the exchange shows a different figure, a row is missing from the export.', 'var(--muted)'];
+  return p.agrees ? ['<b>✓ The running balances chain</b>, row by row, through every file: each balance is the one before plus its row — to the sat for coins, to the cent for money, since the exchange rounds its fees.', 'var(--signal)'] : ['<b>The running balance does not chain somewhere:</b> a file is partial, or a row was read differently from how the exchange wrote it. It can still be imported; the figure stays visible on the account.', 'var(--no)'];
+}
+$('#ex-pick').onclick = async () => {
+  $('#ex-note').textContent = ''; $('#ex-preview').hidden = true;
+  let p; try { p = await invoke('exchange_pick_preview', { existing: null }); } catch (e) { if (String(e) !== 'cancelled') $('#ex-note').textContent = String(e); return; }
+  $('#ex-facts').innerHTML = exFactsHtml(p);
+  const [words, colour] = exReconHtml(p); $('#ex-recon').innerHTML = words; $('#ex-recon').style.borderLeftColor = colour;
+  lineChart($('#ex-chart'), { title: 'Coins held at the exchange, in sats', sub: 'Row by row: bought, then withdrawn. If this is the shape you remember, it is your account.', from: p.first, to: Math.max(p.last, p.first + 86400),
+    series: [{ name: 'Held', color: 'var(--series-value)', pts: p.series, step: true, area: true }], fmt: v => sats(Math.round(v)) + ' sats', fmtAxis: v => csats(v) });
+  if (!$('#ex-name').value) $('#ex-name').value = p.provider;
+  const box = $('#ex-owner'), paintOwner = (id) => { exEntity = id; box.replaceChildren(entityChips(id, $('#ex-owner-form'), paintOwner)); }; paintOwner(null);
+  $('#ex-preview').hidden = false;
+};
+$('#ex-import').onclick = async () => {
+  const name = $('#ex-name').value.trim(); if (!name) return toast('Give the account a name');
+  $('#ex-import').disabled = true;
+  try {
+    const [v, n] = await invoke('exchange_import', { name, entity: exEntity });
+    $('#ex-preview').hidden = true; $('#ex-name').value = '';
+    store = await invoke('store_get'); vault = store.vaults.find(x => x.name === v.name) || v; rememberVault(vault);
+    toast(`${sats(n)} row${n === 1 ? '' : 's'} kept. Nothing here can be spent; every buy carries what it really cost.`, 8000);
+    renderTabs(); paintNet(); show('home');
+  } catch (e) { fail(e); } finally { $('#ex-import').disabled = false; }
+};
+// a later export, from the account's Vault settings: the same preview, then only the new rows are added
+function paintExchangeSettings() {
+  const box = $('#vs-exchange'); if (!box) return;
+  if (!vault || !vault.exchange) { box.hidden = true; box.innerHTML = ''; return; }
+  const ex = vault.exchange, last = ex.imports[ex.imports.length - 1];
+  box.hidden = false;
+  box.innerHTML = `<div class="label" style="margin-top:6px">Statements</div><div class="muted" style="font-size:13px">${sats(ex.imports.length)} import${ex.imports.length === 1 ? '' : 's'}${last && last.at ? ' · the last on ' + new Date(last.at * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : ''} · ${sats(ex.rows.length)} rows · ${ex.stated ? (ex.agrees ? 'balances chain' : 'a balance did not chain') : 'no balance stated'}</div>
+    <div class="row" style="gap:8px;margin-top:6px"><button class="btn small" type="button" id="vs-ex-pick">Add a newer export…</button><span class="muted" id="vs-ex-note" style="font-size:13px" aria-live="polite"></span></div><div id="vs-ex-preview" hidden style="margin-top:8px"></div>`;
+  $('#vs-ex-pick').onclick = async () => {
+    $('#vs-ex-note').textContent = ''; const pv = $('#vs-ex-preview'); pv.hidden = true;
+    let p; try { p = await invoke('exchange_pick_preview', { existing: vault.name }); } catch (e) { if (String(e) !== 'cancelled') $('#vs-ex-note').textContent = String(e); return; }
+    if (p.provider !== ex.provider) { $('#vs-ex-note').textContent = `That export is from ${p.provider}; this account is ${ex.provider}'s.`; return; }
+    pv.hidden = false; pv.innerHTML = `<dl class="tx-dl">${exFactsHtml(p)}</dl><div class="row" style="gap:8px;margin-top:8px"><button class="btn small primary" type="button" id="vs-ex-add">${p.new ? `Add the ${sats(p.new)} new row${p.new === 1 ? '' : 's'}` : 'Nothing new — keep as is'}</button><button class="btn small" type="button" id="vs-ex-cancel">Cancel</button></div>`;
+    $('#vs-ex-cancel').onclick = () => { pv.hidden = true; };
+    $('#vs-ex-add').onclick = async () => { try { const [v, n] = await invoke('exchange_import', { name: vault.name, entity: null }); store = await invoke('store_get'); vault = store.vaults.find(x => x.name === v.name) || v; vault._ex = null; vault._stale = true; toast(n ? `${sats(n)} row${n === 1 ? '' : 's'} added.` : 'Already here: that export added nothing new.'); paintExchangeSettings(); } catch (e) { fail(e); } };
+  };
+}
 function stmtRow(id) { if (!vault || !vault.statement) return null; if (!vault._stmt) vault._stmt = Object.fromEntries((vault.statement.rows || []).map(r => [r.id, r])); return vault._stmt[id] || null; }
 let stmtText = '';
 $('#stmt-pick').onclick = async () => {
@@ -3824,7 +3907,7 @@ function restoreFresh() {
   const adv = $('#spark-words-adv'); if (adv) adv.open = false;
   restoreTab.now = 'keys';
 }
-function restoreTab(name) { if (name !== 'spark' && restoreTab.now === 'spark') { seedClear(); if (sparkSelected || sparkBusy) sparkCancel().catch(() => {}); } restoreTab.now = name; $$('.tabs div').forEach(x => x.classList.toggle('on', x.dataset.tab === name)); for (const t of ['keys', 'scan', 'paste', 'muun', 'spark', 'statement', 'node']) $('#tab-' + t).hidden = t !== name; $('#sheet-note').hidden = !['scan', 'paste'].includes(name);   // it is about a recovery sheet, and only two of these are
+function restoreTab(name) { if (name !== 'spark' && restoreTab.now === 'spark') { seedClear(); if (sparkSelected || sparkBusy) sparkCancel().catch(() => {}); } restoreTab.now = name; $$('.tabs div').forEach(x => x.classList.toggle('on', x.dataset.tab === name)); for (const t of ['keys', 'scan', 'paste', 'muun', 'spark', 'statement', 'exchange', 'node']) $('#tab-' + t).hidden = t !== name; $('#sheet-note').hidden = !['scan', 'paste'].includes(name);   // it is about a recovery sheet, and only two of these are
   // a result from another way in is not about this one: it goes when the choice changes
   if (restoreTab.last && restoreTab.last !== name) { $('#restore-card').innerHTML = ''; parsed = null; }
   restoreTab.last = name;
@@ -4086,10 +4169,11 @@ function renderVaultSettings() {
   const n = vault.keys.length, single = n === 1;
   const drill = (vault.notes || {})['vault:drill'] || '';
   { const box = $('#vs-owner'); box.innerHTML = ''; box.appendChild(entityChips(vault.entity && entityOf(vault.entity) ? vault.entity : null, box, (id) => vaultEntitySet(vault.name, id, renderVaultSettings))); }
+  paintExchangeSettings();
   $('#vs-facts').innerHTML = [
     ['Name', esc(vault.name)],
     ['Network', vault.network === 'mainnet' ? 'mainnet \u2014 real coins' : esc(vault.network) + ' \u2014 a test network; these coins are worth nothing'],
-    ['Kind', vault.node ? `a ${vault.node.kind === 'cln' ? 'Core Lightning' : 'LND'} node, ${esc(vault.node.alias)}, read with a read-only credential` : vault.statement ? `a closed custodial wallet, read from the statement ${esc(vault.statement.source)} gave` : vault.watch ? `watched \u2014 one exported key, ${vault.watch.kinds.length > 1 ? 'every kind of address' : vault.watch.kinds[0]}${vault.watch.sp ? ', and silent payments' : ''}` : vault.spark ? (vault.spark.authenticated ? 'watched \u2014 Spark, through a YubiKey reader' : 'watched \u2014 Spark') : vault.muun ? 'watched \u2014 a Muun wallet' : single ? 'a single key' : `${vault.threshold} of ${n} keys \u2014 any ${vault.threshold} of them sign`],
+    ['Kind', vault.node ? `a ${vault.node.kind === 'cln' ? 'Core Lightning' : 'LND'} node, ${esc(vault.node.alias)}, read with a read-only credential` : vault.exchange ? `an exchange account at ${esc(vault.exchange.provider)}, read from its statements` : vault.statement ? `a closed custodial wallet, read from the statement ${esc(vault.statement.source)} gave` : vault.watch ? `watched \u2014 one exported key, ${vault.watch.kinds.length > 1 ? 'every kind of address' : vault.watch.kinds[0]}${vault.watch.sp ? ', and silent payments' : ''}` : vault.spark ? (vault.spark.authenticated ? 'watched \u2014 Spark, through a YubiKey reader' : 'watched \u2014 Spark') : vault.muun ? 'watched \u2014 a Muun wallet' : single ? 'a single key' : `${vault.threshold} of ${n} keys \u2014 any ${vault.threshold} of them sign`],
     ['Keys', vault.keys.map(k => esc(k.name)).join(' \u00b7 ')],
     ['Made', vault.created ? new Date(vault.created * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' }) : '\u2014'],
   ].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
