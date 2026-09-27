@@ -92,6 +92,9 @@ impl Index {
             snap.name = v.name.clone(); snap.network = v.network.clone();
             snap.muun = v.muun.is_some(); snap.statement = v.statement.is_some(); snap.node = v.node.is_some(); snap.exchange = v.exchange.is_some();
             snap.identity = v.spark.as_ref().map(|sp| sp.identity.to_lowercase()).unwrap_or_default();
+            // an exchange's withdrawals always carry their amount as what they paid — from the account itself, so a
+            // snapshot taken before the app knew to record it links the moment the app starts, not after a refresh
+            if let Some(ex) = &v.exchange { let by_id: BTreeMap<&str, &crate::exchange::ExRow> = ex.rows.iter().map(|r| (r.id.as_str(), r)).collect(); for f in snap.rows.iter_mut() { if let Some(r) = by_id.get(f.id.as_str()) { if r.kind == "btc_out" && r.sats != 0 && f.paid.is_empty() { f.paid = vec![r.sats.unsigned_abs()]; } } } }
         }
         self.build();
     }
