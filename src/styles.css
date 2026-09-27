@@ -553,6 +553,11 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .tp-list{margin-top:6px}
 .tp.rowpick{cursor:pointer} .tp.rowpick:hover{background:var(--gold-soft);margin:0 -10px;padding-left:10px;padding-right:10px;border-radius:6px}
 .tp .tp-art{flex:0 0 40px;width:40px;display:flex;align-items:center;justify-content:center;color:var(--gold)} .tp .tp-art svg{width:26px;height:26px}
+/* an icon for an entity, a place or a key: a round mark, a glyph or a sealed picture; clickable where it can be changed */
+.ic{display:inline-flex;align-items:center;justify-content:center;border-radius:50%;overflow:hidden;background:var(--ground);border:1px solid var(--line);color:var(--gold);flex:0 0 auto;vertical-align:middle} .ic img{width:100%;height:100%;object-fit:cover;display:block} .ic svg{width:60%;height:60%}
+.ic.s24{width:24px;height:24px} .ic.s40{width:40px;height:40px} .ic.s72{width:72px;height:72px}
+.ic[data-icon-pick]{cursor:pointer} .ic[data-icon-pick]:hover{border-color:var(--gold)}
+.icpick{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--ground)} .icpick .ic{cursor:pointer} .icpick .ic:hover,.icpick .ic.on{border-color:var(--gold);background:var(--gold-soft)}
 .ent-kind{font-family:var(--display);font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:14px 0 4px}
 .kpi{padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}

@@ -2054,12 +2054,13 @@ function renderOverview() {
   const chips = document.createElement('div'); chips.style.cssText = 'display:flex;gap:var(--s2) 14px;flex-wrap:wrap;align-items:center';
   const ents = (store.entities || []).slice().sort((a, b) => a.name.localeCompare(b.name)), groups = ents.length ? ents.map(e => [e.name, main.filter(v => v.entity === e.id)]).concat([['Unassigned', main.filter(v => !v.entity || !entityOf(v.entity))]]).filter(g => g[1].length) : [['', main]];
   for (const [gname, vs] of groups) {
-    if (gname) { const l = document.createElement('span'); l.className = 'ent-kind'; l.textContent = gname; l.style.marginRight = '-6px'; chips.appendChild(l); }
+    if (gname) { const l = document.createElement('span'); l.className = 'ent-kind'; l.style.cssText = 'margin-right:-6px;display:inline-flex;align-items:center;gap:6px'; const e = ents.find(x => x.name === gname); l.innerHTML = (e ? iconHtml('entity', e.id, 24, entGlyph(e)) : '') + esc(gname); chips.appendChild(l); }
     for (const v of vs) { const b = document.createElement('button'); b.type = 'button'; b.className = 'vchip'; b.dataset.vault = v.name; b.setAttribute('aria-pressed', off.includes(v.name) ? 'false' : 'true'); b.textContent = v.name;
       b.onclick = () => { const set = new Set(off); set.has(v.name) ? set.delete(v.name) : set.add(v.name); sumSave('off', JSON.stringify([...set])); renderOverview(); }; chips.appendChild(b); }
   }
   $('#ov-note').textContent = test.length ? `Not counted: ${test.map(v => '“' + v.name + '”').join(', ')} — on a test network, whose coins are worth nothing and must never be added to real ones.` : '';
   if (!main.length) { $('#ov-summary').innerHTML = '<div class="label">All vaults</div><div class="sum-empty">No vault on mainnet yet. Test-network vaults are never added into a total of real coins.</div>'; return; }
+  paintIcons(chips);
   renderSummary($('#ov-summary'), names, { title: 'All vaults', chips: main.length > 1 ? chips : null,
     empty: names.length ? 'Nothing has arrived in these vaults yet.' : 'Every vault is switched off above. Switch one on to see it.',
     extra: main.length > 1 ? 'Switch a vault off above to leave it out; a transfer from a vault that is switched off then counts as coming from outside.' : '' });
@@ -3099,13 +3100,14 @@ function openKeyCard(pub) {
     <div class="guide-row">
       <div class="guide" style="display:flex;align-items:center;justify-content:center;min-height:196px;line-height:0">${art}</div>
       <div class="guide-body">
-        <div class="cer-act-title">${esc(k.name)}</div>
+        <div class="row" style="gap:10px;align-items:center">${iconHtml('key', pub, 40, 'keys', true)}<div class="cer-act-title">${esc(k.name)}</div></div>
         <div class="muted">${esc(sub)}</div>
         <dl class="tx-dl" style="margin-top:6px">${facts.map(([a, b]) => `<dt>${a}</dt><dd>${b}</dd>`).join('')}</dl>
       </div>
     </div>
     <div id="key-private"></div>`;
   $('#key-back').onclick = () => closeKeyCard();
+  paintIcons(d);
   paintKeyPrivate();
   paintCrumbs('keys');
 }
@@ -3271,10 +3273,11 @@ function renderLocations() {
   for (const p of places) {
     const h = placeHoldings(p.id), nk = h.reduce((a, x) => a + x.keys.length, 0), row = document.createElement('div'); row.className = 'tp rowpick'; row.dataset.place = p.id; row.setAttribute('role', 'link'); row.tabIndex = 0;
     const holds = h.length ? `${sats(nk)} key${nk === 1 ? '' : 's'} of ${sats(h.length)} vault${h.length === 1 ? '' : 's'}` : 'nothing kept here yet';
-    row.innerHTML = `<div class="tp-art"><svg aria-hidden="true"><use href="#i-place"/></svg></div><div class="tp-what"><div class="tp-head"><b>${esc(p.name)}</b>${p.place ? ` <span class="muted">· ${esc(p.place)}</span>` : ''}</div><div class="muted" style="font-size:13px">${holds}${h.length ? ': ' + h.map(x => `${esc(x.vault.name)} (${x.keys.map(k => esc(k.name)).join(', ')})`).join(' · ') : ''}</div>${h.some(x => x.alone) ? `<div class="warn" style="font-size:13px">this place alone can spend ${h.filter(x => x.alone).map(x => esc(x.vault.name)).join(' and ')}</div>` : ''}</div><div class="tp-act"><span class="muted" style="font-size:13px">${p.lat != null ? 'on the map' : 'no pin'}</span></div>`;
+    row.innerHTML = `<div class="tp-art">${iconHtml('place', p.id, 40, 'place')}</div><div class="tp-what"><div class="tp-head"><b>${esc(p.name)}</b>${p.place ? ` <span class="muted">· ${esc(p.place)}</span>` : ''}</div><div class="muted" style="font-size:13px">${holds}${h.length ? ': ' + h.map(x => `${esc(x.vault.name)} (${x.keys.map(k => esc(k.name)).join(', ')})`).join(' · ') : ''}</div>${h.some(x => x.alone) ? `<div class="warn" style="font-size:13px">this place alone can spend ${h.filter(x => x.alone).map(x => esc(x.vault.name)).join(' and ')}</div>` : ''}</div><div class="tp-act"><span class="muted" style="font-size:13px">${p.lat != null ? 'on the map' : 'no pin'}</span></div>`;
     row.onclick = () => openPlace(p.id); row.onkeydown = (e) => { if (e.key === 'Enter') openPlace(p.id); };
     list.appendChild(row);
   }
+  paintIcons(list);
   $('#place-new').onclick = () => placeForm($('#place-form-slot'), null, (saved) => { if (saved) openPlace(saved.id); else renderLocations(); });
 }
 function openPlace(id) { placePage = id; show('place'); }
@@ -3287,11 +3290,11 @@ function renderPlace() {
   const held = h.length ? h.map(x => `<div class="row" style="gap:6px;align-items:baseline;flex-wrap:wrap"><b>${esc(x.vault.name)}</b>${x.keys.map(k => `<button type="button" class="tag ours" data-open-key="${esc(k.pubkey)}" title="Open this key’s card" style="cursor:pointer">${esc(k.name)}</button>`).join('')}<span class="muted" style="font-size:13px">${x.vault.keys.length > 1 ? `${sats(x.keys.length)} of its ${sats(x.vault.keys.length)} keys · ${sats(x.vault.threshold)} sign` : 'its only key'}</span>${x.alone ? '<span class="warn">this place alone can spend it</span>' : ''}</div>`).join('') : '<div class="muted" style="font-size:13px">Nothing kept here yet. Assign a key from its card, or from the Not yet placed list on Locations.</div>';
   card.innerHTML = `<div class="txnav"><button class="btn small" type="button" data-go="places">‹ All locations</button><span class="muted">${esc(p.name)}</span><span></span></div>
     <div class="guide-row" style="align-items:stretch">${placeTile(p, 'place-map-' + esc(p.id))}<div class="guide-body">
-      <div class="cer-act-title">${esc(p.name)}</div>${p.place ? `<div class="muted">${esc(p.place)}</div>` : ''}${p.note ? `<div style="font-size:13.5px;white-space:pre-wrap">${esc(p.note)}</div>` : ''}
+      <div class="row" style="gap:10px;align-items:center">${iconHtml('place', p.id, 40, 'place', true)}<div class="cer-act-title">${esc(p.name)}</div></div>${p.place ? `<div class="muted">${esc(p.place)}</div>` : ''}${p.note ? `<div style="font-size:13.5px;white-space:pre-wrap">${esc(p.note)}</div>` : ''}
       <div class="label" style="margin-top:4px">Kept here</div><div class="stack" style="gap:6px">${held}</div>
       <div class="row" style="gap:8px;margin-top:6px"><button class="btn small" type="button" id="place-edit">Edit</button><button class="btn small" type="button" id="place-del">Forget this place</button></div>
     </div></div><div id="place-form"></div>`;
-  if (p.lat != null) drawPlaceMap($('#place-map-' + p.id), p);
+  if (p.lat != null) drawPlaceMap($('#place-map-' + p.id), p); paintIcons(card);
   $('#place-edit').onclick = () => placeForm($('#place-form'), p, () => renderPlace());
   askTwice($('#place-del'), 'Forget this place? The keys kept there stay in their vaults; they just have no place recorded.', 'Yes, forget it', async () => { try { store = await invoke('place_delete', { id: p.id }); show('places'); } catch (e) { fail(e); } });
   $$('#place-card [data-open-key]').forEach(b => b.onclick = () => openKeyFromApp(b.dataset.openKey));
@@ -3317,14 +3320,42 @@ function renderAllKeys() {
     const model = dev ? dev.name : card ? modelName(card.form, card.nfc) : pf ? modelName(pf, !!(pf & 0x80), !!(pf & 0x40)) : bare ? 'YubiKey' : 'signs on its own device';
     const p = placeOf(pub);
     const row = document.createElement('div'); row.className = 'tp rowpick'; row.dataset.key = pub; row.setAttribute('role', 'link'); row.tabIndex = 0;
-    row.innerHTML = `<div class="tp-art" style="color:var(--ink)">${art}</div><div class="tp-what"><div class="tp-head"><b>${esc(k.name)}</b> <span class="muted">· ${esc(model)}${k.serial ? ' · serial ' + esc(String(k.serial)) : ''}</span></div><div class="muted" style="font-size:13px">Signs for ${vaults.map(v => esc(v.name)).join(', ')}${p ? ` · kept at <b>${esc(p.name)}</b>` : ' · no place recorded'}</div></div><div class="tp-act">${bare ? `<span class="${card ? 'ok' : 'muted'}" style="font-size:13px">${card ? '✓ plugged in' : 'not plugged in'}</span>` : '<span class="muted" style="font-size:13px">own device</span>'}</div>`;
+    row.innerHTML = `<div class="tp-art" style="color:var(--ink)">${iconOf('key', pub) ? iconHtml('key', pub, 40, 'keys') : art}</div><div class="tp-what"><div class="tp-head"><b>${esc(k.name)}</b> <span class="muted">· ${esc(model)}${k.serial ? ' · serial ' + esc(String(k.serial)) : ''}</span></div><div class="muted" style="font-size:13px">Signs for ${vaults.map(v => esc(v.name)).join(', ')}${p ? ` · kept at <b>${esc(p.name)}</b>` : ' · no place recorded'}</div></div><div class="tp-act">${bare ? `<span class="${card ? 'ok' : 'muted'}" style="font-size:13px">${card ? '✓ plugged in' : 'not plugged in'}</span>` : '<span class="muted" style="font-size:13px">own device</span>'}</div>`;
     row.onclick = () => openKeyFromApp(pub); row.onkeydown = (e) => { if (e.key === 'Enter') openKeyFromApp(pub); };
     list.appendChild(row);
   }
+  paintIcons(list);
 }
+// ---------- icons: a mark for an entity, a place or a key — a house glyph, or a sealed picture ----------
+const GLYPHS = [['entity', 'People'], ['building', 'Company'], ['shield', 'Trust'], ['bank', 'Bank'], ['briefcase', 'Office'], ['safe', 'Safe'], ['home', 'Home'], ['place', 'Place'], ['keys', 'Key'], ['card', 'Card'], ['star', 'Star']];
+const glyphRef = (g) => ['entity', 'home', 'place', 'keys', 'lock', 'coins', 'book'].includes(g) ? '#i-' + g : '#g-' + g;
+const iconOf = (kind, id) => (store.icons || {})[kind + ':' + id] || '';
+// the mark's html; `fallback` is the glyph drawn when none is set; a picture is filled in by paintIcons
+function iconHtml(kind, id, size, fallback, pick) {
+  const ic = iconOf(kind, id), img = ic.startsWith('img:') ? ic.slice(4) : '', g = ic.startsWith('glyph:') ? ic.slice(6) : fallback;
+  return `<span class="ic s${size}" data-icon="${esc(kind + ':' + id)}"${img ? ` data-icon-img="${esc(img)}"` : ''}${pick ? ' data-icon-pick="1" title="Change the picture" role="button" tabindex="0"' : ''}>${img ? '' : `<svg aria-hidden="true"><use href="${glyphRef(g)}"/></svg>`}</span>`;
+}
+async function paintIcons(root) {
+  for (const el of $$('[data-icon-img]', root)) { const h = el.dataset.iconImg; if (el.querySelector('img')) continue;
+    try { if (!thumbCache.has(h)) thumbCache.set(h, await invoke('attach_thumb', { sha256: h })); if (!el.isConnected) continue; const img = new Image(); img.alt = ''; img.src = thumbCache.get(h); el.replaceChildren(img); } catch {} }
+}
+// the picker, under the mark it changes: the glyphs, a picture, or none
+function iconPicker(anchor, kind, id, done) {
+  let box = anchor.parentElement.querySelector('.icpick'); if (box) { box.remove(); return; }
+  box = document.createElement('div'); box.className = 'icpick';
+  const cur = iconOf(kind, id);
+  box.innerHTML = GLYPHS.map(([g, w]) => `<span class="ic s40${cur === 'glyph:' + g ? ' on' : ''}" data-glyph="${g}" title="${w}" role="button" tabindex="0"><svg aria-hidden="true"><use href="${glyphRef(g)}"/></svg></span>`).join('') + `<button type="button" class="btn small" data-icon-upload>A picture…</button>${cur ? '<button type="button" class="linkish" data-icon-none>None</button>' : ''}`;
+  const set = async (icon) => { try { store = icon === 'pick' ? await invoke('icon_pick', { kind, id }) : await invoke('icon_set', { kind, id, icon }); box.remove(); if (done) done(); } catch (e) { if (String(e) !== 'cancelled') fail(e); } };
+  $$('[data-glyph]', box).forEach(b => b.onclick = () => set('glyph:' + b.dataset.glyph));
+  box.querySelector('[data-icon-upload]').onclick = () => set('pick');
+  const none = box.querySelector('[data-icon-none]'); if (none) none.onclick = () => set(null);
+  anchor.insertAdjacentElement('afterend', box);
+}
+document.addEventListener('click', (e) => { const m = e.target.closest('.ic[data-icon-pick]'); if (!m) return; const [kind, ...rest] = m.dataset.icon.split(':'); iconPicker(m, kind, rest.join(':'), () => { const name = $('.screen.on') && $('.screen.on').id.slice(2); if (name === 'keys' && recPage.kind === 'key') openKeyCard(recPage.id); else if (name) show(name); }); });
 // ---------- Entities: who owns what ----------
 const ENTITY_KINDS = [['person', 'Person'], ['company', 'Company'], ['trust', 'Trust'], ['smsf', 'Super fund'], ['other', 'Other']];
 const kindWord = (k) => (ENTITY_KINDS.find(x => x[0] === k) || ['', 'Other'])[1];
+const entGlyph = (e) => e.kind === 'company' ? 'building' : e.kind === 'trust' ? 'shield' : e.kind === 'smsf' ? 'bank' : 'entity';
 const vaultsOf = (id) => store.vaults.filter(v => v.entity === id);
 const kindOfVault = (v) => v.node ? 'Lightning node' : v.statement ? 'closed wallet' : v.exchange ? 'exchange account' : v.spark ? 'Spark wallet' : v.muun ? 'Muun wallet' : v.watch ? 'watched' : v.keys.length === 1 ? 'one key' : `${v.threshold} of ${v.keys.length}`;
 // the chips: every entity, the current one pressed; New entity opens the form in `slot`; `pick(id)` records it
@@ -3374,10 +3405,11 @@ function renderEntities() {
   if (!ents.length) list.innerHTML = `<div class="sum-empty">No entity yet. ${store.vaults.length ? 'Name the first — yourself, a company, a trust — and put its vaults under it.' : ''}</div>`;
   for (const e of ents) {
     const vs = vaultsOf(e.id), row = document.createElement('div'); row.className = 'tp rowpick'; row.dataset.entity = e.id; row.setAttribute('role', 'link'); row.tabIndex = 0;
-    row.innerHTML = `<div class="tp-art"><svg aria-hidden="true"><use href="#i-entity"/></svg></div><div class="tp-what"><div class="tp-head"><b>${esc(e.name)}</b> <span class="ent-kind" style="margin-left:6px">${esc(kindWord(e.kind))}</span></div><div class="muted" style="font-size:13px">${vs.length ? vs.map(v => esc(v.name)).join(' · ') : 'no vaults yet'}</div></div><div class="tp-act"><span class="muted" style="font-size:13px">${sats(vs.length)} vault${vs.length === 1 ? '' : 's'}</span></div>`;
+    row.innerHTML = `<div class="tp-art">${iconHtml('entity', e.id, 40, entGlyph(e))}</div><div class="tp-what"><div class="tp-head"><b>${esc(e.name)}</b> <span class="ent-kind" style="margin-left:6px">${esc(kindWord(e.kind))}</span></div><div class="muted" style="font-size:13px">${vs.length ? vs.map(v => esc(v.name)).join(' · ') : 'no vaults yet'}</div></div><div class="tp-act"><span class="muted" style="font-size:13px">${sats(vs.length)} vault${vs.length === 1 ? '' : 's'}</span></div>`;
     row.onclick = () => openEntity(e.id); row.onkeydown = (ev) => { if (ev.key === 'Enter') openEntity(e.id); };
     list.appendChild(row);
   }
+  paintIcons(list);
   $('#ent-new').onclick = () => entityForm($('#ent-form-slot'), null, (saved) => { if (saved) openEntity(saved.id); else renderEntities(); });
 }
 function openEntity(id) { entPage = id; show('entity'); }
@@ -3387,13 +3419,14 @@ function renderEntity() {
   const vs = vaultsOf(e.id), keys = new Map();
   for (const v of vs) for (const k of v.keys) if (k.pubkey && !keys.has(k.pubkey)) keys.set(k.pubkey, k);
   card.innerHTML = `<div class="txnav"><button class="btn small" type="button" data-go="entities">‹ All entities</button><span class="muted">${esc(e.name)}</span><span></span></div>
-    <div class="guide-row"><div class="guide" style="display:flex;align-items:center;justify-content:center;min-height:140px;flex-basis:200px;color:var(--gold)"><svg width="56" height="56"><use href="#i-entity"/></svg></div><div class="guide-body">
+    <div class="guide-row"><div class="guide" style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:140px;flex-basis:200px">${iconHtml('entity', e.id, 72, entGlyph(e), true)}</div><div class="guide-body">
       <div class="cer-act-title">${esc(e.name)}</div><div class="ent-kind">${esc(kindWord(e.kind))}</div>${e.note ? `<div style="font-size:13.5px;white-space:pre-wrap">${esc(e.note)}</div>` : ''}
       <div class="label" style="margin-top:6px">Its vaults</div>
       <div class="tp-list" style="margin-top:0">${vs.length ? vs.map(v => `<div class="tp rowpick" data-go-vault="${esc(v.name)}" role="link" tabindex="0"><div class="tp-what"><div class="tp-head"><b>${esc(v.name)}</b> <span class="muted">· ${esc(kindOfVault(v))}${v.network !== 'mainnet' ? ' · ' + esc(v.network) : ''}</span></div></div><div class="tp-act"><span class="muted" style="font-size:13px">open ›</span></div></div>`).join('') : '<div class="muted" style="font-size:13px">No vault yet. Assign one from its Vault settings, or from the list on Entities.</div>'}</div>
       ${keys.size ? `<div class="label" style="margin-top:6px">Its keys</div><div class="muted" style="font-size:13px">${[...keys.values()].map(k => `<b>${esc(k.name)}</b>${placeOf(k.pubkey) ? ' at ' + esc(placeOf(k.pubkey).name) : ''}`).join(' · ')} — <button type="button" class="linkish" data-go="allkeys">every key</button></div>` : ''}
       <div class="row" style="gap:8px;margin-top:6px"><button class="btn small" type="button" id="ent-edit">Edit</button><button class="btn small" type="button" id="ent-del">Forget this entity</button></div>
     </div></div><div id="ent-form"></div>`;
+  paintIcons(card);
   $$('#entity-card [data-go-vault]').forEach(r => { const go = () => { vault = store.vaults.find(v => v.name === r.dataset.goVault) || vault; show('home'); }; r.onclick = go; r.onkeydown = (ev) => { if (ev.key === 'Enter') go(); }; });
   $('#ent-edit').onclick = () => entityForm($('#ent-form'), e, () => renderEntity());
   askTwice($('#ent-del'), 'Forget this entity? Its vaults stay; they are simply unassigned again.', 'Yes, forget it', async () => { try { store = await invoke('entity_delete', { id: e.id }); show('entities'); } catch (err) { fail(err); } });
