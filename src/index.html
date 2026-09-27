@@ -578,7 +578,7 @@
             <div class="row"><button class="btn primary" id="muun-read">Watch this wallet</button></div>
             <div class="muted" style="font-size:13px" id="muun-note"></div>
           </div>
-          <div id="tab-paste" class="stack" hidden><div class="field"><textarea id="desc-in" class="mono" placeholder="wsh(sortedmulti(2,02…,03…,03…))#checksum cc=…   ·   or the UR text of a backup, UR:CRYPTO-OUTPUT/1-2/…, each part on its own line" spellcheck="false"></textarea></div><div class="row"><button class="btn" id="desc-read">Read it</button><button class="btn" id="bsms-open" title="Open a BSMS descriptor record (BIP 129)">Open a BSMS file</button></div></div>
+          <div id="tab-paste" class="stack" hidden><div class="field"><textarea id="desc-in" class="mono" placeholder="wsh(sortedmulti(2,02…,03…,03…))#checksum cc=…   ·   a wallet descriptor (wsh, sh(wsh), sh, wpkh, sh(wpkh), pkh, tr)   ·   a Coldcard multisig file   ·   a Sparrow or Specter JSON   ·   two descriptors, receive and change   ·   one key with its origin, [fingerprint/path]xpub…   ·   or the UR text of a backup, UR:CRYPTO-OUTPUT/1-2/…, each part on its own line" spellcheck="false"></textarea></div><div class="row"><button class="btn" id="desc-read">Read it</button><button class="btn" id="bsms-open" title="Open a BSMS descriptor record (BIP 129)">Open a BSMS file</button></div></div>
           <div class="muted" id="sheet-note" hidden style="font-size:13px">The code on a recovery sheet carries the descriptor alone. Nothing on it can spend.</div>
         </div>
         <div class="card" id="restore-card"><div class="muted">Nothing read yet.</div></div>

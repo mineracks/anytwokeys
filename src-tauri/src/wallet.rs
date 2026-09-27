@@ -540,7 +540,36 @@ pub struct ExtKey { pub fingerprint: String, pub path: String, pub xpub: String,
     #[serde(default)] pub fixed: bool }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ExtInfo { pub descriptor: String, pub canonical: String, pub threshold: usize, pub keys: Vec<ExtKey>, pub network: String, pub kind: String }
+pub struct ExtInfo { pub descriptor: String, pub canonical: String, pub threshold: usize, pub keys: Vec<ExtKey>, pub network: String, pub kind: String,
+    /// the script the wallet pays to: wsh · sh-wsh · sh · wpkh · sh-wpkh · pkh · tr
+    #[serde(default)] pub script: String }
+
+/// The script a vault of extended keys pays to, read off its descriptor; a card vault is wsh.
+pub fn script_kind(v: &Vault) -> &'static str {
+    let e = match &v.ext { Some(e) => e.trim_start(), None => return "wsh" };
+    if e.starts_with("sh(wsh(") { "sh-wsh" } else if e.starts_with("sh(wpkh(") { "sh-wpkh" } else if e.starts_with("sh(") { "sh" } else if e.starts_with("wpkh(") { "wpkh" } else if e.starts_with("pkh(") { "pkh" } else if e.starts_with("tr(") { "tr" } else { "wsh" }
+}
+/// Pays to a script with no witness: its PSBT inputs carry the whole previous transaction, not a witness UTXO.
+pub fn legacy(v: &Vault) -> bool { matches!(script_kind(v), "sh" | "pkh") }
+/// An input's virtual size by script: what the fee estimate and the builder both use.
+pub fn in_vbytes_for(script: &str, threshold: usize, n: usize) -> u64 {
+    match script {
+        "wpkh" => 68, "sh-wpkh" => 91, "pkh" => 148, "tr" => 58,
+        "sh" => { let script_len = 1 + 34 * n + 2; (41 + 1 + threshold * 73 + script_len + 2) as u64 }   // every byte in the scriptSig, at full weight
+        "sh-wsh" => in_vbytes(threshold, n) + 36,   // the redeem script, 35 bytes, pushed in the scriptSig
+        _ => in_vbytes(threshold, n),
+    }
+}
+/// A PSBT for a legacy script: every input carries its whole previous transaction, as such signers require.
+pub fn attach_prev_txs(psbt_b64: &str, txs: &[Transaction]) -> Result<String, String> {
+    let mut p = Psbt::from_str(psbt_b64.trim()).map_err(|e| e.to_string())?;
+    let ins = p.unsigned_tx.input.clone();
+    for (i, inp) in ins.iter().enumerate() {
+        let t = txs.iter().find(|t| t.compute_txid() == inp.previous_output.txid).ok_or("a previous transaction could not be fetched; sync and try again")?;
+        p.inputs[i].non_witness_utxo = Some(t.clone()); p.inputs[i].witness_utxo = None;
+    }
+    Ok(p.to_string())
+}
 
 fn ext_desc(text: &str) -> Result<Descriptor<DescriptorPublicKey>, String> {
     // parsed whole, checksum and all, and case left alone: base58 is case-sensitive
@@ -577,12 +606,20 @@ pub fn ext_parse(text: &str) -> Result<Option<ExtInfo>, String> {
     if !d.is_multipath() { return Err("this descriptor names one chain only. Paste the whole wallet descriptor, with <0;1>/* on each key, so both receive and change addresses are watched".into()); }
     let singles = d.clone().into_single_descriptors().map_err(|e| e.to_string())?;
     if singles.len() != 2 { return Err("a wallet descriptor has exactly two chains, <0;1> — receive and change".into()); }
-    let (kind, threshold) = match d.desc_type() {
-        miniscript::descriptor::DescriptorType::WshSortedMulti => ("sortedmulti", sorted_threshold(&d)?),
+    use miniscript::descriptor::DescriptorType as T;
+    let ds = d.to_string();
+    let (kind, threshold, script) = match d.desc_type() {
+        T::WshSortedMulti => ("sortedmulti", sorted_threshold(&d)?, "wsh"),
         // wsh(multi(...)) is reported as a general wsh; it is accepted only when the text says exactly that
-        miniscript::descriptor::DescriptorType::Wsh if d.to_string().starts_with("wsh(multi(") => ("multi", sorted_threshold(&d)?),
-        miniscript::descriptor::DescriptorType::Wpkh => ("single", 1),
-        other => return Err(format!("{other:?} descriptors are not supported yet: this app watches wsh(sortedmulti), wsh(multi) and wpkh wallets")),
+        T::Wsh if ds.starts_with("wsh(multi(") => ("multi", sorted_threshold(&d)?, "wsh"),
+        T::ShWshSortedMulti => ("sortedmulti", sorted_threshold(&d)?, "sh-wsh"),
+        T::ShWsh if ds.starts_with("sh(wsh(multi(") => ("multi", sorted_threshold(&d)?, "sh-wsh"),
+        T::ShSortedMulti => ("sortedmulti", sorted_threshold(&d)?, "sh"),
+        T::Sh if ds.starts_with("sh(multi(") => ("multi", sorted_threshold(&d)?, "sh"),
+        T::Wpkh => ("single", 1, "wpkh"), T::ShWpkh => ("single", 1, "sh-wpkh"), T::Pkh => ("single", 1, "pkh"),
+        // taproot by its key path alone: a single key, no script tree
+        T::Tr if !ds.contains(',') => ("single", 1, "tr"),
+        other => return Err(format!("{other:?} descriptors are not read: this app watches multisig wallets as wsh, sh(wsh) or legacy sh — sortedmulti or multi — and single-key wallets as wpkh, sh(wpkh), pkh or tr by its key path")),
     };
     let network = match net { Some(bitcoin::NetworkKind::Main) => "mainnet", _ => "signet" }.to_string();
     // Kept AS WRITTEN when it came with a checksum that verified: miniscript re-writes 48h as 48' and the checksum
@@ -592,13 +629,95 @@ pub fn ext_parse(text: &str) -> Result<Option<ExtInfo>, String> {
     let descriptor = if trimmed.contains('#') { trimmed.to_string() } else { d.to_string() };
     // origins on FIXED keys are not part of which wallet this is (they say only what the key already says), so the
     // same wallet written either way compares equal — as `48h` and `48'` already do
-    Ok(Some(ExtInfo { descriptor, canonical: without_key_origins(&d.to_string()), threshold, keys, network, kind: kind.into() }))
+    Ok(Some(ExtInfo { descriptor, canonical: without_key_origins(&d.to_string()), threshold, keys, network, kind: kind.into(), script: script.into() }))
 }
 
 fn sorted_threshold(d: &Descriptor<DescriptorPublicKey>) -> Result<usize, String> {
     // the k of k-of-n, read from the canonical text rather than from miniscript's internals
     let s = d.to_string(); let inner = s.split_once("multi(").map(|x| x.1).ok_or("no multi")?;
     inner.split(',').next().and_then(|k| k.trim().parse().ok()).ok_or_else(|| "threshold".into())
+}
+
+// ---------- what wallets export before it is a descriptor ----------
+
+/// Every SLIP-132 key in a line (zpub, Zpub, ypub, Ypub, vpub, Vpub, upub, Upub) written back as the plain xpub or
+/// tpub it is. A descriptor says its own script type; the version bytes only got in the way. A checksum that no
+/// longer fits is dropped rather than kept wrong.
+fn slip132_inside(line: &str) -> Result<String, String> {
+    let b58 = |c: char| c.is_ascii_alphanumeric() && !matches!(c, '0' | 'O' | 'I' | 'l');
+    let (mut out, mut changed, mut run) = (String::new(), false, String::new());
+    let flush = |run: &mut String, out: &mut String, changed: &mut bool| -> Result<(), String> {
+        if run.len() >= 100 && (run.starts_with("zpub") || run.starts_with("Zpub") || run.starts_with("ypub") || run.starts_with("Ypub") || run.starts_with("vpub") || run.starts_with("Vpub") || run.starts_with("upub") || run.starts_with("Upub")) {
+            out.push_str(&crate::signers::standard_xpub(run)?); *changed = true;
+        } else { out.push_str(run); }
+        run.clear(); Ok(())
+    };
+    for c in line.chars() { if b58(c) { run.push(c); } else { flush(&mut run, &mut out, &mut changed)?; out.push(c); } }
+    flush(&mut run, &mut out, &mut changed)?;
+    Ok(if changed { out.split('#').next().unwrap_or(&out).trim().to_string() } else { out })
+}
+/// A Coldcard multisig file — also what Sparrow, Keeper and Nunchuk export under that name: `Policy: 2 of 3`,
+/// `Format: P2WSH` (or P2SH-P2WSH, P2SH), a `Derivation:` for the keys that follow it, and one `fingerprint: xpub`
+/// line per key. Read into the descriptor it means, keys in the file's order, sorted by the script itself.
+fn coldcard_multisig(text: &str) -> Result<String, String> {
+    let (mut policy, mut format, mut deriv, mut keys) = (None::<(usize, usize)>, "P2WSH".to_string(), String::new(), Vec::<String>::new());
+    for line in text.lines() {
+        let l = line.trim(); if l.is_empty() || l.starts_with('#') { continue; }
+        let Some((k, v)) = l.split_once(':') else { continue };
+        let (k, v) = (k.trim().to_lowercase(), v.trim());
+        match k.as_str() {
+            "name" => {}
+            "policy" => { let p: Vec<usize> = v.split(|c: char| !c.is_ascii_digit()).filter(|x| !x.is_empty()).filter_map(|x| x.parse().ok()).collect(); if p.len() != 2 { return Err(format!("Policy line not understood: {v}")); } policy = Some((p[0], p[1])); }
+            "format" => format = v.to_uppercase().replace(' ', ""),
+            "derivation" => deriv = v.trim_start_matches("m/").trim_start_matches('m').trim_start_matches('/').to_string(),
+            f if f.len() == 8 && f.chars().all(|c| c.is_ascii_hexdigit()) => {
+                if deriv.is_empty() { return Err(format!("no Derivation line before key {f}")); }
+                keys.push(format!("[{f}/{deriv}]{}/<0;1>/*", crate::signers::standard_xpub(v)?));
+            }
+            _ => {}
+        }
+    }
+    let (m, n) = policy.ok_or("no Policy line (like 'Policy: 2 of 3')")?;
+    if keys.len() != n { return Err(format!("the policy says {n} keys, the file lists {}", keys.len())); }
+    let inner = format!("sortedmulti({m},{})", keys.join(","));
+    Ok(match format.as_str() { "P2WSH" => format!("wsh({inner})"), "P2SH-P2WSH" | "P2WSH-P2SH" => format!("sh(wsh({inner}))"), "P2SH" => format!("sh({inner})"), other => return Err(format!("Format {other} is not one this app reads (P2WSH, P2SH-P2WSH, P2SH)")) })
+}
+/// Two descriptors on two lines — receive and change, as Bitcoin Core and some wallets export them — become the one
+/// wallet descriptor with `<0;1>`.
+fn two_chains(a: &str, b: &str) -> Result<String, String> {
+    let strip = |s: &str| s.split('#').next().unwrap_or(s).trim().to_string();
+    let (a, b) = (strip(a), strip(b));
+    let (recv, chg) = if a.contains("/0/*") && b.contains("/1/*") { (a, b) } else if b.contains("/0/*") && a.contains("/1/*") { (b, a) } else { return Err("two descriptors were given; this app reads a receive one (…/0/*) and a change one (…/1/*) of the same wallet".into()); };
+    if chg.replace("/1/*", "/0/*") != recv { return Err("the two descriptors are not the receive and change chains of one wallet".into()); }
+    Ok(recv.replace("/0/*", "/<0;1>/*"))
+}
+/// One key with its origin, `[fingerprint/path]xpub…` — what many wallets mean by "export the xpub". The path's
+/// purpose says the script: 84 wpkh, 49 sh(wpkh), 44 pkh, 86 tr; 48 is one key of a multisig, which needs the rest.
+fn single_key(l: &str) -> Result<String, String> {
+    let (origin, rest) = l.trim_start_matches('[').split_once(']').ok_or("expected [fingerprint/path]xpub…")?;
+    let path = origin.split_once('/').map(|x| x.1).unwrap_or("");
+    let purpose: u32 = path.split('/').next().unwrap_or("").trim_end_matches(['h', 'H', '\'']).parse().unwrap_or(84);
+    let key = rest.split('/').next().unwrap_or(rest);
+    let key = crate::signers::standard_xpub(key)?;
+    let expr = format!("[{origin}]{key}/<0;1>/*");
+    Ok(match purpose { 84 => format!("wpkh({expr})"), 49 => format!("sh(wpkh({expr}))"), 44 => format!("pkh({expr})"), 86 => format!("tr({expr})"), 48 | 45 => return Err("this is one key of a multisig wallet; paste the whole wallet descriptor, or the Coldcard multisig file, so the other keys are known too".into()), _ => format!("wpkh({expr})") })
+}
+/// What was pasted, as the descriptor it means: a Sparrow or Specter JSON with a "descriptor" in it, a Coldcard
+/// multisig file, two descriptors for receive and change, a single key with its origin, or a descriptor as it is —
+/// with any SLIP-132 keys written back as plain xpubs. Anything else passes through untouched.
+pub fn normalise_import(text: &str) -> Result<String, String> {
+    let t = text.trim();
+    if t.starts_with('{') {
+        let v: serde_json::Value = serde_json::from_str(t).map_err(|e| format!("that JSON could not be read: {e}"))?;
+        let d = v.get("descriptor").and_then(|x| x.as_str()).ok_or("this JSON has no \"descriptor\" in it")?;
+        return normalise_import(d);
+    }
+    if t.lines().any(|l| l.trim_start().to_lowercase().starts_with("policy:")) { return coldcard_multisig(t); }
+    let lines: Vec<&str> = t.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if lines.len() == 2 && lines.iter().all(|l| l.contains('(')) { return two_chains(&slip132_inside(lines[0])?, &slip132_inside(lines[1])?); }
+    if lines.len() == 1 && lines[0].starts_with('[') && !lines[0].contains('(') { return single_key(lines[0]); }
+    if lines.len() == 1 { return slip132_inside(lines[0]); }
+    Ok(t.to_string())
 }
 
 /// The concrete descriptor at an address index: receive `pos`, or change `CHANGE | pos`.
@@ -869,7 +988,7 @@ pub struct Choice {
 pub fn select(vault: &Vault, coins: &[CoinAt], change_index: u32, to: &str, amount: u64, rate: f64, send_all: bool, pick: Option<&[String]>) -> Result<Choice, String> {
     let network = network_of(&vault.network);
     let to_addr = Address::from_str(to).map_err(|e| format!("address: {e}"))?.require_network(network).map_err(|_| "that address is for another network".to_string())?;
-    let in_vb = in_vbytes(vault.threshold, vault.keys.len());
+    let in_vb = in_vbytes_for(script_kind(vault), vault.threshold, vault.keys.len());
     let out_vb = 9 + to_addr.script_pubkey().len() as u64;
     let change_spk = parse(&descriptor_at(vault, change_index)?)?.at_derivation_index(0).map_err(|e| e.to_string())?.script_pubkey();
     let change_vb = 9 + change_spk.len() as u64;
@@ -939,7 +1058,7 @@ pub fn build(vault: &Vault, coins: &[CoinAt], change_index: u32, to: &str, amoun
     let network = network_of(&vault.network);
     let to_addr = Address::from_str(to).map_err(|e| format!("address: {e}"))?.require_network(network).map_err(|_| "that address is for another network".to_string())?;
     let n = vault.keys.len();
-    let in_vb = in_vbytes(vault.threshold, n);
+    let in_vb = in_vbytes_for(script_kind(vault), vault.threshold, n);
     let out_vb = 9 + to_addr.script_pubkey().len() as u64;
     let change_d = parse(&descriptor_at(vault, change_index)?)?.at_derivation_index(0).map_err(|e| e.to_string())?;
     let change_spk = change_d.script_pubkey();
@@ -959,7 +1078,7 @@ pub fn build(vault: &Vault, coins: &[CoinAt], change_index: u32, to: &str, amoun
     for (i, c) in chosen.iter().enumerate() {
         let d = parse(&descriptor_at(vault, c.index)?)?.at_derivation_index(0).map_err(|e| e.to_string())?;
         psbt.inputs[i].witness_utxo = Some(TxOut { value: Amount::from_sat(c.value), script_pubkey: d.script_pubkey() });
-        if n > 1 { psbt.inputs[i].witness_script = Some(d.explicit_script().map_err(|e| e.to_string())?); }
+        if n > 1 && !legacy(vault) { psbt.inputs[i].witness_script = Some(d.explicit_script().map_err(|e| e.to_string())?); }
     }
     if let Some(ext) = &vault.ext {
         use miniscript::psbt::PsbtExt;
@@ -1004,7 +1123,7 @@ pub fn plan_own(vault: &Vault, coins: &[CoinAt], receive_index: u32, pick: &[Str
         out_vb += 9 + spk.len() as u64;
         outs.push(OwnOut { index, address: Address::from_script(&spk, network).map_err(|e| e.to_string())?.to_string(), sats: 0 });
     }
-    let vsize = 11 + in_vbytes(vault.threshold, vault.keys.len()) * chosen.len() as u64 + out_vb;
+    let vsize = 11 + in_vbytes_for(script_kind(vault), vault.threshold, vault.keys.len()) * chosen.len() as u64 + out_vb;
     let fee = (rate * vsize as f64).ceil() as u64;
     if have < fee + OWN_DUST * count as u64 { return Err(format!("{} sats does not cover a {} sat fee and {count} coin{} worth keeping", sats_text(have), sats_text(fee), if count == 1 { "" } else { "s" })); }
     let back = have - fee;
@@ -1040,7 +1159,7 @@ pub fn build_own(vault: &Vault, coins: &[CoinAt], plan: &OwnPlan) -> Result<Buil
     for (i, c) in chosen.iter().enumerate() {
         let d = parse(&descriptor_at(vault, c.index)?)?.at_derivation_index(0).map_err(|e| e.to_string())?;
         psbt.inputs[i].witness_utxo = Some(TxOut { value: Amount::from_sat(c.value), script_pubkey: d.script_pubkey() });
-        if n > 1 { psbt.inputs[i].witness_script = Some(d.explicit_script().map_err(|e| e.to_string())?); }
+        if n > 1 && !legacy(vault) { psbt.inputs[i].witness_script = Some(d.explicit_script().map_err(|e| e.to_string())?); }
     }
     if let Some(ext) = &vault.ext {
         for (i, c) in chosen.iter().enumerate() { psbt.update_input_with_descriptor(i, &ext_definite(ext, c.index)?).map_err(|e| format!("input {}: {e}", i + 1))?; }
@@ -1334,6 +1453,58 @@ mod ext_tests {
         let q = plan_own(&v, &coins, 23, &pick[..1], 4, None, 2.0).unwrap(); let bb = build_own(&v, &coins, &q).unwrap();
         let ps = Psbt::from_str(&bb.psbt).unwrap(); assert_eq!(ps.unsigned_tx.output.len(), 4); assert!(ps.outputs.iter().all(|o| !o.bip32_derivation.is_empty()));
         assert!(ps.unsigned_tx.output.iter().map(|o| o.value.to_sat()).sum::<u64>() == 212_450 - q.fee);
+    }
+    fn fx(case: &str) -> String { fixtures()[case]["descriptor"].as_str().unwrap().to_string() }
+    fn bare(d: &str) -> String { d.split('#').next().unwrap().to_string() }
+    fn kind_of_first(desc: &str) -> (String, bitcoin::AddressType, bool) {
+        let info = ext_parse(desc).unwrap().unwrap(); let v = vault_of(desc);
+        let a = bitcoin::Address::from_str(&address_at(&v, 0).unwrap()).unwrap().assume_checked();
+        (info.script, a.address_type().unwrap(), legacy(&v))
+    }
+    #[test] fn every_common_script_reads_and_pays_to_its_own_kind_of_address() {
+        use bitcoin::AddressType as A;
+        let sm = bare(&fx("sortedmulti")); let inner = sm[4..sm.len() - 1].to_string();   // inside wsh( … ), one paren each
+        assert_eq!(kind_of_first(&sm), ("wsh".into(), A::P2wsh, false));
+        assert_eq!(kind_of_first(&format!("sh(wsh({inner}))")), ("sh-wsh".into(), A::P2sh, false));
+        assert_eq!(kind_of_first(&format!("sh({inner})")), ("sh".into(), A::P2sh, true), "legacy multisig, BIP45 style");
+        let wp = bare(&fx("wpkh")); let key = wp.trim_start_matches("wpkh(").trim_end_matches(')').to_string();
+        assert_eq!(kind_of_first(&wp), ("wpkh".into(), A::P2wpkh, false));
+        assert_eq!(kind_of_first(&format!("sh(wpkh({key}))")), ("sh-wpkh".into(), A::P2sh, false));
+        assert_eq!(kind_of_first(&format!("pkh({key})")), ("pkh".into(), A::P2pkh, true));
+        assert_eq!(kind_of_first(&format!("tr({key})")), ("tr".into(), A::P2tr, false), "taproot by its key path");
+        assert!(ext_parse(&format!("tr({key},pk({key}))")).unwrap_err().contains("not read"), "a script tree is not read");
+        // fees follow the script: a legacy input is the dearest, a nested one carries its redeem script
+        assert!(in_vbytes_for("sh", 2, 3) > in_vbytes_for("sh-wsh", 2, 3)); assert_eq!(in_vbytes_for("sh-wsh", 2, 3), in_vbytes_for("wsh", 2, 3) + 36);
+        assert_eq!((in_vbytes_for("wpkh", 1, 1), in_vbytes_for("sh-wpkh", 1, 1), in_vbytes_for("pkh", 1, 1), in_vbytes_for("tr", 1, 1)), (68, 91, 148, 58));
+    }
+    #[test] fn what_wallets_export_is_read_as_the_descriptor_it_means() {
+        let d = fx("sortedmulti"); let want = ext_parse(&d).unwrap().unwrap().canonical;
+        let same = |t: &str| ext_parse(&normalise_import(t).unwrap()).unwrap().unwrap().canonical == want;
+        assert!(same(&format!("{{\"label\": \"x\", \"descriptor\": {:?}}}", d)), "a Sparrow or Specter JSON");
+        let info = ext_parse(&d).unwrap().unwrap();
+        let cc = format!("Name: test\nPolicy: 2 of 3\nDerivation: m/48'/0'/0'/2'\nFormat: P2WSH\n\n{}\n", info.keys.iter().map(|k| format!("{}: {}", k.fingerprint, k.xpub)).collect::<Vec<_>>().join("\n"));
+        assert!(same(&cc), "a Coldcard multisig file");
+        let nested = normalise_import(&cc.replace("P2WSH", "P2SH-P2WSH")).unwrap(); assert_eq!(ext_parse(&nested).unwrap().unwrap().script, "sh-wsh");
+        let legacy_ = normalise_import(&cc.replace("P2WSH", "P2SH")).unwrap(); assert_eq!(ext_parse(&legacy_).unwrap().unwrap().script, "sh");
+        assert!(normalise_import(&cc.replace("Policy: 2 of 3", "Policy: 2 of 4")).unwrap_err().contains("the file lists 3"));
+        let b = bare(&d); assert!(same(&format!("{}\n{}\n", b.replace("/<0;1>/*", "/0/*"), b.replace("/<0;1>/*", "/1/*"))), "two chains on two lines");
+        assert!(normalise_import(&format!("{}\n{}\n", b.replace("/<0;1>/*", "/0/*"), b.replace("/<0;1>/*", "/0/*"))).is_err());
+        // one key with its origin: the purpose in its path says the script
+        let wp = bare(&fx("wpkh")); let key = wp.trim_start_matches("wpkh(").trim_end_matches(')').split("/<0;1>").next().unwrap().to_string();
+        let canon = |t: &str| ext_parse(&normalise_import(t).unwrap()).unwrap().unwrap();
+        assert_eq!(canon(&key).canonical, ext_parse(&wp).unwrap().unwrap().canonical); assert_eq!(canon(&key.replace("84h", "49h")).script, "sh-wpkh"); assert_eq!(canon(&key.replace("84h", "86h")).script, "tr"); assert_eq!(canon(&key.replace("84h", "44h")).script, "pkh");
+        assert!(normalise_import(&key.replace("84h/0h/0h", "48h/0h/0h/2h")).unwrap_err().contains("one key of a multisig"));
+        // SLIP-132: a zpub inside a descriptor is the xpub it always was
+        let x = info.keys[0].xpub.clone(); let mut raw = bitcoin::base58::decode_check(&x).unwrap(); raw[..4].copy_from_slice(&0x04b24746u32.to_be_bytes()); let z = bitcoin::base58::encode_check(&raw);
+        assert!(z.starts_with("zpub")); assert!(same(&b.replace(&x, &z)), "a zpub read as its xpub, the stale checksum dropped");
+    }
+    #[test] fn a_legacy_psbt_carries_every_previous_transaction_whole() {
+        let prev = Transaction { version: transaction::Version::TWO, lock_time: absolute::LockTime::ZERO, input: vec![], output: vec![TxOut { value: Amount::from_sat(5000), script_pubkey: ScriptBuf::new() }] };
+        let tx = Transaction { version: transaction::Version::TWO, lock_time: absolute::LockTime::ZERO, input: vec![TxIn { previous_output: OutPoint { txid: prev.compute_txid(), vout: 0 }, script_sig: ScriptBuf::new(), sequence: Sequence::MAX, witness: Witness::new() }], output: vec![] };
+        let mut p = Psbt::from_unsigned_tx(tx).unwrap(); p.inputs[0].witness_utxo = Some(prev.output[0].clone());
+        let out = Psbt::from_str(&attach_prev_txs(&p.to_string(), &[prev.clone()]).unwrap()).unwrap();
+        assert_eq!(out.inputs[0].non_witness_utxo.as_ref().map(|t| t.compute_txid()), Some(prev.compute_txid())); assert!(out.inputs[0].witness_utxo.is_none());
+        assert!(attach_prev_txs(&p.to_string(), &[]).unwrap_err().contains("could not be fetched"));
     }
     #[test] fn a_sortedmulti_xpub_wallet_derives_what_embit_derives() { check_against_embit("sortedmulti"); }
     #[test] fn a_multi_wallet_keeps_its_key_order_and_derives_what_embit_derives() { check_against_embit("multi"); }

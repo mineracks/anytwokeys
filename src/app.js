@@ -2324,7 +2324,7 @@ async function loadFees() {
   if (!vault._coins) await sync();
   try {
     fees = await invoke('fees_get', { network: vault.network });
-    const vb = vault.keys.length === 1 ? 141 : (11 + inVb(vault.threshold, vault.keys.length) + 31 + 43);
+    const vb = vault.keys.length === 1 && !vault.ext ? 141 : (11 + inVb(vault.threshold, vault.keys.length, scriptOf(vault)) + 31 + 43);
     loadFees.vb = vb;
     for (const lvl of ['slow', 'medium', 'fast']) { const r = fees[lvl]; $(`[data-fee="${lvl}"] small`).textContent = `${r} sat/vB · ≈${sats(Math.ceil(r * vb))} sats`; }
     const shape = `A ${vault.keys.length === 1 ? 'single-key' : vault.threshold + '-of-' + vault.keys.length} spend is about ${vb} vB per input set.`;
@@ -2335,7 +2335,13 @@ async function loadFees() {
     paintCustomFee();
   } catch (e) { $('#fee-note').textContent = 'Could not read fee rates: ' + e; }
 }
-function inVb(k, n) { if (n === 1) return 68; const sl = 1 + 34 * n + 2; return 41 + Math.ceil((1 + 1 + k * 73 + (sl < 76 ? 1 : 2) + sl) / 4); }
+// the script a vault of extended keys pays to, off its descriptor; a card vault is wsh
+const scriptOf = (v) => { const e = (v && v.ext || '').trimStart(); return e.startsWith('sh(wsh(') ? 'sh-wsh' : e.startsWith('sh(wpkh(') ? 'sh-wpkh' : e.startsWith('sh(') ? 'sh' : e.startsWith('wpkh(') ? 'wpkh' : e.startsWith('pkh(') ? 'pkh' : e.startsWith('tr(') ? 'tr' : 'wsh'; };
+function inVb(k, n, script) {
+  if (script === 'wpkh' || (!script && n === 1)) return 68; if (script === 'sh-wpkh') return 91; if (script === 'pkh') return 148; if (script === 'tr') return 58;
+  const sl = 1 + 34 * n + 2; if (script === 'sh') return 41 + 1 + k * 73 + sl + 2;
+  const w = 41 + Math.ceil((1 + 1 + k * 73 + (sl < 76 ? 1 : 2) + sl) / 4); return script === 'sh-wsh' ? w + 36 : w;
+}
 // paste and scan into the To field
 // ---------- the address book ----------
 const bookOf = () => (store.contacts || []).filter(c => c.network === (vault ? vault.network : store.settings.network));

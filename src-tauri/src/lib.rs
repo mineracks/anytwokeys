@@ -371,6 +371,8 @@ fn descriptor_parse(text: String) -> R<Parsed> {
     let text = if sskrdesc::is_share(&text) { sskrdesc::join(&text)?.text } else { text };
     let (text, ur_name) = if urdesc::is_ur(&text) { let d = urdesc::decode(&text)?; (urdesc::as_wallet(&d.descriptor), d.name) } else { (text, None) };
     if names_extended_keys(&text) {
+        // what a wallet exported, read as the descriptor it means: a Coldcard multisig file, a JSON, two chains, one key
+        let text = wallet::normalise_import(&text)?;
         let info = ext_for_this_network(&text, &s.settings.network)?;
         let mut v = ext_vault(String::new(), &info, &[]);
         v.address = wallet::address_at(&v, 0)?;
@@ -1339,6 +1341,7 @@ async fn spend_build(name: String, to: String, amount: u64, rate: f64, send_all:
         let change_index = if wallet::rotates(&v) { wallet::CHANGE | sc.next_change } else { 0 };
         let pick = coins.filter(|c| !c.is_empty());
         let b = wallet::build(&v, &sc.coins, change_index, &to, amount, rate, send_all, pick.as_deref())?;
+        let b = legacy_prev_txs(&v, &servers, b)?;
         let (n, sm, nc, smc, psbt) = (sc.next, sc.scan_max.max(sc.next), sc.next_change, sc.scan_max_change.max(sc.next_change), b.psbt.clone());
         wallet::update(|s| { if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == v.name) { vm.next = n; vm.scan_max = sm; vm.next_change = nc; vm.scan_max_change = smc; } s.last_psbt = Some(psbt); s.last_message = None; })?;
         Ok(b)
@@ -1368,10 +1371,21 @@ async fn spend_build_own(name: String, coins: Vec<String>, count: u32, amounts: 
         let sc = wallet::scan(&v, &servers, s.settings.gap)?;
         let plan = wallet::plan_own(&v, &sc.coins, sc.next, &coins, count, amounts.as_deref(), rate)?;
         let b = wallet::build_own(&v, &sc.coins, &plan)?;
+        let b = legacy_prev_txs(&v, &servers, b)?;
         let (n, sm, nc, smc, psbt) = (sc.next, sc.scan_max.max(sc.next), sc.next_change, sc.scan_max_change.max(sc.next_change), b.psbt.clone());
         wallet::update(|s| { if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == v.name) { vm.next = n; vm.scan_max = sm; vm.next_change = nc; vm.scan_max_change = smc; } s.last_psbt = Some(psbt); s.last_message = None; })?;
         Ok(b)
     }).await
+}
+
+/// A vault paying to a legacy script (sh, pkh) needs every input's whole previous transaction in the PSBT; a segwit
+/// vault's PSBT is left as built.
+fn legacy_prev_txs(v: &Vault, servers: &chain::Servers, b: wallet::Built) -> R<wallet::Built> {
+    if !wallet::legacy(v) { return Ok(b); }
+    use std::str::FromStr;
+    let ids: Vec<bitcoin::Txid> = b.chosen.iter().filter_map(|op| op.split(':').next().and_then(|t| bitcoin::Txid::from_str(t).ok())).collect();
+    let txs = chain::transactions(servers, &ids)?;
+    Ok(wallet::Built { psbt: wallet::attach_prev_txs(&b.psbt, &txs)?, ..b })
 }
 
 /// An address that belongs to a vault this app holds: the spend stays with the owner, so nothing is disposed of.
