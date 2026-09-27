@@ -160,6 +160,8 @@ pub struct Store {
     #[serde(default)] pub entities: Vec<Entity>,
     /// an icon for an entity, a place or a key: keyed entity:<id> / place:<id> / key:<pubkey>; the value is glyph:<name> or img:<sha256 of an attachment>
     #[serde(default)] pub icons: std::collections::HashMap<String, String>,
+    /// records that belong to no vault — a place's label, note and files; kept on this computer, not in a vault's backup
+    #[serde(default)] pub records: Records,
     /// public key → YubiKey form factor, learnt when the card is plugged in, so a Nano is drawn as one
     #[serde(default)] pub forms: std::collections::HashMap<String, u8>,
     /// when this computer FIRST saw each key, by public key. A YubiKey carries no manufacture date, so this is the
@@ -337,6 +339,15 @@ pub struct SilentPay {
 
 /// A place a key is kept. The name is the person's ("the safe", "Mum's"); the address and position are optional, for
 /// the map. Notes about it live here too, since the place is one thing however many keys it holds.
+/// The record card's three maps, for things that belong to the app rather than to one vault.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Records {
+    #[serde(default)] pub labels: std::collections::HashMap<String, String>,
+    #[serde(default)] pub label_meta: std::collections::HashMap<String, u64>,
+    #[serde(default)] pub notes: std::collections::HashMap<String, String>,
+    #[serde(default)] pub files: std::collections::HashMap<String, Vec<serde_json::Value>>,
+}
+
 /// A legal owner of vaults: what each tax return is about.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Entity {

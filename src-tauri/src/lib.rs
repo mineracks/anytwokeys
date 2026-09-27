@@ -2439,11 +2439,17 @@ fn seal_restore(id: String, name: String, found: Vec<Found>) -> R<Vault> {
 }
 
 // ---------- labels (BIP 329) ----------
+/// Where a record lives: in the vault named, or — for an empty name — in the app's own records (a place's).
+struct Rec<'a> { labels: &'a mut std::collections::HashMap<String, String>, label_meta: &'a mut std::collections::HashMap<String, u64>, notes: &'a mut std::collections::HashMap<String, String>, files: &'a mut std::collections::HashMap<String, Vec<serde_json::Value>> }
+fn rec_of<'a>(s: &'a mut Store, name: &str) -> Option<Rec<'a>> {
+    if name.is_empty() { let r = &mut s.records; return Some(Rec { labels: &mut r.labels, label_meta: &mut r.label_meta, notes: &mut r.notes, files: &mut r.files }); }
+    s.vaults.iter_mut().find(|v| v.name == name).map(|v| Rec { labels: &mut v.labels, label_meta: &mut v.label_meta, notes: &mut v.notes, files: &mut v.files })
+}
 #[tauri::command]
 async fn label_set(name: String, key: String, label: String) -> R<Store> {
-    if !(key.starts_with("addr:") || key.starts_with("tx:") || key.starts_with("out:") || key.starts_with("output:") || key.starts_with("key:")) { return Err("label key must be addr:, tx:, out:, output: or key:".into()); }
+    if !(key.starts_with("addr:") || key.starts_with("tx:") || key.starts_with("out:") || key.starts_with("output:") || key.starts_with("key:") || key.starts_with("place:")) { return Err("label key must be addr:, tx:, out:, output:, key: or place:".into()); }
     let nm = name.clone();
-    wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) {
+    wallet::update(|s| if let Some(v) = rec_of(s, &nm) {
         let label = label.trim().to_string();
         v.label_meta.insert(key.clone(), now());
         if label.is_empty() { v.labels.remove(&key); } else { v.labels.insert(key, label); }
@@ -2455,10 +2461,10 @@ async fn label_set(name: String, key: String, label: String) -> R<Store> {
 /// The long note on a transaction, an address or a coin. It rides in the same synced record as the label.
 #[tauri::command]
 async fn note_set(name: String, key: String, note: String) -> R<Store> {
-    if !(key.starts_with("addr:") || key.starts_with("tx:") || key.starts_with("out:") || key.starts_with("key:")) { return Err("note key must be addr:, tx:, out: or key:".into()); }
+    if !(key.starts_with("addr:") || key.starts_with("tx:") || key.starts_with("out:") || key.starts_with("key:") || key.starts_with("place:")) { return Err("note key must be addr:, tx:, out:, key: or place:".into()); }
     if note.chars().count() > 20_000 { return Err("a note holds up to 20,000 characters".into()); }
     let nm = name.clone();
-    wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) {
+    wallet::update(|s| if let Some(v) = rec_of(s, &nm) {
         let note = note.trim_end().to_string();
         v.label_meta.insert(key.clone(), now());
         if note.trim().is_empty() { v.notes.remove(&key); } else { v.notes.insert(key, note); }
@@ -2471,7 +2477,7 @@ async fn note_set(name: String, key: String, note: String) -> R<Store> {
 #[derive(Serialize)]
 struct Attached { store: Store, added: usize, notes: Vec<String>, errors: Vec<String> }
 
-fn record_key_ok(key: &str) -> R<()> { if key.starts_with("addr:") || key.starts_with("tx:") || key.starts_with("out:") || key.starts_with("output:") || key.starts_with("key:") { Ok(()) } else { Err("the record key must be addr:, tx: or out:".into()) } }
+fn record_key_ok(key: &str) -> R<()> { if key.starts_with("addr:") || key.starts_with("tx:") || key.starts_with("out:") || key.starts_with("output:") || key.starts_with("key:") || key.starts_with("place:") { Ok(()) } else { Err("the record key must be addr:, tx: or out:".into()) } }
 
 async fn attach_into(name: String, key: String, items: Vec<(String, Vec<u8>)>, keep_original: bool, mut errors: Vec<String>) -> R<Attached> {
     record_key_ok(&key)?;
@@ -2482,7 +2488,7 @@ async fn attach_into(name: String, key: String, items: Vec<(String, Vec<u8>)>, k
     let added = entries.len();
     if added > 0 {
         let nm = name.clone();
-        wallet::update(move |s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) {
+        wallet::update(move |s| if let Some(v) = rec_of(s, &nm) {
             let list = v.files.entry(key.clone()).or_default();
             for e in entries { if !list.iter().any(|x| x.get("sha256") == e.get("sha256")) { list.push(e); } }   // the same file twice is one file
             v.label_meta.insert(key, now());
@@ -2528,7 +2534,7 @@ async fn attach_remove(name: String, key: String, sha256: String) -> R<Store> {
     record_key_ok(&key)?;
     let nm = name.clone();
     let mut gone: Vec<String> = Vec::new();
-    let st = wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) {
+    let st = wallet::update(|s| if let Some(v) = rec_of(s, &nm) {
         if let Some(list) = v.files.get_mut(&key) {
             for e in list.iter().filter(|e| e.get("sha256").and_then(|x| x.as_str()) == Some(&sha256)) { for f in ["sha256", "thumb"] { if let Some(h) = e.get(f).and_then(|x| x.as_str()) { gone.push(h.to_string()); } } }
             list.retain(|e| e.get("sha256").and_then(|x| x.as_str()) != Some(&sha256));

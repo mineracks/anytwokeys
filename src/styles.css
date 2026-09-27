@@ -559,6 +559,7 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .ic[data-icon-pick]{cursor:pointer} .ic[data-icon-pick]:hover{border-color:var(--gold)}
 .icpick{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--ground)} .icpick .ic{cursor:pointer} .icpick .ic:hover,.icpick .ic.on{border-color:var(--gold);background:var(--gold-soft)}
 .mapcol{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:8px 0;border-top:1px solid var(--line)} .mapcol:first-child{border-top:0} .mapcol .col{flex:1 1 200px;min-width:0} .mapcol .col b{font-family:var(--display);font-weight:600} .mapcol .col small{display:block;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cer-act-title.name{display:flex;align-items:center;gap:8px} .cer-act-title .pencil,#place-addr .pencil{padding:3px;color:var(--muted);background:none;border:0;cursor:pointer;display:inline-flex} .cer-act-title .pencil:hover,#place-addr .pencil:hover{color:var(--gold)} #place-name .key-input{font:inherit;font-size:20px;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel)}
 .ent-kind{font-family:var(--display);font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:14px 0 4px}
 .kpi{padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
