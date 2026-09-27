@@ -662,7 +662,36 @@ fn exchange_pick_preview(existing: Option<String>) -> R<exchange::Preview> {
         if bytes.len() > 64 << 20 { return Err(format!("{} is too large to be a statement", p.display())); }
         files.push((p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), bytes));
     }
-    let ex = exchange::parse(&files)?;
+    let s = wallet::load()?;
+    let have = existing.and_then(|n| s.vaults.iter().find(|v| v.name == n).and_then(|v| v.exchange.clone()));
+    // an account read by a mapping reads its later exports by the same mapping
+    let ex = match have.as_ref().and_then(|h| h.mapping.clone()) { Some(m) => exchange::mapped(&files, &m)?, None => exchange::parse(&files)? };
+    let p = exchange::preview(&ex, have.as_ref());
+    *EX_PENDING.lock().map_err(|_| "busy")? = Some(ex);
+    Ok(p)
+}
+static EX_RAW: std::sync::Mutex<Vec<(String, Vec<u8>)>> = std::sync::Mutex::new(Vec::new());
+/// Another exchange's CSV: the files are chosen and held, and their header and a few rows go back so the person can
+/// say which column is what.
+#[tauri::command]
+fn exchange_pick_raw() -> R<exchange::Raw> {
+    let paths = rfd::FileDialog::new().set_title("Choose the exchange's CSV (or a zip of them)").add_filter("Statements", &["csv", "zip", "txt"]).pick_files().ok_or("cancelled")?;
+    let mut files = Vec::new();
+    for p in paths {
+        let bytes = std::fs::read(&p).map_err(|e| format!("{} could not be read: {e}", p.display()))?;
+        if bytes.len() > 64 << 20 { return Err(format!("{} is too large to be a statement", p.display())); }
+        files.push((p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), bytes));
+    }
+    let r = exchange::raw(&files)?;
+    *EX_RAW.lock().map_err(|_| "busy")? = files;
+    Ok(r)
+}
+/// The held files read by the mapping: the same preview as a known exchange's, and the reading held for the import.
+#[tauri::command]
+fn exchange_map_preview(mapping: exchange::Mapping, existing: Option<String>) -> R<exchange::Preview> {
+    let files = EX_RAW.lock().map_err(|_| "busy")?.clone();
+    if files.is_empty() { return Err("choose the files first".into()); }
+    let ex = exchange::mapped(&files, &mapping)?;
     let s = wallet::load()?;
     let have = existing.and_then(|n| s.vaults.iter().find(|v| v.name == n).and_then(|v| v.exchange.clone()));
     let p = exchange::preview(&ex, have.as_ref());
@@ -2864,7 +2893,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
-            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
+            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
         .build(tauri::generate_context!())

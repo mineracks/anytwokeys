@@ -48,7 +48,32 @@ pub struct Exchange {
     #[serde(default)] pub stated: bool,
     /// a stated running balance chained row by row through every file: Some(true) when it did
     #[serde(default)] pub agrees: Option<bool>,
+    /// for another exchange's CSV: which column is what, kept so the next export needs no mapping again
+    #[serde(default)] pub mapping: Option<Mapping>,
 }
+
+/// Which column of a CSV is what, for an exchange this app does not know by header. Column indexes into the header;
+/// a role left out is simply not read.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Mapping {
+    pub provider: String,
+    pub date: usize,
+    /// hours east of UTC the file's times are written in
+    #[serde(default)] pub tz_hours: i32,
+    #[serde(default)] pub kind: Option<usize>,
+    #[serde(default)] pub sats: Option<usize>,
+    /// "btc" (a decimal of bitcoin) or "sats"
+    #[serde(default)] pub sats_unit: String,
+    #[serde(default)] pub fiat: Option<usize>,
+    #[serde(default)] pub fee_fiat: Option<usize>,
+    #[serde(default)] pub fee_sats: Option<usize>,
+    #[serde(default)] pub id: Option<usize>,
+    #[serde(default)] pub ccy: String,
+}
+
+/// The head of a CSV, for the person to say which column is what.
+#[derive(Serialize, Debug, Clone)]
+pub struct Raw { pub files: Vec<String>, pub header: Vec<String>, pub sample: Vec<Vec<String>>, pub rows: usize }
 
 /// What the person is shown before anything is kept.
 #[derive(Serialize, Debug, Clone)]
@@ -296,6 +321,83 @@ fn bitaroo(files: &[(String, String)]) -> R<(Vec<ExRow>, String, i64, i64, bool)
     Ok((out, ccy, btc_now, fiat_now, agrees))
 }
 
+// ---------- another exchange's CSV, read by a mapping ----------
+
+/// The header and a few rows of the CSVs, so the person can point at the columns.
+pub fn raw(files: &[(String, Vec<u8>)]) -> R<Raw> {
+    let texts = texts(files)?;
+    let mut header: Option<Vec<String>> = None; let mut sample = Vec::new(); let mut rows = 0;
+    for (name, text) in &texts {
+        let rs: Vec<Vec<String>> = csv_rows(text.trim_start_matches('\u{feff}')).into_iter().filter(|r| r.iter().any(|f| !f.trim().is_empty())).collect();
+        // the header is the first row with two or more columns; anything above it (a title, an email) is skipped
+        let hi = rs.iter().position(|r| r.len() >= 2).ok_or_else(|| format!("{name}: no table in it"))?;
+        let h: Vec<String> = rs[hi].iter().map(|c| c.trim().to_string()).collect();
+        match &header { None => header = Some(h), Some(have) if have != &h => return Err(format!("{name} has different columns from the first file: {} against {}", h.join(", "), have.join(", "))), _ => {} }
+        for r in &rs[hi + 1..] { if sample.len() < 6 { sample.push(r.clone()); } rows += 1; }
+    }
+    Ok(Raw { files: files.iter().map(|(n, _)| n.clone()).collect(), header: header.unwrap_or_default(), sample, rows })
+}
+/// A time in any of the ways exports write it: ISO "2022-02-15 16:22:33" (or with a T), "15/02/2022 16:22",
+/// "June 30, 2023 9:10:02 PM", or seconds since 1970. Hours east of UTC are taken off.
+fn when_any(s: &str, tz: i32) -> R<u32> {
+    let t = s.trim().trim_end_matches('Z');
+    if let Ok(n) = t.parse::<u64>() { return Ok(if n > 20_000_000_000 { n / 1000 } else { n } as u32); }
+    if let Ok(v) = when_long(t) { return Ok((v as i64 - tz as i64 * 3600) as u32); }
+    let iso = t.replacen('T', " ", 1);
+    let (d, c) = iso.split_once(' ').unwrap_or((iso.as_str(), "00:00:00"));
+    let c = c.split(['+', '.']).next().unwrap_or("00:00:00");
+    let cp: Vec<u32> = c.split(':').map(|x| x.trim().parse().unwrap_or(0)).collect();
+    let (h, mi, se) = (cp.first().copied().unwrap_or(0), cp.get(1).copied().unwrap_or(0), cp.get(2).copied().unwrap_or(0));
+    let dp: Vec<&str> = d.split(['-', '/', '.']).collect();
+    if dp.len() != 3 { return Err(format!("'{}' is not a date and time", s.trim())); }
+    let n: Vec<i64> = dp.iter().map(|x| x.trim().parse().map_err(|_| format!("'{}' is not a date and time", s.trim()))).collect::<R<_>>()?;
+    let (y, m, dd) = if n[0] > 31 { (n[0], n[1] as u32, n[2] as u32) } else if n[2] > 31 { (n[2], n[1] as u32, n[0] as u32) } else { return Err(format!("'{}': which part is the year?", s.trim())); };
+    if !(1..=12).contains(&m) || !(1..=31).contains(&dd) { return Err(format!("'{}' is not a date and time", s.trim())); }
+    Ok((epoch(y, m, dd, h, mi, se) as i64 - tz as i64 * 3600) as u32)
+}
+/// What kind of row this is, from its kind column's words when there is one, else from the signs of its amounts.
+fn kind_of(word: &str, sats: i64, fiat: i64) -> &'static str {
+    let w = word.to_lowercase();
+    if w.contains("buy") || w.contains("purchase") || w.contains("bought") { return "buy"; }
+    if w.contains("sell") || w.contains("sold") { return "sell"; }
+    if w.contains("withdraw") || w.contains("send") || w.contains("sent") { return if sats != 0 { "btc_out" } else { "fiat_out" }; }
+    if w.contains("deposit") || w.contains("eft") || w.contains("payid") || w.contains("transfer in") { return if sats != 0 { "btc_in" } else { "fiat_in" }; }
+    if w.contains("receiv") || w.contains("reward") || w.contains("bonus") || w.contains("referral") || w.contains("airdrop") { return "btc_in"; }
+    match (sats.signum(), fiat.signum()) { (1, -1) => "buy", (-1, 1) => "sell", (1, _) => "btc_in", (-1, _) => "btc_out", (0, 1) => "fiat_in", (0, -1) => "fiat_out", _ => "other" }
+}
+pub fn mapped(files: &[(String, Vec<u8>)], m: &Mapping) -> R<Exchange> {
+    if m.provider.trim().is_empty() { return Err("name the exchange".into()); }
+    let texts = texts(files)?;
+    let mut out = Vec::new();
+    for (name, text) in &texts {
+        let rs: Vec<Vec<String>> = csv_rows(text.trim_start_matches('\u{feff}')).into_iter().filter(|r| r.iter().any(|f| !f.trim().is_empty())).collect();
+        let hi = rs.iter().position(|r| r.len() >= 2).ok_or_else(|| format!("{name}: no table in it"))?;
+        let head = &rs[hi];
+        let need = [Some(m.date), m.kind, m.sats, m.fiat, m.fee_fiat, m.fee_sats, m.id].into_iter().flatten().max().unwrap_or(0);
+        if need >= head.len() { return Err(format!("{name} has {} columns; the mapping points past them", head.len())); }
+        for (n, r) in rs[hi + 1..].iter().enumerate() {
+            let get = |i: Option<usize>| i.and_then(|i| r.get(i)).map(|s| s.trim()).unwrap_or("");
+            let time = when_any(get(Some(m.date)), m.tz_hours).map_err(|e| format!("{name}, row {}: {e}", n + 2))?;
+            let sats = match m.sats_unit.as_str() { "sats" => get(m.sats).replace([',', ' '], "").parse::<i64>().map_err(|_| format!("{name}, row {}: '{}' is not a number of sats", n + 2, get(m.sats)))?, _ => sats_signed(&get(m.sats).replace([',', ' '], "")).map_err(|e| format!("{name}, row {}: {e}", n + 2))? };
+            let fiat = cents(get(m.fiat)).map_err(|e| format!("{name}, row {}: {e}", n + 2))?;
+            let fee_fiat = cents(get(m.fee_fiat)).map_err(|e| format!("{name}, row {}: {e}", n + 2))?.unsigned_abs();
+            let fee_sats = match m.sats_unit.as_str() { "sats" => get(m.fee_sats).replace([',', ' '], "").parse::<i64>().unwrap_or(0).unsigned_abs(), _ => sats_signed(&get(m.fee_sats).replace([',', ' '], "")).unwrap_or(0).unsigned_abs() };
+            let word = get(m.kind);
+            let kind = kind_of(word, sats, fiat);
+            // amounts take the sign their kind implies when the file wrote them unsigned
+            let (sats, fiat) = match kind { "buy" => (sats.abs(), -fiat.abs()), "sell" => (-sats.abs(), fiat.abs()), "btc_out" => (-sats.abs(), fiat), "btc_in" => (sats.abs(), fiat), "fiat_in" => (sats, fiat.abs()), "fiat_out" => (sats, -fiat.abs()), _ => (sats, fiat) };
+            let id = { let given = get(m.id); if given.is_empty() { hex::encode(Sha256::digest(format!("{}|{}|{}|{}|{}|{}", m.provider.to_lowercase(), get(Some(m.date)), word, get(m.sats), get(m.fiat), n).as_bytes())) } else { format!("{}:{given}", m.provider.to_lowercase()) } };
+            out.push(ExRow { id, time, kind: kind.into(), sats, fiat, fee_sats, fee_fiat, rate: None, memo: word.to_lowercase() });
+        }
+    }
+    if out.is_empty() { return Err("the file has no rows under its header".into()); }
+    let mut seen = std::collections::HashSet::new(); out.retain(|r| seen.insert(r.id.clone()));
+    out.sort_by_key(|r| (r.time, r.id.clone()));
+    let btc: i64 = out.iter().map(|r| r.sats - r.fee_sats as i64).sum();
+    let fiat: i64 = out.iter().map(|r| r.fiat - r.fee_fiat as i64).sum();
+    Ok(Exchange { provider: m.provider.trim().to_string(), ccy: if m.ccy.trim().is_empty() { "AUD".into() } else { m.ccy.trim().to_uppercase() }, rows: out, imports: vec![Import { at: 0, files: files.iter().map(|(n, _)| n.clone()).collect(), added: 0 }], btc_now: btc, fiat_now: fiat, stated: false, agrees: None, mapping: Some(m.clone()) })
+}
+
 // ---------- the account ----------
 
 pub fn parse(files: &[(String, Vec<u8>)]) -> R<Exchange> {
@@ -317,7 +419,7 @@ pub fn parse(files: &[(String, Vec<u8>)]) -> R<Exchange> {
     if rows.is_empty() { return Err("the export has no settled rows".into()); }
     let mut seen = std::collections::HashSet::new(); rows.retain(|r| seen.insert(r.id.clone()));
     rows.sort_by_key(|r| (r.time, r.id.clone()));
-    Ok(Exchange { provider, ccy, rows, imports: vec![Import { at: 0, files: files.iter().map(|(n, _)| n.clone()).collect(), added: 0 }], btc_now, fiat_now, stated, agrees })
+    Ok(Exchange { provider, ccy, rows, imports: vec![Import { at: 0, files: files.iter().map(|(n, _)| n.clone()).collect(), added: 0 }], btc_now, fiat_now, stated, agrees, mapping: None })
 }
 
 pub fn preview(ex: &Exchange, have: Option<&Exchange>) -> Preview {
@@ -417,6 +519,19 @@ mod tests {
         assert_eq!(ez.rows.len(), 4); assert_eq!(ez.imports[0].files, vec!["Bitaroo Statements FY23.zip"]);
         assert!(parse(&[f("amber.csv", AMBER), f("b.csv", B_BTC)]).unwrap_err().contains("two different exchanges"));
         assert!(parse(&[f("x.csv", "a,b,c\n1,2,3\n")]).unwrap_err().contains("not an export this app knows"));
+    }
+    #[test] fn another_exchanges_csv_reads_by_a_mapping_in_any_date_style_with_kinds_from_words_or_signs() {
+        let csv = "Exchange statement\nWhen,Type,BTC,AUD,Fee,Ref\n15/02/2022 16:22,Buy,0.0010,-50.00,0.50,x1\n2022-03-01T09:00:00,Withdrawal,0.0005,,,x2\n1646300000,,,200,,x3\n\"March 5, 2022 10:00:00 AM\",Sold,0.0002,9.99,,\n";
+        let m = Mapping { provider: "Swyftx".into(), date: 0, tz_hours: 10, kind: Some(1), sats: Some(2), sats_unit: "btc".into(), fiat: Some(3), fee_fiat: Some(4), fee_sats: None, id: Some(5), ccy: "aud".into() };
+        let raw = raw(&[f("s.csv", csv)]).unwrap(); assert_eq!(raw.header, vec!["When", "Type", "BTC", "AUD", "Fee", "Ref"]); assert_eq!(raw.rows, 4); assert_eq!(raw.sample.len(), 4);
+        let ex = mapped(&[f("s.csv", csv)], &m).unwrap();
+        assert_eq!(ex.provider, "Swyftx"); assert_eq!(ex.ccy, "AUD"); assert!(ex.mapping.is_some());
+        let kinds: Vec<(&str, i64, i64)> = ex.rows.iter().map(|r| (r.kind.as_str(), r.sats, r.fiat)).collect();
+        assert_eq!(kinds, vec![("buy", 100_000, -5000), ("btc_out", -50_000, 0), ("fiat_in", 0, 20000), ("sell", -20_000, 999)], "{kinds:?}");
+        assert_eq!(ex.rows[0].fee_fiat, 50); assert_eq!(ex.rows[0].id, "swyftx:x1"); assert!(ex.rows[3].id.len() == 64, "a row with no id gets one from its columns");
+        assert_eq!(ex.rows[0].time, when_iso("2022-02-15 16:22:00", 10).unwrap()); assert_eq!(ex.rows[2].time, 1646300000, "seconds since 1970 pass through");
+        assert!(mapped(&[f("s.csv", csv)], &Mapping { date: 9, ..m.clone() }).unwrap_err().contains("points past"));
+        assert_eq!(kind_of("", 5, 0), "btc_in"); assert_eq!(kind_of("", -5, 7), "sell"); assert_eq!(kind_of("Instant purchase", 1, -1), "buy"); assert_eq!(kind_of("Send", 0, -1), "fiat_out");
     }
     // a stored zip, written by hand: enough to prove the reader walks the directory
     fn zip_of(files: &[(&str, &str)]) -> Vec<u8> {

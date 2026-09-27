@@ -556,8 +556,9 @@
           <div id="tab-exchange" class="stack" hidden>
             <div class="sk-warn"><b>Coins bought at an exchange are the exchange’s promise until they are withdrawn.</b> Read from the statements it gives, an account keeps what each buy really cost — the money paid, fee included — and the coins that left it carry that cost into the vaults they landed in. Nothing here can be spent.</div>
             <div class="sk-step"><div class="sk-num">1</div><div class="sk-lead"><b>Choose the export.</b> <span class="muted" style="font-weight:400">Amber’s CSV, or the zips Bitaroo gives — one per financial year; choose them all at once. Read on this computer and never sent anywhere.</span></div></div>
-            <div class="row"><button class="btn primary" id="ex-pick">Choose the files…</button></div>
+            <div class="row" style="gap:12px;align-items:center"><button class="btn primary" id="ex-pick">Choose the files…</button><button class="linkish" type="button" id="ex-map-pick">Another exchange’s CSV…</button></div>
             <div class="muted" id="ex-note" aria-live="polite"></div>
+            <div id="ex-map" class="stack tight" hidden></div>
             <div id="ex-preview" class="stack" hidden>
               <div class="sk-step"><div class="sk-num">2</div><div class="sk-lead"><b>Check it is your account.</b> <span class="muted" style="font-weight:400">What the files say, before anything is kept.</span></div></div>
               <dl class="tx-dl" id="ex-facts"></dl>

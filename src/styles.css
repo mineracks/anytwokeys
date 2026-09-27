@@ -558,6 +558,7 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .ic.s24{width:24px;height:24px} .ic.s40{width:40px;height:40px} .ic.s72{width:72px;height:72px}
 .ic[data-icon-pick]{cursor:pointer} .ic[data-icon-pick]:hover{border-color:var(--gold)}
 .icpick{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--ground)} .icpick .ic{cursor:pointer} .icpick .ic:hover,.icpick .ic.on{border-color:var(--gold);background:var(--gold-soft)}
+.mapcol{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:8px 0;border-top:1px solid var(--line)} .mapcol:first-child{border-top:0} .mapcol .col{flex:1 1 200px;min-width:0} .mapcol .col b{font-family:var(--display);font-weight:600} .mapcol .col small{display:block;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ent-kind{font-family:var(--display);font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:14px 0 4px}
 .kpi{padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}

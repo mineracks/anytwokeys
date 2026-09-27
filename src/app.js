@@ -2135,7 +2135,10 @@ function exReconHtml(p) {
 }
 $('#ex-pick').onclick = async () => {
   $('#ex-note').textContent = ''; $('#ex-preview').hidden = true;
-  let p; try { p = await invoke('exchange_pick_preview', { existing: null }); } catch (e) { if (String(e) !== 'cancelled') $('#ex-note').textContent = String(e); return; }
+  let p; try { p = await invoke('exchange_pick_preview', { existing: null }); } catch (e) { if (String(e) !== 'cancelled') $('#ex-note').textContent = /not an export this app knows/.test(String(e)) ? String(e) + ' \u2014 for another exchange, use \u201cAnother exchange\u2019s CSV\u201d and say which column is what.' : String(e); return; }
+  $('#ex-map').hidden = true; paintExPreview(p);
+};
+function paintExPreview(p) {
   $('#ex-facts').innerHTML = exFactsHtml(p);
   const [words, colour] = exReconHtml(p); $('#ex-recon').innerHTML = words; $('#ex-recon').style.borderLeftColor = colour;
   lineChart($('#ex-chart'), { title: 'Coins held at the exchange, in sats', sub: 'Row by row: bought, then withdrawn. If this is the shape you remember, it is your account.', from: p.first, to: Math.max(p.last, p.first + 86400),
@@ -2143,7 +2146,7 @@ $('#ex-pick').onclick = async () => {
   if (!$('#ex-name').value) $('#ex-name').value = p.provider;
   const box = $('#ex-owner'), paintOwner = (id) => { exEntity = id; box.replaceChildren(entityChips(id, $('#ex-owner-form'), paintOwner)); }; paintOwner(null);
   $('#ex-preview').hidden = false;
-};
+}
 $('#ex-import').onclick = async () => {
   const name = $('#ex-name').value.trim(); if (!name) return toast('Give the account a name');
   $('#ex-import').disabled = true;
@@ -2154,6 +2157,57 @@ $('#ex-import').onclick = async () => {
     toast(`${sats(n)} row${n === 1 ? '' : 's'} kept. Nothing here can be spent; every buy carries what it really cost.`, 8000);
     renderTabs(); paintNet(); show('home');
   } catch (e) { fail(e); } finally { $('#ex-import').disabled = false; }
+};
+// another exchange's CSV: the header comes back and the person says which column is what, in the house segments
+const MAP_ROLES = [['', '—'], ['date', 'Date'], ['kind', 'Kind'], ['sats', 'Coins'], ['fiat', 'Money'], ['fee_fiat', 'Fee, money'], ['fee_sats', 'Fee, coins'], ['id', 'Id']];
+// a first guess from the column's name; the person corrects it
+function mapGuess(h) {
+  const n = h.toLowerCase();
+  if (/date|time|when|created/.test(n)) return 'date';
+  if (/^id$|ref|txid|identifier|order/.test(n)) return 'id';
+  if (/fee/.test(n)) return /btc|coin|sat/.test(n) ? 'fee_sats' : 'fee_fiat';
+  if (/type|kind|product|action|side|description/.test(n)) return 'kind';
+  if (/btc|bitcoin|coin|sats|crypto|quantity|qty/.test(n)) return 'sats';
+  if (/aud|usd|eur|gbp|nzd|fiat|price|total|money|cash|amount/.test(n)) return 'fiat';
+  return '';
+}
+function paintMapping(raw) {
+  const box = $('#ex-map'); box.hidden = false;
+  const roles = raw.header.map(mapGuess); const seenRole = new Set();
+  for (let i = 0; i < roles.length; i++) { if (roles[i] && seenRole.has(roles[i])) roles[i] = ''; else if (roles[i]) seenRole.add(roles[i]); }
+  const tz = -new Date().getTimezoneOffset() / 60;
+  box.innerHTML = `<div class="sk-step"><div class="sk-num">1b</div><div class="sk-lead"><b>Say which column is what.</b> <span class="muted" style="font-weight:400">${sats(raw.rows)} rows in ${raw.files.length === 1 ? esc(raw.files[0]) : sats(raw.files.length) + ' files'}. A column left at — is not read. Coins and money are read to the sat and the cent; the kind is read from its words, or from the signs when there is no kind column.</span></div></div>
+    <div id="ex-map-cols">${raw.header.map((h, i) => `<div class="mapcol"><div class="col"><b>${esc(h || '(unnamed)')}</b><small>${esc(raw.sample.slice(0, 3).map(r => r[i] || '').filter(Boolean).join(' · ') || 'empty in the first rows')}</small></div><div class="seg" role="radiogroup" aria-label="What column ${esc(h)} is" data-col="${i}">${MAP_ROLES.map(([r, w]) => `<button type="button" role="radio" aria-checked="${roles[i] === r ? 'true' : 'false'}" data-role="${r}">${w}</button>`).join('')}</div></div>`).join('')}</div>
+    <div class="row" style="gap:18px;align-items:flex-end;flex-wrap:wrap;margin-top:6px">
+      <div class="field" style="max-width:220px"><div class="label">Exchange</div><input id="ex-map-provider" maxlength="40" placeholder="its name"></div>
+      <div class="field" style="max-width:110px"><div class="label">Currency</div><input id="ex-map-ccy" maxlength="3" value="${esc((store.settings.fiat && store.settings.fiat !== 'auto' ? store.settings.fiat : '') || 'AUD')}"></div>
+      <div class="field"><div class="label">Times are</div><div class="seg" role="radiogroup" id="ex-map-tz"><button type="button" role="radio" aria-checked="true" data-tz="0">UTC</button><button type="button" role="radio" aria-checked="false" data-tz="${tz}">Local (${tz >= 0 ? '+' : ''}${tz})</button></div></div>
+      <div class="field"><div class="label">Coins written as</div><div class="seg" role="radiogroup" id="ex-map-unit"><button type="button" role="radio" aria-checked="true" data-unit="btc">BTC</button><button type="button" role="radio" aria-checked="false" data-unit="sats">sats</button></div></div>
+    </div>
+    <div class="row" style="gap:10px;align-items:center"><button class="btn primary" type="button" id="ex-map-read">Read it</button><span class="muted" id="ex-map-note" aria-live="polite"></span></div>`;
+  $$('#ex-map-cols .seg', box).forEach(seg => $$('[data-role]', seg).forEach(b => b.onclick = () => {
+    const role = b.dataset.role;
+    // one column per role: a role taken here is given up wherever else it was
+    if (role) $$('#ex-map-cols .seg', box).forEach(o => { if (o !== seg) $$('[data-role]', o).forEach(x => { if (x.dataset.role === role && x.getAttribute('aria-checked') === 'true') { x.setAttribute('aria-checked', 'false'); o.querySelector('[data-role=""]').setAttribute('aria-checked', 'true'); } }); });
+    $$('[data-role]', seg).forEach(x => x.setAttribute('aria-checked', x === b ? 'true' : 'false'));
+  }));
+  for (const id of ['#ex-map-tz', '#ex-map-unit']) $$(id + ' [role=radio]').forEach(b => b.onclick = () => $$(id + ' [role=radio]').forEach(x => x.setAttribute('aria-checked', x === b ? 'true' : 'false')));
+  $('#ex-map-provider').focus();
+  $('#ex-map-read').onclick = async () => {
+    const col = (role) => { const seg = $$('#ex-map-cols .seg').find(s => $$('[data-role]', s).some(x => x.dataset.role === role && x.getAttribute('aria-checked') === 'true')); return seg ? +seg.dataset.col : null; };
+    const provider = $('#ex-map-provider').value.trim(); if (!provider) { $('#ex-map-note').textContent = 'Name the exchange.'; return $('#ex-map-provider').focus(); }
+    if (col('date') === null) { $('#ex-map-note').textContent = 'Which column is the date?'; return; }
+    if (col('sats') === null && col('fiat') === null) { $('#ex-map-note').textContent = 'Which column holds the coins, or the money?'; return; }
+    const mapping = { provider, date: col('date'), tz_hours: +($('#ex-map-tz [aria-checked=true]').dataset.tz || 0), kind: col('kind'), sats: col('sats'), sats_unit: $('#ex-map-unit [aria-checked=true]').dataset.unit, fiat: col('fiat'), fee_fiat: col('fee_fiat'), fee_sats: col('fee_sats'), id: col('id'), ccy: $('#ex-map-ccy').value.trim().toUpperCase() || 'AUD' };
+    $('#ex-map-note').textContent = 'Reading…';
+    let p; try { p = await invoke('exchange_map_preview', { mapping, existing: null }); } catch (e) { $('#ex-map-note').textContent = String(e); return; }
+    $('#ex-map-note').textContent = ''; paintExPreview(p);
+  };
+}
+$('#ex-map-pick').onclick = async () => {
+  $('#ex-note').textContent = ''; $('#ex-preview').hidden = true; $('#ex-map').hidden = true;
+  let raw; try { raw = await invoke('exchange_pick_raw'); } catch (e) { if (String(e) !== 'cancelled') $('#ex-note').textContent = String(e); return; }
+  paintMapping(raw);
 };
 // a later export, from the account's Vault settings: the same preview, then only the new rows are added
 function paintExchangeSettings() {
