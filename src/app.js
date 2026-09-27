@@ -3309,19 +3309,7 @@ function renderLocations() {
   const places = placesSorted(), un = unplacedKeys();
   const placed = Object.keys(store.key_place || {}).filter(k => store.vaults.some(v => v.keys.some(x => x.pubkey === k)) && places.some(p => p.id === store.key_place[k])).length;
   const n = (c, w) => `${sats(c)} ${w}${c === 1 ? '' : 's'}`;
-  $('#places-sum').textContent = places.length ? `${n(places.length, 'place')} · ${n(placed, 'key')} placed${un.length ? ` · ${un.length} not yet` : ''}` : '';
-  const set = async (pub, id) => { try { store = await invoke('key_place_set', { pubkey: pub, place: id }); renderLocations(); } catch (e) { fail(e); } };
-  // keys with no place yet: each a row with the chips, so the whole custody can be placed from here
-  const unbox = $('#places-unplaced'); unbox.innerHTML = ''; unbox.hidden = !un.length;
-  if (un.length) {
-    unbox.innerHTML = `<div class="label">Not yet placed</div><div class="muted" style="font-size:13px">${un.length === 1 ? 'One key has no place recorded.' : `${un.length} keys have no place recorded.`}</div><div class="tp-list" id="places-un-list"></div><div id="places-un-form"></div>`;
-    for (const u of un) {
-      const row = document.createElement('div'); row.className = 'tp'; row.style.alignItems = 'center';
-      row.innerHTML = `<div class="tp-what"><div class="tp-head"><b>${esc(u.key.name)}</b> <span class="muted">· ${u.vaults.map(esc).join(', ')}</span></div></div>`;
-      row.appendChild(placeChips(null, $('#places-un-form'), (id) => set(u.key.pubkey, id)));
-      $('#places-un-list').appendChild(row);
-    }
-  }
+  $('#places-sum').innerHTML = places.length ? `${n(places.length, 'place')} · ${n(placed, 'key')} placed${un.length ? ` · <button type="button" class="linkish" data-go="allkeys">${un.length} not yet placed</button> — each key's card says where it is kept` : ''}` : '';
   const list = $('#places-list'); list.innerHTML = '';
   if (!places.length) list.innerHTML = '<div class="sum-empty">No place named yet. Name one here, or from a key’s card.</div>';
   for (const p of places) {
