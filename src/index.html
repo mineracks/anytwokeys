@@ -55,8 +55,23 @@
     <div class="card" style="min-height:220px"><div class="row"><svg width="22" height="22"><use href="#ring"/></svg></div><div style="font-family:var(--display);font-weight:600;font-size:18px">Single key</div><div class="warn" style="flex-grow:1">One key. If it is lost, damaged or wiped, the funds are gone. No backup is possible. For small amounts only.</div><button class="btn" id="single-btn">Continue anyway</button></div>
     <div class="card" style="min-height:220px"><div class="row"></div><div style="font-family:var(--display);font-weight:600;font-size:18px">Restore a vault</div><div class="muted" style="flex-grow:1">Plug in any two of its sealed keys and the vault comes back. Or scan the code on a printed sheet, or paste the descriptor line.</div><button class="btn" data-go="restore">Restore</button></div>
   </div>
+  <div id="welcome-pull" hidden style="display:flex;flex-direction:column;align-items:center;gap:10px;margin-top:-10px">
+    <button type="button" class="linkish" id="welcome-pull-open" style="align-self:center">Or bring a vault across from another profile…</button>
+    <div id="welcome-pull-box" hidden style="display:flex;flex-direction:column;align-items:center;gap:8px"><div class="muted" style="font-size:13px">Which profile has it? It opens, you choose the vault, and it comes back here with everything about it.</div><div class="pick tight" id="welcome-pull-pick"></div></div>
+  </div>
   <div class="muted" style="font-size:13px">Free software · not affiliated with Yubico · YubiKey 5 series, firmware 5.2.3 or later · <span id="welcome-net"></span></div>
   <button class="btn" id="welcome-back" hidden>Back to my vaults</button>
+</div>
+
+<div id="pull" class="welcome" hidden>
+  <div style="display:flex;flex-direction:column;align-items:center;gap:14px">
+    <span id="pull-pic"></span>
+    <h1 id="pull-h">Move a vault</h1>
+    <div class="muted" style="font-size:18px;max-width:46ch;text-align:center" id="pull-say"></div>
+  </div>
+  <div class="card" style="width:min(560px,100%)"><div class="label">Vaults in this profile</div><div id="pull-list" style="display:flex;flex-direction:column;gap:8px"></div>
+    <div class="muted" style="font-size:12.5px">The vault leaves this profile with its labels, notes, attachments, key places, owner and links. Coins never move — only the record of them.</div></div>
+  <button type="button" class="linkish" id="pull-cancel" style="align-self:center">Go back without moving anything</button>
 </div>
 
 <div id="shell" hidden>

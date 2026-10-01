@@ -168,7 +168,30 @@ async function paintStaged(name) {
   paintCrumbs.via = msg ? 'messages' : 'send';
   bar.hidden = false;
 }
-function showWelcome() { $('#shell').hidden = true; $('#welcome').hidden = false; $('#welcome-back').hidden = !store.vaults.length; }
+function showWelcome() { $('#shell').hidden = true; $('#welcome').hidden = false; $('#welcome-back').hidden = !store.vaults.length; paintWelcomePull(); }
+// the quiet fourth path: a vault that already exists, in another profile
+function paintWelcomePull() {
+  const others = profile && profilesView ? profilesView.profiles.filter(p => p.id !== profile.id) : [];
+  $('#welcome-pull').hidden = !others.length; $('#welcome-pull-box').hidden = true;
+  $('#welcome-pull-pick').innerHTML = others.map(p => `<div class="opt" data-from="${esc(p.id)}">${esc(p.name)}<small>${PCLASS[p.class][0]}</small></div>`).join('');
+}
+$('#welcome-pull-open').onclick = () => { $('#welcome-pull-box').hidden = !$('#welcome-pull-box').hidden; };
+$('#welcome-pull-pick').addEventListener('click', async (e) => { const o = e.target.closest('.opt'); if (!o || !profile) return;
+  try { sessionStorage.setItem('a2k-pull-to', profile.id); } catch {}
+  try { await invoke('profile_open', { id: o.dataset.from }); } catch (err) { return fail(err); } location.reload(); });
+// in the profile that has the vault: choose it, and it goes back to where the asking came from
+function renderPull(dest) {
+  $('#shell').hidden = true; $('#welcome').hidden = true; $('#profiles').hidden = true; $('#pull').hidden = false;
+  $('#pull-pic').innerHTML = picHtml(dest, 88, true);
+  $('#pull-h').textContent = `Move a vault to ${dest.name}`;
+  $('#pull-say').textContent = `You are in ${profile.name}. Choose the vault to take across; ${dest.name} opens again to receive it.`;
+  const rows = store.vaults.map(v => `<div class="slot"><span><b>${esc(v.name)}</b><small>${v.exchange ? 'exchange account' : v.node ? 'node' : v.statement ? 'statement' : v.network === 'mainnet' ? 'mainnet' : esc(v.network)}${v.keys.length ? ' · ' + v.keys.length + (v.keys.length === 1 ? ' key' : ' keys') : ''}</small></span><button type="button" class="btn small" data-pull="${esc(v.name)}">Move it</button></div>`);
+  $('#pull-list').innerHTML = rows.join('') || '<div class="muted" style="font-size:13px">This profile holds no vault.</div>';
+  $$('#pull-list [data-pull]').forEach(b => b.onclick = async () => { b.disabled = true;
+    try { const st = await invoke('vault_move_start', { name: b.dataset.pull, to: dest.id }); if (st.missing.length) toast(`${st.missing.length} attachment${st.missing.length === 1 ? ' was' : 's were'} not on this computer and stayed behind`, 8000); await invoke('profile_open', { id: dest.id }); location.reload(); }
+    catch (e) { fail(e); b.disabled = false; } });
+  $('#pull-cancel').onclick = async () => { try { sessionStorage.removeItem('a2k-pull-to'); } catch {} try { await invoke('profile_open', { id: dest.id }); } catch (e) { return fail(e); } location.reload(); };
+}
 $('#new-vault-nav').onclick = showWelcome;
 $('#welcome-back').onclick = () => { if (vault) show('home'); };
 
@@ -381,6 +404,10 @@ async function bootProfile() {
   let want = -1; try { want = +localStorage.getItem('a2k-vault-n'); localStorage.removeItem('a2k-vault'); } catch {}
   vault = store.vaults[want] || store.vaults[0] || null;
   paintNet();
+  let pullTo = null; try { pullTo = sessionStorage.getItem('a2k-pull-to'); } catch {}
+  const pullDest = pullTo && profile && profilesView ? profilesView.profiles.find(p => p.id === pullTo) : null;
+  if (pullDest && profile && pullDest.id !== profile.id) { renderPull(pullDest); return; }
+  if (pullTo) { try { sessionStorage.removeItem('a2k-pull-to'); } catch {} }   // back where the asking came from: the parcel, if any, lands below
   if (vault) show('home'); else showWelcome();
   pollCards(); idleLock(); invoke('location_status').catch(() => {});   // the setting lives in the sealed store, so listening can only start now
   await applyGuard(); setDiscreet(isPrivate() && profile.discreet);
