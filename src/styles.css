@@ -732,7 +732,7 @@ a.tag{text-decoration:none;cursor:pointer} a.tag:hover{text-decoration:underline
 .pchip{display:inline-flex;align-items:center;gap:8px;padding:3px 10px 3px 3px;border:1px solid var(--line);border-radius:999px;background:var(--panel);font:600 13px var(--display);color:var(--ink);cursor:pointer;max-width:280px;min-height:32px}
 .pchip:hover,.pchip[aria-expanded="true"]{border-color:var(--gold)} .pchip .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .top{position:relative}
-.pmenu{position:absolute;right:32px;top:60px;z-index:40;display:flex;flex-direction:column;gap:4px;padding:8px;min-width:260px;border:1px solid var(--line);border-radius:10px;background:var(--panel);box-shadow:0 12px 34px rgba(0,0,0,.18)}
+.pmenu{position:fixed;z-index:210;display:flex;flex-direction:column;gap:4px;padding:8px;min-width:260px;border:1px solid var(--line);border-radius:10px;background:var(--panel);box-shadow:0 12px 34px rgba(0,0,0,.18)}
 .pmenu .pm{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;background:none;border:0;font:600 13.5px var(--display);color:var(--ink);cursor:pointer;text-align:left;width:100%}
 .pmenu .pm:hover{background:var(--gold-soft)} .pmenu .pm[aria-current="true"]{color:var(--muted);cursor:default} .pmenu .pm[aria-current="true"]:hover{background:none}
 .pmenu .pm small{display:block;font-weight:400;color:var(--muted);font-size:12px}
@@ -751,3 +751,5 @@ a.tag{text-decoration:none;cursor:pointer} a.tag:hover{text-decoration:underline
 .pull-list .pr b{font-family:var(--display);font-weight:600;font-size:14px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pull-list .pr small{display:block;color:var(--muted);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pull-list .pr .btn.small{white-space:nowrap}
+.welcome{position:relative}
+.corner-chip{position:absolute;top:18px;right:32px;display:flex;align-items:center;gap:10px}

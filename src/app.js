@@ -168,7 +168,7 @@ async function paintStaged(name) {
   paintCrumbs.via = msg ? 'messages' : 'send';
   bar.hidden = false;
 }
-function showWelcome() { $('#shell').hidden = true; $('#welcome').hidden = false; $('#welcome-back').hidden = !store.vaults.length; paintWelcomePull(); }
+function showWelcome() { $('#shell').hidden = true; $('#welcome').hidden = false; $('#welcome-back').hidden = !store.vaults.length; paintWelcomePull(); paintCornerChip('welcome-profile'); }
 // the quiet fourth path: a vault that already exists, in another profile
 function paintWelcomePull() {
   const others = profile && profilesView ? profilesView.profiles.filter(p => p.id !== profile.id) : [];
@@ -182,7 +182,7 @@ $('#welcome-pull-pick').addEventListener('click', async (e) => { const o = e.tar
 // in the profile that has the vault: choose it, and it goes back to where the asking came from
 function renderPull(dest) {
   $('#shell').hidden = true; $('#welcome').hidden = true; $('#profiles').hidden = true; $('#pull').hidden = false;
-  $('#pull-pic').innerHTML = picHtml(dest, 88, true);
+  $('#pull-pic').innerHTML = picHtml(dest, 88, true); paintCornerChip('pull-profile');
   $('#pull-h').textContent = `Move a vault to ${dest.name}`;
   $('#pull-say').textContent = `You are in ${profile.name}. Choose the vault to take across; ${dest.name} opens again to receive it.`;
   const kind = (v) => v.exchange ? 'exchange account' : v.node ? 'node' : v.statement ? 'statement' : (v.network === 'mainnet' ? 'mainnet' : esc(v.network)) + (v.keys.length ? ' · ' + v.keys.length + (v.keys.length === 1 ? ' key' : ' keys') : '');
@@ -344,6 +344,12 @@ function paintProfileChip() {
   chip.hidden = false; chip.innerHTML = `${picHtml(profile, 22, true)}<span class="nm">${esc(profile.name)}</span>${ptagHtml(profile)}`;
   const dc = $('#discreet-chip'); dc.hidden = profile.class !== 'private';
 }
+// the same chip on the screens outside the shell (welcome, pull), with the same menu
+function paintCornerChip(id) {
+  const box = $('#' + id); if (!box) return; if (!profile) { box.innerHTML = ''; return; }
+  box.innerHTML = `<button type="button" class="pchip" aria-haspopup="true" aria-expanded="false" title="Profile">${picHtml(profile, 22, true)}<span class="nm">${esc(profile.name)}</span>${ptagHtml(profile)}</button>`;
+  box.querySelector('.pchip').onclick = (e) => { e.stopPropagation(); const m = $('#profile-menu'); const open = m.hidden; if (open) menuUnder(e.currentTarget); m.hidden = !open; e.currentTarget.setAttribute('aria-expanded', String(open)); };
+}
 function paintProfileMenu() {
   const m = $('#profile-menu'), others = (profilesView ? profilesView.profiles : []);
   m.innerHTML = others.map(p => `<button type="button" class="pm" role="menuitem" data-switch="${esc(p.id)}" aria-current="${p.id === profile.id}">${picHtml(p, 22, false)}<span><span class="nm">${esc(p.name)}</span><small>${PCLASS[p.class][0]}${p.id === profile.id ? ' · open now' : ''}</small></span></button>`).join('')
@@ -351,7 +357,8 @@ function paintProfileMenu() {
   $$('[data-switch]', m).forEach(b => { if (b.getAttribute('aria-current') !== 'true') b.onclick = () => switchProfile(b.dataset.switch); });
   $('#pm-all').onclick = closeProfile;
 }
-$('#profile-chip').onclick = (e) => { e.stopPropagation(); const m = $('#profile-menu'); const open = m.hidden; if (open) paintProfileMenu(); m.hidden = !open; $('#profile-chip').setAttribute('aria-expanded', String(open)); };
+function menuUnder(anchor) { const m = $('#profile-menu'); paintProfileMenu(); const r = anchor.getBoundingClientRect(); m.style.left = Math.max(12, Math.min(r.right - 280, window.innerWidth - 292)) + 'px'; m.style.top = (r.bottom + 6) + 'px'; }
+$('#profile-chip').onclick = (e) => { e.stopPropagation(); const m = $('#profile-menu'); const open = m.hidden; if (open) menuUnder(e.currentTarget); m.hidden = !open; $('#profile-chip').setAttribute('aria-expanded', String(open)); };
 document.addEventListener('click', (e) => { const m = $('#profile-menu'); if (!m.hidden && !e.target.closest('#profile-menu')) { m.hidden = true; $('#profile-chip').setAttribute('aria-expanded', 'false'); } });
 $('#lock-switch').onclick = closeProfile;
 

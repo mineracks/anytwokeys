@@ -45,6 +45,7 @@
 </div>
 
 <div id="welcome" class="welcome" hidden>
+  <div class="corner-chip" id="welcome-profile"></div>
   <div style="display:flex;flex-direction:column;align-items:center;gap:14px">
     <svg width="64" height="64"><use href="#ring"/></svg>
     <h1>Any Two Keys</h1>
@@ -64,6 +65,7 @@
 </div>
 
 <div id="pull" class="welcome" hidden>
+  <div class="corner-chip" id="pull-profile"></div>
   <div style="display:flex;flex-direction:column;align-items:center;gap:14px">
     <span id="pull-pic"></span>
     <h1 id="pull-h">Move a vault</h1>
@@ -108,7 +110,7 @@
 </div>
 <div class="divider" id="divider" title="Drag to resize"></div>
 <div class="main">
-  <div class="top"><div class="topleft"><nav id="crumbs" aria-label="Where you are" hidden></nav><div class="row" style="gap:10px;min-width:0"><h1 id="title">Vault</h1><input id="title-input" hidden><button class="pencil" id="title-edit" title="Rename this vault" hidden><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button></div></div><div class="row" style="gap:10px;flex-wrap:nowrap"><button type="button" class="vchip" id="discreet-chip" hidden aria-pressed="false" title="Amounts, names and addresses stay blurred until you hold the page">Discreet</button><button type="button" class="pchip" id="profile-chip" hidden aria-haspopup="true" aria-expanded="false" title="Profile"></button><div class="net" id="netpill"><i></i><span>signet</span></div></div><div class="pmenu" id="profile-menu" hidden role="menu"></div></div>
+  <div class="top"><div class="topleft"><nav id="crumbs" aria-label="Where you are" hidden></nav><div class="row" style="gap:10px;min-width:0"><h1 id="title">Vault</h1><input id="title-input" hidden><button class="pencil" id="title-edit" title="Rename this vault" hidden><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button></div></div><div class="row" style="gap:10px;flex-wrap:nowrap"><button type="button" class="vchip" id="discreet-chip" hidden aria-pressed="false" title="Amounts, names and addresses stay blurred until you hold the page">Discreet</button><button type="button" class="pchip" id="profile-chip" hidden aria-haspopup="true" aria-expanded="false" title="Profile"></button><div class="net" id="netpill"><i></i><span>signet</span></div></div></div>
   <div id="staged-bar" hidden><span id="staged-text"></span><button class="btn small primary" data-go="sign">Continue signing</button><button class="btn small" id="staged-discard">Discard it</button></div>
   <div class="content">
 
@@ -834,6 +836,7 @@
     <button type="button" class="linkish" id="curtain-switch">Switch to another profile</button>
   </div>
 </div>
+<div class="pmenu" id="profile-menu" hidden role="menu"></div>
 <div class="toast" id="toast"></div>
 <div id="notices" aria-live="polite"></div>
 <script src="vendor/jsQR.js"></script>
