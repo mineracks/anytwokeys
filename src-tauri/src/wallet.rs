@@ -77,7 +77,7 @@ pub struct Seal {
     #[serde(default)] pub sealed: Vec<String>,   // public keys of the cards seen carrying their share
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub network: String,
     pub custom: bool,
@@ -107,6 +107,13 @@ pub struct Settings {
     #[serde(default = "default_drill")] pub drill_days: u32,
     /// how a disposal's cost is found: "utxo" (the coins actually spent, as the chain records them), "fifo", "average"
     #[serde(default = "default_method")] pub cost_method: String,
+}
+/// A store made from nothing — a new profile's, a test's — starts on the same defaults a file with the fields left
+/// out would read: the device's currency, the app's hosts, a 20-address gap, drills every 90 days. The derived
+/// Default gave empty strings and zeros instead, which read as "no currency, no maps, never drill" and were then
+/// SAVED that way (default_on_error_becomes_saved_empty_state).
+impl Default for Settings {
+    fn default() -> Self { serde_json::from_str(r#"{"network":"","custom":false,"electrum":"","explorer":""}"#).expect("the empty settings parse") }
 }
 pub fn default_geocode() -> String { "https://geocode.mineracks.com".into() }
 pub fn default_tiles() -> String { "https://tiles.mineracks.com/planet.pmtiles".into() }
