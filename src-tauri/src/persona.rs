@@ -23,8 +23,8 @@ use serde::Serialize;
 pub const DEFAULT_SEED: &str = "7f3a9c21d4e85b60";
 /// 2026-10-01 02:00:00 UTC — when the default persona's vaults were paid, and the time its last withdrawals carry
 pub const FUNDED_AT: u32 = 1_790_820_000;
-/// what the default persona's cold storage received, by (vault, receive index) — the dispenser paid exactly these
-pub const FUNDING: [(&str, u32, u64); 3] = [("self", 0, 150_000), ("self", 1, 120_000), ("smsf", 0, 200_000)];
+/// what the default persona's cold storage received, by (vault, receive index) — the walletplayground dispenser paid exactly these on 2026-10-01 (txids in the infra journal)
+pub const FUNDING: [(&str, u32, u64); 3] = [("self", 0, 8_000), ("self", 1, 6_000), ("smsf", 0, 10_000)];
 
 struct Rng(u64);
 impl Rng {
@@ -222,7 +222,7 @@ mod tests {
         let ex = s.vaults.iter().find(|v| v.name.starts_with("Amber · ") && !v.name.contains("Super")).unwrap().exchange.as_ref().unwrap();
         assert_eq!(ex.provider, "Amber");
         let sends: Vec<i64> = ex.rows.iter().filter(|r| r.kind == "btc_out").map(|r| r.sats).collect();
-        assert_eq!(sends, vec![-150_000, -120_000], "the withdrawals are the funding, in order");
+        assert_eq!(sends, vec![-8_000, -6_000], "the withdrawals are the funding, in order");
         assert!(ex.rows.iter().filter(|r| r.kind == "buy").count() > 90, "monthly buys since 2018");
         assert!(ex.rows.iter().any(|r| r.kind == "sell") && ex.rows.iter().any(|r| r.kind == "fiat_in"));
         let last_send = ex.rows.iter().filter(|r| r.kind == "btc_out").map(|r| r.time).max().unwrap();
