@@ -167,8 +167,9 @@ pub fn generate(seed: &str, now: u64) -> Result<Made, String> {
     let ex_self = crate::exchange::parse(&[(format!("amber-{}.csv", first.to_lowercase()), csv_self.into_bytes())])?;
     let ex_smsf = crate::exchange::parse(&[("amber-smsf.csv".to_string(), csv_smsf.into_bytes())])?;
     let rows = ex_self.rows.len() + ex_smsf.rows.len();
+    // the exchange accounts have no chain of their own; they carry the persona's network so one screen shows the whole person
     let ex_vault = |name: String, ex: crate::exchange::Exchange, entity: &str, t: u64| Vault { watch: None, spark: None, muun: None, statement: None, node: None, exchange: Some(ex),
-        name, network: "mainnet".into(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address: String::new(), created: t, chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
+        name, network: "signet".into(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address: String::new(), created: t, chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
         labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: Some("fifo".into()), entity: Some(entity.into()) };
     let mut fund = vec![];
     for (who, i, sats) in FUNDING { let v = if who == "self" { &v_self } else { &v_smsf }; fund.push((v.name.clone(), wallet::address_at(v, i)?, sats)); }

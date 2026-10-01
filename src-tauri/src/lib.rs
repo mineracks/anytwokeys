@@ -2352,7 +2352,14 @@ fn profile_close() -> R<ProfilesView> { profiles::close(); profiles_view(profile
 async fn profile_create(name: String, class: profiles::Class, picture: Option<String>) -> R<profiles::Profile> {
     block(move || {
         if class == profiles::Class::Private { lockbox::mac::presence("make a private profile")?; }
-        profiles::create(&name, class, picture, now())
+        let p = profiles::create(&name, class, picture, now())?;
+        // a fiction profile is never empty: it opens on a made-up person, ready to show
+        if class == profiles::Class::Fiction {
+            profiles::open(&p.id, now())?;
+            let made = persona::generate(persona::DEFAULT_SEED, now())?;
+            return profiles::update(&p.id, profiles::Changes { name: None, picture: None, start: None, discreet: None, persona_seed: Some(Some(made.seed)) });
+        }
+        Ok(p)
     }).await
 }
 

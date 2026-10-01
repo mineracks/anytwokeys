@@ -384,6 +384,10 @@ async function bootProfile() {
   if (vault) show('home'); else showWelcome();
   pollCards(); idleLock(); invoke('location_status').catch(() => {});   // the setting lives in the sealed store, so listening can only start now
   await applyGuard(); setDiscreet(isPrivate() && profile.discreet);
+  // a fiction profile made before personas existed, or emptied: fill it the first time it opens
+  if (profile && profile.class === 'fiction' && !profile.persona_seed && !store.vaults.length) {
+    try { const made = await invoke('persona_generate', { seed: null }); store = await invoke('store_get'); vault = store.vaults[0] || null; profilesView = await invoke('profiles_list').catch(() => profilesView); profile = (profilesView && profilesView.current) || profile; paintNet(); renderTabs(); if (vault) show('home');
+      notice({ kind: 'confirmed', title: `${made.name} is here`, body: `A made-up person for this profile: ${made.entities} entities, ${made.vaults.length} vaults and ${sats(made.exchange_rows)} exchange rows. Change the seed in App settings for a different one.` }, 14000); } catch (e) { fail(e); } }
   if (profile) { try { const landed = await invoke('move_land'); if (landed) { store = await invoke('store_get'); vault = store.vaults.find(v => v.name === landed.vault) || vault; const from = (profilesView.profiles.find(p => p.id === landed.from) || {}).name || 'another profile';
     notice({ kind: 'confirmed', title: landed.back ? `“${landed.vault}” came back` : `“${landed.vault}” is now here`, body: landed.back ? `It was on its way to ${from} when the app quit, so it returned to the profile it left.` : `Moved from ${from} with its labels, notes, attachments and links.` }, 14000); renderTabs(); if (vault) show('home'); } } catch (e) { fail(e); } }
   if (profilesView && profilesView.moved && profilesView.moved.moved) notice({ kind: 'confirmed', title: 'Your files now live in the profile “Me”', body: 'Everything this app kept is in a private profile of its own. Demo wallets can move to a profile of their own from Vault settings.' }, 14000);
@@ -2148,7 +2152,9 @@ function renderHomeSummary() { if (vault && $('#s-home').classList.contains('on'
 // why a vault's history could not be read just now, in the words the person needs
 function lockedWhy(e) { const s = String(e); if (s.startsWith('SPARK_UNLOCK:')) return 'its YubiKey reader is locked — open the vault, plug the key in and unlock it'; if (/timed out|timeout|connect|refused|unreachable|dns/i.test(s)) return 'it could not be reached just now'; return s.replace(/^[A-Z_]+:\s*/, '').replace(/\.$/, ''); }
 function renderOverview() {
-  const main = store.vaults.filter(v => v.network === 'mainnet'), test = store.vaults.filter(v => v.network !== 'mainnet');
+  // in a fiction profile the made-up person's world is the real one: its signet vaults count as their holdings
+  const fiction = !!(profile && profile.class === 'fiction');
+  const main = store.vaults.filter(v => fiction || v.network === 'mainnet'), test = fiction ? [] : store.vaults.filter(v => v.network !== 'mainnet');
   let off = []; try { off = JSON.parse(sumPref('off', '[]')); } catch {}
   const names = main.map(v => v.name).filter(n => !off.includes(n));
   const chips = document.createElement('div'); chips.style.cssText = 'display:flex;gap:var(--s2) 14px;flex-wrap:wrap;align-items:center';
