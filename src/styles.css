@@ -743,3 +743,5 @@ a.tag{text-decoration:none;cursor:pointer} a.tag:hover{text-decoration:underline
 .discreet.peek .content,.discreet.peek #vault-tabs,.discreet.peek #title{filter:none}
 .discreet .content{-webkit-user-select:none;user-select:none}
 .vchip.on{border-color:var(--gold);color:var(--ink);background:var(--gold-soft)}
+#pull{justify-content:flex-start;overflow-y:auto;padding-block:48px}
+#pull .card{flex:0 0 auto}

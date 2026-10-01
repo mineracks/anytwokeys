@@ -2394,7 +2394,7 @@ async fn profile_picture_pick(id: String) -> R<profiles::Profile> {
 /// A vault leaves this profile for another: parcel written and proven, the vault removed here. The window then
 /// opens the destination; `move_land` finishes it there once that profile is unlocked.
 #[tauri::command]
-async fn vault_move_start(name: String, to: String) -> R<bundle::Started> { block(move || bundle::start(&name, &to, now())).await }
+async fn vault_move_start(name: String, to: String, keep: Option<bool>) -> R<bundle::Started> { block(move || bundle::start(&name, &to, keep.unwrap_or(false), now())).await }
 
 /// After an unlock: a vault addressed to this profile lands; one that left here and lost its key comes back.
 #[tauri::command]

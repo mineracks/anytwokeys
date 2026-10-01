@@ -118,8 +118,9 @@ pub fn import(b: Bundle) -> Result<String, String> {
 #[derive(Serialize, Clone, Debug)]
 pub struct Started { pub id: String, pub missing: Vec<String> }
 
-/// First half, in the source profile: parcel written and proven, then the vault leaves the source store.
-pub fn start(name: &str, to: &str, now: u64) -> Result<Started, String> {
+/// First half, in the source profile: parcel written and proven, then — unless `keep` — the vault leaves the source.
+/// A copy (`keep`) leaves the source exactly as it was; the destination gets the same record under its own key.
+pub fn start(name: &str, to: &str, keep: bool, now: u64) -> Result<Started, String> {
     let from = crate::profiles::current().ok_or("no profile is open")?;
     if from.id == to { return Err("that is the profile the vault is already in".into()); }
     if !crate::profiles::index()?.profiles.iter().any(|p| p.id == to) { return Err("no such profile".into()); }
@@ -135,6 +136,7 @@ pub fn start(name: &str, to: &str, now: u64) -> Result<Started, String> {
     crate::lockbox::write_sealed(&d.join(format!("{id}.k")), "move-key", &k)?;
     std::fs::write(d.join(format!("{id}.json")), serde_json::to_vec(&Manifest { id: id.clone(), from: from.id.clone(), to: to.into(), made: now }).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     if let Ok(mut g) = KEYS.lock() { g.push((id.clone(), k)); }
+    if keep { return Ok(Started { id, missing }); }
     // now, and only now, the source lets go — the same clearing a forget does
     if let Some(sp) = b.vault.watch.as_ref().and_then(|w| w.sp.as_ref()) { crate::sp::forget_scan_key(&crate::sp::id_of(&sp.spend)); }
     if let Some(n) = b.vault.node.as_ref() { crate::node::forget_cred(&crate::node::id_of(&n.url, &n.pubkey)); }
@@ -203,7 +205,7 @@ mod tests {
         wallet::update(|s| { s.vaults.push(v.clone()); s.vaults.push(vault("other")); s.entities.push(wallet::Entity { id: "e1".into(), name: "SMSF".into(), kind: "smsf".into(), note: String::new(), added: 1 });
             s.places.push(wallet::Place { id: "p1".into(), name: "Home safe".into(), ..Default::default() }); s.key_place.insert("02aa".into(), "p1".into());
             s.key_fw.insert("02aa".into(), "5.4.3".into()); s.seen.insert("demo".into(), wallet::Seen { txs: [("ab".to_string(), 1)].into_iter().collect(), coins: Default::default(), primed: true }); }).unwrap();
-        let st = start("demo", &b.id, 10).unwrap();
+        let st = start("demo", &b.id, false, 10).unwrap();
         assert!(st.missing.is_empty());
         let s = wallet::load().unwrap();
         assert_eq!(s.vaults.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), vec!["other"], "the source let go");
@@ -226,7 +228,7 @@ mod tests {
         // a second move of a vault with the same name lands as "demo · 2"; then the app "quits": its key is gone
         crate::profiles::open(&a.id, 15).unwrap();
         wallet::update(|s| s.vaults.push(vault("demo"))).unwrap();
-        let st2 = start("demo", &b.id, 16).unwrap();
+        let st2 = start("demo", &b.id, false, 16).unwrap();
         if let Ok(mut g) = KEYS.lock() { g.clear(); }
         crate::profiles::open(&b.id, 17).unwrap();
         assert!(land(18).unwrap().is_none(), "the destination cannot open a parcel whose key died with the process");
@@ -235,6 +237,11 @@ mod tests {
         assert!(back.back && back.vault == "demo", "{back:?}");
         assert!(wallet::load().unwrap().vaults.iter().any(|v| v.name == "demo"));
         let _ = st2;
+        // a copy: the source keeps the vault, the destination gets it too
+        let st3 = start("demo", &b.id, true, 21).unwrap(); let _ = st3;
+        assert!(wallet::load().unwrap().vaults.iter().any(|v| v.name == "demo"), "a copy leaves the source as it was");
+        crate::profiles::open(&b.id, 22).unwrap();
+        let l3 = land(23).unwrap().unwrap(); assert_eq!(l3.vault, "demo · 2", "the first move is still there; the copy sits beside it");
         crate::profiles::close(); crate::profiles::test_root(None); std::env::remove_var("A2K_STORE_KEY");
     }
 }
