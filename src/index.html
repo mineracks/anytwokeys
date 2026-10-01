@@ -74,8 +74,10 @@
   <div class="card" style="width:min(600px,100%)">
     <div class="row" style="justify-content:space-between;gap:12px"><div class="label">Vaults in this profile</div><div class="seg" role="radiogroup" aria-label="Copy or move" id="pull-how"><button type="button" role="radio" aria-checked="true" data-how="copy">Copy</button><button type="button" role="radio" aria-checked="false" data-how="move">Move</button></div></div>
     <div class="muted" style="font-size:12.5px" id="pull-how-say">A copy leaves this profile exactly as it is; the other gets the same record under its own key.</div>
-    <div id="pull-list" class="pull-list"></div>
-    <div class="muted" style="font-size:12.5px">Either way it goes with its labels, notes, attachments, key places, owner and links. Coins never move — only the record of them.</div></div>
+    <div class="row" style="justify-content:space-between;gap:12px"><div class="muted" style="font-size:12.5px">Click the vaults to take across.</div><div class="row" style="gap:12px"><button type="button" class="linkish" id="pull-all">Select all</button><button type="button" class="linkish" id="pull-none">None</button></div></div>
+    <div id="pull-list" class="pull-list" role="listbox" aria-multiselectable="true"></div>
+    <div class="muted" style="font-size:12.5px">Either way they go with their labels, notes, attachments, key places, owners and links. Coins never move — only the record of them.</div>
+    <div class="pickbar" id="pull-bar" hidden><div class="pb-what"><b id="pull-count">0 vaults</b><span class="muted" id="pull-bar-say"></span></div><div class="pb-act"><button type="button" class="btn primary" id="pull-go">Copy them</button></div></div></div>
   <button type="button" class="linkish" id="pull-cancel" style="align-self:center">Go back without moving anything</button>
 </div>
 

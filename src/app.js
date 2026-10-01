@@ -187,11 +187,20 @@ function renderPull(dest) {
   $('#pull-say').textContent = `You are in ${profile.name}. Choose the vault to take across; ${dest.name} opens again to receive it.`;
   const kind = (v) => v.exchange ? 'exchange account' : v.node ? 'node' : v.statement ? 'statement' : (v.network === 'mainnet' ? 'mainnet' : esc(v.network)) + (v.keys.length ? ' · ' + v.keys.length + (v.keys.length === 1 ? ' key' : ' keys') : '');
   const how = () => ($('#pull-how [aria-checked="true"]') || {}).dataset?.how || 'copy';
-  const paintRows = () => { $('#pull-list').innerHTML = store.vaults.map(v => `<div class="pr"><span><b>${esc(v.name)}</b><small>${kind(v)}</small></span><button type="button" class="btn small" data-pull="${esc(v.name)}">${how() === 'copy' ? 'Copy it' : 'Move it'}</button></div>`).join('') || '<div class="muted" style="font-size:13px;padding:10px 14px">This profile holds no vault.</div>';
-    $$('#pull-list [data-pull]').forEach(b => b.onclick = async () => { b.disabled = true;
-      try { const st = await invoke('vault_move_start', { name: b.dataset.pull, to: dest.id, keep: how() === 'copy' }); if (st.missing.length) toast(`${st.missing.length} attachment${st.missing.length === 1 ? ' was' : 's were'} not on this computer and stayed behind`, 8000); await invoke('profile_open', { id: dest.id }); location.reload(); }
-      catch (e) { fail(e); b.disabled = false; } }); };
-  $$('#pull-how button').forEach(b => b.onclick = () => { $$('#pull-how button').forEach(x => x.setAttribute('aria-checked', String(x === b))); $('#pull-how-say').textContent = b.dataset.how === 'copy' ? 'A copy leaves this profile exactly as it is; the other gets the same record under its own key.' : `A move takes the vault out of ${profile.name}. It arrives in ${dest.name} whole.`; paintRows(); });
+  const picked = new Set();
+  const paintBar = () => { const n = picked.size, verb = how() === 'copy' ? 'Copy' : 'Move'; $('#pull-bar').hidden = !n; $('#pull-count').textContent = `${n} vault${n === 1 ? '' : 's'}`; $('#pull-bar-say').textContent = how() === 'copy' ? `${profile.name} keeps ${n === 1 ? 'it' : 'them'}` : `${n === 1 ? 'it leaves' : 'they leave'} ${profile.name}`; $('#pull-go').textContent = `${verb} ${n === 1 ? 'it' : 'them'} to ${dest.name}`; };
+  const paintRows = () => { $('#pull-list').innerHTML = store.vaults.map(v => `<div class="pr" role="option" aria-selected="${picked.has(v.name)}" data-pull="${esc(v.name)}" tabindex="0"><span><b>${esc(v.name)}</b><small>${kind(v)}</small></span><span class="tick" aria-hidden="true">✓</span></div>`).join('') || '<div class="muted" style="font-size:13px;padding:10px 14px">This profile holds no vault.</div>';
+    const toggle = (r) => { const n = r.dataset.pull; if (picked.has(n)) picked.delete(n); else picked.add(n); r.setAttribute('aria-selected', String(picked.has(n))); paintBar(); };
+    $$('#pull-list [data-pull]').forEach(r => { r.onclick = () => toggle(r); r.onkeydown = (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggle(r); } }; });
+    paintBar(); };
+  $$('#pull-how button').forEach(b => b.onclick = () => { $$('#pull-how button').forEach(x => x.setAttribute('aria-checked', String(x === b))); $('#pull-how-say').textContent = b.dataset.how === 'copy' ? 'A copy leaves this profile exactly as it is; the other gets the same record under its own key.' : `A move takes the vaults out of ${profile.name}. They arrive in ${dest.name} whole.`; paintBar(); });
+  $('#pull-all').onclick = () => { store.vaults.forEach(v => picked.add(v.name)); paintRows(); };
+  $('#pull-none').onclick = () => { picked.clear(); paintRows(); };
+  $('#pull-go').onclick = async () => { if (!picked.size) return; $('#pull-go').disabled = true; let missing = 0;
+    try { for (const name of store.vaults.map(v => v.name).filter(n => picked.has(n))) { const st = await invoke('vault_move_start', { name, to: dest.id, keep: how() === 'copy' }); missing += st.missing.length; }
+      if (missing) toast(`${missing} attachment${missing === 1 ? ' was' : 's were'} not on this computer and stayed behind`, 8000);
+      await invoke('profile_open', { id: dest.id }); location.reload(); }
+    catch (e) { fail(e); $('#pull-go').disabled = false; } };
   paintRows();
   $('#pull-cancel').onclick = async () => { try { sessionStorage.removeItem('a2k-pull-to'); } catch {} try { await invoke('profile_open', { id: dest.id }); } catch (e) { return fail(e); } location.reload(); };
 }
@@ -425,8 +434,10 @@ async function bootProfile() {
   if (profile && profile.class === 'fiction' && !profile.persona_seed && !store.vaults.length) {
     try { const made = await invoke('persona_generate', { seed: null }); store = await invoke('store_get'); vault = store.vaults[0] || null; profilesView = await invoke('profiles_list').catch(() => profilesView); profile = (profilesView && profilesView.current) || profile; paintNet(); renderTabs(); if (vault) show('home');
       notice({ kind: 'confirmed', title: `${made.name} is here`, body: `A made-up person for this profile: ${made.entities} entities, ${made.vaults.length} vaults and ${sats(made.exchange_rows)} exchange rows. Change the seed in App settings for a different one.` }, 14000); } catch (e) { fail(e); } }
-  if (profile) { try { const landed = await invoke('move_land'); if (landed) { store = await invoke('store_get'); vault = store.vaults.find(v => v.name === landed.vault) || vault; const from = (profilesView.profiles.find(p => p.id === landed.from) || {}).name || 'another profile';
-    notice({ kind: 'confirmed', title: landed.back ? `“${landed.vault}” came back` : `“${landed.vault}” is now here`, body: landed.back ? `It was on its way to ${from} when the app quit, so it returned to the profile it left.` : `Moved from ${from} with its labels, notes, attachments and links.` }, 14000); renderTabs(); if (vault) show('home'); } } catch (e) { fail(e); } }
+  if (profile) { try { const landed = []; for (let i = 0; i < 64; i++) { const l = await invoke('move_land'); if (!l) break; landed.push(l); }
+    if (landed.length) { store = await invoke('store_get'); vault = store.vaults.find(v => v.name === landed[0].vault) || vault; const from = (profilesView.profiles.find(p => p.id === landed[0].from) || {}).name || 'another profile';
+      const names = landed.map(l => `“${l.vault}”`).join(', '), back = landed.every(l => l.back);
+      notice({ kind: 'confirmed', title: back ? `${names} came back` : landed.length === 1 ? `${names} is now here` : `${landed.length} vaults are now here`, body: back ? `On the way to ${from} when the app quit, so returned to the profile ${landed.length === 1 ? 'it' : 'they'} left.` : `${names} from ${from}, with labels, notes, attachments and links.` }, 14000); renderTabs(); if (vault) show('home'); } } catch (e) { fail(e); } }
   if (profilesView && profilesView.moved && profilesView.moved.moved) notice({ kind: 'confirmed', title: 'Your files now live in the profile “Me”', body: 'Everything this app kept is in a private profile of its own. Demo wallets can move to a profile of their own from Vault settings.' }, 14000);
   const moved = lockInfo && lockInfo.moved;
   if (boot.sealFailed) notice({ kind: 'warn', title: 'This app\'s files are not encrypted yet', body: boot.sealFailed });

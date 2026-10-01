@@ -753,3 +753,9 @@ a.tag{text-decoration:none;cursor:pointer} a.tag:hover{text-decoration:underline
 .pull-list .pr .btn.small{white-space:nowrap}
 .welcome{position:relative}
 .corner-chip{position:absolute;top:18px;right:32px;display:flex;align-items:center;gap:10px}
+.pull-list .pr{cursor:pointer;user-select:none;-webkit-user-select:none}
+.pull-list .pr:hover{background:var(--ground)}
+.pull-list .pr[aria-selected="true"]{background:var(--gold-soft)}
+.pull-list .pr .tick{width:20px;height:20px;border-radius:50%;border:1.5px solid var(--line);display:grid;place-items:center;font-size:12px;color:var(--ground);flex:0 0 20px}
+.pull-list .pr[aria-selected="true"] .tick{background:var(--gold);border-color:var(--gold)}
+#pull .pickbar{position:static;margin-top:4px}
