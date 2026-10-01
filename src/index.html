@@ -174,7 +174,10 @@
           <div class="card"><div class="label">This vault</div><dl class="tx-dl" id="vs-facts"></dl>
             <div class="label" style="margin-top:6px">Owner</div><div id="vs-owner"></div>
             <div id="vs-exchange" hidden></div>
-            <div class="row" style="gap:10px"><button class="btn small" id="vs-rename">Rename it</button><button class="btn small" id="vs-forget">Forget it on this computer</button></div></div>
+            <div class="row" style="gap:10px"><button class="btn small" id="vs-rename">Rename it</button><button class="btn small" id="vs-move" hidden>Move to another profile…</button><button class="btn small" id="vs-forget">Forget it on this computer</button></div>
+            <div id="vs-move-box" hidden style="display:flex;flex-direction:column;gap:10px;border-top:1px solid var(--line);padding-top:12px"><div class="label">Move this vault to</div><div class="pick tight" id="vs-move-pick"></div>
+              <div class="muted" style="font-size:13px">Everything about it goes along: labels, notes, attachments, where its keys are kept, its owner, the links it has answered. It leaves this profile; the other profile opens to receive it. Coins never move — only the record of them.</div>
+              <div class="row" style="gap:8px"><button class="btn small primary" id="vs-move-go" disabled>Move it</button><button class="btn small" id="vs-move-cancel">Cancel</button></div></div></div>
           <div class="card"><div class="label">How what leaves is costed</div>
             <div class="field"><label class="cap" for="vs-method">Cost method</label><select id="vs-method" style="max-width:420px"><option value="">The app's own</option><option value="utxo">The coins actually spent</option><option value="fifo">First in, first out</option><option value="average">Average cost (for reference)</option></select></div>
             <div class="muted" style="font-size:13px" id="vs-method-note"></div></div>

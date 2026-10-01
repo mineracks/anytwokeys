@@ -384,6 +384,8 @@ async function bootProfile() {
   if (vault) show('home'); else showWelcome();
   pollCards(); idleLock(); invoke('location_status').catch(() => {});   // the setting lives in the sealed store, so listening can only start now
   await applyGuard(); setDiscreet(isPrivate() && profile.discreet);
+  if (profile) { try { const landed = await invoke('move_land'); if (landed) { store = await invoke('store_get'); vault = store.vaults.find(v => v.name === landed.vault) || vault; const from = (profilesView.profiles.find(p => p.id === landed.from) || {}).name || 'another profile';
+    notice({ kind: 'confirmed', title: landed.back ? `“${landed.vault}” came back` : `“${landed.vault}” is now here`, body: landed.back ? `It was on its way to ${from} when the app quit, so it returned to the profile it left.` : `Moved from ${from} with its labels, notes, attachments and links.` }, 14000); renderTabs(); if (vault) show('home'); } } catch (e) { fail(e); } }
   if (profilesView && profilesView.moved && profilesView.moved.moved) notice({ kind: 'confirmed', title: 'Your files now live in the profile “Me”', body: 'Everything this app kept is in a private profile of its own. Demo wallets can move to a profile of their own from Vault settings.' }, 14000);
   const moved = lockInfo && lockInfo.moved;
   if (boot.sealFailed) notice({ kind: 'warn', title: 'This app\'s files are not encrypted yet', body: boot.sealFailed });
@@ -4376,6 +4378,9 @@ $('#drill-nudge-hide').onclick = () => { paintDrillNudge.hidden = vault && vault
 function renderVaultSettings() {
   paintShares();
   if (!vault) return;
+  { const others = profile && profilesView ? profilesView.profiles.filter(p => p.id !== profile.id) : [];
+    $('#vs-move').hidden = !others.length; $('#vs-move-box').hidden = true;
+    $('#vs-move-pick').innerHTML = others.map(p => `<div class="opt" data-to="${esc(p.id)}">${esc(p.name)}<small>${PCLASS[p.class][0]}</small></div>`).join(''); $('#vs-move-go').disabled = true; }
   $('#vs-method').value = vault.cost_method || '';
   const own = vault.cost_method, app = store.settings.cost_method || 'utxo';
   $('#vs-method-note').textContent = own
@@ -4531,6 +4536,12 @@ $('#vs-rewrite-go').onclick = async () => { const text = $('#vs-rewrite-in').val
   catch (e) { fail(e); } };
 $('#vs-pdf').onclick = () => invoke('vault_pdf', { name: vault.name }).then((p) => toast('Saved to ' + p)).catch(fail);
 $('#vs-rename').onclick = () => { show('home'); setTimeout(() => $('#title-edit').click(), 80); };
+$('#vs-move').onclick = () => { $('#vs-move-box').hidden = false; };
+$('#vs-move-cancel').onclick = () => { $('#vs-move-box').hidden = true; };
+$('#vs-move-pick').addEventListener('click', (e) => { const o = e.target.closest('.opt'); if (!o) return; $$('#vs-move-pick .opt').forEach(x => x.classList.toggle('on', x === o)); $('#vs-move-go').disabled = false; });
+$('#vs-move-go').onclick = async () => { const o = $('#vs-move-pick .opt.on'); if (!o || !vault) return; const to = o.dataset.to; $('#vs-move-go').disabled = true;
+  try { const st = await invoke('vault_move_start', { name: vault.name, to }); if (st.missing.length) toast(`${st.missing.length} attachment${st.missing.length === 1 ? ' was' : 's were'} not on this computer and stayed behind`, 8000); await invoke('profile_open', { id: to }); location.reload(); }
+  catch (e) { fail(e); $('#vs-move-go').disabled = false; } };
 askTwice($('#vs-forget'), 'Forget this vault on this computer? The coins stay on the chain; two sealed keys, or the recovery line and two keys, bring it back.', 'Yes, forget it here', async () => { store = await invoke('vault_forget', { name: vault.name }); await refreshTransferLinks(); vault = null; boot(); });
 $('#coins-switch').onclick = () => { try { localStorage.setItem('a2k-coins-tab', coinsTab() ? 'off' : 'on'); } catch {} paintCoinsTab(); };
 // A change of method changes every realised figure, so every ledger is worked out again.

@@ -22,7 +22,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::RwLock;
+#[cfg(not(test))] use std::sync::RwLock;
 
 pub const LEGACY_ACCOUNT: &str = "store key";
 

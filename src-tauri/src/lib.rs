@@ -22,6 +22,7 @@ mod labels;
 mod location;
 mod lockbox;
 mod profiles;
+mod bundle;
 mod map;
 mod message;
 mod places;
@@ -2382,6 +2383,15 @@ async fn profile_picture_pick(id: String) -> R<profiles::Profile> {
     }).await
 }
 
+/// A vault leaves this profile for another: parcel written and proven, the vault removed here. The window then
+/// opens the destination; `move_land` finishes it there once that profile is unlocked.
+#[tauri::command]
+async fn vault_move_start(name: String, to: String) -> R<bundle::Started> { block(move || bundle::start(&name, &to, now())).await }
+
+/// After an unlock: a vault addressed to this profile lands; one that left here and lost its key comes back.
+#[tauri::command]
+async fn move_land() -> R<Option<bundle::Landed>> { block(|| bundle::land(now())).await }
+
 /// How many displays, and whether any is mirrored: a private profile does not draw while another display is attached.
 #[tauri::command]
 fn guard_displays() -> profiles::Displays { profiles::guard::displays() }
@@ -3005,7 +3015,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![profiles_list, profile_open, profile_close, profile_create, profile_update, profile_delete, profile_picture_pick, guard_displays, guard_sharing, guard_override, transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
+        .invoke_handler(tauri::generate_handler![profiles_list, profile_open, profile_close, profile_create, profile_update, profile_delete, profile_picture_pick, guard_displays, guard_sharing, guard_override, vault_move_start, move_land, transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
