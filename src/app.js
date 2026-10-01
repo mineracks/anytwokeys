@@ -185,11 +185,14 @@ function renderPull(dest) {
   $('#pull-pic').innerHTML = picHtml(dest, 88, true);
   $('#pull-h').textContent = `Move a vault to ${dest.name}`;
   $('#pull-say').textContent = `You are in ${profile.name}. Choose the vault to take across; ${dest.name} opens again to receive it.`;
-  const rows = store.vaults.map(v => `<div class="slot"><span><b>${esc(v.name)}</b><small>${v.exchange ? 'exchange account' : v.node ? 'node' : v.statement ? 'statement' : v.network === 'mainnet' ? 'mainnet' : esc(v.network)}${v.keys.length ? ' · ' + v.keys.length + (v.keys.length === 1 ? ' key' : ' keys') : ''}</small></span><span class="row" style="gap:10px;flex-wrap:nowrap"><button type="button" class="btn small" data-pull="${esc(v.name)}" data-keep="1">Copy it</button><button type="button" class="linkish" data-pull="${esc(v.name)}" title="It leaves this profile">move instead</button></span></div>`);
-  $('#pull-list').innerHTML = rows.join('') || '<div class="muted" style="font-size:13px">This profile holds no vault.</div>';
-  $$('#pull-list [data-pull]').forEach(b => b.onclick = async () => { b.disabled = true;
-    try { const st = await invoke('vault_move_start', { name: b.dataset.pull, to: dest.id, keep: !!b.dataset.keep }); if (st.missing.length) toast(`${st.missing.length} attachment${st.missing.length === 1 ? ' was' : 's were'} not on this computer and stayed behind`, 8000); await invoke('profile_open', { id: dest.id }); location.reload(); }
-    catch (e) { fail(e); b.disabled = false; } });
+  const kind = (v) => v.exchange ? 'exchange account' : v.node ? 'node' : v.statement ? 'statement' : (v.network === 'mainnet' ? 'mainnet' : esc(v.network)) + (v.keys.length ? ' · ' + v.keys.length + (v.keys.length === 1 ? ' key' : ' keys') : '');
+  const how = () => ($('#pull-how [aria-checked="true"]') || {}).dataset?.how || 'copy';
+  const paintRows = () => { $('#pull-list').innerHTML = store.vaults.map(v => `<div class="pr"><span><b>${esc(v.name)}</b><small>${kind(v)}</small></span><button type="button" class="btn small" data-pull="${esc(v.name)}">${how() === 'copy' ? 'Copy it' : 'Move it'}</button></div>`).join('') || '<div class="muted" style="font-size:13px;padding:10px 14px">This profile holds no vault.</div>';
+    $$('#pull-list [data-pull]').forEach(b => b.onclick = async () => { b.disabled = true;
+      try { const st = await invoke('vault_move_start', { name: b.dataset.pull, to: dest.id, keep: how() === 'copy' }); if (st.missing.length) toast(`${st.missing.length} attachment${st.missing.length === 1 ? ' was' : 's were'} not on this computer and stayed behind`, 8000); await invoke('profile_open', { id: dest.id }); location.reload(); }
+      catch (e) { fail(e); b.disabled = false; } }); };
+  $$('#pull-how button').forEach(b => b.onclick = () => { $$('#pull-how button').forEach(x => x.setAttribute('aria-checked', String(x === b))); $('#pull-how-say').textContent = b.dataset.how === 'copy' ? 'A copy leaves this profile exactly as it is; the other gets the same record under its own key.' : `A move takes the vault out of ${profile.name}. It arrives in ${dest.name} whole.`; paintRows(); });
+  paintRows();
   $('#pull-cancel').onclick = async () => { try { sessionStorage.removeItem('a2k-pull-to'); } catch {} try { await invoke('profile_open', { id: dest.id }); } catch (e) { return fail(e); } location.reload(); };
 }
 $('#new-vault-nav').onclick = showWelcome;

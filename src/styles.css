@@ -745,3 +745,9 @@ a.tag{text-decoration:none;cursor:pointer} a.tag:hover{text-decoration:underline
 .vchip.on{border-color:var(--gold);color:var(--ink);background:var(--gold-soft)}
 #pull{justify-content:flex-start;overflow-y:auto;padding-block:48px}
 #pull .card{flex:0 0 auto}
+.pull-list{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.pull-list .pr{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;padding:10px 14px}
+.pull-list .pr+.pr{border-top:1px solid var(--line)}
+.pull-list .pr b{font-family:var(--display);font-weight:600;font-size:14px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pull-list .pr small{display:block;color:var(--muted);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pull-list .pr .btn.small{white-space:nowrap}

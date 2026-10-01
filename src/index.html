@@ -69,8 +69,11 @@
     <h1 id="pull-h">Move a vault</h1>
     <div class="muted" style="font-size:18px;max-width:46ch;text-align:center" id="pull-say"></div>
   </div>
-  <div class="card" style="width:min(560px,100%)"><div class="label">Vaults in this profile</div><div id="pull-list" style="display:flex;flex-direction:column;gap:8px"></div>
-    <div class="muted" style="font-size:12.5px">A copy leaves this profile exactly as it is; the other profile gets the same record under its own key. A move takes it out of here. Either way it goes with its labels, notes, attachments, key places, owner and links. Coins never move — only the record of them.</div></div>
+  <div class="card" style="width:min(600px,100%)">
+    <div class="row" style="justify-content:space-between;gap:12px"><div class="label">Vaults in this profile</div><div class="seg" role="radiogroup" aria-label="Copy or move" id="pull-how"><button type="button" role="radio" aria-checked="true" data-how="copy">Copy</button><button type="button" role="radio" aria-checked="false" data-how="move">Move</button></div></div>
+    <div class="muted" style="font-size:12.5px" id="pull-how-say">A copy leaves this profile exactly as it is; the other gets the same record under its own key.</div>
+    <div id="pull-list" class="pull-list"></div>
+    <div class="muted" style="font-size:12.5px">Either way it goes with its labels, notes, attachments, key places, owner and links. Coins never move — only the record of them.</div></div>
   <button type="button" class="linkish" id="pull-cancel" style="align-self:center">Go back without moving anything</button>
 </div>
 
