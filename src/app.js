@@ -278,7 +278,99 @@ window.__TAURI__.event.listen('app-locked', () => location.reload());   // the k
 $('#lock-now').onclick = lockNow;
 
 function rememberVault(v) { try { const i = store.vaults.findIndex(x => x.name === v.name); if (i >= 0) localStorage.setItem('a2k-vault-n', String(i)); } catch {} }
+// ---------- profiles: one app, several sealed trees; which one is this session for? ----------
+let profilesView = null, profile = null;
+const PCLASS = { private: ['private', 'private', 'ring-private'], work: ['demo', 'demo', 'ring-demo'], fiction: ['demo · fictional', 'demo', 'ring-demo'] };
+function picHtml(p, size, ring) {
+  const pic = p.picture || '', img = pic.startsWith('img:') ? pic.slice(4) : '', g = pic.startsWith('glyph:') ? pic.slice(6) : (p.class === 'private' ? 'lock' : p.class === 'fiction' ? 'entity' : 'keys');
+  return `<span class="ic s${size}${ring ? ' ' + PCLASS[p.class][2] : ''}" aria-hidden="true">${img ? `<img alt="" src="data:image/jpeg;base64,${img}">` : `<svg><use href="${glyphRef(g)}"/></svg>`}</span>`;
+}
+const ptagHtml = (p) => `<span class="ptag ${PCLASS[p.class][1]}">${PCLASS[p.class][0]}</span>`;
+function renderProfiles(view) {
+  $('#shell').hidden = true; $('#welcome').hidden = true; $('#lock').hidden = true; $('#profiles').hidden = false;
+  const when = (t) => t ? 'opened ' + new Date(t * 1000).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : 'never opened';
+  const line = (p) => p.class === 'private' ? 'Your own holdings. Asks for Touch ID or a key every time, and will not draw while another display is attached.'
+    : p.class === 'fiction' ? 'A made-up person\'s holdings for showing to a room. Nothing in it is real.' : 'Demo vaults for working on the app. Opens on a click.';
+  $('#profiles-grid').innerHTML = view.profiles.map(p => `<div class="card pcard${p.start ? ' hot' : ''}" data-profile="${esc(p.id)}">${picHtml(p, 64, true)}<div class="ctitle"><span class="nm">${esc(p.name)}</span>${ptagHtml(p)}</div><div class="muted grow">${line(p)}<br><small>${when(p.last_opened)}</small></div><div class="acts"><button class="btn${p.start ? ' primary' : ''}" data-open="${esc(p.id)}">${p.class === 'private' ? 'Open…' : 'Open'}</button>${p.start ? '<span class="vchip on" aria-pressed="true">Opens on start</span>' : ''}</div></div>`).join('')
+    + `<div class="card pcard ghost"><div class="ctitle" style="font-size:16px">New profile</div><div class="muted">Name it, say who it is for, give it a picture later.</div><button class="btn small" id="pn-start">Start</button></div>`;
+  $$('#profiles-grid [data-open]').forEach(b => b.onclick = () => openProfile(b.dataset.open));
+  $('#pn-start').onclick = () => { $('#profile-new').hidden = false; $('#pn-name').focus(); pnNote(); };
+}
+const pnClass = () => ($('#pn-class .opt.on') || {}).dataset?.class || 'work';
+function pnNote() { $('#pn-note').textContent = { work: 'Opens on a click. Touch ID can be asked for in App settings › Lock once it is open.', fiction: 'Opens on a click and carries a DEMO · fictional tag wherever its name is shown. A persona can be generated into it from App settings.',
+  private: 'Made only by the person at this Mac: Touch ID first. Always asked when it opens, never opens on start, uncapturable on screen, and closed while another display is attached.' }[pnClass()]; }
+$('#pn-class').addEventListener('click', (e) => { const o = e.target.closest('.opt'); if (!o) return; $$('#pn-class .opt').forEach(x => x.classList.toggle('on', x === o)); pnNote(); });
+$('#pn-cancel').onclick = () => { $('#profile-new').hidden = true; };
+$('#pn-create').onclick = async () => { const name = $('#pn-name').value.trim(); if (!name) return toast('A profile needs a name');
+  $('#pn-create').disabled = true;
+  try { const p = await invoke('profile_create', { name, class: pnClass(), picture: null }); $('#profile-new').hidden = true; $('#pn-name').value = ''; await openProfile(p.id); } catch (e) { fail(e); } finally { $('#pn-create').disabled = false; } };
+async function openProfile(id) {
+  try { lockInfo = await invoke('profile_open', { id }); } catch (e) { return fail(e); }
+  profilesView = await invoke('profiles_list').catch(() => profilesView);
+  profile = (profilesView && profilesView.current) || (profilesView && profilesView.profiles.find(p => p.id === id)) || null;
+  $('#profiles').hidden = true;
+  await bootProfile();
+}
+async function switchProfile(id) { try { await invoke('profile_open', { id }); } catch (e) { return fail(e); } location.reload(); }   // the key left memory in profile_open; the window forgets too
+async function closeProfile() { try { await invoke('profile_close'); } catch {} location.reload(); }
+function paintProfileChip() {
+  const chip = $('#profile-chip'); if (!profile) { chip.hidden = true; return; }
+  chip.hidden = false; chip.innerHTML = `${picHtml(profile, 22, true)}<span class="nm">${esc(profile.name)}</span>${ptagHtml(profile)}`;
+  const dc = $('#discreet-chip'); dc.hidden = profile.class !== 'private';
+}
+function paintProfileMenu() {
+  const m = $('#profile-menu'), others = (profilesView ? profilesView.profiles : []);
+  m.innerHTML = others.map(p => `<button type="button" class="pm" role="menuitem" data-switch="${esc(p.id)}" aria-current="${p.id === profile.id}">${picHtml(p, 22, false)}<span><span class="nm">${esc(p.name)}</span><small>${PCLASS[p.class][0]}${p.id === profile.id ? ' · open now' : ''}</small></span></button>`).join('')
+    + `<div class="sep"></div><button type="button" class="pm" role="menuitem" id="pm-all">All profiles…<small>back to the picker; this one locks</small></button>`;
+  $$('[data-switch]', m).forEach(b => { if (b.getAttribute('aria-current') !== 'true') b.onclick = () => switchProfile(b.dataset.switch); });
+  $('#pm-all').onclick = closeProfile;
+}
+$('#profile-chip').onclick = (e) => { e.stopPropagation(); const m = $('#profile-menu'); const open = m.hidden; if (open) paintProfileMenu(); m.hidden = !open; $('#profile-chip').setAttribute('aria-expanded', String(open)); };
+document.addEventListener('click', (e) => { const m = $('#profile-menu'); if (!m.hidden && !e.target.closest('#profile-menu')) { m.hidden = true; $('#profile-chip').setAttribute('aria-expanded', 'false'); } });
+$('#lock-switch').onclick = closeProfile;
+
+// ---------- the private profile on a screen: uncapturable, curtained while another display is attached, discreet ----------
+let curtainUntil = 0;
+const isPrivate = () => !!(profile && profile.class === 'private');
+function curtainCheck(d) {
+  if (!isPrivate()) { $('#curtain').hidden = true; return; }
+  const risky = d && (d.count > 1 || d.mirrored);
+  const show = risky && Date.now() > curtainUntil;
+  $('#curtain').hidden = !show;
+  if (show) { $('#curtain-pic').innerHTML = picHtml(profile, 88, true); $('#curtain-say').textContent = (d.mirrored ? 'A mirrored display is attached' : `${d.count} displays are attached`) + ': a projector, a room\'s TV, or a shared screen. This private profile stays closed while it is. Unplug it, or show anyway for ten minutes with Touch ID.'; }
+  if (risky && !show) { clearTimeout(curtainCheck.t); curtainCheck.t = setTimeout(() => invoke('guard_displays').then(curtainCheck).catch(() => {}), Math.max(1000, curtainUntil - Date.now() + 50)); }
+}
+$('#curtain-anyway').onclick = async () => { try { await invoke('guard_override'); curtainUntil = Date.now() + 10 * 60000; curtainCheck(await invoke('guard_displays')); } catch (e) { fail(e); } };
+$('#curtain-switch').onclick = closeProfile;
+async function applyGuard() {
+  try { await invoke('guard_sharing', { none: isPrivate() }); } catch {}
+  if (isPrivate()) { try { curtainCheck(await invoke('guard_displays')); } catch {} }
+}
+window.__TAURI__.event.listen('displays-changed', (ev) => { if (!isPrivate()) return; if (ev.payload && (ev.payload.count > 1 || ev.payload.mirrored)) { curtainUntil = 0; lockNow(); } else curtainCheck(ev.payload); });   // a display appearing re-locks, override or not: the next thing drawn is the lock screen, then the curtain
+function setDiscreet(on) {
+  document.body.classList.toggle('discreet', !!on); document.body.classList.remove('peek');
+  const c = $('#discreet-chip'); c.classList.toggle('on', !!on); c.setAttribute('aria-pressed', on ? 'true' : 'false');
+}
+$('#discreet-chip').onclick = async () => { const on = !document.body.classList.contains('discreet'); setDiscreet(on); if (profile) { try { profile = await invoke('profile_update', { id: profile.id, discreet: on }); } catch {} } };
+// hold the page to read it; let go and it blurs again
+let peekT = null;
+document.addEventListener('pointerdown', (e) => { if (!document.body.classList.contains('discreet') || !e.target.closest('.content, #vault-tabs, #title')) return; peekT = setTimeout(() => document.body.classList.add('peek'), 350); }, true);
+for (const ev of ['pointerup', 'pointercancel']) document.addEventListener(ev, () => { clearTimeout(peekT); document.body.classList.remove('peek'); }, true);
+// what a private profile copies does not sit on the clipboard for the rest of the day
+{ const wt = navigator.clipboard.writeText.bind(navigator.clipboard);
+  navigator.clipboard.writeText = (t) => wt(t).then((r) => { if (isPrivate()) setTimeout(async () => { try { if ((await navigator.clipboard.readText()) === t) await wt(''); } catch {} }, 60000); return r; }); }
+
 async function boot() {
+  try { profilesView = await invoke('profiles_list'); } catch (e) { profilesView = null; boot.profilesFailed = String(e); }
+  if (profilesView) {
+    profile = profilesView.current || null;
+    if (!profile) { const auto = profilesView.profiles.find(p => p.start && p.class !== 'private'); if (auto) { try { lockInfo = await invoke('profile_open', { id: auto.id }); profile = auto; } catch (e) { fail(e); } } }
+    if (!profile) { renderProfiles(profilesView); return; }
+  }
+  await bootProfile();
+}
+async function bootProfile() {
+  paintProfileChip(); $('#lock-switch').hidden = !profilesView;
   try { lockInfo = await invoke('lock_status'); } catch { lockInfo = null; }
   if (lockInfo && lockInfo.sealed && !lockInfo.unlocked) await lockScreen();
   else if (lockInfo && !lockInfo.finished) { try { lockInfo = await invoke('lock_start'); } catch (e) { boot.sealFailed = String(e); } }
@@ -291,6 +383,8 @@ async function boot() {
   paintNet();
   if (vault) show('home'); else showWelcome();
   pollCards(); idleLock(); invoke('location_status').catch(() => {});   // the setting lives in the sealed store, so listening can only start now
+  await applyGuard(); setDiscreet(isPrivate() && profile.discreet);
+  if (profilesView && profilesView.moved && profilesView.moved.moved) notice({ kind: 'confirmed', title: 'Your files now live in the profile “Me”', body: 'Everything this app kept is in a private profile of its own. Demo wallets can move to a profile of their own from Vault settings.' }, 14000);
   const moved = lockInfo && lockInfo.moved;
   if (boot.sealFailed) notice({ kind: 'warn', title: 'This app\'s files are not encrypted yet', body: boot.sealFailed });
   else if (moved && (moved.store || moved.attachments)) notice({ kind: 'confirmed', title: 'This app\'s files are now encrypted', body: `Vaults, labels, notes and contacts${moved.attachments ? `, and ${moved.attachments} attachment${moved.attachments === 1 ? '' : 's'}` : ''}. Add one of your keys in App settings › Lock, so the app can be opened without this Mac's Keychain.` }, 30000);
@@ -4466,8 +4560,38 @@ function renderSettings() {
   $('#fiat-pick').innerHTML = `<option value="auto">Automatic: ${dev.ccy} · ${CCYS[dev.ccy] || ''}</option><option value="">None: show sats only</option>` + Object.entries(CCYS).map(([c, n]) => `<option value="${c}">${c} · ${n}</option>`).join('');
   $('#fiat-pick').value = cur;
   $('#fiat-note').textContent = (cur === 'auto' ? `Chosen because ${dev.why}. ` : '') + (store.settings.custom ? (store.settings.prices ? `Prices come from ${store.settings.prices}.` : 'You run your own servers and have named no price server, so no values are shown.') : 'Prices come from prices.mineracks.com: the hour of each transaction is asked for, never an address or an amount.') + ' Test networks show no values.';
-  invoke('store_get').then(() => {}); $('#watch-log-path').textContent = '~/Library/Application Support/Any Two Keys/watch.log';
+  invoke('store_get').then(() => {}); $('#watch-log-path').textContent = profile ? `~/Library/Application Support/Any Two Keys/profiles/${profile.id}/watch.log` : '~/Library/Application Support/Any Two Keys/watch.log';
+  renderProfileCard();
 }
+function renderProfileCard() {
+  const card = $('#profile-card'); if (!profile) { card.hidden = true; return; } card.hidden = false;
+  $('#pc-pic').innerHTML = `<span class="ic s64 ${PCLASS[profile.class][2]}" data-pc-pick="1" role="button" tabindex="0" title="Change the picture" style="cursor:pointer">${picHtml(profile, 64, false).replace(/^<span[^>]*>|<\/span>$/g, '')}</span>`;
+  $('#pc-name').value = profile.name;
+  $('#pc-class').textContent = { private: 'A private profile: always asked when it opens, never opens on start, black in screenshots and screen shares, and closed while another display is attached.',
+    work: 'A work profile: demo wallets for working on the app. It opens on a click and carries a DEMO tag.', fiction: 'A fiction profile: a made-up person for showing to a room. It opens on a click and carries a DEMO · fictional tag.' }[profile.class];
+  $('#pc-start-row').hidden = profile.class === 'private';
+  $('#pc-start').classList.toggle('on', !!profile.start); $('#pc-start').setAttribute('aria-checked', String(!!profile.start));
+  $('#pc-discreet').classList.toggle('on', !!profile.discreet); $('#pc-discreet').setAttribute('aria-checked', String(!!profile.discreet));
+  $('#pc-pic [data-pc-pick]').onclick = (e) => profilePicker(e.currentTarget);
+}
+function profilePicker(anchor) {
+  let box = anchor.parentElement.querySelector('.icpick'); if (box) { box.remove(); return; }
+  box = document.createElement('div'); box.className = 'icpick';
+  const cur = profile.picture || '';
+  box.innerHTML = [['lock', 'Lock'], ...GLYPHS].map(([g, w]) => `<span class="ic s40${cur === 'glyph:' + g ? ' on' : ''}" data-glyph="${g}" title="${w}" role="button" tabindex="0"><svg aria-hidden="true"><use href="${glyphRef(g)}"/></svg></span>`).join('')
+    + `<button type="button" class="btn small" data-pc-upload>Choose a picture…</button><small class="muted" style="flex-basis:100%">The picture is kept in the clear, like the name.</small>`;
+  const set = async (pic) => { try { profile = pic === 'pick' ? await invoke('profile_picture_pick', { id: profile.id }) : await invoke('profile_update', { id: profile.id, picture: pic }); box.remove(); renderProfileCard(); paintProfileChip(); } catch (e) { if (String(e) !== 'cancelled') fail(e); } };
+  $$('[data-glyph]', box).forEach(b => b.onclick = () => set('glyph:' + b.dataset.glyph));
+  box.querySelector('[data-pc-upload]').onclick = () => set('pick');
+  anchor.insertAdjacentElement('afterend', box);
+}
+const pcSet = async (args) => { try { profile = await invoke('profile_update', { id: profile.id, ...args }); renderProfileCard(); paintProfileChip(); } catch (e) { fail(e); } };
+$('#pc-save').onclick = () => pcSet({ name: $('#pc-name').value });
+$('#pc-start').onclick = () => pcSet({ start: !profile.start }); $('#pc-start').onkeydown = (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); pcSet({ start: !profile.start }); } };
+$('#pc-discreet').onclick = () => pcSet({ discreet: !profile.discreet }); $('#pc-discreet').onkeydown = (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); pcSet({ discreet: !profile.discreet }); } };
+$('#pc-switch').onclick = closeProfile;
+askTwice($('#pc-delete'), 'Delete this profile and everything in it? Its key leaves the Keychain first, then its folder. Coins stay on the chain; every record here goes.', 'Delete it', async () => {
+  try { const id = profile.id; await invoke('profile_close'); await invoke('profile_delete', { id }); location.reload(); } catch (e) { fail(e); location.reload(); } });
 $('#net-pick').addEventListener('click', async (e) => { const o = e.target.closest('.opt'); if (!o) return; store = await invoke('settings_set', { network: o.dataset.net, custom: store.settings.custom, electrum: store.settings.electrum, explorer: store.settings.explorer }); toast('New vaults will use ' + o.dataset.net); renderSettings(); $('#welcome-net').textContent = store.settings.network; });
 $('#own-servers').onclick = async () => { store = await invoke('settings_set', { network: netName(), custom: !store.settings.custom, electrum: $('#c-electrum').value, explorer: $('#c-explorer').value }); renderSettings(); };
 $('#save-settings').onclick = async () => { try { store = await invoke('settings_set', { network: netName(), custom: true, electrum: $('#c-electrum').value, explorer: $('#c-explorer').value, prices: $('#c-prices').value, vss: $('#c-vss').value, spOracle: $('#c-sp').value }); renderSettings(); toast('Using your servers'); } catch (e) { fail(e); } };

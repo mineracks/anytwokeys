@@ -27,6 +27,23 @@
   <symbol id="i-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol><symbol id="g-building" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="1.5"/><path d="M9 21v-5h6v5M8 7h2M14 7h2M8 11h2M14 11h2"/></symbol><symbol id="g-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/></symbol><symbol id="g-safe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4" width="17" height="16" rx="2"/><circle cx="12" cy="12" r="3.5"/><path d="M12 8.5v1.5M12 14v1.5M8.5 12H10M14 12h1.5M7 20v1.5M17 20v1.5"/></symbol><symbol id="g-bank" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5L12 4l9 5.5H3zM5 10v7M9.5 10v7M14.5 10v7M19 10v7M3 20h18"/></symbol><symbol id="g-briefcase" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M3 12h18"/></symbol><symbol id="g-star" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1.1 5.9L12 16.9l-5.3 2.8 1.1-5.9-4.3-4.1 5.9-.8z"/></symbol><symbol id="g-card" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M3 10h18M7 14h4"/></symbol><symbol id="i-entity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19v-1.5a4.5 4.5 0 0 1 4.5-4.5h2a4.5 4.5 0 0 1 4.5 4.5V19"/><circle cx="17" cy="9" r="2.5"/><path d="M20.5 19v-1a3.5 3.5 0 0 0-3-3.4"/></symbol><symbol id="i-place" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6-5.4-6-11a6 6 0 0 1 12 0c0 5.6-6 11-6 11z"/><circle cx="12" cy="10" r="2.2"/></symbol><symbol id="i-warn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></symbol>
 </defs></svg>
 
+<div id="profiles" class="welcome" hidden>
+  <div style="display:flex;flex-direction:column;align-items:center;gap:14px">
+    <svg width="64" height="64"><use href="#ring"/></svg>
+    <h1>Any Two Keys</h1>
+    <div class="muted" style="font-size:18px;max-width:44ch;text-align:center" id="profiles-say">Who is this session for? Each profile is its own sealed set of vaults, records and keys.</div>
+  </div>
+  <div class="grid3" id="profiles-grid"></div>
+  <div class="card" id="profile-new" hidden style="width:min(560px,100%)">
+    <div class="label">New profile</div>
+    <div class="field"><div class="label">Name</div><input id="pn-name" placeholder="YubiKey bench" maxlength="40"></div>
+    <div class="field"><div class="label">Who it is for</div><div class="pick" id="pn-class"><div class="opt on" data-class="work">Work<small>demo wallets · opens on a click</small></div><div class="opt" data-class="fiction">Fiction<small>a made-up person · for audiences</small></div><div class="opt" data-class="private">Private<small>your own data · always asked</small></div></div></div>
+    <div class="muted" style="font-size:13px" id="pn-note"></div>
+    <div class="row"><button class="btn primary" id="pn-create">Create profile</button><button class="btn" id="pn-cancel">Cancel</button></div>
+  </div>
+  <div class="muted" style="font-size:13px;text-align:center;max-width:60ch">A profile's name and picture are kept in the clear, like the app's own name. Everything inside it is sealed under that profile's own key.</div>
+</div>
+
 <div id="welcome" class="welcome" hidden>
   <div style="display:flex;flex-direction:column;align-items:center;gap:14px">
     <svg width="64" height="64"><use href="#ring"/></svg>
@@ -73,7 +90,7 @@
 </div>
 <div class="divider" id="divider" title="Drag to resize"></div>
 <div class="main">
-  <div class="top"><div class="topleft"><nav id="crumbs" aria-label="Where you are" hidden></nav><div class="row" style="gap:10px;min-width:0"><h1 id="title">Vault</h1><input id="title-input" hidden><button class="pencil" id="title-edit" title="Rename this vault" hidden><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button></div></div><div class="net" id="netpill"><i></i><span>signet</span></div></div>
+  <div class="top"><div class="topleft"><nav id="crumbs" aria-label="Where you are" hidden></nav><div class="row" style="gap:10px;min-width:0"><h1 id="title">Vault</h1><input id="title-input" hidden><button class="pencil" id="title-edit" title="Rename this vault" hidden><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button></div></div><div class="row" style="gap:10px;flex-wrap:nowrap"><button type="button" class="vchip" id="discreet-chip" hidden aria-pressed="false" title="Amounts, names and addresses stay blurred until you hold the page">Discreet</button><button type="button" class="pchip" id="profile-chip" hidden aria-haspopup="true" aria-expanded="false" title="Profile"></button><div class="net" id="netpill"><i></i><span>signet</span></div></div><div class="pmenu" id="profile-menu" hidden role="menu"></div></div>
   <div id="staged-bar" hidden><span id="staged-text"></span><button class="btn small primary" data-go="sign">Continue signing</button><button class="btn small" id="staged-discard">Discard it</button></div>
   <div class="content">
 
@@ -674,6 +691,14 @@
             <div class="muted" style="font-size:13px">These are ours and they see which addresses you ask about. Point the app at your own node to keep that to yourself.</div></div>
         </div>
         <div style="display:flex;flex-direction:column;gap:18px">
+          <div class="card" id="profile-card" hidden><div class="label">This profile</div>
+            <div class="row" style="gap:16px;align-items:center;flex-wrap:nowrap"><span id="pc-pic"></span><div class="field" style="flex:1;min-width:0"><div class="label">Name</div><div class="row" style="gap:8px;flex-wrap:nowrap"><input id="pc-name" maxlength="40" style="min-width:0"><button class="btn" id="pc-save">Save</button></div></div></div>
+            <div class="muted" style="font-size:13px" id="pc-class"></div>
+            <div class="row" style="justify-content:space-between;flex-wrap:nowrap;gap:16px" id="pc-start-row"><div style="font-family:var(--display);font-weight:600;font-size:14px;min-width:0">Open on start<small class="muted" style="display:block;font-weight:400">Skip the picker and open this profile when the app starts.</small></div><div class="toggle" id="pc-start" role="switch" aria-checked="false" tabindex="0"><i></i></div></div>
+            <div class="row" style="justify-content:space-between;flex-wrap:nowrap;gap:16px"><div style="font-family:var(--display);font-weight:600;font-size:14px;min-width:0">Discreet when it opens<small class="muted" style="display:block;font-weight:400">Amounts, names and addresses stay blurred until you hold the page.</small></div><div class="toggle" id="pc-discreet" role="switch" aria-checked="false" tabindex="0"><i></i></div></div>
+            <div class="row"><button class="btn" id="pc-switch">Switch profile…</button><button class="btn" id="pc-delete">Delete this profile</button></div>
+            <div class="muted" style="font-size:12.5px" id="pc-note">Deleting removes this profile's key from the Keychain, then its folder. Coins stay on the chain; the records here go.</div>
+          </div>
           <div class="card" id="custom-card"><div class="label">Your own servers</div>
             <div class="field"><div class="label">Electrum server</div><input id="c-electrum" class="mono" placeholder="ssl://my-node.local:50002" spellcheck="false"></div>
             <div class="field"><div class="label">Block explorer</div><input id="c-explorer" class="mono" placeholder="http://umbrel.local:3006" spellcheck="false"></div><div class="field"><div class="label">Label host (VSS)</div><input id="c-vss" class="mono" placeholder="https://vss.mineracks.com/vss" spellcheck="false"><div class="muted" style="font-size:13px">Every sealed vault's labels are kept here encrypted under a key only its own keys can rebuild, so any two keys bring the labels back with the vault. The host cannot read them or tie them to an address. Empty keeps labels on this computer only.</div></div><div class="field"><div class="label">Silent payments oracle (BlindBit)</div><input id="c-sp" class="mono" placeholder="https://sp.mineracks.com" spellcheck="false"><div class="muted" style="font-size:13px">Serves, per block, the tweak of every transaction that pays to taproot, so a watched wallet can find its silent payments. Every client asks for every block, so the oracle learns nothing about a wallet. Empty switches silent payments off.</div></div><div class="field"><div class="label">Price server</div><input id="c-prices" class="mono" placeholder="https://prices.example  (blank = no fiat values)" spellcheck="false"></div>
@@ -771,6 +796,16 @@
     <div class="lock-err" id="lock-err" hidden></div>
     <div class="lock-or"><span>or with one of your keys</span></div>
     <div id="lock-keys"></div>
+    <button type="button" class="linkish" id="lock-switch" hidden>Choose another profile</button>
+  </div>
+</div>
+<div id="curtain" hidden>
+  <div class="lock-card" role="dialog" aria-modal="true" aria-labelledby="curtain-h">
+    <span id="curtain-pic"></span>
+    <h2 id="curtain-h">Another display is connected</h2>
+    <p class="muted" id="curtain-say">This private profile stays closed while a second or mirrored display is attached: a projector, a room's TV, a shared screen. Unplug it, or show anyway for ten minutes with Touch ID.</p>
+    <button type="button" class="btn primary" id="curtain-anyway">Show anyway for 10 minutes</button>
+    <button type="button" class="linkish" id="curtain-switch">Switch to another profile</button>
   </div>
 </div>
 <div class="toast" id="toast"></div>

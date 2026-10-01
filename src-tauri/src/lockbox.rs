@@ -65,14 +65,8 @@ fn hold(k: [u8; 32]) { if let Ok(mut g) = KEY.write() { *g = Some(k); } }
 
 // ------------------------------------------------------------------ files --
 
-pub fn dir() -> PathBuf {
-    // a test never looks at this computer's real folder: what is or is not sealed there is none of its business
-    #[cfg(test)] let home = std::env::temp_dir().join("a2k-tests-empty");
-    #[cfg(not(test))] let home = dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("Any Two Keys");
-    let dir = match std::env::var_os("A2K_DATA_DIR") { Some(d) => PathBuf::from(d), None => home };
-    std::fs::create_dir_all(&dir).ok();
-    dir
-}
+/// The open profile's folder — or the root while none is open (tests, harnesses, the picker). See profiles.rs.
+pub fn dir() -> PathBuf { crate::profiles::dir() }
 fn slots_path() -> PathBuf { dir().join("slots.json") }
 
 /// This computer seals what it keeps: there is a keyslot file, or a sealed store (the file that matters most) exists.
@@ -179,7 +173,7 @@ fn proves(k: &[u8; 32]) -> Result<(), String> {
 pub fn unlock_mac(reason: &str) -> Result<(), String> {
     let touch = slots()?.map(|s| s.touch).unwrap_or(true);
     if touch { mac::presence(reason)?; }
-    let k = mac::get()?.ok_or("this Mac's Keychain has no key for Any Two Keys. Open it with one of your keys instead.")?;
+    let k = mac::get(&crate::profiles::keychain_account())?.ok_or("this Mac's Keychain has no key for Any Two Keys. Open it with one of your keys instead.")?;
     proves(&k)?;
     hold(k);
     Ok(())
@@ -193,7 +187,8 @@ pub fn unlock_card(pubkey: &str, card_secret: &[u8; 32]) -> Result<(), String> {
     proves(&k)?;
     hold(k);
     // the Keychain item may be what was lost: put it back, quietly
-    if mac::get().ok().flatten() != Some(k) { let _ = mac::set(&k); }
+    let acct = crate::profiles::keychain_account();
+    if mac::get(&acct).ok().flatten() != Some(k) { let _ = mac::set(&acct, &k); }
     Ok(())
 }
 
@@ -220,12 +215,13 @@ pub fn migrate() -> Result<Migration, String> {
     let mut s = match slots()? { Some(s) => s, None => {
         // the key exists in the Keychain — and has been read back from it — before a single file is sealed under it
         if std::env::var_os("A2K_STORE_KEY").is_none() {
-            let k = match mac::get()? { Some(k) => k, None => { let k: [u8; 32] = random(); mac::set(&k)?; k } };
-            if mac::get()? != Some(k) { return Err("the Keychain did not give back the key that was just stored in it; nothing was changed".into()); }
+            let acct = crate::profiles::keychain_account();
+            let k = match mac::get(&acct)? { Some(k) => k, None => { let k: [u8; 32] = random(); mac::set(&acct, &k)?; k } };
+            if mac::get(&acct)? != Some(k) { return Err("the Keychain did not give back the key that was just stored in it; nothing was changed".into()); }
             proves(&k)?;
             hold(k);
         }
-        let s = Slots { v: 1, id: hex::encode(random::<8>()), touch: true, idle_minutes: 0, with_screen: true, cards: vec![], migrated: false };
+        let s = Slots { v: 1, id: hex::encode(random::<8>()), touch: crate::profiles::touch_default(), idle_minutes: 0, with_screen: true, cards: vec![], migrated: false };
         save_slots(&s)?; s
     } };
     let mut m = Migration::default();
@@ -275,21 +271,30 @@ pub fn migrate() -> Result<Migration, String> {
 #[cfg(target_os = "macos")]
 pub mod mac {
     const SERVICE: &str = "com.anytwokeys.app.store-key";
-    const ACCOUNT: &str = "store key";
     // errSecItemNotFound
     const NOT_FOUND: i32 = -25300;
 
-    pub fn get() -> Result<Option<[u8; 32]>, String> {
+    /// `account`: one Keychain item per profile (profiles.rs); the migrated profile keeps "store key".
+    pub fn get(account: &str) -> Result<Option<[u8; 32]>, String> {
         if std::env::var_os("A2K_STORE_KEY").is_some() || std::env::var_os("A2K_NO_KEYCHAIN").is_some() { return Ok(None); }
-        match security_framework::passwords::get_generic_password(SERVICE, ACCOUNT) {
+        match security_framework::passwords::get_generic_password(SERVICE, account) {
             Ok(b) => b.try_into().map(Some).map_err(|_| "the Keychain item for Any Two Keys is not a 32-byte key".to_string()),
             Err(e) if e.code() == NOT_FOUND => Ok(None),
             Err(e) => Err(format!("the Keychain would not give up the key for Any Two Keys: {e}")),
         }
     }
-    pub fn set(k: &[u8; 32]) -> Result<(), String> {
+    pub fn set(account: &str, k: &[u8; 32]) -> Result<(), String> {
         if std::env::var_os("A2K_NO_KEYCHAIN").is_some() { return Err("the Keychain is switched off for this run".into()); }
-        security_framework::passwords::set_generic_password(SERVICE, ACCOUNT, k).map_err(|e| format!("the Keychain would not store the key: {e}"))
+        security_framework::passwords::set_generic_password(SERVICE, account, k).map_err(|e| format!("the Keychain would not store the key: {e}"))
+    }
+    /// A deleted profile's key goes first, so its folder could not be opened even if a copy survived.
+    pub fn forget(account: &str) -> Result<(), String> {
+        if std::env::var_os("A2K_STORE_KEY").is_some() || std::env::var_os("A2K_NO_KEYCHAIN").is_some() { return Ok(()); }
+        match security_framework::passwords::delete_generic_password(SERVICE, account) {
+            Ok(()) => Ok(()),
+            Err(e) if e.code() == NOT_FOUND => Ok(()),
+            Err(e) => Err(format!("the Keychain would not remove the key: {e}")),
+        }
     }
 
     /// Is the Mac's screen locked right now? From the window server's description of this login session.
@@ -330,8 +335,9 @@ pub mod mac {
 #[cfg(not(target_os = "macos"))]
 pub mod mac {
     pub fn screen_locked() -> bool { false }
-    pub fn get() -> Result<Option<[u8; 32]>, String> { Ok(None) }
-    pub fn set(_: &[u8; 32]) -> Result<(), String> { Err("no system keychain on this platform yet: add one of your keys instead".into()) }
+    pub fn get(_: &str) -> Result<Option<[u8; 32]>, String> { Ok(None) }
+    pub fn set(_: &str, _: &[u8; 32]) -> Result<(), String> { Err("no system keychain on this platform yet: add one of your keys instead".into()) }
+    pub fn forget(_: &str) -> Result<(), String> { Ok(()) }
     pub fn presence(_: &str) -> Result<(), String> { Ok(()) }
 }
 

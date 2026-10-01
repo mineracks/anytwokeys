@@ -21,6 +21,7 @@ mod hd;
 mod labels;
 mod location;
 mod lockbox;
+mod profiles;
 mod map;
 mod message;
 mod places;
@@ -2313,6 +2314,89 @@ fn ctx_set(name: String, txid: String, remove: bool, place: Option<String>, lat:
     })
 }
 
+// ------------------------------------------------------------------ profiles --
+
+#[derive(serde::Serialize)]
+struct ProfilesView { profiles: Vec<profiles::Profile>, current: Option<profiles::Profile>, moved: profiles::Moved, displays: profiles::Displays }
+
+fn profiles_view(moved: profiles::Moved) -> R<ProfilesView> {
+    let mut ix = profiles::index()?;
+    ix.profiles.sort_by(|a, b| b.last_opened.cmp(&a.last_opened).then_with(|| a.created.cmp(&b.created)));
+    Ok(ProfilesView { profiles: ix.profiles, current: profiles::current(), moved, displays: profiles::guard::displays() })
+}
+
+/// The window's first question: which profiles there are and whether one is open. The first run with profiles also
+/// moves a folder that held the app's files directly into the private profile "Me".
+#[tauri::command]
+fn profiles_list() -> R<ProfilesView> {
+    let moved = profiles::migrate_legacy(now())?;
+    profiles::open_from_env(now());
+    profiles_view(moved)
+}
+
+/// Open a profile: lock whatever is open, point every file read at its folder, and tell the window how the lock stands
+/// (sealed and locked → the lock screen; nothing sealed yet → lock_start makes its key).
+#[tauri::command]
+async fn profile_open(id: String) -> R<LockStatus> {
+    block(move || { profiles::open(&id, now())?; lock_state(None) }).await
+}
+
+/// Back to the picker. The key leaves memory first.
+#[tauri::command]
+fn profile_close() -> R<ProfilesView> { profiles::close(); profiles_view(profiles::Moved::default()) }
+
+/// A new profile. A private one is only made by the person at the Mac: Touch ID (or the password) first.
+#[tauri::command]
+async fn profile_create(name: String, class: profiles::Class, picture: Option<String>) -> R<profiles::Profile> {
+    block(move || {
+        if class == profiles::Class::Private { lockbox::mac::presence("make a private profile")?; }
+        profiles::create(&name, class, picture, now())
+    }).await
+}
+
+#[tauri::command]
+fn profile_update(id: String, name: Option<String>, picture: Option<Option<String>>, start: Option<bool>, discreet: Option<bool>, persona_seed: Option<Option<String>>) -> R<profiles::Profile> {
+    profiles::update(&id, profiles::Changes { name, picture, start, discreet, persona_seed })
+}
+
+/// Gone for good: its Keychain item first, then its folder. The person at the Mac confirms with Touch ID whatever the
+/// class, because a folder of vault records is not something a stray click removes.
+#[tauri::command]
+async fn profile_delete(id: String) -> R<ProfilesView> {
+    block(move || { lockbox::mac::presence("delete a profile and everything in it")?; profiles::delete(&id)?; profiles_view(profiles::Moved::default()) }).await
+}
+
+/// A small square picture for a profile, from a file the person picks: thumbnailed and kept in the index as
+/// `img:<base64 JPEG>`. The index is unsealed, so this is as public as the profile's name — the picker says so.
+#[tauri::command]
+async fn profile_picture_pick(id: String) -> R<profiles::Profile> {
+    let p = rfd::FileDialog::new().set_title("Choose a profile picture").add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "heic", "bmp"]).pick_file().ok_or("cancelled")?;
+    block(move || {
+        let bytes = std::fs::read(&p).map_err(|e| format!("the picture could not be read: {e}"))?;
+        if bytes.len() > 25 << 20 { return Err("that picture is over 25 MB".into()); }
+        let img = image::load_from_memory(&bytes).map_err(|e| format!("that picture could not be read: {e}"))?.resize_to_fill(128, 128, image::imageops::FilterType::Lanczos3);
+        let mut out = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 82).encode_image(&img.to_rgb8()).map_err(|e| e.to_string())?;
+        use bitcoin::base64::{prelude::BASE64_STANDARD, Engine};
+        profiles::update(&id, profiles::Changes { name: None, picture: Some(Some(format!("img:{}", BASE64_STANDARD.encode(&out)))), start: None, discreet: None, persona_seed: None })
+    }).await
+}
+
+/// How many displays, and whether any is mirrored: a private profile does not draw while another display is attached.
+#[tauri::command]
+fn guard_displays() -> profiles::Displays { profiles::guard::displays() }
+
+/// The window black in screenshots, recordings and screen shares (NSWindowSharingNone) while a private profile is open.
+#[tauri::command]
+fn guard_sharing(window: tauri::WebviewWindow, none: bool) -> R<()> {
+    let ptr = window.ns_window().map_err(|e| e.to_string())? as usize;
+    window.run_on_main_thread(move || unsafe { profiles::guard::set_sharing(ptr, none) }).map_err(|e| e.to_string())
+}
+
+/// "Show anyway for 10 minutes": the person at the Mac, again.
+#[tauri::command]
+async fn guard_override() -> R<()> { block(|| lockbox::mac::presence("show the private profile while another display is attached")).await }
+
 #[derive(serde::Serialize)]
 struct LockCard { pubkey: String, name: String, added: u64 }
 #[derive(serde::Serialize)]
@@ -2898,9 +2982,18 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             std::thread::spawn(|| loop { std::thread::sleep(std::time::Duration::from_secs(30)); spark_auth::prune(); });
+            let _ = profiles::migrate_legacy(now());   // the window asks again and is told what moved
+            profiles::open_from_env(now());
             attach::clear_opened();
             net::attach(app.handle().clone());
-            if let Ok(s) = wallet::load() { net::seed(s.settings.offline); }   // a store that cannot be read yet is seeded by the window's first store_get
+            if let Ok(s) = wallet::load() { net::seed(s.settings.offline); }
+            // the displays: a private profile does not draw while another is attached, so the window hears every change
+            let hd = app.handle().clone();
+            std::thread::spawn(move || { let mut last = profiles::guard::displays(); loop {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let now_d = profiles::guard::displays();
+                if now_d != last { last = now_d; use tauri::Emitter; let _ = hd.emit("displays-changed", now_d); }
+            } });   // a store that cannot be read yet is seeded by the window's first store_get
             watch::start(app.handle().clone());
             // when the Mac's screen locks, so does this: the key leaves memory and the window is told to forget what it knew
             let h = app.handle().clone();
@@ -2912,7 +3005,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
+        .invoke_handler(tauri::generate_handler![profiles_list, profile_open, profile_close, profile_create, profile_update, profile_delete, profile_picture_pick, guard_displays, guard_sharing, guard_override, transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
             cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
