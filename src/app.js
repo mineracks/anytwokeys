@@ -4584,7 +4584,19 @@ function renderProfileCard() {
   $('#pc-start').classList.toggle('on', !!profile.start); $('#pc-start').setAttribute('aria-checked', String(!!profile.start));
   $('#pc-discreet').classList.toggle('on', !!profile.discreet); $('#pc-discreet').setAttribute('aria-checked', String(!!profile.discreet));
   $('#pc-pic [data-pc-pick]').onclick = (e) => profilePicker(e.currentTarget);
+  const pp = $('#pc-persona'); pp.hidden = profile.class !== 'fiction';
+  if (profile.class === 'fiction') { invoke('persona_defaults').then(d => { if (!$('#pc-seed').value) $('#pc-seed').value = profile.persona_seed || d.seed; renderPersonaCard.defaults = d; }).catch(() => {});
+    $('#pc-persona-say').textContent = profile.persona_seed ? `A persona was generated into this profile from the seed below. Generate again to rebuild it, or change the seed for a different person.` : `Nothing has been generated yet. Generate a made-up person — four entities, two places, two signet vaults, two exchange accounts with years of history — for showing to a room.`;
+    $('#pc-generate').textContent = profile.persona_seed ? 'Regenerate' : 'Generate'; }
 }
+function renderPersonaCard() {}
+askTwice($('#pc-generate'), 'Generate a persona into this profile? Everything in it is replaced: every vault, record, entity and place.', 'Generate it', async () => {
+  const seed = $('#pc-seed').value.trim(); $('#pc-generate').disabled = true;
+  try { const made = await invoke('persona_generate', { seed: seed || null }); store = await invoke('store_get'); vault = store.vaults[0] || null; renderTabs(); profilesView = await invoke('profiles_list').catch(() => profilesView); profile = (profilesView && profilesView.current) || profile;
+    const out = $('#pc-persona-out'); out.hidden = false;
+    out.innerHTML = `<b>${esc(made.name)}</b> — ${made.entities} entities, ${made.vaults.length} vaults, ${sats(made.exchange_rows)} exchange rows. ` + (made.funded ? 'The signet vaults were funded when this persona was made; the exchange withdrawals match those deposits.' : `These signet addresses need funding for the story to close:<br>${made.fund.map(([v, a, n]) => `<span class="mono" style="font-size:12px">${esc(a)}</span> · ${sats(n)} sats → ${esc(v)}`).join('<br>')}`);
+    renderProfileCard(); paintProfileChip(); toast(`${made.name} is here`); }
+  catch (e) { fail(e); } finally { $('#pc-generate').disabled = false; } });
 function profilePicker(anchor) {
   let box = anchor.parentElement.querySelector('.icpick'); if (box) { box.remove(); return; }
   box = document.createElement('div'); box.className = 'icpick';

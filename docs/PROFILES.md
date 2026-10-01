@@ -61,7 +61,35 @@ What this does not stop: a camera pointed at the laptop.
 `profile_create` (Touch ID first for private), `profile_update`, `profile_delete` (Touch ID; Keychain item first,
 then the folder; never the open one), `profile_picture_pick`, `guard_displays`, `guard_sharing`, `guard_override`.
 
+## Moving a vault between profiles (`bundle.rs`)
+
+Vault settings › **Move to another profile…**. The source writes a sealed parcel under `<root>/moves/` — the vault,
+its snapshot, labels, notes, attachments, its keys' places, pictures and firmware facts, its owner, the transfer
+answers naming it, its node credential or scan key — under a one-time key K, proves it reads back, and only then
+removes the vault (clearing what a forget clears). K stays in memory across the switch; `move_land` after the
+destination unlocks imports it. `<id>.k` holds K under the SOURCE key: if the app quit in between, the vault comes
+back to the profile it left the next time that one opens. A taken name lands as "name · 2"; an owner or place of the
+same name is reused.
+
+## The fictional person (`persona.rs`)
+
+App settings › This profile › **The person in this profile** (fiction profiles only): a seed and Generate. From the
+seed, deterministically: a name (short lists, never a real person), four entities (self, partner, an SMSF, its
+corporate trustee), two places with coordinates, two **signet** watch-only vaults (BIP 84 from the seed, `<0;1>/*`
+descriptors) and two **Amber** accounts whose CSV is written in Amber's own format and read by `exchange::parse`:
+monthly buys since 2018 (larger ones since 2023 for the fund), a few sells with withdrawals, and final
+`SEND` rows that name the exact sats paid to the vaults' first addresses, dated 30 minutes before `FUNDED_AT`, so
+the transfers matcher links exchange → cold storage once the coins are on chain.
+
+Prices are a baked yearly AUD curve with seeded noise; the rows carry their rate, and the app values them from the
+rows as it does a real export. Generating replaces everything in the profile and records the seed on it.
+
+**Funding.** `DEFAULT_SEED` (`7f3a9c21d4e85b60`, Jonah Nakamura) is the funded persona: its three addresses were
+paid the amounts in `FUNDING` from the walletplayground dispenser (see the journal, 2026-10-01). Any other seed is
+the same story unfunded; the result lists what to pay where. The matcher's window is −1 h … +3 d around the
+withdrawal, so a persona funded later than three days after `FUNDED_AT` will show the withdrawals and deposits
+unlinked until `FUNDED_AT` is moved.
+
 ## Not yet
 
-Moving a vault between profiles (a sealed vault bundle), exporting a profile as one archive, and the fiction
-persona generator: see the spec's P3 and P4.
+Exporting a profile as one archive; Bitaroo-format fixtures; bank, share and property fixtures as their specs land.
