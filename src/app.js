@@ -4652,15 +4652,19 @@ askTwice($('#pc-generate'), 'Generate a persona into this profile? Everything in
     renderProfileCard(); paintProfileChip(); toast(`${made.name} is here`); }
   catch (e) { fail(e); } finally { $('#pc-generate').disabled = false; } });
 function profilePicker(anchor) {
-  let box = anchor.parentElement.querySelector('.icpick'); if (box) { box.remove(); return; }
+  const row = anchor.closest('.row') || anchor.parentElement;   // under the whole row, never inside it
+  let box = row.parentElement.querySelector('.icpick'); if (box) { box.remove(); return; }
   box = document.createElement('div'); box.className = 'icpick';
   const cur = profile.picture || '';
   box.innerHTML = [['lock', 'Lock'], ...GLYPHS].map(([g, w]) => `<span class="ic s40${cur === 'glyph:' + g ? ' on' : ''}" data-glyph="${g}" title="${w}" role="button" tabindex="0"><svg aria-hidden="true"><use href="${glyphRef(g)}"/></svg></span>`).join('')
     + `<button type="button" class="btn small" data-pc-upload>Choose a picture…</button><small class="muted" style="flex-basis:100%">The picture is kept in the clear, like the name.</small>`;
-  const set = async (pic) => { try { profile = pic === 'pick' ? await invoke('profile_picture_pick', { id: profile.id }) : await invoke('profile_update', { id: profile.id, picture: pic }); box.remove(); renderProfileCard(); paintProfileChip(); } catch (e) { if (String(e) !== 'cancelled') fail(e); } };
+  const busy = (on) => { box.classList.toggle('busy', on); const b = box.querySelector('[data-pc-upload]'); b.disabled = on; b.textContent = on ? 'Reading the picture…' : 'Choose a picture…'; let bar = box.querySelector('.busybar'); if (on && !bar) { bar = document.createElement('div'); bar.className = 'busybar'; bar.setAttribute('role', 'progressbar'); bar.setAttribute('aria-label', 'Reading the picture'); box.appendChild(bar); } if (!on && bar) bar.remove(); };
+  const set = async (pic) => { if (pic === 'pick') busy(true);
+    try { profile = pic === 'pick' ? await invoke('profile_picture_pick', { id: profile.id }) : await invoke('profile_update', { id: profile.id, picture: pic }); box.remove(); renderProfileCard(); paintProfileChip(); }
+    catch (e) { busy(false); if (String(e) !== 'cancelled') fail(e); } };
   $$('[data-glyph]', box).forEach(b => b.onclick = () => set('glyph:' + b.dataset.glyph));
   box.querySelector('[data-pc-upload]').onclick = () => set('pick');
-  anchor.insertAdjacentElement('afterend', box);
+  row.insertAdjacentElement('afterend', box);
 }
 const pcSet = async (args) => { try { profile = await invoke('profile_update', { id: profile.id, ...args }); renderProfileCard(); paintProfileChip(); } catch (e) { fail(e); } };
 $('#pc-save').onclick = () => pcSet({ name: $('#pc-name').value });

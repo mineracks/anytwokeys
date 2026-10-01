@@ -759,3 +759,8 @@ a.tag{text-decoration:none;cursor:pointer} a.tag:hover{text-decoration:underline
 .pull-list .pr .tick{width:20px;height:20px;border-radius:50%;border:1.5px solid var(--line);display:grid;place-items:center;font-size:12px;color:var(--ground);flex:0 0 20px}
 .pull-list .pr[aria-selected="true"] .tick{background:var(--gold);border-color:var(--gold)}
 #pull .pickbar{position:static;margin-top:4px}
+.busybar{flex-basis:100%;height:3px;border-radius:2px;background:var(--line);overflow:hidden;position:relative}
+.busybar::after{content:"";position:absolute;top:0;bottom:0;left:-40%;width:40%;background:var(--gold);border-radius:2px;animation:busy 1.1s ease-in-out infinite}
+@keyframes busy{from{left:-40%}to{left:100%}}
+@media (prefers-reduced-motion: reduce){.busybar::after{animation:none;left:0;width:100%;opacity:.5}}
+.icpick.busy [data-glyph]{opacity:.45;pointer-events:none}
