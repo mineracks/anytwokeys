@@ -1,0 +1,4 @@
+# Android 15 and later run on 16 KB memory pages on newer phones (a Pixel 9 among them), and say so in a warning on
+# every launch if the app's library is laid out for 4 KB. NDK 27 still links for 4 KB unless told otherwise.
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
