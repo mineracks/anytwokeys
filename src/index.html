@@ -42,6 +42,15 @@
     <div class="muted" style="font-size:13px" id="pn-note"></div>
     <div class="row"><button class="btn primary" id="pn-create">Create profile</button><button class="btn" id="pn-cancel">Cancel</button></div>
   </div>
+  <div class="card" id="profile-bring" hidden style="width:min(560px,100%)">
+    <div class="label">Bring a profile from another device</div>
+    <div class="muted" style="font-size:13px">Plug in a key that was added to the profile's sync and enter its PIN. The profile comes from your sync host, encrypted; the key and its PIN are what open it.</div>
+    <button type="button" class="linkish" id="pb-host-show">My profile syncs through a host of my own</button>
+    <div class="field" id="pb-host-field" hidden><label class="cap" for="pb-host">Sync host</label><input id="pb-host" class="mono" placeholder="https://vss.mineracks.com/vss" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+    <div id="pb-keys"></div>
+    <div id="pb-found"></div>
+    <div class="row"><button class="btn small" id="pb-look" type="button">Look for keys again</button><button class="btn small" id="pb-cancel" type="button">Cancel</button></div>
+  </div>
   <div class="muted" style="font-size:13px;text-align:center;max-width:60ch">A profile's name and picture are kept in the clear, like the app's own name. Everything inside it is sealed under that profile's own key.</div>
 </div>
 
@@ -753,6 +762,11 @@
             <div class="row" style="justify-content:space-between;flex-wrap:nowrap;gap:16px" id="loc-exact-row"><div style="font-family:var(--display);font-weight:600;font-size:14px;min-width:0">Keep the exact spot<small class="muted" style="display:block;font-weight:400;font-family:var(--serif);font-size:13px">Off: rounded to about 110 metres, which is enough to say which street.</small></div><div class="toggle" id="loc-exact" role="switch" tabindex="0" aria-label="Keep the exact spot"><i></i></div></div>
             <div class="muted" style="font-size:13px" id="loc-state"></div>
           </div>
+          <div class="card" id="sync-card" hidden><div class="label">Sync</div>
+            <div class="muted" style="font-size:13px" id="sync-state"></div>
+            <div class="field"><div class="cap" id="sync-keys-cap">Keys that can bring this profile to a new device</div><div id="sync-slots"></div></div>
+            <div class="row" id="sync-acts" hidden><button class="btn" id="sync-now" type="button">Sync now</button><button class="linkish" id="sync-off" type="button" style="align-self:center">Stop syncing on this device</button></div>
+          </div>
           <div class="card" id="lock-card"><div class="label">Lock</div>
             <div class="muted" style="font-size:13px" id="lock-state"></div>
             <div class="row" style="justify-content:space-between;flex-wrap:nowrap;gap:16px"><div style="font-family:var(--display);font-weight:600;font-size:14px;min-width:0">Ask for Touch ID when the app opens<small class="muted" style="display:block;font-weight:400;font-family:var(--serif);font-size:13px">Off: the app opens without asking. Its files stay encrypted either way.</small></div><div class="toggle on" id="lock-touch" role="switch" tabindex="0" aria-label="Ask for Touch ID when the app opens"><i></i></div></div>
@@ -864,6 +878,7 @@
 <script src="scan.js"></script>
 <script src="app.js"></script>
 <script src="keyinit.js"></script>
+<script src="sync.js"></script>
 <script src="phone.js"></script>
 </body>
 </html>

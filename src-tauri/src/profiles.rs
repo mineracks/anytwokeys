@@ -47,6 +47,9 @@ pub struct Profile {
     #[serde(default)] pub persona_seed: Option<String>,
     /// the Keychain account its store key sits under; the migrated profile keeps the one the app always used
     #[serde(default = "legacy_account")] pub keychain_account: String,
+    /// set while this profile is synced (sync.rs): the name it goes by on every device. As public as the profile's
+    /// own name; it lets the picker say "already on this device" without opening anything.
+    #[serde(default)] pub sync_id: Option<String>,
 }
 fn legacy_account() -> String { LEGACY_ACCOUNT.into() }
 
@@ -147,7 +150,7 @@ pub fn migrate_legacy(now: u64) -> Result<Moved, String> {
             std::fs::rename(p, &to).map_err(|e| format!("moving {} into the profile: {e}", p.display()))?;
             m.files += 1;
         }
-        ix.profiles.push(Profile { id: id.clone(), name: "Me".into(), class: Class::Private, picture: Some("glyph:lock".into()), created: now, last_opened: 0, start: false, discreet: true, persona_seed: None, keychain_account: LEGACY_ACCOUNT.into() });
+        ix.profiles.push(Profile { id: id.clone(), name: "Me".into(), class: Class::Private, picture: Some("glyph:lock".into()), created: now, last_opened: 0, start: false, discreet: true, persona_seed: None, sync_id: None, keychain_account: LEGACY_ACCOUNT.into() });
         m.moved = true; m.id = Some(id);
     }
     save_index(&ix)?;
@@ -185,7 +188,7 @@ pub fn create(name: &str, class: Class, picture: Option<String>, now: u64) -> Re
     let id = new_id();
     std::fs::create_dir_all(dir_for(&id)).map_err(|e| e.to_string())?;
     let p = Profile { id: id.clone(), name: name.into(), class, picture: picture.or_else(|| Some(match class { Class::Private => "glyph:lock", Class::Work => "glyph:keys", Class::Fiction => "glyph:entity" }.into())),
-        created: now, last_opened: 0, start: false, discreet: class == Class::Private, persona_seed: None, keychain_account: format!("profile {id}") };
+        created: now, last_opened: 0, start: false, discreet: class == Class::Private, persona_seed: None, sync_id: None, keychain_account: format!("profile {id}") };
     ix.profiles.push(p.clone());
     save_index(&ix)?;
     Ok(p)
@@ -220,6 +223,13 @@ pub fn update(id: &str, c: Changes) -> Result<Profile, String> {
 }
 
 /// Shred the Keychain item first, then the folder. Never the open one.
+pub fn set_sync_id(id: &str, sync_id: Option<String>) -> Result<(), String> {
+    let mut ix = index()?;
+    let p = ix.profiles.iter_mut().find(|p| p.id == id).ok_or("no such profile")?;
+    p.sync_id = sync_id;
+    save_index(&ix)
+}
+
 pub fn delete(id: &str) -> Result<Index, String> {
     if current().map(|c| c.id == id).unwrap_or(false) { return Err("close this profile before deleting it".into()); }
     let mut ix = index()?;

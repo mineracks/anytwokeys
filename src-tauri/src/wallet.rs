@@ -243,6 +243,7 @@ pub fn update<F: FnOnce(&mut Store)>(f: F) -> Result<Store, String> {
 }
 
 pub fn save(s: &Store) -> Result<(), String> {
+    crate::sync::DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);   // something may have changed that other devices should hear of
     let p = store_path();
     let text = serde_json::to_string_pretty(s).map_err(|e| e.to_string())?;
     if crate::lockbox::sealed_mode() {

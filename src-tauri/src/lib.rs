@@ -4,6 +4,7 @@ mod statement;
 mod exchange;
 mod node;
 mod spark_auth;
+mod sync;
 mod muun;
 mod activity;
 mod transfers;
@@ -76,6 +77,142 @@ async fn cards_other() -> R<Vec<cards::OtherDevice>> {
 #[tauri::command]
 async fn card_generate(reader: String, admin_pin: String) -> R<String> {
     block(move || cards::generate(&reader, &admin_pin).map_err(|e| e.to_string())).await
+}
+
+// ---------- a profile kept the same on every device (sync.rs) ----------
+
+#[derive(Serialize)]
+struct SyncStatus { on: bool, url: String, last: u64, cards: Vec<sync::CardRef>, waiting: bool }
+
+/// A profile fetched with a key on this device, waiting for its first unlock to be written down (the sealed files
+/// of a new profile cannot be written before it has a store key). Lost if the app quits first: nothing is harmed,
+/// the profile is simply brought again.
+static ADOPTING: std::sync::Mutex<Option<(String, sync::Pointed, sync::CardRef)>> = std::sync::Mutex::new(None);
+
+fn sync_status_now() -> R<SyncStatus> {
+    let st = if lockbox::unlocked() { sync::state()? } else { None };
+    Ok(match st {
+        Some(s) => SyncStatus { on: true, url: s.url, last: s.last, cards: s.cards, waiting: sync::DIRTY.load(std::sync::atomic::Ordering::Relaxed) },
+        None => SyncStatus { on: false, url: String::new(), last: 0, cards: vec![], waiting: false },
+    })
+}
+fn sync_host() -> String { wallet::load().ok().map(|s| s.settings.vss).filter(|u| !u.is_empty()).unwrap_or_else(|| labels::DEFAULT_VSS.to_string()) }
+
+/// A plugged-in key's name, public key and the secret it gives up after its PIN. `create`: make the secret if the
+/// key has none yet (only ever for a key the person is adding on purpose).
+fn sync_card(reader: &str, pin: &str, create: bool) -> R<(sync::CardRef, [u8; 32])> {
+    let card = cards::list().map_err(|e| e.to_string())?.into_iter().find(|c| c.reader == reader).ok_or("that key is no longer plugged in")?;
+    let pubkey = card.pubkey.clone().ok_or("that key has no signing key on it yet: set it up first")?;
+    let secret = cards::seal_key(reader, pin, create).map_err(|e| e.to_string())?.ok_or("this key carries no profiles: it has never been added to one")?;
+    Ok((sync::CardRef { name: card_name(&pubkey, card.serial), pubkey, added: now() }, secret))
+}
+
+async fn sync_once() -> R<sync::Outcome> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut st = sync::state()?.ok_or("sync is not on for this profile")?;
+    let out = sync::run(&mut st, now(),
+        || serde_json::to_value(wallet::load()?).map_err(|e| e.to_string()),
+        |f| {
+            let mut out: R<bool> = Ok(false);
+            wallet::update(|s| {
+                let Ok(mut j) = serde_json::to_value(&*s) else { out = Err("the store could not be read for merging".into()); return };
+                if !f(&mut j) { return; }
+                // what comes back must still be a store: nothing that does not parse is ever saved over a real one
+                match serde_json::from_value::<Store>(j) { Ok(n) => { *s = n; out = Ok(true); } Err(e) => out = Err(format!("what arrived from the sync host does not fit this build ({e}); nothing was changed here")) }
+            })?;
+            out
+        }).await?;
+    sync::DIRTY.store(false, Relaxed);
+    Ok(out)
+}
+
+#[tauri::command]
+fn sync_status() -> R<SyncStatus> { sync_status_now() }
+
+/// Switch sync on for the open profile with this key, or add this key to a profile that already syncs. Either way
+/// the key can afterwards bring the profile to a new device, with its PIN.
+#[tauri::command]
+async fn sync_enable(reader: String, pin: String) -> R<SyncStatus> {
+    lockbox::key()?;
+    let prof = profiles::current().ok_or("open a profile first")?;
+    let pin = zeroize::Zeroizing::new(pin);
+    let (card, secret) = block(move || sync_card(&reader, &pin, true)).await?;
+    let mut st = match sync::state()? { Some(s) => s, None => sync::State { v: 1, id: hex::encode(lockbox::random::<16>()), root: hex::encode(lockbox::random::<32>()), url: sync_host(), ..Default::default() } };
+    sync::save_state(&st)?;
+    sync::point(&st.url, &secret, &st.id, Some(sync::Pointed { id: st.id.clone(), root: st.root.clone(), url: st.url.clone(), name: prof.name.clone(), class: prof.class, added: now() })).await?;
+    st.cards.retain(|c| c.pubkey != card.pubkey); st.cards.push(card);
+    sync::save_state(&st)?;
+    profiles::set_sync_id(&prof.id, Some(st.id.clone()))?;
+    sync_once().await?;
+    sync_status_now()
+}
+
+#[tauri::command]
+async fn sync_now() -> R<sync::Outcome> { lockbox::key()?; sync_once().await }
+
+/// Called by the window every so often: finish bringing a profile that was fetched with a key, and sync when this
+/// device has something to say or has not listened for five minutes. `None`: nothing to do.
+#[tauri::command]
+async fn sync_tick() -> R<Option<sync::Outcome>> {
+    if !lockbox::unlocked() { return Ok(None); }
+    let Some(prof) = profiles::current() else { return Ok(None) };
+    let adopting = ADOPTING.lock().map_err(|_| "sync lock poisoned".to_string())?.take_if(|(id, _, _)| *id == prof.id);
+    if let Some((_, p, card)) = adopting {
+        if sync::state()?.is_none() { sync::save_state(&sync::State { v: 1, id: p.id.clone(), root: p.root.clone(), url: p.url.clone(), cards: vec![card], ..Default::default() })?; }
+        return sync_once().await.map(Some);
+    }
+    let Some(st) = sync::state()? else { return Ok(None) };
+    if !sync::DIRTY.load(std::sync::atomic::Ordering::Relaxed) && now().saturating_sub(st.last) < 300 { return Ok(None); }
+    sync_once().await.map(Some)
+}
+
+/// Stop syncing on THIS device. What is on the host and on other devices stays; the keys can still bring it back.
+#[tauri::command]
+fn sync_disable() -> R<SyncStatus> {
+    lockbox::key()?;
+    sync::forget_state()?;
+    if let Some(p) = profiles::current() { profiles::set_sync_id(&p.id, None)?; }
+    sync_status_now()
+}
+
+/// Where a key's pointer is looked for on a device that knows nothing yet: the host the person names, or the usual one.
+fn sync_host_or(host: Option<String>) -> R<String> {
+    match host.map(|h| h.trim().to_string()).filter(|h| !h.is_empty()) {
+        None => Ok(labels::DEFAULT_VSS.to_string()),
+        Some(h) if h.starts_with("https://") => Ok(h),
+        Some(_) => Err("a sync host is an https:// address".into()),
+    }
+}
+
+#[derive(Serialize)]
+struct SyncFound { id: String, name: String, class: profiles::Class, added: u64, here: bool }
+
+/// The profiles a plugged-in key can bring to this device. No profile needs to be open.
+#[tauri::command]
+async fn sync_find(reader: String, pin: String, host: Option<String>) -> R<Vec<SyncFound>> {
+    let host = sync_host_or(host)?;
+    let pin = zeroize::Zeroizing::new(pin);
+    let (_, secret) = block(move || sync_card(&reader, &pin, false)).await?;
+    let here: Vec<String> = profiles::index()?.profiles.into_iter().filter_map(|p| p.sync_id).collect();
+    Ok(sync::pointed(&host, &secret).await?.into_iter().map(|p| SyncFound { here: here.contains(&p.id), id: p.id, name: p.name, class: p.class, added: p.added }).collect())
+}
+
+/// Bring one of them here: a new, empty profile under the same name, which fills from the host once it is opened.
+#[tauri::command]
+async fn sync_adopt(reader: String, pin: String, id: String, host: Option<String>) -> R<profiles::Profile> {
+    let host = sync_host_or(host)?;
+    let pin = zeroize::Zeroizing::new(pin);
+    let (card, secret) = block(move || sync_card(&reader, &pin, false)).await?;
+    let p = sync::pointed(&host, &secret).await?.into_iter().find(|p| p.id == id).ok_or("that key no longer carries that profile")?;
+    if profiles::index()?.profiles.iter().any(|x| x.sync_id.as_deref() == Some(&p.id)) { return Err("that profile is already on this device".into()); }
+    let (name, class) = (p.name.clone(), p.class);
+    let made = block(move || {
+        if class == profiles::Class::Private { lockbox::mac::presence("bring a private profile to this device")?; }
+        profiles::create(&name, class, None, now())
+    }).await?;
+    profiles::set_sync_id(&made.id, Some(p.id.clone()))?;
+    *ADOPTING.lock().map_err(|_| "sync lock poisoned".to_string())? = Some((made.id.clone(), p, card));
+    Ok(made)
 }
 
 // ---------- setting up a brand-new key ----------
@@ -3125,7 +3262,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![profiles_list, profile_open, profile_close, profile_create, profile_update, profile_delete, profile_picture_pick, guard_displays, guard_sharing, guard_override, vault_move_start, move_land, persona_generate, persona_defaults, transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
-            cards_list, card_generate, card_survey, card_tap, platform, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
+            cards_list, card_generate, sync_status, sync_enable, sync_now, sync_tick, sync_disable, sync_find, sync_adopt, card_survey, card_tap, platform, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
         .build(tauri::generate_context!())

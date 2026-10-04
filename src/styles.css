@@ -805,3 +805,5 @@ body.offer-on .toast{bottom:150px}
 .enrol{display:flex;gap:16px;align-items:flex-start;padding-top:14px;border-top:1px solid var(--line)} .enrol .keyart{flex:0 0 auto;line-height:0;padding-top:2px}
 .enrol-body{display:flex;flex-direction:column;gap:10px;min-width:0;flex:1} .enrol-body .grid2{max-width:560px}
 .recv-grid{display:grid;grid-template-columns:300px 1fr;gap:28px;align-items:start}
+/* sync: keys listed one under another, in App settings and on the profile picker */
+#sync-slots,#pb-keys,#pb-found{display:flex;flex-direction:column;gap:8px}

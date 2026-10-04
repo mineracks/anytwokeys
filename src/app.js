@@ -327,7 +327,9 @@ function renderProfiles(view) {
   const line = (p) => p.class === 'private' ? 'Your own holdings. Asks for Touch ID or a key every time, and will not draw while another display is attached.'
     : p.class === 'fiction' ? 'A made-up person\'s holdings for showing to a room. Nothing in it is real.' : 'Demo vaults for working on the app. Opens on a click.';
   $('#profiles-grid').innerHTML = view.profiles.map(p => `<div class="card pcard${p.start ? ' hot' : ''}" data-profile="${esc(p.id)}">${picHtml(p, 64, true)}<div class="ctitle"><span class="nm">${esc(p.name)}</span>${ptagHtml(p)}</div><div class="muted grow">${line(p)}<br><small>${when(p.last_opened)}</small></div><div class="acts"><button class="btn${p.start ? ' primary' : ''}" data-open="${esc(p.id)}">${p.class === 'private' ? 'Open…' : 'Open'}</button>${p.start ? '<span class="vchip on" aria-pressed="true">Opens on start</span>' : ''}</div></div>`).join('')
-    + `<div class="card pcard ghost"><div class="ctitle" style="font-size:16px">New profile</div><div class="muted">Name it, say who it is for, give it a picture later.</div><button class="btn small" id="pn-start">Start</button></div>`;
+    + `<div class="card pcard ghost"><div class="ctitle" style="font-size:16px">New profile</div><div class="muted">Name it, say who it is for, give it a picture later.</div><button class="btn small" id="pn-start">Start</button></div>`
+    + `<div class="card pcard ghost"><div class="ctitle" style="font-size:16px">From another device</div><div class="muted">A profile you sync comes here with one of its keys and that key\u2019s PIN.</div><button class="btn small" id="pb-start">Bring it here</button></div>`;
+  if (typeof syncBringWire === 'function') syncBringWire();
   $$('#profiles-grid [data-open]').forEach(b => b.onclick = () => openProfile(b.dataset.open));
   $('#pn-start').onclick = () => { $('#profile-new').hidden = false; $('#pn-name').focus(); pnNote(); };
 }
@@ -3749,7 +3751,7 @@ $('#title-input').addEventListener('blur', () => { if (!$('#title-input').hidden
 $('#vault-pdf').onclick = async () => { try { toast('Saved ' + await invoke('vault_pdf', { name: vault.name }), 6000); } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
 // never fall back to `vault.descriptor`: for a rotating vault that is the line WITHOUT its chain code, which restores the wrong addresses
 $('#copy-desc').onclick = async () => { try { if (!vault._recovery) vault._recovery = await invoke('vault_recovery', { name: vault.name }); if (!vault._recovery) throw 'the recovery line could not be read'; await navigator.clipboard.writeText(vault._recovery); toast('Recovery line copied'); } catch (e) { fail(e); } };
-askTwice($('#forget-vault'), 'Forget this vault on this computer? The coins stay on the chain; two sealed keys, or the recovery line and two keys, bring it back.', 'Yes, forget it here', async () => { store = await invoke('vault_forget', { name: vault.name }); await refreshTransferLinks(); vault = null; boot(); });
+askTwice($('#forget-vault'), 'Forget this vault on this computer? If this profile syncs, it is forgotten on every device it syncs to. The coins stay on the chain; two sealed keys, or the recovery line and two keys, bring it back.', 'Yes, forget it here', async () => { store = await invoke('vault_forget', { name: vault.name }); await refreshTransferLinks(); vault = null; boot(); });
 
 // ---------- setup (enrol) ----------
 function renderSetup() {
@@ -4619,7 +4621,7 @@ $('#vs-move-pick').addEventListener('click', (e) => { const o = e.target.closest
 $('#vs-move-go').onclick = async () => { const o = $('#vs-move-pick .opt.on'); if (!o || !vault) return; const to = o.dataset.to; $('#vs-move-go').disabled = true;
   try { const st = await invoke('vault_move_start', { name: vault.name, to }); if (st.missing.length) toast(`${st.missing.length} attachment${st.missing.length === 1 ? ' was' : 's were'} not on this computer and stayed behind`, 8000); await invoke('profile_open', { id: to }); location.reload(); }
   catch (e) { fail(e); $('#vs-move-go').disabled = false; } };
-askTwice($('#vs-forget'), 'Forget this vault on this computer? The coins stay on the chain; two sealed keys, or the recovery line and two keys, bring it back.', 'Yes, forget it here', async () => { store = await invoke('vault_forget', { name: vault.name }); await refreshTransferLinks(); vault = null; boot(); });
+askTwice($('#vs-forget'), 'Forget this vault on this computer? If this profile syncs, it is forgotten on every device it syncs to. The coins stay on the chain; two sealed keys, or the recovery line and two keys, bring it back.', 'Yes, forget it here', async () => { store = await invoke('vault_forget', { name: vault.name }); await refreshTransferLinks(); vault = null; boot(); });
 $('#coins-switch').onclick = () => { try { localStorage.setItem('a2k-coins-tab', coinsTab() ? 'off' : 'on'); } catch {} paintCoinsTab(); };
 // A change of method changes every realised figure, so every ledger is worked out again.
 const methodChanged = () => { vaultLedger.memo = {}; if ($('#s-home').classList.contains('on')) renderHomeSummary(); };
