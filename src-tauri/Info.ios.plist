@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NFCReaderUsageDescription</key>
+  <string>Any Two Keys reads your YubiKey when you hold it to the phone, to sign with it or set it up.</string>
+  <!-- the parts of a YubiKey the app may select over NFC: OpenPGP (signing), management, one-time codes, authenticator, PIV. The last three are only ever read. -->
+  <key>com.apple.developer.nfc.readersession.iso7816.select-identifiers</key>
+  <array>
+    <string>D27600012401</string>
+    <string>A000000527471117</string>
+    <string>A0000005272001</string>
+    <string>A0000005272101</string>
+    <string>A000000308</string>
+  </array>
+  <key>NSFaceIDUsageDescription</key>
+  <string>Any Two Keys asks for Face ID to open what it keeps encrypted on this iPhone.</string>
+  <key>NSCameraUsageDescription</key>
+  <string>Any Two Keys uses the camera to read QR codes: an address to pay, a signed transaction, a signing device's key.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Any Two Keys can talk to a Bitcoin node of your own on this network.</string>
+  <!-- iOS 27 will not launch an app built with its SDK unless the app adopts the scene lifecycle. The windowing
+       library (tao) only registers its scene delegate when this says scenes are supported; an iPhone still shows one. -->
+  <key>UIApplicationSceneManifest</key>
+  <dict>
+    <key>UIApplicationSupportsMultipleScenes</key>
+    <true/>
+  </dict>
+  <key>UIFileSharingEnabled</key>
+  <true/>
+  <key>LSSupportsOpeningDocumentsInPlace</key>
+  <true/>
+</dict>
+</plist>

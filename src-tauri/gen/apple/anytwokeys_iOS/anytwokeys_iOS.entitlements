@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- a key held to the phone -->
+  <key>com.apple.developer.nfc.readersession.formats</key>
+  <array>
+    <string>TAG</string>
+  </array>
+  <!-- a key in the USB-C port, through the system's smart-card service -->
+  <key>com.apple.security.smartcard</key>
+  <true/>
+</dict>
+</plist>
