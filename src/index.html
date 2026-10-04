@@ -2,10 +2,11 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Any Two Keys</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=JetBrains+Mono:wght@400;600&display=swap">
 <link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="phone.css">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute"><defs>
@@ -82,11 +83,12 @@
 </div>
 
 <div id="shell" hidden>
-<div class="side">
+<div class="side" id="side"><button type="button" class="linkish" id="side-close">Close</button>
   <div class="brand"><svg width="26" height="26"><use href="#ring"/></svg>Any Two Keys</div>
   <div class="label" style="padding:4px 12px 2px">Vaults</div>
   <div class="nav" data-go="overview" id="nav-overview"><svg><use href="#i-overview"/></svg>All vaults</div>
   <div id="vault-tabs" style="display:flex;flex-direction:column;gap:2px;margin-bottom:8px"></div>
+  <div class="nav" id="nav-tap" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M7 9a7 7 0 0 1 10 0M9.5 12a3.6 3.6 0 0 1 5 0"/><rect x="8" y="14.5" width="8" height="6" rx="1.8"/></svg>Read a key by NFC</div>
   <div class="nav" id="new-vault-nav" style="font-weight:400;color:var(--muted)"><span style="width:18px;text-align:center;font-weight:800">+</span>New vault…</div>
   <div style="border-top:1px solid var(--line);margin:8px 0"></div>
   <div class="label sidegroup" id="side-vault" title="These screens are about the selected vault">This vault</div>
@@ -111,6 +113,14 @@
   </div>
 </div>
 <div class="divider" id="divider" title="Drag to resize"></div>
+<!-- a phone's way round the app: the four things done most, and the rest of the sidebar behind More -->
+<nav id="tabbar" aria-label="Main">
+  <div class="nav" data-go="home"><svg><use href="#i-home"/></svg>Home</div>
+  <div class="nav" data-go="activity"><svg><use href="#i-activity"/></svg>Activity</div>
+  <div class="nav" data-go="send"><svg><use href="#i-send"/></svg>Send</div>
+  <div class="nav" data-go="receive"><svg><use href="#i-receive"/></svg>Receive</div>
+  <button type="button" class="nav" id="tab-more" aria-expanded="false" aria-controls="side"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="19" cy="12" r="1.8" fill="currentColor"/></svg>More</button>
+</nav>
 <div class="main">
   <div class="top"><div class="topleft"><nav id="crumbs" aria-label="Where you are" hidden></nav><div class="row" style="gap:10px;min-width:0"><h1 id="title">Vault</h1><input id="title-input" hidden><button class="pencil" id="title-edit" title="Rename this vault" hidden><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button></div></div><div class="row" style="gap:10px;flex-wrap:nowrap"><button type="button" class="vchip" id="discreet-chip" hidden aria-pressed="false" title="Amounts, names and addresses stay blurred until you hold the page">Discreet</button><button type="button" class="pchip" id="profile-chip" hidden aria-haspopup="true" aria-expanded="false" title="Profile"></button><div class="net" id="netpill"><i></i><span>signet</span></div></div></div>
   <div id="staged-bar" hidden><span id="staged-text"></span><button class="btn small primary" data-go="sign">Continue signing</button><button class="btn small" id="staged-discard">Discard it</button></div>
@@ -130,7 +140,7 @@
 
     <section id="s-receive" class="screen">
       <div class="seg" id="addr-seg" role="radiogroup" aria-label="Kind of address" hidden style="margin-bottom:16px"></div>
-      <div style="display:grid;grid-template-columns:300px 1fr;gap:28px;align-items:start">
+      <div class="recv-grid">
         <div class="card" style="align-items:center"><div class="qrbox" id="addr-qr"></div><button class="btn primary" id="copy-addr" style="width:240px">Copy address</button></div>
         <div style="display:flex;flex-direction:column;gap:18px">
           <div class="field"><div class="label">Your vault address</div><div class="mono" id="addr-text" style="padding:11px 14px;border:1px solid var(--line);border-radius:6px;background:var(--panel);-webkit-user-select:text;user-select:text"></div></div>
@@ -838,6 +848,13 @@
     <button type="button" class="linkish" id="curtain-switch">Switch to another profile</button>
   </div>
 </div>
+<div id="keyoffer" hidden role="status"></div>
+<div id="keyinit" hidden>
+  <div class="ki-card" role="dialog" aria-modal="true" aria-labelledby="ki-title">
+    <div class="ki-top"><ol class="ki-prog" id="ki-prog" aria-label="Steps"></ol><span class="ki-here" id="ki-here"></span><button type="button" class="linkish" id="ki-close">Close</button></div>
+    <div class="guide-row"><div class="guide" id="ki-art"></div><div class="guide-body" id="ki-body"></div></div>
+  </div>
+</div>
 <div class="pmenu" id="profile-menu" hidden role="menu"></div>
 <div class="toast" id="toast"></div>
 <div id="notices" aria-live="polite"></div>
@@ -846,5 +863,7 @@
 <script src="devices.js"></script>
 <script src="scan.js"></script>
 <script src="app.js"></script>
+<script src="keyinit.js"></script>
+<script src="phone.js"></script>
 </body>
 </html>

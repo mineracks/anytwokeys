@@ -17,7 +17,9 @@ mod urdesc;
 mod sskrdesc;
 mod context;
 mod export;
+mod files;
 mod hd;
+mod keyinit;
 mod labels;
 mod location;
 mod lockbox;
@@ -28,6 +30,7 @@ mod map;
 mod message;
 mod places;
 mod seal;
+mod transport;
 mod wallet;
 
 use serde::{Deserialize, Serialize};
@@ -73,6 +76,77 @@ async fn cards_other() -> R<Vec<cards::OtherDevice>> {
 #[tauri::command]
 async fn card_generate(reader: String, admin_pin: String) -> R<String> {
     block(move || cards::generate(&reader, &admin_pin).map_err(|e| e.to_string())).await
+}
+
+// ---------- setting up a brand-new key ----------
+
+/// Every plugged-in key, looked at with no PIN and nothing written: what state its OpenPGP part is in, and what
+/// else the key holds that setting it up will leave alone.
+#[tauri::command]
+async fn card_survey() -> R<Vec<keyinit::Survey>> {
+    block(|| keyinit::survey().map_err(|e| e.to_string())).await
+}
+
+/// A key held to the phone, read by NFC: the same look as `card_survey`, for a key that is never "plugged in".
+#[tauri::command]
+async fn card_tap() -> R<keyinit::Survey> {
+    if !cfg!(target_os = "ios") { return Err("a key is read by NFC on the phone; on a computer, plug it in".into()); }
+    block(|| keyinit::survey_nfc().map_err(|e| e.to_string())).await
+}
+
+/// Which kind of device this is: the window draws and words itself differently on a phone.
+#[tauri::command]
+fn platform() -> &'static str { if cfg!(target_os = "ios") { "ios" } else if cfg!(target_os = "android") { "android" } else if cfg!(target_os = "macos") { "macos" } else { "other" } }
+
+/// Why each PIN will not do (or null), said while it is being typed. The same rules are applied again before a write.
+#[tauri::command]
+fn card_pin_judge(user: String, admin: String, serial: u32) -> (Option<String>, Option<String>) {
+    let (user, admin) = (zeroize::Zeroizing::new(user), zeroize::Zeroizing::new(admin));
+    (if user.is_empty() { None } else { keyinit::refuse(&user, false, serial) }, if admin.is_empty() { None } else { keyinit::refuse_pair(&user, &admin, serial).1 })
+}
+
+#[tauri::command]
+async fn card_init_pins(serial: u32, user_pin: String, admin_pin: String, user_done: bool) -> R<keyinit::PinsSet> {
+    let (user, admin) = (zeroize::Zeroizing::new(user_pin), zeroize::Zeroizing::new(admin_pin));
+    block(move || {
+        let done = keyinit::set_pins(serial, &user, &admin, user_done)?;
+        if done.admin_done { wallet::update(move |s| { if !s.key_begun.contains(&serial) { s.key_begun.push(serial); } })?; }
+        Ok(done)
+    }).await
+}
+
+#[tauri::command]
+async fn card_init_check(serial: u32, user_pin: String, admin_pin: String) -> R<()> {
+    let (user, admin) = (zeroize::Zeroizing::new(user_pin), zeroize::Zeroizing::new(admin_pin));
+    block(move || keyinit::check_pins(serial, &user, &admin)).await
+}
+
+#[tauri::command]
+async fn card_init_harden(serial: u32, admin_pin: String, sig_pin_each: bool, otp_off: bool) -> R<keyinit::Hardened> {
+    let admin = zeroize::Zeroizing::new(admin_pin);
+    block(move || keyinit::harden(serial, &admin, sig_pin_each, otp_off)).await
+}
+
+#[tauri::command]
+async fn card_init_key(serial: u32, admin_pin: String) -> R<String> {
+    let admin = zeroize::Zeroizing::new(admin_pin);
+    block(move || keyinit::make_key(serial, &admin)).await
+}
+
+/// The key's first signature, checked. Only then is it remembered as ready, under the name it was given.
+#[tauri::command]
+async fn card_init_prove(serial: u32, user_pin: String, pubkey: String, name: String) -> R<Store> {
+    let user = zeroize::Zeroizing::new(user_pin);
+    block(move || {
+        keyinit::prove(serial, &user, &pubkey)?;
+        let t = now();
+        wallet::update(move |s| { s.key_begun.retain(|b| *b != serial); s.key_ready.insert(pubkey, wallet::KeyReady { name: name.trim().to_string(), serial, at: t }); })
+    }).await
+}
+
+#[tauri::command]
+fn key_setup_skip(serial: u32) -> R<Store> {
+    wallet::update(move |s| { if !s.key_skip.contains(&serial) { s.key_skip.push(serial); } })
 }
 
 #[tauri::command]
@@ -660,7 +734,7 @@ static EX_PENDING: std::sync::Mutex<Option<exchange::Exchange>> = std::sync::Mut
 /// how many rows are new.
 #[tauri::command]
 fn exchange_pick_preview(existing: Option<String>) -> R<exchange::Preview> {
-    let paths = rfd::FileDialog::new().set_title("Choose the exchange's export (CSV, or the zip it gave)").add_filter("Statements", &["csv", "zip", "txt"]).pick_files().ok_or("cancelled")?;
+    let paths = files::FileDialog::new().set_title("Choose the exchange's export (CSV, or the zip it gave)").add_filter("Statements", &["csv", "zip", "txt"]).pick_files().ok_or("cancelled")?;
     let mut files = Vec::new();
     for p in paths {
         let bytes = std::fs::read(&p).map_err(|e| format!("{} could not be read: {e}", p.display()))?;
@@ -680,7 +754,7 @@ static EX_RAW: std::sync::Mutex<Vec<(String, Vec<u8>)>> = std::sync::Mutex::new(
 /// say which column is what.
 #[tauri::command]
 fn exchange_pick_raw() -> R<exchange::Raw> {
-    let paths = rfd::FileDialog::new().set_title("Choose the exchange's CSV (or a zip of them)").add_filter("Statements", &["csv", "zip", "txt"]).pick_files().ok_or("cancelled")?;
+    let paths = files::FileDialog::new().set_title("Choose the exchange's CSV (or a zip of them)").add_filter("Statements", &["csv", "zip", "txt"]).pick_files().ok_or("cancelled")?;
     let mut files = Vec::new();
     for p in paths {
         let bytes = std::fs::read(&p).map_err(|e| format!("{} could not be read: {e}", p.display()))?;
@@ -735,7 +809,7 @@ fn exchange_import(name: String, entity: Option<String>) -> R<(Vault, usize)> {
 #[tauri::command]
 async fn icon_pick(kind: String, id: String) -> R<Store> {
     if !["entity", "place", "key"].contains(&kind.as_str()) { return Err("an icon belongs to an entity, a place or a key".into()); }
-    let p = rfd::FileDialog::new().set_title("Choose a picture").add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "heic", "bmp"]).pick_file().ok_or("cancelled")?;
+    let p = files::FileDialog::new().set_title("Choose a picture").add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "heic", "bmp"]).pick_file().ok_or("cancelled")?;
     let bytes = std::fs::read(&p).map_err(|e| format!("the picture could not be read: {e}"))?;
     if bytes.len() > 25 << 20 { return Err("that picture is over 25 MB".into()); }
     let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "icon".into());
@@ -866,7 +940,7 @@ fn node_read(n: &node::Node) -> R<node::Node> {
 /// nowhere else.
 #[tauri::command]
 fn statement_pick() -> R<String> {
-    let p = rfd::FileDialog::new().set_title("Choose the statement (CSV)").add_filter("CSV", &["csv", "txt"]).pick_file().ok_or("cancelled")?;
+    let p = files::FileDialog::new().set_title("Choose the statement (CSV)").add_filter("CSV", &["csv", "txt"]).pick_file().ok_or("cancelled")?;
     std::fs::read_to_string(&p).map_err(|e| format!("the file could not be read: {e}"))
 }
 #[tauri::command]
@@ -988,7 +1062,7 @@ fn device_key_read(text: String) -> R<DeviceRead> {
 /// The same, from a file a device wrote (Coldcard's ccxp-XXXX.json, Passport's export, a text file).
 #[tauri::command]
 fn device_key_file() -> R<DeviceRead> {
-    let path = rfd::FileDialog::new().set_title("Open the key file your signing device wrote").add_filter("Key file", &["json", "txt", "bsms"]).pick_file().ok_or("cancelled")?;
+    let path = files::FileDialog::new().set_title("Open the key file your signing device wrote").add_filter("Key file", &["json", "txt", "bsms"]).pick_file().ok_or("cancelled")?;
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     device_key_read(text)
 }
@@ -1508,7 +1582,7 @@ fn spend_export(name: String, what: String) -> R<String> {
         let txid = psbt.unsigned_tx.compute_txid().to_string();
         (psbt.serialize(), "psbt", format!("anytwokeys-{}", &txid[..12]))
     };
-    let path = rfd::FileDialog::new().set_title(if ext == "psbt" { "Save the PSBT" } else { "Save the signed transaction" })
+    let path = files::FileDialog::new().set_title(if ext == "psbt" { "Save the PSBT" } else { "Save the signed transaction" })
         .set_file_name(format!("{stem}.{ext}")).add_filter(if ext == "psbt" { "PSBT" } else { "Transaction hex" }, &[ext]).save_file()
         .ok_or("cancelled")?;
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
@@ -1571,7 +1645,7 @@ fn spend_pdf(name: String) -> R<String> {
         sturdy: false, code_hint: "Any wallet that reads UR (crypto-psbt) codes can scan these, in any order.".into(), text_heading: "The same PSBT as text (base64, BIP 174)".into(),
         codes: export::ur_parts(&raw, 320, false)?, text: b64.trim().to_string() };
     let bytes = export::pdf(&sheet)?;
-    let path = rfd::FileDialog::new().set_title("Save the PSBT as a PDF").set_file_name(format!("anytwokeys-{}.pdf", &c.txid[..12])).add_filter("PDF", &["pdf"]).save_file().ok_or("cancelled")?;
+    let path = files::FileDialog::new().set_title("Save the PSBT as a PDF").set_file_name(format!("anytwokeys-{}.pdf", &c.txid[..12])).add_filter("PDF", &["pdf"]).save_file().ok_or("cancelled")?;
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path.display().to_string())
 }
@@ -1584,7 +1658,7 @@ fn vault_shares_pdf(name: String, k: usize, n: usize) -> R<String> {
     let s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
     let shares = sskrdesc::split(&wallet::recovery_line(v), k, n)?;
-    let dir = rfd::FileDialog::new().set_title(format!("Choose a folder for the {n} share sheets")).pick_folder().ok_or("cancelled")?;
+    let dir = files::FileDialog::new().set_title(format!("Choose a folder for the {n} share sheets")).pick_folder().ok_or("cancelled")?;
     for (i, sh) in shares.iter().enumerate() {
         let id = sskrdesc::set_of(sh).unwrap_or_default();
         let sheet = export::Sheet {
@@ -1608,7 +1682,7 @@ fn vault_pdf(name: String) -> R<String> {
     let sheet = export::recovery_sheet(v)?;
     let bytes = export::pdf(&sheet)?;
     let safe: String = v.name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
-    let path = rfd::FileDialog::new().set_title("Save the recovery sheet").set_file_name(format!("anytwokeys-recovery-{safe}.pdf")).add_filter("PDF", &["pdf"]).save_file().ok_or("cancelled")?;
+    let path = files::FileDialog::new().set_title("Save the recovery sheet").set_file_name(format!("anytwokeys-recovery-{safe}.pdf")).add_filter("PDF", &["pdf"]).save_file().ok_or("cancelled")?;
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path.display().to_string())
 }
@@ -1617,7 +1691,7 @@ fn vault_pdf(name: String) -> R<String> {
 #[tauri::command]
 fn spend_import(name: String, text: Option<String>) -> R<wallet::Ceremony> {
     let raw = match text { Some(t) => t.into_bytes(), None => {
-        let path = rfd::FileDialog::new().set_title("Open a PSBT").add_filter("PSBT", &["psbt", "txt", "base64"]).pick_file().ok_or("cancelled")?;
+        let path = files::FileDialog::new().set_title("Open a PSBT").add_filter("PSBT", &["psbt", "txt", "base64"]).pick_file().ok_or("cancelled")?;
         std::fs::read(&path).map_err(|e| e.to_string())? } };
     let psbt = export::parse(&raw)?;
     let s = wallet::load()?;
@@ -1774,7 +1848,6 @@ fn seal_combine(es: &[&seal::Entry]) -> Option<(seal::Record, Vec<String>)> {
 fn seal_cards() -> R<Vec<cards::Sealed>> {
     match cards::read_sealed() {
         Ok(c) => Ok(c),
-        Err(cards::CardError::Pcsc(pcsc::Error::NoReadersAvailable)) | Err(cards::CardError::Pcsc(pcsc::Error::NoService)) => Ok(vec![]),
         Err(e) => Err(format!("could not read the keys: {e}")),
     }
 }
@@ -2058,7 +2131,7 @@ async fn tx_pdf(name: String, txid: String, height: i32, ccy: String) -> R<Strin
     let bytes = block({ let (name, txid, ccy) = (name.clone(), txid.clone(), ccy.clone()); move || tx_sheet(&name, &txid, height, &ccy) }).await?;
     let short: String = txid.chars().take(8).collect();
     let safe: String = name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
-    let path = rfd::FileDialog::new().set_title("Save this transaction").set_file_name(format!("anytwokeys-{safe}-{short}.pdf")).add_filter("PDF", &["pdf"]).save_file().ok_or("cancelled")?;
+    let path = files::FileDialog::new().set_title("Save this transaction").set_file_name(format!("anytwokeys-{safe}-{short}.pdf")).add_filter("PDF", &["pdf"]).save_file().ok_or("cancelled")?;
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path.display().to_string())
 }
@@ -2207,7 +2280,7 @@ async fn report_pdf(title: String, subtitle: String, blocks: Vec<BlockIn>, file:
         export::doc(&title, &subtitle, &out)
     }).await?;
     let safe: String = file.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '-' }).collect();
-    let path = rfd::FileDialog::new().set_title("Save the report").set_file_name(format!("anytwokeys-{safe}.pdf")).add_filter("PDF", &["pdf"]).save_file().ok_or("cancelled")?;
+    let path = files::FileDialog::new().set_title("Save the report").set_file_name(format!("anytwokeys-{safe}.pdf")).add_filter("PDF", &["pdf"]).save_file().ok_or("cancelled")?;
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path.display().to_string())
 }
@@ -2249,7 +2322,7 @@ async fn record_pdf(name: String, key: String, title: String, subtitle: String, 
         export::doc(&title, &subtitle, &blocks)
     }).await?;
     let safe: String = file.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '-' }).collect();
-    let path = rfd::FileDialog::new().set_title("Save this record").set_file_name(format!("anytwokeys-{safe}.pdf")).add_filter("PDF", &["pdf"]).save_file().ok_or("cancelled")?;
+    let path = files::FileDialog::new().set_title("Save this record").set_file_name(format!("anytwokeys-{safe}.pdf")).add_filter("PDF", &["pdf"]).save_file().ok_or("cancelled")?;
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path.display().to_string())
 }
@@ -2379,7 +2452,7 @@ async fn profile_delete(id: String) -> R<ProfilesView> {
 /// `img:<base64 JPEG>`. The index is unsealed, so this is as public as the profile's name — the picker says so.
 #[tauri::command]
 async fn profile_picture_pick(id: String) -> R<profiles::Profile> {
-    let p = rfd::FileDialog::new().set_title("Choose a profile picture").add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "heic", "bmp"]).pick_file().ok_or("cancelled")?;
+    let p = files::FileDialog::new().set_title("Choose a profile picture").add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "heic", "bmp"]).pick_file().ok_or("cancelled")?;
     block(move || {
         let bytes = std::fs::read(&p).map_err(|e| format!("the picture could not be read: {e}"))?;
         if bytes.len() > 25 << 20 { return Err("that picture is over 25 MB".into()); }
@@ -2425,8 +2498,12 @@ fn guard_displays() -> profiles::Displays { profiles::guard::displays() }
 /// The window black in screenshots, recordings and screen shares (NSWindowSharingNone) while a private profile is open.
 #[tauri::command]
 fn guard_sharing(window: tauri::WebviewWindow, none: bool) -> R<()> {
-    let ptr = window.ns_window().map_err(|e| e.to_string())? as usize;
-    window.run_on_main_thread(move || unsafe { profiles::guard::set_sharing(ptr, none) }).map_err(|e| e.to_string())
+    #[cfg(target_os = "macos")]
+    { let ptr = window.ns_window().map_err(|e| e.to_string())? as usize;
+      window.run_on_main_thread(move || unsafe { profiles::guard::set_sharing(ptr, none) }).map_err(|e| e.to_string()) }
+    // a phone has no such switch: what it can do instead (curtain while recorded or mirrored) is the window's own job
+    #[cfg(not(target_os = "macos"))]
+    { let _ = (window, none); Ok(()) }
 }
 
 /// "Show anyway for 10 minutes": the person at the Mac, again.
@@ -2651,7 +2728,7 @@ async fn attach_paths(name: String, key: String, paths: Vec<String>, keep_origin
 
 #[tauri::command]
 async fn attach_pick(name: String, key: String, keep_original: bool) -> R<Attached> {
-    let picked = rfd::FileDialog::new().set_title("Add files to this record").pick_files().ok_or("cancelled")?;
+    let picked = files::FileDialog::new().set_title("Add files to this record").pick_files().ok_or("cancelled")?;
     attach_paths(name, key, picked.into_iter().map(|p| p.to_string_lossy().into_owned()).collect(), keep_original).await
 }
 
@@ -2797,14 +2874,14 @@ fn labels_export(name: String) -> R<String> {
         lines.push(serde_json::json!({ "type": t, "ref": r, "label": v.labels[k] }).to_string());
     }
     if lines.is_empty() { return Err("this vault has no labels yet".into()); }
-    let path = rfd::FileDialog::new().set_title("Save labels (BIP 329)").set_file_name(format!("{}-labels.jsonl", v.name.replace(' ', "-"))).add_filter("BIP 329 labels", &["jsonl", "json"]).save_file().ok_or("cancelled")?;
+    let path = files::FileDialog::new().set_title("Save labels (BIP 329)").set_file_name(format!("{}-labels.jsonl", v.name.replace(' ', "-"))).add_filter("BIP 329 labels", &["jsonl", "json"]).save_file().ok_or("cancelled")?;
     std::fs::write(&path, lines.join("\n") + "\n").map_err(|e| e.to_string())?;
     Ok(path.display().to_string())
 }
 
 #[tauri::command]
 async fn labels_import(name: String) -> R<usize> {
-    let path = rfd::FileDialog::new().set_title("Open a labels file (BIP 329)").add_filter("BIP 329 labels", &["jsonl", "json", "txt"]).pick_file().ok_or("cancelled")?;
+    let path = files::FileDialog::new().set_title("Open a labels file (BIP 329)").add_filter("BIP 329 labels", &["jsonl", "json", "txt"]).pick_file().ok_or("cancelled")?;
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let mut got: Vec<(String, String)> = Vec::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
@@ -2827,7 +2904,7 @@ fn bsms_export(name: String) -> R<String> {
     let s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
     let text = bsms_record(v)?;
-    let path = rfd::FileDialog::new().set_title("Save the vault as a BSMS descriptor record").set_file_name(format!("{}.bsms", v.name.replace(' ', "-"))).add_filter("BSMS", &["bsms", "txt"]).save_file().ok_or("cancelled")?;
+    let path = files::FileDialog::new().set_title("Save the vault as a BSMS descriptor record").set_file_name(format!("{}.bsms", v.name.replace(' ', "-"))).add_filter("BSMS", &["bsms", "txt"]).save_file().ok_or("cancelled")?;
     std::fs::write(&path, text).map_err(|e| e.to_string())?;
     Ok(path.display().to_string())
 }
@@ -2878,7 +2955,7 @@ pub fn bsms_read(text: &str, network: &str) -> R<BsmsIn> {
 /// Read a BSMS 1.0 descriptor record from a file.
 #[tauri::command]
 fn bsms_import() -> R<BsmsIn> {
-    let path = rfd::FileDialog::new().set_title("Open a BSMS descriptor record").add_filter("BSMS", &["bsms", "txt"]).pick_file().ok_or("cancelled")?;
+    let path = files::FileDialog::new().set_title("Open a BSMS descriptor record").add_filter("BSMS", &["bsms", "txt"]).pick_file().ok_or("cancelled")?;
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let s = wallet::load()?;
     bsms_read(&text, &s.settings.network)
@@ -3014,9 +3091,15 @@ mod watch {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_notification::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_notification::init());
+    // the wire to a key on a phone (transport.rs)
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    let builder = builder.plugin(tauri_plugin_keylink::init());
+    builder
         .setup(|app| {
+            // an Android phone has no "user's data folder" to find by itself: the system tells the app where it lives
+            #[cfg(target_os = "android")]
+            { use tauri::Manager; if let Ok(data) = app.path().app_data_dir() { let docs = app.path().document_dir().unwrap_or_else(|_| data.join("Documents")); profiles::set_system_dirs(data, docs); } }
             std::thread::spawn(|| loop { std::thread::sleep(std::time::Duration::from_secs(30)); spark_auth::prune(); });
             let _ = profiles::migrate_legacy(now());   // the window asks again and is told what moved
             profiles::open_from_env(now());
@@ -3042,7 +3125,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![profiles_list, profile_open, profile_close, profile_create, profile_update, profile_delete, profile_picture_pick, guard_displays, guard_sharing, guard_override, vault_move_start, move_land, persona_generate, persona_defaults, transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
-            cards_list, card_generate, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
+            cards_list, card_generate, card_survey, card_tap, platform, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
         .build(tauri::generate_context!())

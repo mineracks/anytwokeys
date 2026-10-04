@@ -1,11 +1,11 @@
 //! YubiKey OpenPGP applet over PC/SC: the six APDUs a Bitcoin cosigner needs.
 //! Ported byte-for-byte from the Python proof (yubikit) that signed on mainnet.
-use pcsc::{Card, Context, Protocols, Scope, ShareMode};
+use crate::transport::{self, Card, Opened, Wire};
 use serde::Serialize;
 use thiserror::Error;
 
-const AID_OPENPGP: &[u8] = &[0xD2, 0x76, 0x00, 0x01, 0x24, 0x01];
-const OID_SECP256K1: &[u8] = &[0x2B, 0x81, 0x04, 0x00, 0x0A];
+pub(crate) const AID_OPENPGP: &[u8] = &[0xD2, 0x76, 0x00, 0x01, 0x24, 0x01];
+pub(crate) const OID_SECP256K1: &[u8] = &[0x2B, 0x81, 0x04, 0x00, 0x0A];
 const ORDER: [u8; 32] = [
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
     0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41,
@@ -14,7 +14,10 @@ const ORDER: [u8; 32] = [
 #[derive(Debug, Error)]
 pub enum CardError {
     #[error("smartcard service: {0}")]
-    Pcsc(#[from] pcsc::Error),
+    Link(String),
+    /// another program reset the card under us; `again` turns a second one into `Reset`
+    #[error("the smart card was reset by another program")]
+    WasReset,
     #[error("another program reset the key part-way through (YubiKey Manager, or gpg-agent, was talking to it at the same time); it was tried again and reset again. Close YubiKey Manager, unplug and replug the key, and try once more")]
     Reset,
     #[error("no YubiKey found")]
@@ -54,7 +57,7 @@ pub struct CardInfo {
 /// connection, once; PIN and touch are part of it, so a half-done sequence is never resumed.
 fn again<T>(f: impl Fn() -> Result<T, CardError>) -> Result<T, CardError> {
     match f() {
-        Err(CardError::Pcsc(pcsc::Error::ResetCard)) => { std::thread::sleep(std::time::Duration::from_millis(250)); f().map_err(|e| if matches!(e, CardError::Pcsc(pcsc::Error::ResetCard)) { CardError::Reset } else { e }) }
+        Err(CardError::WasReset) => { std::thread::sleep(std::time::Duration::from_millis(250)); f().map_err(|e| if matches!(e, CardError::WasReset) { CardError::Reset } else { e }) }
         r => r,
     }
 }
@@ -69,7 +72,9 @@ fn hint_for(sw: u16) -> String {
 }
 
 /// Send one APDU, following 61xx GET RESPONSE chaining. Returns data (without SW).
-fn apdu(card: &Card, cla: u8, ins: u8, p1: u8, p2: u8, data: &[u8]) -> Result<Vec<u8>, CardError> {
+pub(crate) fn apdu(card: &dyn Wire, cla: u8, ins: u8, p1: u8, p2: u8, data: &[u8]) -> Result<Vec<u8>, CardError> { apdu_more(card, cla, ins, p1, p2, data, 0xC0) }
+/// The same, for an applet that asks for the rest of a long answer with its own instruction (OATH uses A5, not C0).
+pub(crate) fn apdu_more(card: &dyn Wire, cla: u8, ins: u8, p1: u8, p2: u8, data: &[u8], more: u8) -> Result<Vec<u8>, CardError> {
     let mut cmd = vec![cla, ins, p1, p2];
     if !data.is_empty() {
         cmd.push(data.len() as u8);
@@ -77,8 +82,7 @@ fn apdu(card: &Card, cla: u8, ins: u8, p1: u8, p2: u8, data: &[u8]) -> Result<Ve
     }
     cmd.push(0x00); // Le
     let mut out = Vec::new();
-    let mut buf = vec![0u8; 4096];
-    let mut resp = card.transmit(&cmd, &mut buf)?.to_vec();
+    let mut resp = card.send(&cmd)?;
     loop {
         if resp.len() < 2 {
             return Err(CardError::Parse);
@@ -89,8 +93,7 @@ fn apdu(card: &Card, cla: u8, ins: u8, p1: u8, p2: u8, data: &[u8]) -> Result<Ve
         match sw1 {
             0x90 if sw2 == 0x00 => return Ok(out),
             0x61 => {
-                let mut b = vec![0u8; 4096];
-                resp = card.transmit(&[0x00, 0xC0, 0x00, 0x00, sw2], &mut b)?.to_vec();
+                resp = card.send(&[0x00, more, 0x00, 0x00, sw2])?;
             }
             0x63 if sw2 & 0xF0 == 0xC0 => return Err(CardError::WrongPin(sw2 & 0x0F)),
             0x66 if sw2 == 0x00 => return Err(CardError::NoTouch),
@@ -103,7 +106,7 @@ fn apdu(card: &Card, cla: u8, ins: u8, p1: u8, p2: u8, data: &[u8]) -> Result<Ve
 }
 
 /// Minimal BER-TLV: returns (tag, value, rest).
-fn tlv(buf: &[u8]) -> Option<(u16, &[u8], &[u8])> {
+pub(crate) fn tlv(buf: &[u8]) -> Option<(u16, &[u8], &[u8])> {
     if buf.is_empty() {
         return None;
     }
@@ -124,7 +127,7 @@ fn tlv(buf: &[u8]) -> Option<(u16, &[u8], &[u8])> {
     Some((tag, v, &buf[i + len..]))
 }
 
-fn find(buf: &[u8], want: u16) -> Option<&[u8]> {
+pub(crate) fn find(buf: &[u8], want: u16) -> Option<&[u8]> {
     let mut rest = buf;
     while let Some((t, v, r)) = tlv(rest) {
         if t == want {
@@ -135,12 +138,34 @@ fn find(buf: &[u8], want: u16) -> Option<&[u8]> {
     None
 }
 
-fn select(card: &Card) -> Result<(), CardError> {
+pub(crate) fn select(card: &dyn Wire) -> Result<(), CardError> {
     apdu(card, 0x00, 0xA4, 0x04, 0x00, AID_OPENPGP).map(|_| ())
 }
 
+/// How many tries each PIN has left: [key PIN, reset code, admin PIN], from the PW status bytes (C4).
+pub(crate) fn pin_tries(card: &dyn Wire) -> Option<[u8; 3]> {
+    let ad = app_data(card).ok()?;
+    let c4 = find(find(&ad, 0x73).unwrap_or(&ad), 0xC4).or_else(|| find(&ad, 0xC4))?;
+    (c4.len() >= 7).then(|| [c4[4], c4[5], c4[6]])
+}
+
+/// What a YubiKey's refusal of a PIN means. It answers 6982 for a wrong PIN and 6983 for a blocked one, and never
+/// says how many tries are left in the answer itself: that is read from the PW status bytes afterwards.
+pub(crate) fn pin_refusal(card: &dyn Wire, p2: u8, e: CardError) -> CardError {
+    match e {
+        CardError::Sw { sw: 0x6982, .. } => match pin_tries(card) { Some(t) => CardError::WrongPin(t[if p2 == 0x83 { 2 } else { 0 }]), None => e },
+        CardError::Sw { sw: 0x6983, .. } => CardError::WrongPin(0),
+        e => e,
+    }
+}
+
+/// VERIFY: 81 the key PIN for a signature, 82 the key PIN for everything else, 83 the admin PIN.
+pub(crate) fn verify(card: &dyn Wire, p2: u8, pin: &str) -> Result<(), CardError> {
+    apdu(card, 0x00, 0x20, 0x00, p2, pin.as_bytes()).map(|_| ()).map_err(|e| pin_refusal(card, p2, e))
+}
+
 /// Application related data — the card answers with the whole 6E object; return its contents.
-fn app_data(card: &Card) -> Result<Vec<u8>, CardError> {
+pub(crate) fn app_data(card: &dyn Wire) -> Result<Vec<u8>, CardError> {
     let raw = apdu(card, 0x00, 0xCA, 0x00, 0x6E, &[])?;
     match tlv(&raw) {
         Some((0x6E, v, _)) => Ok(v.to_vec()),
@@ -158,18 +183,15 @@ fn compress(point: &[u8]) -> Option<[u8; 33]> {
     Some(out)
 }
 
-fn read_sig_pubkey(card: &Card) -> Option<[u8; 33]> {
+pub(crate) fn read_sig_pubkey(card: &dyn Wire) -> Option<[u8; 33]> {
     let resp = apdu(card, 0x00, 0x47, 0x81, 0x00, &[0xB6, 0x00]).ok()?;
     let pk = find(&resp, 0x7F49)?;
     let point = find(pk, 0x86)?;
     compress(point)
 }
 
-fn connect(ctx: &Context, reader: &str) -> Result<Card, CardError> {
-    let cname = std::ffi::CString::new(reader).map_err(|_| CardError::Parse)?;
-    let card = ctx.connect(&cname, ShareMode::Shared, Protocols::ANY)?;
-    select(&card)?;
-    Ok(card)
+fn connect(reader: &str) -> Result<Card, CardError> {
+    match transport::open(reader)? { Opened::Card(card) => { select(&card)?; Ok(card) }, Opened::NotACard => Err(CardError::NotFound) }
 }
 
 /// What a plugged-in Yubico device turned out to be, judged by what it ANSWERED rather than by its name.
@@ -182,16 +204,10 @@ pub enum Probe { Key(Card), Other(String) }
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OtherDevice { pub reader: String, pub why: String }
 
-fn probe(ctx: &Context, reader: &str) -> Result<Probe, CardError> {
-    let cname = std::ffi::CString::new(reader).map_err(|_| CardError::Parse)?;
-    let card = match ctx.connect(&cname, ShareMode::Shared, Protocols::ANY) {
-        Ok(c) => c,
-        // listed a moment ago and gone now, or a reader with nothing a smart-card service can talk to: that is not
-        // a key failing, it is not a key. (A YubiKey Bio showed up exactly this way on 2026-09-21.)
-        Err(pcsc::Error::UnknownReader) | Err(pcsc::Error::NoSmartcard) | Err(pcsc::Error::RemovedCard)
-        | Err(pcsc::Error::ReaderUnavailable) | Err(pcsc::Error::UnpoweredCard) | Err(pcsc::Error::UnresponsiveCard) =>
-            return Ok(Probe::Other("the computer can see it, but it does not answer as a smart card".into())),
-        Err(e) => return Err(e.into()),
+pub(crate) fn probe(reader: &str) -> Result<Probe, CardError> {
+    let card = match transport::open(reader)? {
+        Opened::Card(c) => c,
+        Opened::NotACard => return Ok(Probe::Other("the computer can see it, but it does not answer as a smart card".into())),
     };
     match select(&card) {
         Ok(()) => Ok(Probe::Key(card)),
@@ -201,22 +217,17 @@ fn probe(ctx: &Context, reader: &str) -> Result<Probe, CardError> {
 
 /// Every Yubico device plugged in that is NOT a key this app can use, and why.
 pub fn others() -> Vec<OtherDevice> {
-    let Ok(ctx) = Context::establish(Scope::User) else { return vec![] };
-    let Ok(names) = readers(&ctx) else { return vec![] };
-    names.into_iter().filter_map(|reader| match probe(&ctx, &reader) {
+    let Ok(names) = readers() else { return vec![] };
+    names.into_iter().filter_map(|reader| match probe(&reader) {
         Ok(Probe::Other(why)) => Some(OtherDevice { reader, why }),
         _ => None,
     }).collect()
 }
 
-fn readers(ctx: &Context) -> Result<Vec<String>, CardError> {
-    let mut buf = vec![0u8; 2048];
-    let names = ctx.list_readers(&mut buf)?;
-    Ok(names.map(|n| n.to_string_lossy().into_owned()).filter(|n| n.to_lowercase().contains("yubi")).collect())
-}
+pub(crate) fn readers() -> Result<Vec<String>, CardError> { transport::readers() }
 
 /// The key's shape, NFC and firmware, from the YubiKey management applet (READ CONFIG). Leaves OpenPGP selected again.
-fn hardware(card: &Card) -> (u8, bool, String) {
+fn hardware(card: &dyn Wire) -> (u8, bool, String) {
     const AID_MGMT: &[u8] = &[0xA0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17];
     let cfg = apdu(card, 0x00, 0xA4, 0x04, 0x00, AID_MGMT).and_then(|_| apdu(card, 0x00, 0x1D, 0x00, 0x00, &[])).ok();
     let tlvs = cfg.as_deref().and_then(|c| c.get(1..)).unwrap_or(&[]);
@@ -229,10 +240,9 @@ fn hardware(card: &Card) -> (u8, bool, String) {
 
 pub fn list() -> Result<Vec<CardInfo>, CardError> { again(|| list_once()) }
 fn list_once() -> Result<Vec<CardInfo>, CardError> {
-    let ctx = Context::establish(Scope::User)?;
     let mut out = Vec::new();
-    for reader in readers(&ctx)? {
-        let card = match probe(&ctx, &reader) { Ok(Probe::Key(c)) => c, _ => continue };
+    for reader in readers()? {
+        let card = match probe(&reader) { Ok(Probe::Key(c)) => c, _ => continue };
         let ad = app_data(&card)?;
         let aid = find(&ad, 0x4F).ok_or(CardError::Parse)?;
         if aid.len() < 14 {
@@ -263,9 +273,8 @@ fn list_once() -> Result<Vec<CardInfo>, CardError> {
 /// Replaces whatever was in the slot. Needs the ADMIN PIN.
 pub fn generate(reader: &str, admin_pin: &str) -> Result<String, CardError> { again(|| generate_once(reader, admin_pin)) }
 fn generate_once(reader: &str, admin_pin: &str) -> Result<String, CardError> {
-    let ctx = Context::establish(Scope::User)?;
-    let card = connect(&ctx, reader)?;
-    apdu(&card, 0x00, 0x20, 0x00, 0x83, admin_pin.as_bytes())?;
+    let card = connect(reader)?;
+    verify(&card, 0x83, admin_pin)?;
     let mut attrs = vec![0x13];
     attrs.extend_from_slice(OID_SECP256K1);
     apdu(&card, 0x00, 0xDA, 0x00, 0xC1, &attrs)?;
@@ -282,8 +291,7 @@ fn generate_once(reader: &str, admin_pin: &str) -> Result<String, CardError> {
 /// Returns (r, s) with low-S.
 pub fn sign_digest(reader: &str, pin: &str, digest: &[u8; 32]) -> Result<([u8; 32], [u8; 32]), CardError> { again(|| sign_digest_once(reader, pin, digest)) }
 fn sign_digest_once(reader: &str, pin: &str, digest: &[u8; 32]) -> Result<([u8; 32], [u8; 32]), CardError> {
-    let ctx = Context::establish(Scope::User)?;
-    let card = connect(&ctx, reader)?;
+    let card = connect(reader)?;
     sign_on_card(&card, pin, digest)
 }
 
@@ -291,8 +299,7 @@ fn sign_digest_once(reader: &str, pin: &str, digest: &[u8; 32]) -> Result<([u8; 
 /// that verifies the PIN and signs; never sign after a card swap or policy change.
 pub fn sign_digest_checked(reader: &str, pin: &str, digest: &[u8;32], expected: &[u8;33]) -> Result<([u8;32], [u8;32]), CardError> { again(|| sign_digest_checked_once(reader, pin, digest, expected)) }
 fn sign_digest_checked_once(reader: &str, pin: &str, digest: &[u8;32], expected: &[u8;33]) -> Result<([u8;32], [u8;32]), CardError> {
-    let ctx = Context::establish(Scope::User)?;
-    let card = connect(&ctx, reader)?;
+    let card = connect(reader)?;
     if read_sig_pubkey(&card).as_ref() != Some(expected) { return Err(CardError::Changed); }
     if apdu(&card, 0x00, 0xCA, 0x00, 0xD6, &[])?.first() != Some(&2) { return Err(CardError::Unverified); }
     sign_on_card(&card, pin, digest)
@@ -301,8 +308,7 @@ fn sign_digest_checked_once(reader: &str, pin: &str, digest: &[u8;32], expected:
 /// Spark setup is never allowed to replace a slot, including a non-secp256k1 key.
 pub fn generate_empty(reader: &str, admin_pin: &str, serial: u32) -> Result<String, CardError> { again(|| generate_empty_once(reader, admin_pin, serial)) }
 fn generate_empty_once(reader: &str, admin_pin: &str, serial: u32) -> Result<String, CardError> {
-    let ctx = Context::establish(Scope::User)?;
-    let card = connect(&ctx, reader)?;
+    let card = connect(reader)?;
     let ad = app_data(&card)?;
     if serial_of(&ad) != serial { return Err(CardError::Changed); }
     let disc = find(&ad, 0x73).ok_or(CardError::Parse)?;
@@ -310,11 +316,12 @@ fn generate_empty_once(reader: &str, admin_pin: &str, serial: u32) -> Result<Str
     if fingerprints.len() < 20 || fingerprints[..20].iter().any(|b| *b != 0) { return Err(CardError::Changed); }
     // Even a key with unset fingerprints is occupied if its public key can be read.
     match apdu(&card, 0x00, 0x47, 0x81, 0x00, &[0xB6, 0x00]) {
-        Err(CardError::Sw { sw: 0x6A88, .. }) => {},
+        // an empty slot: 6A88 by the specification, 6581 from a YubiKey 5.4 (measured on its empty slots, 2026-10-04)
+        Err(CardError::Sw { sw: 0x6A88 | 0x6581, .. }) => {},
         Ok(_) => return Err(CardError::Changed),
         Err(e) => return Err(e),
     }
-    apdu(&card, 0x00, 0x20, 0x00, 0x83, admin_pin.as_bytes())?;
+    verify(&card, 0x83, admin_pin)?;
     let mut attrs = vec![0x13]; attrs.extend_from_slice(OID_SECP256K1);
     apdu(&card, 0x00, 0xDA, 0x00, 0xC1, &attrs)?;
     let resp = apdu(&card, 0x00, 0x47, 0x80, 0x00, &[0xB6, 0x00])?;
@@ -325,8 +332,8 @@ fn generate_empty_once(reader: &str, admin_pin: &str, serial: u32) -> Result<Str
     Ok(hex::encode(comp))
 }
 
-fn sign_on_card(card: &Card, pin: &str, digest: &[u8;32]) -> Result<([u8;32], [u8;32]), CardError> {
-    apdu(&card, 0x00, 0x20, 0x00, 0x81, pin.as_bytes())?;
+pub(crate) fn sign_on_card(card: &dyn Wire, pin: &str, digest: &[u8;32]) -> Result<([u8;32], [u8;32]), CardError> {
+    verify(&card, 0x81, pin)?;
     let mut raw = None;
     for _ in 0..4 {
         match apdu(&card, 0x00, 0x2A, 0x9E, 0x9A, digest) {
@@ -353,20 +360,19 @@ fn sign_on_card(card: &Card, pin: &str, digest: &[u8;32]) -> Result<([u8;32], [u
 #[derive(Debug, Clone, Serialize)]
 pub struct Sealed { pub reader: String, pub serial: u32, pub pubkey: Option<String>, pub container: Vec<u8>, pub room: usize }
 
-fn serial_of(ad: &[u8]) -> u32 {
+pub(crate) fn serial_of(ad: &[u8]) -> u32 {
     find(ad, 0x4F).filter(|a| a.len() >= 14).map(|a| u32::from_str_radix(&hex::encode(&a[10..14]), 10).unwrap_or(0)).unwrap_or(0)
 }
 
 /// The cardholder-certificate object (7F21) of every plugged-in card, and how many bytes it can hold.
 pub fn read_sealed() -> Result<Vec<Sealed>, CardError> { again(|| read_sealed_once()) }
 fn read_sealed_once() -> Result<Vec<Sealed>, CardError> {
-    let ctx = Context::establish(Scope::User)?;
     let mut out = Vec::new();
-    for reader in readers(&ctx)? {
+    for reader in readers()? {
         // A KEY that is plugged in but unreadable is an error, not an absent key — so a failing vault key is never
         // quietly treated as missing. But a device that is not an OpenPGP key at all (a Bio, a FIDO-only key) is not
         // a key failing: it is skipped, and reported as plugged in and unusable by `others()`.
-        let card = match probe(&ctx, &reader)? { Probe::Key(c) => c, Probe::Other(_) => continue };
+        let card = match probe(&reader)? { Probe::Key(c) => c, Probe::Other(_) => continue };
         let ad = app_data(&card)?;
         // extended capabilities (C0): bytes 4..6 = the longest certificate the card will store
         let room = find(&ad, 0x73).and_then(|d| find(d, 0xC0)).filter(|c| c.len() >= 6).map(|c| ((c[4] as usize) << 8) | c[5] as usize).unwrap_or(0);
@@ -380,10 +386,9 @@ fn read_sealed_once() -> Result<Vec<Sealed>, CardError> {
 /// else by now, nothing is written. Needs the ADMIN PIN. The write is read back and compared before returning.
 pub fn write_sealed(reader: &str, admin_pin: &str, expect: &[u8], data: &[u8]) -> Result<(), CardError> { again(|| write_sealed_once(reader, admin_pin, expect, data)) }
 fn write_sealed_once(reader: &str, admin_pin: &str, expect: &[u8], data: &[u8]) -> Result<(), CardError> {
-    let ctx = Context::establish(Scope::User)?;
-    let card = connect(&ctx, reader)?;
+    let card = connect(reader)?;
     if apdu(&card, 0x00, 0xCA, 0x7F, 0x21, &[])? != expect { return Err(CardError::Changed); }
-    apdu(&card, 0x00, 0x20, 0x00, 0x83, admin_pin.as_bytes())?;
+    verify(&card, 0x83, admin_pin)?;
     // command chaining: every block but the last carries CLA bit 0x10
     let blocks: Vec<&[u8]> = data.chunks(255).collect();
     for (i, b) in blocks.iter().enumerate() {
@@ -399,9 +404,8 @@ fn write_sealed_once(reader: &str, admin_pin: &str, expect: &[u8], data: &[u8]) 
 /// left alone. The write is read back before it is trusted.
 pub fn seal_key(reader: &str, pin: &str, create: bool) -> Result<Option<[u8; 32]>, CardError> { again(|| seal_key_once(reader, pin, create)) }
 fn seal_key_once(reader: &str, pin: &str, create: bool) -> Result<Option<[u8; 32]>, CardError> {
-    let ctx = Context::establish(Scope::User)?;
-    let card = connect(&ctx, reader)?;
-    apdu(&card, 0x00, 0x20, 0x00, 0x82, pin.as_bytes())?;
+    let card = connect(reader)?;
+    verify(&card, 0x82, pin)?;
     let parse = |v: &[u8]| -> Result<Option<[u8; 32]>, CardError> {
         if v.is_empty() { return Ok(None); }
         if v.len() != 36 || &v[..4] != crate::seal::KEY_MAGIC { return Err(CardError::PrivateInUse); }

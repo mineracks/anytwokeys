@@ -178,7 +178,18 @@ pub struct Store {
     /// already exists, so a version once seen stays true — which is what makes it safe to answer for a key that is
     /// not plugged in, and it is the only way an off-site key can be checked against an advisory at all.
     #[serde(default)] pub key_fw: std::collections::HashMap<String, String>,
+    /// keys set up here (PINs chosen, signing key made, first signature checked) that are not in a vault yet, by
+    /// public key: the name given at setup, so making a vault with one is a single click and not a second ceremony
+    #[serde(default)] pub key_ready: std::collections::HashMap<String, KeyReady>,
+    /// serials of new keys the person asked not to be offered setup for again
+    #[serde(default)] pub key_skip: Vec<u32>,
+    /// serials whose two PINs were set here but whose setup was not finished. Such a key still LOOKS untouched to
+    /// anything that reads it without a PIN, and offering it the factory PINs again would spend a try for nothing.
+    #[serde(default)] pub key_begun: Vec<u32>,
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct KeyReady { pub name: String, pub serial: u32, pub at: u64 }
 
 pub fn network_of(s: &str) -> Network {
     match s {

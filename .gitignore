@@ -1,5 +1,7 @@
 node_modules/
 src-tauri/target/
-src-tauri/gen/
+# the Xcode and Android projects are kept: they carry hand-made changes (entitlements, MainActivity). Their own
+# .gitignore files leave build output out. Only the generated schemas are not kept.
+src-tauri/gen/schemas/
 icon.svg.png
 .DS_Store

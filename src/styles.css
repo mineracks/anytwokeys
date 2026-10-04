@@ -764,3 +764,44 @@ a.tag{text-decoration:none;cursor:pointer} a.tag:hover{text-decoration:underline
 @keyframes busy{from{left:-40%}to{left:100%}}
 @media (prefers-reduced-motion: reduce){.busybar::after{animation:none;left:0;width:100%;opacity:.5}}
 .icpick.busy [data-glyph]{opacity:.45;pointer-events:none}
+
+/* a brand-new key: the offer, which never takes the focus, and the walk */
+#keyoffer{position:fixed;right:22px;bottom:22px;z-index:30;display:flex;gap:14px;align-items:center;width:min(470px,calc(100vw - 44px));padding:14px 16px;background:var(--panel);border:1px solid var(--gold);border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.14)}
+#keyoffer[hidden]{display:none}
+.ko-art{flex:0 0 auto;line-height:0} .ko-body{display:flex;flex-direction:column;gap:6px;min-width:0}
+.ko-body b{font-family:var(--display);font-weight:700;font-size:15px} .ko-body .muted{font-size:13px} .ko-body .row{gap:10px;align-items:center;margin-top:2px} .ko-body .linkish{align-self:center}
+body.offer-on .toast{bottom:150px}
+#keyinit{position:fixed;inset:0;z-index:150;background:var(--ground);display:flex;justify-content:center;align-items:flex-start;padding:28px 24px;overflow:auto}
+#keyinit[hidden]{display:none}
+.ki-card{width:min(900px,100%);display:flex;flex-direction:column;gap:22px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:22px 26px 26px}
+.ki-top{display:flex;align-items:center;gap:16px} .ki-top .linkish{align-self:center;margin-left:auto} .ki-here{font-family:var(--display);font-size:13px;font-weight:600}
+.ki-prog{display:flex;flex-wrap:wrap;gap:6px 0;list-style:none;margin:0;padding:0;counter-reset:ki;font-family:var(--display);font-size:11.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}
+.ki-prog li{counter-increment:ki;display:flex;align-items:center;gap:6px}
+.ki-prog li::before{content:counter(ki);display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;border:1.5px solid var(--line);font-size:11px;letter-spacing:0}
+.ki-prog li + li{margin-left:8px} .ki-prog li span{display:none}
+.ki-prog li.now{color:var(--ink)} .ki-prog li.now span{display:inline} .ki-prog li.now::before{background:var(--gold);border-color:var(--gold);color:#fff}
+.ki-prog li.done::before{content:"\2713";background:var(--signal);border-color:var(--signal);color:#fff}
+#keyinit .guide{flex-basis:270px;background:var(--ground)} #keyinit .guide-body{min-height:300px;gap:12px}
+.ki-keyart{position:relative;display:flex;justify-content:center;align-items:center;padding:26px 0;line-height:0} .ki-keyart svg{width:auto} .ki-tick{position:absolute;right:26%;bottom:18px}
+.ki-t{font:700 10px var(--display);letter-spacing:.08em;fill:var(--muted)} .ki-t.s{font-weight:600;font-size:9px;letter-spacing:.02em;text-anchor:start} .ki-rule{fill:none;stroke:var(--line);stroke-width:1.5;stroke-linecap:round}
+.ki-rows{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.ki-row{display:grid;grid-template-columns:minmax(150px,200px) minmax(0,1fr) auto;gap:12px;align-items:baseline;padding:8px 12px;font-size:13.5px} .ki-row + .ki-row{border-top:1px solid var(--line)}
+.ki-row b{font-family:var(--display);font-weight:600;font-size:13px} .ki-row .muted{font-size:13px} .ki-row .tag{margin-left:0}
+.ki-two{display:grid;grid-template-columns:1fr 1fr;gap:14px} .ki-two > div{display:flex;flex-direction:column;gap:6px;align-items:flex-start;border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+.ki-two b{font-family:var(--display);font-weight:700;font-size:15px} .ki-two .tag{margin-left:0} .ki-two .muted{font-size:13px}
+.ki-narrow{max-width:320px}
+.ki-record{display:flex;flex-direction:column;max-width:420px;border:1px dashed var(--muted);border-radius:8px;padding:6px 16px;background:var(--ground)}
+.ki-record > div{display:grid;grid-template-columns:96px minmax(0,1fr) auto;gap:10px;align-items:baseline;padding:7px 0} .ki-record > div + div{border-top:1px solid var(--line)}
+.ki-record span{font-family:var(--display);font-size:11.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)} .ki-record b{font-family:var(--display);font-weight:600;font-size:14px;overflow-wrap:anywhere} .ki-record b.mono{font-family:var(--mono)}
+.ki-record small{color:var(--muted);font-size:12px} .ki-record i{display:block;height:1.2em;border-bottom:1.5px solid var(--muted);grid-column:2 / 4}
+.ki-form{display:grid;grid-template-columns:repeat(2,minmax(0,250px));gap:10px 16px} .ki-form.one{grid-template-columns:minmax(0,300px)}
+.ki-say{min-height:1.3em;font-size:12.5px;color:var(--signal)} .ki-say.bad{color:var(--no)}
+.ki-reveal{white-space:pre;font-size:14px;padding:10px 14px;border:1px solid var(--gold);border-radius:6px;background:var(--gold-soft);align-self:flex-start;-webkit-user-select:none;user-select:none}
+.ki-did{display:flex;flex-direction:column;gap:6px} .ki-did > div{display:flex;gap:10px;align-items:baseline}
+.ki-foot{margin-top:6px;gap:10px} .ki-err{color:var(--no)}
+#keyinit .vchip{align-self:flex-start;text-align:left} #keyinit .vchip:disabled{opacity:.6;cursor:default}
+@media (max-width:760px){.ki-two,.ki-form{grid-template-columns:1fr}}
+/* New vault: one panel per plugged-in key that is not in the vault yet */
+.enrol{display:flex;gap:16px;align-items:flex-start;padding-top:14px;border-top:1px solid var(--line)} .enrol .keyart{flex:0 0 auto;line-height:0;padding-top:2px}
+.enrol-body{display:flex;flex-direction:column;gap:10px;min-width:0;flex:1} .enrol-body .grid2{max-width:560px}
+.recv-grid{display:grid;grid-template-columns:300px 1fr;gap:28px;align-items:start}

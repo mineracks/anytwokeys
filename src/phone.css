@@ -1,0 +1,53 @@
+/* Any Two Keys on a phone. Everything the desktop stylesheet says still holds; this only re-arranges it for a narrow
+   screen held in one hand: the sidebar becomes a drawer behind "More", the four things done most sit in a bar under
+   the thumb, columns stack, and nothing is smaller than a fingertip. Nothing here applies to a window wider than a
+   phone, so the Mac app is untouched. */
+#tabbar,#side-close{display:none}
+@media (max-width:700px){
+  body{flex-direction:column}
+  .divider{display:none}
+  /* the sidebar, whole, as a drawer */
+  .side{position:fixed;inset:0;z-index:60;width:auto;flex:none;transform:translateX(-102%);transition:transform .22s ease;padding:calc(18px + env(safe-area-inset-top)) 16px calc(18px + env(safe-area-inset-bottom));border-right:0}
+  body.drawer .side{transform:none}
+  #side-close{display:block;position:absolute;top:calc(20px + env(safe-area-inset-top));right:18px;font-size:14px;z-index:1}
+  .side .nav{min-height:46px;font-size:15px}
+  .main{flex:1 1 auto;min-height:0}
+  .top{padding:calc(10px + env(safe-area-inset-top)) 16px 10px;gap:10px}
+  .top h1{font-size:19px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .content{padding:16px 16px calc(86px + env(safe-area-inset-bottom));gap:16px;-webkit-overflow-scrolling:touch}
+  #staged-bar{padding-inline:16px;flex-wrap:wrap}
+  /* under the thumb */
+  #tabbar{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:50;background:var(--panel);border-top:1px solid var(--line);padding:4px 6px calc(4px + env(safe-area-inset-bottom));justify-content:space-around;gap:2px}
+  #tabbar .nav{flex:1 1 0;flex-direction:column;gap:3px;font-size:11px;padding:6px 2px;min-height:50px;justify-content:center;border:0;background:none;letter-spacing:0}
+  #tabbar .nav.on{background:none;color:var(--ink)} #tabbar .nav.on svg{color:var(--gold)}
+  #tabbar .nav svg{width:22px;height:22px;flex:0 0 22px}
+  /* one column, fingertip-sized */
+  .grid2,.grid3,.split,.txgrid{grid-template-columns:minmax(0,1fr)}
+  .card{padding:16px}
+  input,select,textarea,.field input,.field textarea,.field select{font-size:16px}   /* below 16px iOS zooms the page on focus */
+  .btn.small{min-height:40px;padding:8px 14px;font-size:13px}
+  .linkish{padding:6px 0}
+  .big{font-size:28px}
+  /* the first screens */
+  .welcome{padding:calc(28px + env(safe-area-inset-top)) 16px calc(28px + env(safe-area-inset-bottom));gap:24px;height:auto;min-height:100%;justify-content:flex-start;overflow:auto}
+  .welcome h1{font-size:32px}
+  .corner-chip{position:static;align-self:flex-end}
+  /* a new key: the offer and the walk */
+  #keyoffer{left:12px;right:12px;width:auto;bottom:calc(74px + env(safe-area-inset-bottom))}
+  .ko-body .row{flex-wrap:wrap}
+  .toast{left:12px;right:12px;max-width:none;bottom:calc(74px + env(safe-area-inset-bottom))} body.offer-on .toast{bottom:calc(230px + env(safe-area-inset-bottom))}
+  #keyinit{padding:calc(10px + env(safe-area-inset-top)) 10px calc(16px + env(safe-area-inset-bottom))}
+  .ki-card{padding:14px 14px 18px;gap:14px}
+  #keyinit .guide{flex-basis:auto;max-width:none;max-height:150px;display:flex;justify-content:center} #keyinit .guide svg{width:auto;max-height:150px} .ki-keyart{padding:10px 0} .ki-keyart svg{max-height:120px}
+  /* stacked, the picture and the words each take the height they need: a flex-basis meant as a WIDTH must not become a height */
+  .guide-row > .guide,.guide-row > .guide-body{flex:0 0 auto} .guide-body{min-height:0}
+  #keyinit .guide-body{min-height:0} .ki-rows,.ki-two,.ki-record,.ki-form{flex:0 0 auto}
+  .ki-prog li::before{width:18px;height:18px;font-size:10px} .ki-prog li + li{margin-left:5px} .ki-top{gap:8px}
+  .ki-row{grid-template-columns:minmax(0,1fr) auto} .ki-row .muted{grid-column:1 / -1;grid-row:2}
+  .ki-foot .btn{flex:1 1 auto}
+  .enrol{flex-direction:column}
+  /* Receive: the code first, at the width of the screen, then the address under it */
+  .recv-grid{grid-template-columns:minmax(0,1fr);gap:16px} .recv-grid > *{min-width:0} #addr-text{word-break:break-all} #copy-addr{width:100% !important}
+  .pencil{padding:9px !important;margin:-6px 0;min-height:36px}
+  #lock,#curtain{padding:calc(24px + env(safe-area-inset-top)) 16px}
+}

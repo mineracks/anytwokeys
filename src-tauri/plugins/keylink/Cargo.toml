@@ -1,0 +1,16 @@
+[package]
+name = "tauri-plugin-keylink"
+version = "0.1.0"
+description = "Any Two Keys — the wire to a YubiKey on a phone: USB-C through the system's smart-card service, or NFC"
+authors = ["mineracks pty ltd"]
+license = "MIT"
+edition = "2021"
+links = "tauri-plugin-keylink"
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }
+
+[dependencies]
+tauri = { version = "2" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

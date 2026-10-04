@@ -268,7 +268,7 @@ pub fn migrate() -> Result<Migration, String> {
 
 // -------------------------------------------------------------------- mac --
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub mod mac {
     const SERVICE: &str = "com.anytwokeys.app.store-key";
     // errSecItemNotFound
@@ -297,7 +297,12 @@ pub mod mac {
         }
     }
 
+    /// An iPhone that is locked is not running this app's window at all; there is nothing to ask.
+    #[cfg(target_os = "ios")]
+    pub fn screen_locked() -> bool { false }
+
     /// Is the Mac's screen locked right now? From the window server's description of this login session.
+    #[cfg(target_os = "macos")]
     pub fn screen_locked() -> bool {
         use core_foundation::base::{CFType, TCFType};
         use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
@@ -321,7 +326,7 @@ pub mod mac {
         let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
         unsafe {
             let ctx = LAContext::new();
-            if let Err(e) = ctx.canEvaluatePolicy_error(LAPolicy::DeviceOwnerAuthentication) { return Err(format!("this Mac cannot ask for Touch ID or a password: {}", e.localizedDescription())); }
+            if let Err(e) = ctx.canEvaluatePolicy_error(LAPolicy::DeviceOwnerAuthentication) { return Err(format!("this device cannot ask for Touch ID, Face ID or its passcode: {}", e.localizedDescription())); }
             let reply = RcBlock::new(move |ok: Bool, err: *mut NSError| {
                 let r = if ok.as_bool() { Ok(()) } else if err.is_null() { Err("not confirmed".to_string()) } else { Err((*err).localizedDescription().to_string()) };
                 let _ = tx.send(r);
@@ -332,7 +337,29 @@ pub mod mac {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// An Android phone: the same four questions, answered by the phone's hardware keystore and its own unlock prompt
+/// (plugins/keylink, Kotlin side). The module keeps its name so every caller reads the same on every platform.
+#[cfg(target_os = "android")]
+pub mod mac {
+    #[derive(serde::Deserialize)] struct Slot { key: Option<String> }
+    #[derive(serde::Deserialize)] struct Nothing {}
+    pub fn screen_locked() -> bool { false }
+    pub fn get(account: &str) -> Result<Option<[u8; 32]>, String> {
+        let s: Slot = tauri_plugin_keylink::call("slotGet", serde_json::json!({ "account": account }))?;
+        match s.key { None => Ok(None), Some(h) => hex::decode(h).ok().and_then(|b| b.try_into().ok()).map(Some).ok_or_else(|| "the phone's keystore item for Any Two Keys is not a 32-byte key".to_string()) }
+    }
+    pub fn set(account: &str, k: &[u8; 32]) -> Result<(), String> {
+        tauri_plugin_keylink::call::<Nothing>("slotSet", serde_json::json!({ "account": account, "key": hex::encode(k) })).map(|_| ())
+    }
+    pub fn forget(account: &str) -> Result<(), String> {
+        tauri_plugin_keylink::call::<Nothing>("slotForget", serde_json::json!({ "account": account })).map(|_| ())
+    }
+    pub fn presence(reason: &str) -> Result<(), String> {
+        tauri_plugin_keylink::call::<Nothing>("presence", serde_json::json!({ "reason": reason })).map(|_| ())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
 pub mod mac {
     pub fn screen_locked() -> bool { false }
     pub fn get(_: &str) -> Result<Option<[u8; 32]>, String> { Ok(None) }

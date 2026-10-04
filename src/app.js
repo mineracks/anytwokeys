@@ -499,6 +499,7 @@ async function pollCards() {
   if ($('#s-restore').classList.contains('on') && restoreTab.now === 'keys') readSeals();
   if ($('#s-sign').classList.contains('on')) renderSign();
   if ($('#s-messages').classList.contains('on')) { const c = cards.find(c => c.pubkey); const was = renderMessages.had; renderMessages.had = !!c; if (was !== !!c) renderMessages(); }
+  if (typeof keyOfferTick === 'function') keyOfferTick().catch(() => {});
   setTimeout(pollCards, 2000);
 }
 function cardLabel(c) { return `YubiKey 5 · serial ${c.serial} · ${c.version}`; }
@@ -3771,42 +3772,64 @@ function renderSetup() {
   $('#add-device').closest('.row').hidden = setup.n < 2;
   $('#add-device').disabled = remaining <= 0;
   if (remaining === 0) { box.innerHTML = `<div class="ok">All ${setup.n} keys ${setup.keys.some(k => k.expression) ? 'added' : 'enrolled'}.</div>`; return; }
-  const fresh = cards.find(c => !setup.keys.some(k => k.serial === c.serial));
-  if (!fresh) { box.innerHTML = `<div class="muted">Key ${setup.keys.length + 1} of ${setup.n}: plug in a YubiKey${setup.n > 1 ? ', or add a signing device' : ''}.</div>`; return; }
-  // a card already named in another vault keeps that name: it is the same key, and the person knows it by it
-  const known = fresh.pubkey ? store.vaults.flatMap(v => v.keys).find(k => k.pubkey === fresh.pubkey && k.name && !/^key \d+/.test(k.name)) : null;
-  const nameGuess = known ? known.name : ['laptop', 'keyring', 'off-site'][setup.keys.length] || `key ${setup.keys.length + 1}`;
-  const has = !!fresh.pubkey;
-  // The card poll redraws this screen every 2 s. Rebuilding the panel each time put a fresh "Name this key" box
-  // under the cursor — focus gone and the typing reset after a keystroke. It is rebuilt only when what it shows
+  // every plugged-in key that is not in the vault yet is offered, each in its own panel: with two keys in the
+  // computer the person chooses which one is next, and is never shown one of them as though it were the only one
+  const waiting = cards.filter(c => !setup.keys.some(k => k.serial === c.serial));
+  if (!waiting.length) { box.innerHTML = `<div class="muted">Key ${setup.keys.length + 1} of ${setup.n}: plug in a YubiKey${setup.n > 1 ? ', or add a signing device' : ''}.</div>`; renderSetup.nowSig = null; return; }
+  const spare = ['laptop', 'keyring', 'off-site'].filter(n => !setup.keys.some(k => k.name === n));
+  const rows = waiting.map((c, i) => {
+    // a card already named in another vault keeps that name: it is the same key, and the person knows it by it
+    const known = c.pubkey ? store.vaults.flatMap(v => v.keys).find(k => k.pubkey === c.pubkey && k.name && !/^key \d+/.test(k.name)) : null;
+    // a key set up here (its PINs chosen, its key made, its first signature checked) is known by the name it was given then
+    const ready = c.pubkey ? (store.key_ready || {})[c.pubkey] : null;
+    const has = !!c.pubkey;
+    // a key with no signing key: is it untouched (set it up here, PINs and all) or does it have PINs of its own already?
+    const looked = has ? null : kiSeen.get(c.serial), isNew = !!(looked && looked.state === 'fresh'), begun = isNew && kiBegun(c.serial);
+    return { c, known, ready, has, looked, isNew, begun, nameGuess: known ? known.name : ready && ready.name ? ready.name : spare[i] || `key ${setup.keys.length + 1 + i}` };
+  });
+  // The card poll redraws this screen every 2 s. Rebuilding the panels each time put a fresh "Name this key" box
+  // under the cursor — focus gone and the typing reset after a keystroke. They are rebuilt only when what they show
   // changes (another card, another step); what was typed is kept across even that.
-  const sig = [fresh.serial, fresh.pubkey || '', setup.keys.length, setup.n].join('|');
-  if (renderSetup.nowSig === sig && box.querySelector('#enrol-name')) return;
+  const sig = rows.map(r => [r.c.serial, r.c.pubkey || '', r.isNew, r.begun].join(':')).concat([setup.keys.length, setup.n]).join('|');
+  if (renderSetup.nowSig === sig && box.querySelector('.enrol')) return;
   renderSetup.nowSig = sig;
-  const typed = renderSetup.typed && renderSetup.typed.serial === fresh.serial ? renderSetup.typed : null;
-  box.innerHTML = `<div style="font-family:var(--display);font-weight:600;font-size:15px">Key ${setup.keys.length + 1}: ${cardLabel(fresh)}</div>
-    <div class="muted" style="font-size:13px">${has ? 'This card already holds a signing key (touch ' + fresh.touch + '). Use it: the same card key can belong to any number of vaults.' : 'OpenPGP signature slot is empty: a key will be generated on the card.'}</div>
-    <div class="grid2"><div class="field"><div class="label">Name this key</div><input id="enrol-name" value="${esc(nameGuess)}">${known ? `<div class="muted" style="font-size:12.5px">Its name in ${esc(store.vaults.find(v => v.keys.includes(known)).name)}</div>` : ''}</div>${has ? '' : '<div class="field"><div class="label">Admin PIN</div><input id="enrol-admin" type="password" autocomplete="off"></div>'}</div>
-    ${has ? '' : '<div class="muted" style="font-size:13px">Factory admin PIN is 12345678. Change it first with YubiKey Manager if you have not. Touch policy will be set to FIXED, which cannot be undone without wiping the key.</div>'}
-    <div class="row">${has ? '<button class="btn primary" id="use-btn">Use this card\'s key</button><button class="btn" id="replace-btn" style="border-color:var(--no);color:var(--no)">Replace it with a new key…</button>' : '<button class="btn primary" id="enrol-btn">Generate key on card</button>'}</div>`;
-  if (typed) { $('#enrol-name').value = typed.name; if (typed.focused) { const i = $('#enrol-name'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }
-  $('#enrol-name').addEventListener('input', () => { renderSetup.typed = { serial: fresh.serial, name: $('#enrol-name').value, focused: true }; });
-  $('#enrol-name').addEventListener('blur', () => { if (renderSetup.typed) renderSetup.typed.focused = false; });
-  if (has) {
-    $('#use-btn').onclick = () => { setup.keys.push({ name: $('#enrol-name').value.trim() || nameGuess, serial: fresh.serial, pubkey: fresh.pubkey, device: cardDevice(fresh) }); toast('enrolled with its existing key'); renderSetup(); };
-    askTwice($('#replace-btn'), 'Generate a NEW key on this card? The key it holds now will be destroyed, and any vault it belongs to loses that cosigner for good. Only for a card that has never held funds.', 'Yes, replace its key', async () => {
-      box.innerHTML += '<div class="field" style="margin-top:12px"><div class="label">Admin PIN</div><input id="enrol-admin" type="password" autocomplete="off" style="max-width:260px"></div><button class="btn" id="enrol-btn" style="border-color:var(--no);color:var(--no);margin-top:10px">Generate a new key, destroying the old one</button>';
-      wireGenerate();
-    });
-  } else wireGenerate();
-  function wireGenerate() { $('#enrol-btn').onclick = async () => {
-    const name = $('#enrol-name').value.trim() || nameGuess, admin = $('#enrol-admin').value;
-    if (!admin) return toast('Enter the admin PIN');
-    $('#enrol-btn').disabled = true;
-    try { const pub = await invoke('card_generate', { reader: fresh.reader, adminPin: admin }); setup.keys.push({ name, serial: fresh.serial, pubkey: pub, device: cardDevice(fresh) }); toast(`${name} enrolled`); }
-    catch (e) { fail(e); }
-    renderSetup();
-  }; }
+  const typedBy = renderSetup.typedBy || (renderSetup.typedBy = {});
+  // the first panel keeps the ids this screen has always had; the others are reached through their own panel
+  const id = (i, name) => i === 0 ? ` id="${name}"` : '';
+  box.innerHTML = `<div style="font-family:var(--display);font-weight:600;font-size:15px">Key ${setup.keys.length + 1} of ${setup.n}${rows.length > 1 ? `: ${rows.length} keys are plugged in. Choose the one to add next` : ''}</div>`
+    + rows.map((r, i) => { const c = r.c, date = r.ready ? new Date(r.ready.at * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' }) : '';
+      const head = `<span class="keyart">${keyArt(c.form || 3, !!c.nfc, 52)}</span><div class="enrol-body"><div style="font-family:var(--display);font-weight:600;font-size:15px">${esc(modelName(c.form, c.nfc))} · serial ${c.serial}${c.firmware ? ' · firmware ' + esc(c.firmware) : ''}</div>`;
+      if (r.isNew) return `<div class="enrol" data-serial="${c.serial}">${head}
+        <div class="muted" style="font-size:13px">${r.begun ? 'This key’s PINs were set here, but its setup was not finished: it has no signing key yet.' : 'This key is new: it has never been set up, and both its PINs are still the ones every YubiKey ships with.'} Setting it up here takes a few minutes and needs no other software.</div>
+        <div class="row"><button class="btn primary enrol-init"${id(i, 'enrol-init')} type="button">${r.begun ? 'Finish setting this key up' : 'Set this key up'}</button></div></div></div>`;
+      return `<div class="enrol" data-serial="${c.serial}">${head}
+        <div class="muted" style="font-size:13px">${r.has ? (r.ready ? `Set up here on ${date}: its PINs are yours, its signing key is made and its first signature was checked. Nothing more to do but add it.` : 'This card already holds a signing key (touch ' + esc(c.touch) + '). Use it: the same card key can belong to any number of vaults.') : 'This key has PINs of its own already and no signing key: one will be made on it.'}</div>
+        <div class="grid2"><div class="field"><div class="label">Name this key</div><input class="enrol-name"${id(i, 'enrol-name')} value="${esc(r.nameGuess)}">${r.known ? `<div class="muted" style="font-size:12.5px">Its name in ${esc(store.vaults.find(v => v.keys.includes(r.known)).name)}</div>` : ''}</div>${r.has ? '' : `<div class="field"><div class="label">Admin PIN</div><input class="enrol-admin"${id(i, 'enrol-admin')} type="password" autocomplete="off"></div>`}</div>
+        ${r.has ? '' : '<div class="muted" style="font-size:13px">Enter the admin PIN this key was given. A touch will be needed for every signature from then on, which cannot be undone without wiping the key.</div>'}
+        <div class="row">${r.has ? `<button class="btn primary use-btn"${id(i, 'use-btn')} type="button">Use this card’s key</button><button class="btn replace-btn"${id(i, 'replace-btn')} type="button" style="border-color:var(--no);color:var(--no)">Replace it with a new key…</button>` : `<button class="btn primary enrol-btn"${id(i, 'enrol-btn')} type="button">Generate key on card</button>`}</div></div></div>`; }).join('');
+  rows.forEach((r) => {
+    const c = r.c, el = box.querySelector(`.enrol[data-serial="${c.serial}"]`), q = (sel) => el.querySelector(sel);
+    if (r.isNew) { q('.enrol-init').onclick = () => kiOpen(r.looked); return; }
+    const nameEl = q('.enrol-name'), typed = typedBy[c.serial];
+    if (typed) { nameEl.value = typed.name; if (typed.focused) { nameEl.focus(); nameEl.setSelectionRange(nameEl.value.length, nameEl.value.length); } }
+    nameEl.addEventListener('input', () => { typedBy[c.serial] = { name: nameEl.value, focused: true }; });
+    nameEl.addEventListener('blur', () => { if (typedBy[c.serial]) typedBy[c.serial].focused = false; });
+    const wireGenerate = () => { q('.enrol-btn').onclick = async () => {
+      const name = nameEl.value.trim() || r.nameGuess, admin = q('.enrol-admin').value;
+      if (!admin) return toast('Enter the admin PIN');
+      q('.enrol-btn').disabled = true;
+      try { const pub = await invoke('card_generate', { reader: c.reader, adminPin: admin }); setup.keys.push({ name, serial: c.serial, pubkey: pub, device: cardDevice(c) }); delete typedBy[c.serial]; toast(`${name} enrolled`); }
+      catch (e) { fail(e); }
+      renderSetup.nowSig = null; renderSetup();
+    }; };
+    if (r.has) {
+      q('.use-btn').onclick = () => { setup.keys.push({ name: nameEl.value.trim() || r.nameGuess, serial: c.serial, pubkey: c.pubkey, device: cardDevice(c) }); delete typedBy[c.serial]; toast('enrolled with its existing key'); renderSetup(); };
+      askTwice(q('.replace-btn'), 'Generate a NEW key on this card? The key it holds now will be destroyed, and any vault it belongs to loses that cosigner for good. Only for a card that has never held funds.', 'Yes, replace its key', async () => {
+        q('.enrol-body').insertAdjacentHTML('beforeend', '<div class="field" style="margin-top:12px"><div class="label">Admin PIN</div><input class="enrol-admin" type="password" autocomplete="off" style="max-width:260px"></div><button class="btn enrol-btn" type="button" style="border-color:var(--no);color:var(--no);margin-top:10px">Generate a new key, destroying the old one</button>');
+        wireGenerate();
+      });
+    } else wireGenerate();
+  });
 }
 function cardDevice(c) { return /nitrokey/i.test(c.reader || '') ? 'nitrokey3' : 'yubikey'; }
 function deviceRow(k) {

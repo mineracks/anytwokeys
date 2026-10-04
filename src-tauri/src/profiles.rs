@@ -74,10 +74,20 @@ fn cur_set(p: Option<Profile>) {
 #[cfg(test)] thread_local! { static ROOT_T: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) }; }
 /// Under test, this thread's root — so a profiles test never touches the process-wide `A2K_DATA_DIR` that other tests use.
 #[cfg(test)] pub fn test_root(p: Option<PathBuf>) { ROOT_T.with(|r| *r.borrow_mut() = p); }
+/// Where the system says this app keeps its files, told once at start. A computer and an iPhone answer through the
+/// usual folders; an Android phone has none of those, and without this the app would write into "." and fail.
+static SYSTEM_DIRS: std::sync::OnceLock<(PathBuf, PathBuf)> = std::sync::OnceLock::new();
+pub fn set_system_dirs(data: PathBuf, documents: PathBuf) { let _ = SYSTEM_DIRS.set((data, documents)); }
+/// The folder a phone's own Files app shows for this app: what is saved from here lands there.
+#[allow(dead_code)]
+pub fn phone_documents() -> Option<PathBuf> {
+    let d = match SYSTEM_DIRS.get() { Some((_, docs)) => docs.clone(), None => dirs::home_dir()?.join("Documents") };
+    std::fs::create_dir_all(&d).ok()?; Some(d)
+}
 pub fn root() -> PathBuf {
     #[cfg(test)] if let Some(r) = ROOT_T.with(|r| r.borrow().clone()) { std::fs::create_dir_all(&r).ok(); return r; }
     #[cfg(test)] let home = std::env::temp_dir().join("a2k-tests-empty");
-    #[cfg(not(test))] let home = dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("Any Two Keys");
+    #[cfg(not(test))] let home = SYSTEM_DIRS.get().map(|(data, _)| data.clone()).or_else(dirs::data_dir).unwrap_or_else(|| PathBuf::from(".")).join("Any Two Keys");
     let dir = match std::env::var_os("A2K_DATA_DIR") { Some(d) => PathBuf::from(d), None => home };
     std::fs::create_dir_all(&dir).ok();
     dir
