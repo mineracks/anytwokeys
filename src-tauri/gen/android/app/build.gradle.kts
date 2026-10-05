@@ -24,6 +24,20 @@ android {
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }
+    // The release build is signed with the upload key, whose whereabouts and password are in key.properties beside
+    // this project (never in git). Without that file the release build is left unsigned rather than failing.
+    signingConfigs {
+        create("release") {
+            val keyFile = rootProject.file("key.properties")
+            if (keyFile.exists()) {
+                val keys = Properties().apply { keyFile.inputStream().use { load(it) } }
+                storeFile = file(keys.getProperty("storeFile"))
+                storePassword = keys.getProperty("password")
+                keyAlias = keys.getProperty("keyAlias")
+                keyPassword = keys.getProperty("password")
+            }
+        }
+    }
     buildTypes {
         getByName("debug") {
             manifestPlaceholders["usesCleartextTraffic"] = "true"
@@ -37,6 +51,7 @@ android {
             }
         }
         getByName("release") {
+            if (rootProject.file("key.properties").exists()) { signingConfig = signingConfigs.getByName("release") }
             isMinifyEnabled = true
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }

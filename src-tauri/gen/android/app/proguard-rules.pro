@@ -19,3 +19,10 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+# The key plugin is found by NAME from the Rust side, and its commands and arguments by reflection: shrinking must
+# not rename or remove any of it. Yubico's library is reached the same way by its own connection classes.
+-keep class com.anytwokeys.keylink.** { *; }
+-keep class com.yubico.yubikit.** { *; }
+-dontwarn com.yubico.yubikit.**
+-dontwarn edu.umd.cs.findbugs.annotations.**
+-dontwarn org.slf4j.**
