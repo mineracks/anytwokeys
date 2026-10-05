@@ -193,6 +193,9 @@ async fn sync_tick() -> R<Option<sync::Outcome>> {
         return sync_once().await.map(Some);
     }
     let Some(st) = sync::state()? else { return Ok(None) };
+    // the first tick after the app opens always syncs: whatever changed while it was closed, here or elsewhere
+    static OPENED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+    if OPENED.swap(false, std::sync::atomic::Ordering::Relaxed) { return sync_once().await.map(Some); }
     // nothing to say here and heard from the host recently: one cheap listing says whether another device has written
     if !sync::DIRTY.load(std::sync::atomic::Ordering::Relaxed) && now().saturating_sub(st.last) < 300 && !sync::changed(&st).await? { return Ok(None); }
     sync_once().await.map(Some)

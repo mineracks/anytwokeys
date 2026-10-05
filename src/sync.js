@@ -69,6 +69,8 @@ async function syncArrived() {
   const was = vault && vault.name;
   store = await invoke('store_get');
   vault = store.vaults.find(v => v.name === was) || store.vaults[0] || null;
+  // the profile's own name and picture may be what arrived
+  try { profilesView = await invoke('profiles_list'); if (profilesView && profilesView.current) { profile = profilesView.current; paintProfileChip(); if (typeof renderProfileCard === 'function' && $('#s-settings').classList.contains('on')) renderProfileCard(); } } catch {}
   if (typeof renderTabs === 'function') renderTabs();
   // a profile that was empty a moment ago now has vaults: leave the first-run screen for them
   if (!$('#welcome').hidden && store.vaults.length) { rememberVault(vault); return show('home'); }

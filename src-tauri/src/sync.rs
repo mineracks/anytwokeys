@@ -183,7 +183,11 @@ fn keyed<'a>(list: &str, v: Option<&'a Value>) -> Option<Vec<(String, &'a Value)
 
 /// Three-way merge. `None` is "not there". `name` is the field this value sits under (it decides how a list is merged
 /// and which counters only move forward).
-pub fn merge3(name: &str, base: Option<&Value>, local: Option<&Value>, remote: Option<&Value>) -> Option<Value> {
+pub fn merge3(name: &str, base: Option<&Value>, local: Option<&Value>, remote: Option<&Value>) -> Option<Value> { merge(name, base, local, remote, false) }
+/// `joining`: this device is meeting a profile that already exists elsewhere. It has no last-synced copy to judge
+/// by, so where the two differ the profile as it exists wins: a new device's defaults (the picture it was made
+/// with, say) must never overwrite what the person set on the device they came from.
+pub fn merge(name: &str, base: Option<&Value>, local: Option<&Value>, remote: Option<&Value>, joining: bool) -> Option<Value> {
     if FORWARD_ONLY.contains(&name) {
         let n = |v: Option<&Value>| v.and_then(Value::as_u64);
         return match (n(local), n(remote)) { (Some(a), Some(b)) => Some(Value::from(a.max(b))), _ => local.or(remote).cloned() };
@@ -198,7 +202,7 @@ pub fn merge3(name: &str, base: Option<&Value>, local: Option<&Value>, remote: O
             let mut out = Map::new();
             let mut keys: Vec<&String> = l.keys().collect();
             for k in r.keys() { if !l.contains_key(k) { keys.push(k); } }
-            for k in keys { if let Some(v) = merge3(k, b.and_then(|b| b.get(k)), l.get(k), r.get(k)) { out.insert(k.clone(), v); } }
+            for k in keys { if let Some(v) = merge(k, b.and_then(|b| b.get(k)), l.get(k), r.get(k), joining) { out.insert(k.clone(), v); } }
             Some(Value::Object(out))
         }
         (Some(Value::Array(_)), Some(Value::Array(_))) => {
@@ -208,14 +212,15 @@ pub fn merge3(name: &str, base: Option<&Value>, local: Option<&Value>, remote: O
                     let (bm, rm): (HashMap<&str, &Value>, HashMap<&str, &Value>) = (b.iter().map(|(k, v)| (k.as_str(), *v)).collect(), r.iter().map(|(k, v)| (k.as_str(), *v)).collect());
                     let lm: HashMap<&str, &Value> = l.iter().map(|(k, v)| (k.as_str(), *v)).collect();
                     let mut out = Vec::new();
-                    for (id, item) in &l { if let Some(v) = merge3("", bm.get(id.as_str()).copied(), Some(item), rm.get(id.as_str()).copied()) { out.push(v); } }
-                    for (id, item) in &r { if !lm.contains_key(id.as_str()) { if let Some(v) = merge3("", bm.get(id.as_str()).copied(), None, Some(item)) { out.push(v); } } }
+                    for (id, item) in &l { if let Some(v) = merge("", bm.get(id.as_str()).copied(), Some(item), rm.get(id.as_str()).copied(), joining) { out.push(v); } }
+                    for (id, item) in &r { if !lm.contains_key(id.as_str()) { if let Some(v) = merge("", bm.get(id.as_str()).copied(), None, Some(item), joining) { out.push(v); } } }
                     Some(Value::Array(out))
                 }
                 _ => local.cloned(),
             }
         }
         // a true clash, or one side deleted what the other changed: this device's word stands (a change beats a deletion)
+        (Some(_), Some(_)) if joining => remote.cloned(),
         (Some(_), _) => local.cloned(),
         (None, r) => r.cloned(),
     }
@@ -380,7 +385,7 @@ pub async fn run(st: &mut State, now: u64, load: impl Fn() -> Result<Value, Stri
         // a device joining a profile that already exists takes it as it is; its own first contents are added to it
         let merged = if never { local0.clone() } else {
             let mut out = Map::new();
-            for k in SYNCED { if let Some(v) = merge3(k, base.and_then(|b| b.get(*k)), local0.get(*k), remote.get(*k)) { out.insert((*k).into(), v); } }
+            for k in SYNCED { if let Some(v) = merge(k, base.and_then(|b| b.get(*k)), local0.get(*k), remote.get(*k), base.is_none()) { out.insert((*k).into(), v); } }
             Value::Object(out)
         };
         // write what differs from the host, the book first (it names the vaults that are about to arrive); a clash
@@ -601,6 +606,18 @@ mod tests {
         assert_eq!(m(base.clone(), local, json!({ "vaults": [] }))["vaults"][0]["name"], "mine");
         // forgotten there, untouched here: it goes
         assert_eq!(m(base.clone(), base.clone(), json!({ "vaults": [] }))["vaults"], json!([]));
+    }
+
+    #[test]
+    fn a_device_joining_a_profile_takes_it_as_it_is_and_adds_what_only_it_has() {
+        let here = json!({ "profile": { "name": "Household", "picture": "glyph:keys" }, "contacts": [{ "name": "Mine", "address": "bc1m", "network": "mainnet" }] });
+        let there = json!({ "profile": { "name": "Household", "picture": "img:AAAA" }, "contacts": [{ "name": "Ann", "address": "bc1a", "network": "mainnet" }] });
+        let mut out = Map::new();
+        for k in SYNCED { if let Some(v) = merge(k, None, here.get(*k), there.get(*k), true) { out.insert((*k).into(), v); } }
+        assert_eq!(out["profile"]["picture"], "img:AAAA", "the default it was made with does not overwrite the real one");
+        assert_eq!(out["contacts"].as_array().unwrap().len(), 2);
+        // once it has synced, its own change is a change like any other
+        assert_eq!(merge3("profile", Some(&there["profile"]), Some(&json!({ "name": "Household", "picture": "img:BBBB" })), Some(&there["profile"])).unwrap()["picture"], "img:BBBB");
     }
 
     #[test]

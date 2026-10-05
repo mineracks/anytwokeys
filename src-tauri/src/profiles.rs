@@ -219,6 +219,8 @@ pub fn update(id: &str, c: Changes) -> Result<Profile, String> {
     if start_on { for q in ix.profiles.iter_mut() { if q.id != id { q.start = false; } } }   // one profile opens on start
     save_index(&ix)?;
     if current().map(|c| c.id == id).unwrap_or(false) { cur_set(Some(out.clone())); }
+    // a synced profile's name and picture travel with it: however they were changed, the next tick says so
+    crate::sync::DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(out)
 }
 
