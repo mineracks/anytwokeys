@@ -135,7 +135,7 @@ async fn sync_once() -> R<sync::Outcome> {
                 if a != face() && a.is_object() {
                     // a name another profile here already has is left as it is: two profiles are never called the same
                     let _ = profiles::update(&p.id, profiles::Changes { name: a["name"].as_str().map(String::from), picture: Some(a["picture"].as_str().map(String::from)), start: None, discreet: None, persona_seed: None })
-                        .or_else(|_| profiles::update(&p.id, profiles::Changes { name: None, picture: Some(a["picture"].as_str().map(String::from)), start: None, discreet: None, persona_seed: None }));
+                        .or_else(|_| { profiles::update(&p.id, profiles::Changes { name: None, picture: Some(a["picture"].as_str().map(String::from)), start: None, discreet: None, persona_seed: None }) });
                 }
             }
             out

@@ -88,6 +88,10 @@ async function syncTick() {
   if ($('#s-settings').classList.contains('on')) syncPaint(!syncInfo);
 }
 setInterval(syncTick, 15000);
+// A phone stops an app's clock while it is in the background. Coming back to the front asks at once, instead of
+// leaving the person looking at yesterday's profile until the next tick comes round.
+document.addEventListener('visibilitychange', () => { if (!document.hidden) syncTick(); });
+window.addEventListener('focus', () => syncTick());
 setInterval(() => { if ($('#s-settings').classList.contains('on')) syncPaint(); }, 2000);
 
 // ---------- the profile picker: bring one here ----------
