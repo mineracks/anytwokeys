@@ -256,6 +256,11 @@ pub struct State {
     #[serde(default)] pub last: u64,
     /// the keys that can bring this profile to a new device
     #[serde(default)] pub cards: Vec<CardRef>,
+    /// the host's records and their versions as this device last left them: one cheap listing against this says
+    /// whether another device has written since, without fetching anything
+    #[serde(default)] pub seen: BTreeMap<String, i64>,
+    /// files this device holds that the host does not have all of yet
+    #[serde(default)] pub files_waiting: usize,
 }
 fn state_path() -> std::path::PathBuf { crate::lockbox::dir().join("sync.enc") }
 pub fn state() -> Result<Option<State>, String> {
@@ -273,7 +278,7 @@ pub static DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 // ------------------------------------------------------------------- sync --
 
 #[derive(Serialize, Clone, Debug, Default)]
-pub struct Outcome { pub pulled: bool, pub pushed: usize, pub last: u64 }
+pub struct Outcome { pub pulled: bool, pub pushed: usize, pub last: u64, #[serde(default)] pub files: Files }
 
 /// One round: read the host, merge three ways, write what differs, take what arrived. `load`/`store` are the
 /// device's store as JSON; `store` is handed the merge of what came back with whatever changed here meanwhile.
@@ -282,7 +287,8 @@ pub async fn run(st: &mut State, now: u64, load: impl Fn() -> Result<Value, Stri
     for _ in 0..3 {
         let local0 = view(&load()?);
         // the host, as it is now
-        let versions = list(&st.url, &keys).await?;
+        let mut versions = list(&st.url, &keys).await?;
+        versions.retain(|name, _| is_record(name));   // a file's pieces are not records: they are never parsed, and never swept by this loop
         let mut remote_objs = BTreeMap::new();
         for name in versions.keys() {
             if let Some((plain, _)) = get(&st.url, &keys, name).await? { remote_objs.insert(name.clone(), serde_json::from_slice::<Value>(&plain).map_err(|e| format!("a synced record is damaged: {e}"))?); }
@@ -321,10 +327,102 @@ pub async fn run(st: &mut State, now: u64, load: impl Fn() -> Result<Value, Stri
             apply(s, &fin); true
         })?;
         st.base = merged; st.last = now;
+        st.seen = list(&st.url, &keys).await.map(|mut l| { l.retain(|name, _| is_record(name)); l }).unwrap_or_default();
         save_state(st)?;
-        return Ok(Outcome { pulled, pushed, last: now });
+        return Ok(Outcome { pulled, pushed, last: now, files: Files::default() });
     }
     Err("the sync host kept changing while this device was writing; it will be tried again".into())
+}
+
+/// Has another device written since this one last synced? One listing, nothing fetched.
+pub async fn changed(st: &State) -> Result<bool, String> {
+    let mut now = list(&st.url, &profile_keys(&st.root()?)).await?;
+    now.retain(|name, _| is_record(name));
+    Ok(now != st.seen)
+}
+
+// ------------------------------------------------------------------ files --
+//
+// A record names its files by the SHA-256 of their bytes (and a picture's thumbnail by its own). The record travels
+// with the profile; the bytes travel here, cut into pieces the host will accept, each sealed under the profile's
+// key and filed under a name the host cannot connect to the file. A device sends what it holds and the host lacks,
+// fetches every thumbnail (they are small, and a record without its picture looks broken), and fetches whole files
+// either as they are opened or, where the person keeps everything, in the background. A file leaves the host only
+// when the merged profile no longer names it anywhere.
+
+const PIECE: usize = 256 * 1024;
+fn is_record(name: &str) -> bool { !name.starts_with("a/") }
+fn is_hash(s: &str) -> bool { s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()) }
+
+/// Every file the view names: hash → is it only ever a thumbnail.
+pub fn file_refs(view: &Value) -> BTreeMap<String, bool> {
+    fn walk(v: &Value, out: &mut BTreeMap<String, bool>) {
+        match v {
+            Value::Object(o) => {
+                if let Some(h) = o.get("sha256").and_then(Value::as_str).filter(|h| is_hash(h)) {
+                    out.insert(h.to_lowercase(), false);
+                    if let Some(t) = o.get("thumb").and_then(Value::as_str).filter(|t| is_hash(t)) { out.entry(t.to_lowercase()).or_insert(true); }
+                }
+                for x in o.values() { walk(x, out); }
+            }
+            Value::Array(a) => for x in a { walk(x, out); },
+            _ => {}
+        }
+    }
+    let mut out = BTreeMap::new(); walk(view, &mut out); out
+}
+
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct Files { pub sent: usize, pub waiting: usize, pub fetched: usize, pub removed: usize }
+
+/// One whole file from the host, or `None` when the host does not have all of it (yet). The caller checks the hash.
+pub async fn download(st: &State, sha256: &str) -> Result<Option<Vec<u8>>, String> {
+    let keys = profile_keys(&st.root()?);
+    let base = keys.name_of("a", &sha256.to_lowercase());
+    let mut out = Vec::new();
+    for i in 0..(crate::attach::MAX_FILE as usize / PIECE + 2) {
+        match get(&st.url, &keys, &format!("{base}/{i}")).await? { Some((piece, _)) => { let last = piece.len() < PIECE; out.extend(piece); if last { break; } } None => break }
+    }
+    Ok(if out.is_empty() { None } else { Some(out) })
+}
+
+/// Bring the host's files in line with the profile. `budget`: how many pieces may be sent this time, so one long
+/// upload never holds everything else up; what is left is counted in `waiting` and sent on the next round.
+pub async fn files(st: &State, keep_all: bool, mut budget: usize, have: impl Fn(&str) -> bool, read: impl Fn(&str) -> Result<Vec<u8>, String>, keep: impl Fn(&str, &[u8]) -> Result<(), String>) -> Result<Files, String> {
+    let keys = profile_keys(&st.root()?);
+    let refs = file_refs(&st.base);
+    let mut out = Files::default();
+    // what the host holds, by file
+    let mut held: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for name in list(&st.url, &keys).await?.into_keys().filter(|n| !is_record(n)) { if let Some((base, _)) = name.rsplit_once('/') { held.entry(base.to_string()).or_default().push(name); } }
+    let named: BTreeMap<String, &String> = refs.keys().map(|h| (keys.name_of("a", h), h)).collect();
+    // send what this device holds and the host lacks
+    for (base, hash) in &named {
+        if !have(hash) { continue; }
+        let on_host = held.get(base).map(Vec::len).unwrap_or(0);
+        let Ok(bytes) = read(hash) else { continue };
+        // a file that is an exact number of pieces ends with an empty one, so "a short piece" always marks the end
+        let mut pieces: Vec<&[u8]> = bytes.chunks(PIECE).collect();
+        if bytes.len() % PIECE == 0 { pieces.push(&[]); }
+        if on_host >= pieces.len() { continue; }
+        let mut done = true;
+        for (i, piece) in pieces.iter().enumerate() {
+            let name = format!("{base}/{i}");
+            if held.get(base).map(|h| h.contains(&name)).unwrap_or(false) { continue; }
+            if budget == 0 { done = false; break; }
+            match put(&st.url, &keys, &name, 0, piece).await { Ok(()) => {} Err(e) if e == "conflict" => {} Err(e) => return Err(e) }   // a clash here is another device sending the same piece
+            budget -= 1;
+        }
+        if done { out.sent += 1; } else { out.waiting += 1; }
+    }
+    // fetch what the host holds and this device lacks: every thumbnail, and whole files where everything is kept
+    for (base, hash) in &named {
+        if have(hash) || !held.contains_key(base) || !(refs[*hash] || keep_all) { continue; }
+        if let Some(bytes) = download(st, hash).await? { if keep(hash, &bytes).is_ok() { out.fetched += 1; } }   // a file still being sent by its device fails its hash: next time
+    }
+    // a file the profile no longer names anywhere leaves the host
+    for (base, names) in &held { if !named.contains_key(base) { for n in names { del(&st.url, &keys, n).await?; } out.removed += 1; } }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------- pointers --
@@ -498,6 +596,33 @@ mod tests {
         assert_eq!(a.lock().unwrap()["vaults"], json!([]));
         // nothing to say: nothing is written
         let o = go(&da, &mut sa, &a); assert!(o.pushed == 0 && !o.pulled, "{o:?}");
+        // a file: named by a record on a, sent by a, fetched by b (whole, because b keeps everything), gone when unnamed
+        let big: Vec<u8> = (0..PIECE * 2).map(|i| (i % 251) as u8).collect();   // exactly two pieces: the awkward size
+        let thumb = b"a small picture".to_vec();
+        let (hb, ht) = (hex::encode(Sha256::digest(&big)), hex::encode(Sha256::digest(&thumb)));
+        let disk_a: Mutex<HashMap<String, Vec<u8>>> = Mutex::new([(hb.clone(), big.clone()), (ht.clone(), thumb.clone())].into_iter().collect());
+        let disk_b: Mutex<HashMap<String, Vec<u8>>> = Mutex::new(HashMap::new());
+        a.lock().unwrap()["records"] = json!({ "files": { "place:1": [{ "name": "receipt.pdf", "sha256": hb, "thumb": ht, "size": big.len() }] } });
+        go(&da, &mut sa, &a);
+        let fgo = |st: &State, disk: &Mutex<HashMap<String, Vec<u8>>>, keep_all: bool, budget: usize| rt.block_on(files(st, keep_all, budget,
+            |h| disk.lock().unwrap().contains_key(h), |h| disk.lock().unwrap().get(h).cloned().ok_or("gone".to_string()),
+            |h, b| { if hex::encode(Sha256::digest(b)) != h { return Err("wrong bytes".into()); } disk.lock().unwrap().insert(h.to_string(), b.to_vec()); Ok(()) })).unwrap();
+        let f = fgo(&sa, &disk_a, true, 2); assert!(f.waiting >= 1 && f.fetched == 0, "a small budget leaves some waiting: {f:?}");
+        go(&db, &mut sb, &b);
+        let f = fgo(&sb, &disk_b, false, 40); assert!(disk_b.lock().unwrap().get(&hb).is_none(), "a half-sent file is not taken: {f:?}");
+        let f = fgo(&sa, &disk_a, true, 40); assert!(f.waiting == 0 && f.sent >= 1, "{f:?}");
+        let f = fgo(&sb, &disk_b, false, 40); assert!(disk_b.lock().unwrap().get(&ht) == Some(&thumb) && !disk_b.lock().unwrap().contains_key(&hb), "a phone takes the thumbnail and leaves the file: {f:?}");
+        assert_eq!(rt.block_on(download(&sb, &hb)).unwrap(), Some(big.clone()), "and fetches the whole file when it is opened");
+        let f = fgo(&sb, &disk_b, true, 40); assert!(f.fetched == 1 && disk_b.lock().unwrap().get(&hb) == Some(&big), "a device that keeps everything takes it unasked: {f:?}");
+        assert_eq!(fgo(&sa, &disk_a, true, 40), Files::default(), "nothing to do twice");
+        assert!(rt.block_on(changed(&sa)).unwrap() == false, "files being sent are not mistaken for another device's changes");
+        a.lock().unwrap()["records"] = json!({});
+        go(&da, &mut sa, &a);
+        let f = fgo(&sa, &disk_a, true, 40); assert!(f.removed == 2, "{f:?}");
+        assert!(rt.block_on(list(url, &profile_keys(&root))).unwrap().keys().all(|n| is_record(n)));
+        // one cheap listing tells b that a wrote
+        assert!(rt.block_on(changed(&sb)).unwrap());
+        go(&db, &mut sb, &b); assert!(!rt.block_on(changed(&sb)).unwrap());
         // a key's pointer
         let secret: [u8; 32] = crate::lockbox::random();
         let entry = Pointed { id: "t".into(), root: hex::encode(root), url: url.into(), name: "Test".into(), class: crate::profiles::Class::Work, added: 1 };

@@ -82,7 +82,7 @@ async fn card_generate(reader: String, admin_pin: String) -> R<String> {
 // ---------- a profile kept the same on every device (sync.rs) ----------
 
 #[derive(Serialize)]
-struct SyncStatus { on: bool, url: String, last: u64, cards: Vec<sync::CardRef>, waiting: bool }
+struct SyncStatus { on: bool, url: String, last: u64, cards: Vec<sync::CardRef>, waiting: bool, files_waiting: usize }
 
 /// A profile fetched with a key on this device, waiting for its first unlock to be written down (the sealed files
 /// of a new profile cannot be written before it has a store key). Lost if the app quits first: nothing is harmed,
@@ -92,8 +92,8 @@ static ADOPTING: std::sync::Mutex<Option<(String, sync::Pointed, sync::CardRef)>
 fn sync_status_now() -> R<SyncStatus> {
     let st = if lockbox::unlocked() { sync::state()? } else { None };
     Ok(match st {
-        Some(s) => SyncStatus { on: true, url: s.url, last: s.last, cards: s.cards, waiting: sync::DIRTY.load(std::sync::atomic::Ordering::Relaxed) },
-        None => SyncStatus { on: false, url: String::new(), last: 0, cards: vec![], waiting: false },
+        Some(s) => SyncStatus { on: true, url: s.url, last: s.last, cards: s.cards, waiting: sync::DIRTY.load(std::sync::atomic::Ordering::Relaxed), files_waiting: s.files_waiting },
+        None => SyncStatus { on: false, url: String::new(), last: 0, cards: vec![], waiting: false, files_waiting: 0 },
     })
 }
 fn sync_host() -> String { wallet::load().ok().map(|s| s.settings.vss).filter(|u| !u.is_empty()).unwrap_or_else(|| labels::DEFAULT_VSS.to_string()) }
@@ -123,6 +123,13 @@ async fn sync_once() -> R<sync::Outcome> {
             out
         }).await?;
     sync::DIRTY.store(false, Relaxed);
+    // then the files the records name. A computer keeps every file; a phone takes thumbnails, and a whole file when
+    // it is opened (attach_fetch). Forty pieces a round is ten megabytes: a long upload carries on at the next tick.
+    let mut out = out;
+    match sync::files(&st, cfg!(not(any(target_os = "ios", target_os = "android"))), 40, attach::have, attach::read, attach::keep).await {
+        Ok(f) => { if st.files_waiting != f.waiting { st.files_waiting = f.waiting; sync::save_state(&st)?; } if f.waiting > 0 { sync::DIRTY.store(true, Relaxed); } out.files = f; }
+        Err(e) => return Err(format!("the records are synced; their files are not yet ({e})")),
+    }
     Ok(out)
 }
 
@@ -162,7 +169,8 @@ async fn sync_tick() -> R<Option<sync::Outcome>> {
         return sync_once().await.map(Some);
     }
     let Some(st) = sync::state()? else { return Ok(None) };
-    if !sync::DIRTY.load(std::sync::atomic::Ordering::Relaxed) && now().saturating_sub(st.last) < 300 { return Ok(None); }
+    // nothing to say here and heard from the host recently: one cheap listing says whether another device has written
+    if !sync::DIRTY.load(std::sync::atomic::Ordering::Relaxed) && now().saturating_sub(st.last) < 300 && !sync::changed(&st).await? { return Ok(None); }
     sync_once().await.map(Some)
 }
 
@@ -2992,6 +3000,10 @@ async fn attach_fetch(name: String, sha256: String, size: u64) -> R<bool> {
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
     if !v.files.values().flatten().any(|e| ["sha256", "thumb"].iter().any(|f| e.get(*f).and_then(|x| x.as_str()) == Some(sha256.as_str()))) { return Err("no record of this vault names that file".into()); }
     if attach::have(&sha256) { return Ok(true); }
+    // a synced profile has its files on the sync host under the profile's own key: sealed vault or not
+    if let Some(st) = sync::state()? {
+        if let Ok(Some(bytes)) = sync::download(&st, &sha256).await { let h = sha256.clone(); if block(move || attach::keep(&h, &bytes)).await.is_ok() { return Ok(true); } }
+    }
     if s.settings.vss.is_empty() { return Err("no label host is set, so there is nowhere to fetch it from".into()); }
     let root = labels::root_from_shares(&v.seal.shares).ok_or("this vault is not sealed, so it has no backup to fetch from")?;
     let bytes = labels::att_download(&s.settings.vss, &labels::keys(&root), &sha256, size.clamp(1, attach::MAX_FILE) as usize).await?;

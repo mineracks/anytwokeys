@@ -19,11 +19,11 @@ async function syncPaint(force) {
   const on = syncInfo.on, enrolled = syncInfo.cards || [];
   const plugged = (cards || []).filter(c => c.pubkey && !enrolled.some(k => k.pubkey === c.pubkey));
   // rebuilt only when what it shows changes: a poll must not wipe a PIN being typed
-  const sig = [on, syncInfo.last, syncInfo.url, enrolled.map(k => k.pubkey).join(','), plugged.map(c => c.reader + c.pubkey).join(','), syncPaint.err || ''].join('|');
+  const sig = [on, syncInfo.last, syncInfo.files_waiting, syncInfo.url, enrolled.map(k => k.pubkey).join(','), plugged.map(c => c.reader + c.pubkey).join(','), syncPaint.err || ''].join('|');
   if (sig === syncPaint.sig) return; syncPaint.sig = sig;
   let host = ''; try { host = new URL(syncInfo.url).host; } catch {}
   $('#sync-state').innerHTML = on
-    ? `This profile is kept the same on every device you bring it to. It is encrypted before it leaves here; ${esc(host)} holds what it cannot read. Last synced ${esc(syncWhen(syncInfo.last))}.${syncPaint.err ? ` <span class="warn">The last try did not go through: ${esc(syncPaint.err)}</span>` : ''}`
+    ? `This profile is kept the same on every device you bring it to. It is encrypted before it leaves here; ${esc(host)} holds what it cannot read. Last synced ${esc(syncWhen(syncInfo.last))}.${syncInfo.files_waiting ? ` ${syncInfo.files_waiting} file${syncInfo.files_waiting === 1 ? ' is' : 's are'} still being sent.` : ''}${syncPaint.err ? ` <span class="warn">The last try did not go through: ${esc(syncPaint.err)}</span>` : ''}`
     : 'This profile lives on this device only. Switch sync on with one of your keys and its vaults, labels, contacts and places follow you to your other devices: encrypted here, held by your sync host, opened only by your keys. Settings stay per device, and nothing that can spend ever leaves the keys.';
   $('#sync-keys-cap').textContent = on ? 'Keys that can bring this profile to a new device' : 'Switch it on with a key';
   const nameOf = (c) => { for (const v of store.vaults) { const k = v.keys.find(k => k.pubkey === c.pubkey); if (k) return k.name; } const r = (store.key_ready || {})[c.pubkey]; return (r && r.name) || 'key ' + (c.serial || ''); };
