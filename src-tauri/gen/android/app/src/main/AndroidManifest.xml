@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- the camera reads QR codes (an address, a signed transaction, a signing device's key) and takes a photo to keep
+         with a record. Android only ASKS the person for it if the app declares it here; without this line every
+         request is refused silently and no switch for it appears in the system's settings. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />

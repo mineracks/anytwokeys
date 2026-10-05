@@ -67,6 +67,10 @@ function askTwice(btn, question, yesLabel, act) {
     btn._t = setTimeout(disarm, 15000);
   };
 }
+// where the person goes to let the app use the camera, said for the device in their hand (phone.js sets the class)
+const cameraDenied = () => document.body.classList.contains('android') ? 'This phone is not letting Any Two Keys use the camera: allow it in Settings \u203a Apps \u203a Any Two Keys \u203a Permissions \u203a Camera.'
+  : document.body.classList.contains('ios') ? 'This iPhone is not letting Any Two Keys use the camera: allow it in Settings \u203a Any Two Keys \u203a Camera.'
+  : 'macOS is not letting Any Two Keys use the camera: allow it in System Settings \u203a Privacy & Security \u203a Camera.';
 function toast(t, ms = 3500) { const el = $('#toast'); el.textContent = t; el.classList.add('on'); clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove('on'), ms); }
 function fail(e) { toast(String(e && e.message || e), 6000); console.error(e); }
 
@@ -926,7 +930,7 @@ async function shotStart(deviceId) {
     $('#shot-video').srcObject = shot.stream; $('#shot-take').disabled = false;
     await camChooser($('#shot-pick'), shot.stream, shotStart);
     $('#shot-note').classList.remove('warn'); $('#shot-note').textContent = 'A receipt, a label on a parcel, the thing you bought. It is kept with this transaction, encrypted like everything else.';
-  } catch (e) { $('#shot-note').classList.add('warn'); $('#shot-note').textContent = /NotAllowed|denied/i.test(String(e)) ? 'macOS is not letting Any Two Keys use the camera: allow it in System Settings › Privacy & Security › Camera.' : /NotFound|Overconstrained/i.test(String(e)) ? 'No camera was found.' : 'The camera could not be started: ' + String(e.message || e); }
+  } catch (e) { $('#shot-note').classList.add('warn'); $('#shot-note').textContent = /NotAllowed|denied/i.test(String(e)) ? cameraDenied() : /NotFound|Overconstrained/i.test(String(e)) ? 'No camera was found.' : 'The camera could not be started: ' + String(e.message || e); }
 }
 $('#tx-camera').onclick = () => { if (!onRec()) return; $('#shot-modal').classList.add('on'); shotStart(''); };
 
