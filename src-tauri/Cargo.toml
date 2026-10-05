@@ -85,3 +85,10 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 [profile.release.build-override]
 strip = "none"
 opt-level = 0
+
+# swift-rs builds the Swift halves of the plugins. Xcode 27 moved where SwiftPM puts its products and hides the
+# functions Rust calls in a release build; the copy in vendor/ finds the one and puts back the other (it needs
+# `rustup component add llvm-tools`). Kept here, in git, so a release build for the iPhone does not depend on a
+# file patched by hand in one computer's download cache.
+[patch.crates-io]
+swift-rs = { path = "vendor/swift-rs" }

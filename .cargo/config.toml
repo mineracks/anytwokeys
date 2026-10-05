@@ -2,3 +2,9 @@
 # every launch if the app's library is laid out for 4 KB. NDK 27 still links for 4 KB unless told otherwise.
 [target.aarch64-linux-android]
 rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+# An iPhone build links the STATIC library into the app, with the Swift halves of the plugins beside it. Cargo also
+# links a dynamic library nobody uses, and in a release build that link is not handed the Swift halves, so it stops
+# on their symbols ("_init_plugin_keylink"). Letting that unused link leave them to be found later is the fix.
+[target.aarch64-apple-ios]
+rustflags = ["-C", "link-arg=-Wl,-undefined,dynamic_lookup"]
