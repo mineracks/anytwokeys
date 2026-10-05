@@ -54,7 +54,11 @@ pub struct Profile {
     /// profile, so the picker is never a device behind. The key here opens the name and picture and nothing else —
     /// which this file already holds in the clear.
     #[serde(default)] pub face: Option<Face>,
+    /// may the picker ask the sync host for this profile's current name and picture while the profile is closed?
+    /// It is the one thing the app says to anyone before a profile is opened, so it is the person's to switch off.
+    #[serde(default = "yes")] pub face_refresh: bool,
 }
+fn yes() -> bool { true }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Face {
@@ -164,7 +168,7 @@ pub fn migrate_legacy(now: u64) -> Result<Moved, String> {
             std::fs::rename(p, &to).map_err(|e| format!("moving {} into the profile: {e}", p.display()))?;
             m.files += 1;
         }
-        ix.profiles.push(Profile { id: id.clone(), name: "Me".into(), class: Class::Private, picture: Some("glyph:lock".into()), created: now, last_opened: 0, start: false, discreet: true, persona_seed: None, sync_id: None, face: None, keychain_account: LEGACY_ACCOUNT.into() });
+        ix.profiles.push(Profile { id: id.clone(), name: "Me".into(), class: Class::Private, picture: Some("glyph:lock".into()), created: now, last_opened: 0, start: false, discreet: true, persona_seed: None, sync_id: None, face: None, face_refresh: true, keychain_account: LEGACY_ACCOUNT.into() });
         m.moved = true; m.id = Some(id);
     }
     save_index(&ix)?;
@@ -202,7 +206,7 @@ pub fn create(name: &str, class: Class, picture: Option<String>, now: u64) -> Re
     let id = new_id();
     std::fs::create_dir_all(dir_for(&id)).map_err(|e| e.to_string())?;
     let p = Profile { id: id.clone(), name: name.into(), class, picture: picture.or_else(|| Some(match class { Class::Private => "glyph:lock", Class::Work => "glyph:keys", Class::Fiction => "glyph:entity" }.into())),
-        created: now, last_opened: 0, start: false, discreet: class == Class::Private, persona_seed: None, sync_id: None, face: None, keychain_account: format!("profile {id}") };
+        created: now, last_opened: 0, start: false, discreet: class == Class::Private, persona_seed: None, sync_id: None, face: None, face_refresh: true, keychain_account: format!("profile {id}") };
     ix.profiles.push(p.clone());
     save_index(&ix)?;
     Ok(p)
@@ -245,6 +249,15 @@ pub fn set_sync_id(id: &str, sync_id: Option<String>) -> Result<(), String> {
     if sync_id.is_none() { p.face = None; }
     p.sync_id = sync_id;
     save_index(&ix)
+}
+pub fn set_face_refresh(id: &str, on: bool) -> Result<(), String> {
+    let mut ix = index()?;
+    let p = ix.profiles.iter_mut().find(|p| p.id == id).ok_or("no such profile")?;
+    p.face_refresh = on;
+    let out = p.clone();
+    save_index(&ix)?;
+    if current().map(|c| c.id == id).unwrap_or(false) { cur_set(Some(out)); }
+    Ok(())
 }
 pub fn set_face(id: &str, face: Option<Face>) -> Result<(), String> {
     let mut ix = index()?;

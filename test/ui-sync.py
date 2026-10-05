@@ -12,7 +12,7 @@ document.hasFocus = () => true;
 const CFG = %(cfg)s;
 const V = (name) => ({ name, network: 'mainnet', threshold: 2, keys: [{ name: 'laptop', serial: 1, pubkey: '%(k0)s' }, { name: 'off-site', serial: 2, pubkey: '%(k1)s' }], descriptor: 'wsh(' + name + ')', address: 'bc1qexample', labels: {}, seal: { shares: [], sealed: [] } });
 window.__vaults = CFG.vaults.map(V);
-window.SYNC = { on: CFG.on, url: 'https://vss.example.org/vss', last: CFG.on ? 1791000000 : 0, cards: CFG.on ? [{ pubkey: '%(k0)s', name: 'laptop', added: 1790000000 }] : [], waiting: false };
+window.SYNC = { face_refresh: true, on: CFG.on, url: 'https://vss.example.org/vss', last: CFG.on ? 1791000000 : 0, cards: CFG.on ? [{ pubkey: '%(k0)s', name: 'laptop', added: 1790000000 }] : [], waiting: false };
 window.__tick = null; window.__profiles = CFG.profiles; window.__current = CFG.current;
 const store = () => ({ forms: {}, contacts: [], vaults: __vaults, key_ready: {}, key_skip: [], key_begun: [], settings: { network: 'mainnet', custom: false, electrum: '', explorer: '', gap: 20, fiat: 'AUD', prices: '', vss: 'https://vss.example.org/vss' }, seen: {}, last_psbt: null, last_message: null });
 const card = (i) => ({ reader: 'Yubico YubiKey ' + i, serial: 100 + i, version: 'OpenPGP 3.4', pubkey: [ '%(k0)s', '%(k1)s' ][i], touch: 'FIXED', form: 3, nfc: true, firmware: '5.7.1' });
@@ -33,6 +33,7 @@ const H = {
   sync_disable: () => { SYNC.on = false; SYNC.cards = []; return { ...SYNC }; },
   sync_remove_card: (a) => { if (a.reader && a.pin !== '493817') throw 'wrong PIN, 2 tries left'; window.__removed = a; SYNC.cards = SYNC.cards.filter(k => k.pubkey !== a.pubkey); return { ...SYNC }; },
   sync_rotate: (a) => { if (a.pin !== '493817') throw 'wrong PIN, 2 tries left'; const c = CFG.cards.map(card).find(c => c.reader === a.reader); SYNC.cards = SYNC.cards.map(k => ({ ...k, stale: k.pubkey !== c.pubkey })); window.__rotated = a.reader; return { ...SYNC }; },
+  sync_face_refresh: (a) => { SYNC.face_refresh = a.on; return { ...SYNC }; },
   sync_find: (a) => { if (a.pin !== '493817') throw 'wrong PIN, 2 tries left'; return CFG.found; },
   sync_adopt: (a) => { const f = CFG.found.find(p => p.id === a.id); const p = { id: 'new1', name: f.name, class: f.class, sync_id: f.id }; __profiles.push(p); __vaults = []; return prof(p.id, p.name, p); },
 };
@@ -66,6 +67,10 @@ with sync_playwright() as p:
     t = pg.inner_text("#sync-card")
     check("with the key's PIN sync is on: the host is named, the key is listed, and the PIN is gone from the page", "vss.example.org" in t and "Last synced" in t and pg.locator("#sync-slots .slot:not(.add)").count() == 1 and pg.locator("#sync-slots input").count() == 0 and pg.locator("#sync-acts").is_visible(), t)
     pg.locator("#sync-card").screenshot(path=str(out / "sync-on.png"))
+    check("asking after the name and picture while the profile is closed is a switch, on, and says what the host sees", pg.locator("#sync-face-row").is_visible() and pg.get_attribute("#sync-face", "aria-checked") == "true" and "the host sees that this device asked" in pg.inner_text("#sync-face-row"))
+    pg.click("#sync-face"); pg.wait_for_timeout(200)
+    check("and it switches off", pg.evaluate("SYNC.face_refresh") is False and pg.get_attribute("#sync-face", "aria-checked") == "false")
+    pg.click("#sync-face"); pg.wait_for_timeout(200)
     pg.click("#sync-now"); pg.wait_for_timeout(300); check("Sync now says what happened", "changes are on the host" in pg.inner_text("#toast"))
     # ---- something arrives from another device ----
     pg.evaluate("show('home'); window.__tick = { vaults: ['Household', 'Holiday fund'] }; syncTick()"); pg.wait_for_timeout(600)

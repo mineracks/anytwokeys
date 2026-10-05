@@ -23,7 +23,7 @@ async function syncPaint(force) {
   // a key gets a PIN field when there is something to do with it: add it, give it the new key, carry on with it
   const asks = here.filter(c => { const k = enrolled.find(k => k.pubkey === c.pubkey); return rotating || moved || !k || k.stale; });
   // rebuilt only when what it shows changes: a poll must not wipe a PIN being typed
-  const sig = [on, syncInfo.last, syncInfo.files_waiting, syncInfo.url, enrolled.map(k => k.pubkey + (k.stale ? '!' : '')).join(','), here.map(c => c.reader + c.pubkey).join(','), syncPaint.err || '', rotating, removing || ''].join('|');
+  const sig = [on, syncInfo.last, syncInfo.files_waiting, syncInfo.face_refresh, syncInfo.url, enrolled.map(k => k.pubkey + (k.stale ? '!' : '')).join(','), here.map(c => c.reader + c.pubkey).join(','), syncPaint.err || '', rotating, removing || ''].join('|');
   if (sig === syncPaint.sig) return; syncPaint.sig = sig;
   let host = ''; try { host = new URL(syncInfo.url).host; } catch {}
   $('#sync-state').innerHTML = !on
@@ -43,6 +43,7 @@ async function syncPaint(force) {
     + asks.map((c, i) => `<form class="slot add" data-reader="${esc(c.reader)}"><span><b>${esc(nameOf(c))}</b><small>plugged in</small></span><span class="row" style="gap:8px"><input type="password" autocomplete="off" placeholder="Key PIN" id="sync-pin-${i}" aria-label="PIN of ${esc(nameOf(c))}"><button class="btn small" type="submit">${act}</button></span></form>`).join('')
     + (!asks.length ? `<div class="muted" style="font-size:13px">${rotating || moved ? 'Plug in one of this profile’s keys.' : on ? 'Plug in another key to add it. Any one of them, with its PIN, brings the profile to a new device.' : 'Plug in a key that has a signing key on it.'}</div>` : '');
   $('#sync-acts').hidden = !on || moved;
+  $('#sync-face-row').hidden = !on || moved || rotating; $('#sync-face').classList.toggle('on', syncInfo.face_refresh !== false); $('#sync-face').setAttribute('aria-checked', syncInfo.face_refresh !== false ? 'true' : 'false');
   $('#sync-now').hidden = rotating; $('#sync-off').hidden = rotating;
   $('#sync-rotate').textContent = rotating ? 'Leave the key as it is' : 'A device or a key was lost…';
   $$('#sync-slots [data-sync-x]').forEach(b => b.onclick = () => { syncPaint.removing = b.dataset.syncX; syncPaint.sig = null; syncPaint(); });
@@ -57,6 +58,8 @@ async function syncPaint(force) {
     } catch (e) { inp.value = ''; fail(e); }
     syncPaint.sig = null; syncPaint(true); }; });
 }
+const syncFace = async () => { try { syncInfo = await invoke('sync_face_refresh', { on: syncInfo.face_refresh === false }); } catch (e) { fail(e); } syncPaint.sig = null; syncPaint(); };
+$('#sync-face').onclick = syncFace; $('#sync-face').onkeydown = (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); syncFace(); } };
 $('#sync-rotate').onclick = () => { syncPaint.rotating = !syncPaint.rotating; syncPaint.removing = null; syncPaint.sig = null; syncPaint(); };
 $('#sync-now').onclick = async () => { const b = $('#sync-now'); b.disabled = true;
   try { const o = await invoke('sync_now'); syncPaint.err = ''; if (o.pulled) await syncArrived(); toast(o.pulled ? 'Synced: changes from another device are here' : o.pushed ? 'Synced: this device’s changes are on the host' : 'Already the same everywhere'); }
