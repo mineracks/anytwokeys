@@ -534,6 +534,34 @@ pub async fn files(st: &State, keep_all: bool, mut budget: usize, have: impl Fn(
     Ok(out)
 }
 
+// ------------------------------------------------------------------- face --
+//
+// A profile's name and picture are shown by the picker before anything is opened, so they are kept in the clear on
+// the device. On the host they get a tiny store of their own, under a key derived one-way from the profile's: a
+// device can keep THAT key in the clear beside the name and picture it opens, and ask the host for the current
+// face without opening the profile. It opens nothing else, and it changes when the profile's key is replaced.
+
+const FACE: &str = "face";
+pub fn face_secret(root: &[u8; 32]) -> [u8; 32] { let mut out = [0u8; 32]; Hkdf::<Sha256>::new(Some(b"a2k-profile-face-v1"), root).expand(b"face", &mut out).unwrap(); out }
+fn face_keys(secret: &[u8; 32]) -> Keys { keys_from(secret, b"a2k-profile-face-store-v1") }
+/// What a face is known by between syncs: a short hash of its name and picture.
+pub fn face_hash(face: &Value) -> String { hex::encode(&Sha256::digest(serde_json::to_vec(face).unwrap_or_default())[..12]) }
+
+pub async fn face_get(url: &str, secret: &[u8; 32]) -> Result<Option<Value>, String> {
+    Ok(match get(url, &face_keys(secret), FACE).await? { Some((plain, _)) => serde_json::from_slice(&plain).ok(), None => None })
+}
+/// Leave the host holding this face. Nothing is written when it already does.
+pub async fn face_put(url: &str, secret: &[u8; 32], face: &Value) -> Result<(), String> {
+    let keys = face_keys(secret);
+    for _ in 0..3 {
+        let version = match get(url, &keys, FACE).await? { Some((plain, v)) => { if serde_json::from_slice::<Value>(&plain).ok().as_ref() == Some(face) { return Ok(()); } v } None => 0 };
+        match put(url, &keys, FACE, version, &serde_json::to_vec(face).map_err(|e| e.to_string())?).await { Ok(()) => return Ok(()), Err(e) if e == "conflict" => continue, Err(e) => return Err(e) }
+    }
+    Ok(())
+}
+/// Remove a face from the host (the profile's key was replaced: the old face store must not linger).
+pub async fn face_forget(url: &str, secret: &[u8; 32]) -> Result<(), String> { del(url, &face_keys(secret), FACE).await }
+
 // ---------------------------------------------------------------- pointers --
 
 /// One profile a key may fetch.
@@ -695,7 +723,7 @@ mod tests {
         impl Drop for Sweep { fn drop(&mut self) { let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap(); for k in &self.1 { if let Ok(names) = rt.block_on(list(self.0, k)) { for n in names.keys() { let _ = rt.block_on(del(self.0, k, n)); } } } } }
         let root2: [u8; 32] = crate::lockbox::random();
         let secret: [u8; 32] = crate::lockbox::random();
-        let _sweep = Sweep(url, vec![profile_keys(&root), profile_keys(&root2), pointer_keys(&secret)]);
+        let _sweep = Sweep(url, vec![profile_keys(&root), profile_keys(&root2), pointer_keys(&secret), face_keys(&face_secret(&root2))]);
         let fresh = || State { v: 1, id: "t".into(), root: hex::encode(root), url: url.into(), ..Default::default() };
         let (mut sa, mut sb) = (fresh(), fresh());
         let clock = std::cell::Cell::new(1u64);
@@ -795,6 +823,14 @@ mod tests {
         assert!(a.lock().unwrap()["contacts"].as_array().unwrap().iter().any(|c| c["name"] == "Late"), "what b did meanwhile is not lost");
         assert_eq!(a.lock().unwrap()["vaults"], b.lock().unwrap()["vaults"]);
         for name in rt.block_on(list(url, &profile_keys(&root2))).unwrap().keys() { rt.block_on(del(url, &profile_keys(&root2), name)).unwrap(); }
+        // a profile's face: read with the face key alone, and that key opens nothing of the profile
+        let fs = face_secret(&root2);
+        let face = json!({ "name": "Test", "picture": "img:AAAA" });
+        rt.block_on(face_put(url, &fs, &face)).unwrap(); rt.block_on(face_put(url, &fs, &face)).unwrap();
+        assert_eq!(rt.block_on(face_get(url, &fs)).unwrap(), Some(face.clone()));
+        assert!(rt.block_on(list(url, &profile_keys(&fs))).unwrap().is_empty() && face_keys(&fs).store != profile_keys(&root2).store, "the face key reaches no profile store");
+        rt.block_on(face_forget(url, &fs)).unwrap();
+        assert_eq!(rt.block_on(face_get(url, &fs)).unwrap(), None);
         // a key's pointer
         let entry = Pointed { id: "t".into(), root: hex::encode(root), url: url.into(), name: "Test".into(), class: crate::profiles::Class::Work, added: 1, gen: 0 };
         rt.block_on(point(url, &secret, "t", Some(entry.clone()))).unwrap();

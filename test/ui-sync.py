@@ -19,6 +19,7 @@ const card = (i) => ({ reader: 'Yubico YubiKey ' + i, serial: 100 + i, version: 
 const prof = (id, name, extra) => Object.assign({ id, name, class: 'work', picture: null, created: 1, last_opened: 0, start: false, discreet: false, persona_seed: null, keychain_account: 'profile ' + id, sync_id: null }, extra || {});
 const H = {
   profiles_list: () => ({ profiles: __profiles.map(p => prof(p.id, p.name, p)), current: __current ? prof(__current.id, __current.name, __current) : null, moved: { moved: false, files: 0, id: null }, displays: { count: 1, mirrored: false, external: false } }),
+  profiles_refresh: async () => { await new Promise(r => setTimeout(r, 300)); if (CFG.fresh) __profiles = __profiles.map(p => Object.assign({}, p, CFG.fresh[p.id] || {})); return H.profiles_list(); },
   profile_open: (a) => { __current = __profiles.find(p => p.id === a.id); return H.lock_status(); },
   lock_status: () => ({ sealed: true, unlocked: true, finished: true, touch: false, idle_minutes: 0, with_screen: true, cards: [], moved: null }), lock_open_mac: () => H.lock_status(),
   cards_list: () => CFG.cards.map(card), cards_other: () => [], card_survey: () => [], store_get: () => store(), device_locale: () => ({ locale: 'en_AU', currency: 'AUD' }), platform: () => 'macos',
@@ -99,6 +100,7 @@ with sync_playwright() as p:
     # ---- a blank device: bring a profile with a key ----
     found = [dict(id="s1", name="Household money", **{"class": "private"}, added=1790000000, here=False), dict(id="s2", name="Bench", **{"class": "work"}, added=1790000000, here=True)]
     pg = page(b, current=None, vaults=[], found=found)
+    check("the picker is drawn at once, before the host has been asked anything", pg.locator("#profiles-grid .pcard").count() >= 1)
     check("the picker offers to bring a profile from another device", pg.locator("#profiles").is_visible() and pg.locator("#pb-start").is_visible())
     pg.click("#pb-start"); pg.wait_for_timeout(300)
     check("the plugged-in key is listed with a PIN field, and nothing has been asked of it", pg.locator("#pb-keys form").count() == 1 and "serial 100" in pg.inner_text("#pb-keys") and not called(pg, "sync_find"))
@@ -110,5 +112,10 @@ with sync_playwright() as p:
     pg.locator("#profile-bring").screenshot(path=str(out / "bring.png"))
     pg.evaluate("window.__tick = { vaults: ['Household'] }"); pg.click("#pb-found [data-bring]"); pg.wait_for_timeout(2200)
     check("bringing it opens the new profile and its vaults arrive", pg.evaluate("__args.sync_adopt.id") == "s1" and not pg.locator("#profiles").is_visible() and "Household" in pg.inner_text(".side") and pg.locator("#s-home.on").count() == 1, pg.inner_text("body")[:300])
+    # ---- the picker hears of a name and picture changed on another device, without the profile being opened ----
+    pg = page(b, current=None, profiles=[dict(id="p1", name="Bench", sync_id="s2", picture="glyph:keys")], fresh=dict(p1=dict(name="Bench two", picture="glyph:lock")))
+    before = pg.inner_text("#profiles-grid")
+    pg.wait_for_timeout(900)
+    check("a synced profile's new name appears on the picker by itself", "Bench two" in pg.inner_text("#profiles-grid") and "profile_open" not in pg.evaluate("__calls"), before + " -> " + pg.inner_text("#profiles-grid"))
     b.close()
 print(f"{fails} failed"); sys.exit(1 if fails else 0)

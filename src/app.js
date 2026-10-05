@@ -334,6 +334,11 @@ function renderProfiles(view) {
     + `<div class="card pcard ghost"><div class="ctitle" style="font-size:16px">New profile</div><div class="muted">Name it, say who it is for, give it a picture later.</div><button class="btn small" id="pn-start">Start</button></div>`
     + `<div class="card pcard ghost"><div class="ctitle" style="font-size:16px">From another device</div><div class="muted">A profile you sync comes here with one of its keys and that key\u2019s PIN.</div><button class="btn small" id="pb-start">Bring it here</button></div>`;
   if (typeof syncBringWire === 'function') syncBringWire();
+  // the names and pictures of synced profiles may have changed on another device: ask once, quietly, and draw again
+  // only if something did (the picker is never a device behind, and never waits on the network to appear)
+  if (!renderProfiles.asked) { renderProfiles.asked = true;
+    invoke('profiles_refresh').then((fresh) => { const sig = (v) => JSON.stringify(v.profiles.map(p => [p.id, p.name, p.picture]));
+      if (fresh && sig(fresh) !== sig(view) && !$('#profiles').hidden) { profilesView = fresh; renderProfiles(fresh); } }).catch(() => {}); }
   $$('#profiles-grid [data-open]').forEach(b => b.onclick = () => openProfile(b.dataset.open));
   $('#pn-start').onclick = () => { $('#profile-new').hidden = false; $('#pn-name').focus(); pnNote(); };
 }

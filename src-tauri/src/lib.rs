@@ -112,7 +112,7 @@ async fn sync_once() -> R<sync::Outcome> {
     let mut st = sync::state()?.ok_or("sync is not on for this profile")?;
     // a key replaced here whose old store was not emptied yet (the app quit, the host was away): finish that first
     if let Some(old) = st.retiring.clone() {
-        if let Some(root) = hex::decode(&old).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()) { sync::retire(&st.url, &root).await?; }
+        if let Some(root) = hex::decode(&old).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()) { sync::retire(&st.url, &root).await?; let _ = sync::face_forget(&st.url, &sync::face_secret(&root)).await; }
         st.retiring = None; sync::save_state(&st)?;
     }
     // the profile's own name and picture live outside the store (the picker shows them before anything is opened);
@@ -141,6 +141,14 @@ async fn sync_once() -> R<sync::Outcome> {
             out
         }).await?;
     sync::DIRTY.store(false, Relaxed);
+    // the picker shows this profile's name and picture without opening it: leave the current ones where it can
+    // ask for them, and note what they were, so a face read later is never mistaken for older than this device's
+    if let (Some(p), Ok(root)) = (profiles::current(), st.root()) {
+        let (f, secret) = (face(), sync::face_secret(&root));
+        if sync::face_put(&st.url, &secret, &f).await.is_ok() {
+            let _ = profiles::set_face(&p.id, Some(profiles::Face { url: st.url.clone(), secret: hex::encode(secret), synced: sync::face_hash(&f) }));
+        }
+    }
     // then the files the records name. A computer keeps every file; a phone takes thumbnails, and a whole file when
     // it is opened (attach_fetch). Forty pieces a round is ten megabytes: a long upload carries on at the next tick.
     let mut out = out;
@@ -245,6 +253,26 @@ async fn sync_remove_card(pubkey: String, reader: Option<String>, pin: Option<St
     st.cards.retain(|c| c.pubkey != pubkey);
     sync::save_state(&st)?;
     sync_status_now()
+}
+
+/// The picker's question while no profile is open: have the names and pictures of the synced profiles changed on
+/// another device? Each is read with its face key alone. A profile whose face was changed HERE and not yet synced
+/// is left as it is.
+#[tauri::command]
+async fn profiles_refresh() -> R<ProfilesView> {
+    for p in profiles::index()?.profiles {
+        let Some(f) = p.face.clone() else { continue };
+        let Some(secret) = hex::decode(&f.secret).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()) else { continue };
+        let mine = serde_json::json!({ "name": p.name, "picture": p.picture });
+        if sync::face_hash(&mine) != f.synced { continue; }
+        let Ok(Some(theirs)) = sync::face_get(&f.url, &secret).await else { continue };
+        if theirs == mine || !theirs.is_object() { continue; }
+        let pic = Some(theirs["picture"].as_str().map(String::from));
+        let done = profiles::update(&p.id, profiles::Changes { name: theirs["name"].as_str().map(String::from), picture: pic.clone(), start: None, discreet: None, persona_seed: None })
+            .or_else(|_| profiles::update(&p.id, profiles::Changes { name: None, picture: pic, start: None, discreet: None, persona_seed: None }));
+        if let Ok(now) = done { let _ = profiles::set_face(&p.id, Some(profiles::Face { synced: sync::face_hash(&serde_json::json!({ "name": now.name, "picture": now.picture })), ..f })); }
+    }
+    profiles_view(profiles::Moved::default())
 }
 
 /// Stop syncing on THIS device. What is on the host and on other devices stays; the keys can still bring it back.
@@ -3364,7 +3392,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![profiles_list, profile_open, profile_close, profile_create, profile_update, profile_delete, profile_picture_pick, guard_displays, guard_sharing, guard_override, vault_move_start, move_land, persona_generate, persona_defaults, transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
-            cards_list, card_generate, attach_view, sync_status, sync_enable, sync_rotate, sync_remove_card, sync_now, sync_tick, sync_disable, sync_find, sync_adopt, card_survey, card_tap, platform, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
+            cards_list, card_generate, attach_view, profiles_refresh, sync_status, sync_enable, sync_rotate, sync_remove_card, sync_now, sync_tick, sync_disable, sync_find, sync_adopt, card_survey, card_tap, platform, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
         .build(tauri::generate_context!())
