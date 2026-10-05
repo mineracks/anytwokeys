@@ -681,6 +681,8 @@ async function renderFiles() {
         try { await invoke('attach_fetch', { name, sha256: e.sha256, size: e.size || 1 }); if (e.thumb) { try { await invoke('attach_fetch', { name, sha256: e.thumb, size: 1 }); } catch {} } await renderFiles(); toast(`${e.name} is on this computer now`); }
         catch (err) { delete t.dataset.fetching; t.querySelector('.sz').textContent = 'not on this computer yet'; fail(err); }
         return; }
+      // a phone has no viewer to hand a file to: a picture is shown in the window itself (phone.js)
+      if (typeof phoneView === 'function' && document.body.matches('.ios, .android')) { try { await phoneView(e); } catch (err) { fail(err); } return; }
       try { toast(`${e.name}: ${await invoke('attach_open', { sha256: e.sha256, name: e.name, mime: e.mime })}`); } catch (err) { fail(err); } };
     t.onclick = (ev) => { if (ev.target.closest('.att-x')) return; openIt(); };
     t.onkeydown = (ev) => { if (ev.key === 'Enter' && !ev.target.closest('.att-x')) openIt(); }; });

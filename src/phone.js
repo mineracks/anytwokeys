@@ -41,3 +41,13 @@
     };
   }).catch(() => {});
 })();
+
+// A picture kept with a record, shown in the window: tap anywhere to put it away.
+async function phoneView(e) {
+  const v = await invoke('attach_view', { sha256: e.sha256 });
+  let box = document.getElementById('phone-view');
+  if (!box) { box = document.createElement('div'); box.id = 'phone-view'; box.setAttribute('role', 'dialog'); box.setAttribute('aria-label', 'Picture'); document.body.appendChild(box); box.onclick = () => { box.hidden = true; box.innerHTML = ''; }; }
+  box.innerHTML = '<img alt=""><span class="pv-name"></span><span class="pv-hint">Tap to close</span>';
+  box.querySelector('img').src = `data:${v.mime};base64,${v.base64}`; box.querySelector('.pv-name').textContent = e.name || '';
+  box.hidden = false;
+}

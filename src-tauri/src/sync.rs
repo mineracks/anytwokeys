@@ -1,6 +1,6 @@
 //! A profile kept the same on every device, through a VSS host and nothing else.
 //!
-//! WHAT TRAVELS. The profile's vaults (definition, labels, notes, the lot), its address book, places, entities and
+//! WHAT TRAVELS. The profile's own name and picture, its vaults (definition, labels, notes, the lot), its address book, places, entities and
 //! what it has learnt about its keys. Not the settings (a node on the home network is not reachable from a phone),
 //! not a half-built spend, not the chain cache, not what this device has already been told about. Nothing in a
 //! profile can spend: the keys that sign live on the YubiKeys. What this protects is privacy, and it is protected
@@ -41,7 +41,7 @@ const MAGIC: &[u8; 5] = b"A2KP\x01";
 /// The host refuses a request over 4 MiB; an object is kept well under it.
 const MAX_OBJECT: usize = 3 * 1024 * 1024;
 /// The parts of the store that travel. Everything else stays on the device it was made on.
-const SYNCED: &[&str] = &["vaults", "contacts", "places", "key_place", "entities", "icons", "records", "forms", "key_first", "key_fw", "key_ready", "transfer_answers"];
+const SYNCED: &[&str] = &["profile", "vaults", "contacts", "places", "key_place", "entities", "icons", "records", "forms", "key_first", "key_fw", "key_ready", "transfer_answers"];
 /// Inside a vault: when THIS device last backed its labels up is nobody else's business.
 const VAULT_LOCAL: &[&str] = &["labels_synced"];
 /// Counters that only move forward: the next unused address, and how far the chain has been searched.
@@ -223,25 +223,76 @@ pub fn merge3(name: &str, base: Option<&Value>, local: Option<&Value>, remote: O
 
 // ------------------------------------------------------- objects on the host --
 
-/// The view cut into the objects the host keeps: one per vault, and one for everything else.
+const BOOK: &str = "book";
+/// Left alone in a store whose profile has moved to a new key (see `retire`).
+const GONE: &str = "gone";
+/// The whole error when the profile's key was replaced on another device: this one must be shown a key again.
+pub const ROTATED: &str = "this profile\u{2019}s key was replaced on another device. Plug in one of its keys and enter its PIN to carry on.";
+
+/// The view cut into the objects the host keeps: one per vault, and one for everything else. The book also lists
+/// which vault objects exist, so a vault the host has quietly dropped is told apart from one a device forgot.
 fn objects(keys: &Keys, view: &Value) -> BTreeMap<String, Value> {
     let mut out = BTreeMap::new();
     let mut book = view.as_object().cloned().unwrap_or_default();
     if let Some(Value::Array(vs)) = book.remove("vaults") { for v in vs { out.insert(keys.name_of("v", &vault_id(&v)), v); } }
-    out.insert("book".into(), Value::Object(book));
+    book.insert("index".into(), Value::Array(out.keys().map(|k| Value::String(k.clone())).collect()));
+    out.insert(BOOK.into(), Value::Object(book));
     out
 }
 fn assemble(objs: &BTreeMap<String, Value>) -> Value {
-    let mut out = objs.get("book").and_then(Value::as_object).cloned().unwrap_or_default();
+    let mut out = objs.get(BOOK).and_then(Value::as_object).cloned().unwrap_or_default();
+    out.remove("index");
     let vaults: Vec<Value> = objs.iter().filter(|(k, _)| k.starts_with("v/")).map(|(_, v)| v.clone()).collect();
     out.insert("vaults".into(), Value::Array(vaults));
     Value::Object(out)
 }
 
+/// A record as the host holds it: a counter that only ever goes up, and the record. A device remembers the highest
+/// counter it has seen for each record, so a host that serves an older copy is caught rather than believed.
+fn wrap(n: u64, body: &Value) -> Result<Vec<u8>, String> { serde_json::to_vec(&serde_json::json!({ "n": n, "body": body })).map_err(|e| e.to_string()) }
+fn unwrap(plain: &[u8]) -> Result<(u64, Value), String> {
+    let v: Value = serde_json::from_slice(plain).map_err(|e| format!("a synced record is damaged: {e}"))?;
+    match v.as_object() {
+        Some(o) if o.len() == 2 && o.contains_key("body") && o.get("n").map(Value::is_u64).unwrap_or(false) => Ok((o["n"].as_u64().unwrap_or(0), o["body"].clone())),
+        _ => Ok((0, v)),   // the first builds that synced wrote the record bare
+    }
+}
+
+/// A record too large for one request is sent as parts, and the record's own object says where they are. The parts
+/// are named after their content, so the same record always lands in the same parts and a half-sent set is harmless.
+const PART: usize = 1024 * 1024;
+fn parts_base(keys: &Keys, name: &str, plain: &[u8]) -> Option<String> {
+    (plain.len() > PART).then(|| keys.name_of("p", &format!("{name}|{}", hex::encode(&Sha256::digest(plain)[..8]))))
+}
+async fn put_record(url: &str, keys: &Keys, name: &str, version: i64, plain: &[u8]) -> Result<(), String> {
+    let Some(base) = parts_base(keys, name, plain) else { return put(url, keys, name, version, plain).await };
+    let n = plain.chunks(PART).count();
+    for (i, part) in plain.chunks(PART).enumerate() {
+        match put(url, keys, &format!("{base}/{i}"), 0, part).await { Ok(()) => {} Err(e) if e == "conflict" => {} Err(e) => return Err(e) }   // already there: same content, same name
+    }
+    put(url, keys, name, version, &serde_json::to_vec(&serde_json::json!({ "a2k_parts": { "base": base, "n": n, "len": plain.len() } })).map_err(|e| e.to_string())?).await
+}
+/// (the record, its version on the host, where its parts are if it has any)
+async fn get_record(url: &str, keys: &Keys, name: &str) -> Result<Option<(Vec<u8>, i64, Option<String>)>, String> {
+    let Some((plain, version)) = get(url, keys, name).await? else { return Ok(None) };
+    let head: Option<Value> = serde_json::from_slice::<Value>(&plain).ok().filter(|v| v.as_object().map(|o| o.len() == 1 && o.contains_key("a2k_parts")).unwrap_or(false));
+    let Some(head) = head else { return Ok(Some((plain, version, None))) };
+    let (base, n, len) = (head["a2k_parts"]["base"].as_str().unwrap_or("").to_string(), head["a2k_parts"]["n"].as_u64().unwrap_or(0) as usize, head["a2k_parts"]["len"].as_u64().unwrap_or(0) as usize);
+    if !base.starts_with("p/") || n == 0 || n > 512 { return Err("a synced record is damaged".into()); }
+    let mut out = Vec::with_capacity(len);
+    for i in 0..n { out.extend(get(url, keys, &format!("{base}/{i}")).await?.ok_or("a record on the sync host is not all there yet; it will be tried again")?.0); }
+    if out.len() != len { return Err("a record on the sync host is not all there yet; it will be tried again".into()); }
+    Ok(Some((out, version, Some(base))))
+}
+
 // ------------------------------------------------------------ local state --
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct CardRef { pub pubkey: String, pub name: String, pub added: u64 }
+pub struct CardRef {
+    pub pubkey: String, pub name: String, pub added: u64,
+    /// the profile's key was replaced since this key was last plugged in: its pointer still names the old one
+    #[serde(default)] pub stale: bool,
+}
 
 /// What this device remembers about a synced profile. Sealed on disk like everything else (`sync.enc`).
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -251,6 +302,8 @@ pub struct State {
     pub id: String,
     pub root: String,
     pub url: String,
+    /// how many times the profile's key has been replaced; the higher one is the current one
+    #[serde(default)] pub gen: u32,
     /// the view as it stood on the host after this device's last sync
     #[serde(default)] pub base: Value,
     #[serde(default)] pub last: u64,
@@ -259,6 +312,13 @@ pub struct State {
     /// the host's records and their versions as this device last left them: one cheap listing against this says
     /// whether another device has written since, without fetching anything
     #[serde(default)] pub seen: BTreeMap<String, i64>,
+    /// the highest counter this device has seen inside each record: the host is never believed below it
+    #[serde(default)] pub counters: BTreeMap<String, u64>,
+    /// parts on the host that no record names, and when that was first noticed: removed an hour later, never at once,
+    /// because another device may be half-way through sending the record that will name them
+    #[serde(default)] pub orphans: BTreeMap<String, u64>,
+    /// the key this profile had before it was replaced here, until its store on the host has been emptied
+    #[serde(default)] pub retiring: Option<String>,
     /// files this device holds that the host does not have all of yet
     #[serde(default)] pub files_waiting: usize,
 }
@@ -270,6 +330,10 @@ pub fn save_state(s: &State) -> Result<(), String> { crate::lockbox::write_seale
 pub fn forget_state() -> Result<(), String> { match std::fs::remove_file(state_path()) { Ok(()) => Ok(()), Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()), Err(e) => Err(e.to_string()) } }
 impl State {
     pub fn root(&self) -> Result<[u8; 32], String> { hex::decode(&self.root).ok().and_then(|b| b.try_into().ok()).ok_or_else(|| "this device's sync key is damaged".to_string()) }
+    /// Take up a different key for the same profile: everything remembered about the old store is dropped.
+    pub fn rekey(&mut self, root: String, gen: u32) {
+        self.root = root; self.gen = gen; self.base = Value::Null; self.seen.clear(); self.counters.clear(); self.orphans.clear(); self.files_waiting = 0;
+    }
 }
 
 /// Set by every save of the store; cleared when a sync has carried this device's changes to the host.
@@ -280,6 +344,9 @@ pub static DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 #[derive(Serialize, Clone, Debug, Default)]
 pub struct Outcome { pub pulled: bool, pub pushed: usize, pub last: u64, #[serde(default)] pub files: Files }
 
+const OLDER: &str = "the sync host handed back an older copy of this profile than this device has already seen. Nothing was taken from it.";
+const DROPPED: &str = "the sync host no longer has a record this profile had there. Nothing was taken from it or sent to it.";
+
 /// One round: read the host, merge three ways, write what differs, take what arrived. `load`/`store` are the
 /// device's store as JSON; `store` is handed the merge of what came back with whatever changed here meanwhile.
 pub async fn run(st: &mut State, now: u64, load: impl Fn() -> Result<Value, String>, store: impl Fn(&dyn Fn(&mut Value) -> bool) -> Result<bool, String>) -> Result<Outcome, String> {
@@ -287,13 +354,27 @@ pub async fn run(st: &mut State, now: u64, load: impl Fn() -> Result<Value, Stri
     for _ in 0..3 {
         let local0 = view(&load()?);
         // the host, as it is now
-        let mut versions = list(&st.url, &keys).await?;
-        versions.retain(|name, _| is_record(name));   // a file's pieces are not records: they are never parsed, and never swept by this loop
-        let mut remote_objs = BTreeMap::new();
+        let all = list(&st.url, &keys).await?;
+        if all.contains_key(GONE) { return Err(ROTATED.into()); }
+        let versions: BTreeMap<String, i64> = all.iter().filter(|(name, _)| is_record(name)).map(|(k, v)| (k.clone(), *v)).collect();
+        let (mut remote_objs, mut remote_n) = (BTreeMap::new(), BTreeMap::new());
+        let mut parts_of: BTreeMap<String, String> = BTreeMap::new();   // record → where its parts are, as the host will have it after this round
         for name in versions.keys() {
-            if let Some((plain, _)) = get(&st.url, &keys, name).await? { remote_objs.insert(name.clone(), serde_json::from_slice::<Value>(&plain).map_err(|e| format!("a synced record is damaged: {e}"))?); }
+            let Some((plain, _, parts)) = get_record(&st.url, &keys, name).await? else { continue };
+            let (n, body) = unwrap(&plain)?;
+            if n < *st.counters.get(name).unwrap_or(&0) { return Err(OLDER.into()); }
+            if let Some(p) = parts { parts_of.insert(name.clone(), p); }
+            remote_n.insert(name.clone(), n); remote_objs.insert(name.clone(), body);
         }
-        let never = versions.is_empty();
+        // a record this device has seen there before and is gone: forgotten by a device (the book says so), or dropped
+        let index: Option<Vec<String>> = remote_objs.get(BOOK).and_then(|b| b.get("index")).and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect());
+        for name in st.counters.keys() {
+            if remote_objs.contains_key(name) { continue; }
+            if name == BOOK || index.as_ref().map(|ix| ix.contains(name)).unwrap_or(false) { return Err(DROPPED.into()); }
+        }
+        // a vault object the book does not list is the tail of a deletion another device has not finished: not there
+        if let Some(ix) = &index { remote_objs.retain(|name, _| name == BOOK || ix.contains(name)); }
+        let never = versions.is_empty();   // and nothing remembered, or the loop above would have refused
         let remote = assemble(&remote_objs);
         let base = if st.base.is_null() { None } else { Some(&st.base) };
         // a device joining a profile that already exists takes it as it is; its own first contents are added to it
@@ -302,19 +383,31 @@ pub async fn run(st: &mut State, now: u64, load: impl Fn() -> Result<Value, Stri
             for k in SYNCED { if let Some(v) = merge3(k, base.and_then(|b| b.get(*k)), local0.get(*k), remote.get(*k)) { out.insert((*k).into(), v); } }
             Value::Object(out)
         };
-        // write what differs from the host; a clash means someone else wrote first: read again
+        // write what differs from the host, the book first (it names the vaults that are about to arrive); a clash
+        // means someone else wrote first: read again
         let want = objects(&keys, &merged);
         let (mut pushed, mut clash) = (0usize, false);
         for (name, body) in &want {
-            if remote_objs.get(name) == Some(body) { continue; }
-            match put(&st.url, &keys, name, *versions.get(name).unwrap_or(&0), &serde_json::to_vec(body).map_err(|e| e.to_string())?).await {
-                Ok(()) => pushed += 1,
+            if remote_objs.get(name) == Some(body) { st.counters.insert(name.clone(), *remote_n.get(name).unwrap_or(&0)); continue; }
+            let n = (*st.counters.get(name).unwrap_or(&0)).max(*remote_n.get(name).unwrap_or(&0)) + 1;
+            let plain = wrap(n, body)?;
+            match put_record(&st.url, &keys, name, *versions.get(name).unwrap_or(&0), &plain).await {
+                Ok(()) => { pushed += 1; st.counters.insert(name.clone(), n); match parts_base(&keys, name, &plain) { Some(p) => { parts_of.insert(name.clone(), p); } None => { parts_of.remove(name); } } }
                 Err(e) if e == "conflict" => { clash = true; break }
                 Err(e) => return Err(e),
             }
         }
         if clash { continue; }
-        for name in versions.keys() { if !want.contains_key(name) { del(&st.url, &keys, name).await?; pushed += 1; } }
+        for name in versions.keys() { if !want.contains_key(name) { del(&st.url, &keys, name).await?; st.counters.remove(name); parts_of.remove(name); pushed += 1; } }
+        let live_parts: std::collections::BTreeSet<&str> = parts_of.values().map(String::as_str).collect();
+        // parts no record names any more: noted now, removed once they have been unnamed for an hour
+        let mut loose: BTreeMap<String, Vec<&String>> = BTreeMap::new();
+        for name in all.keys().filter(|n| n.starts_with("p/")) { if let Some((b, _)) = name.rsplit_once('/') { if !live_parts.contains(b) { loose.entry(b.to_string()).or_default().push(name); } } }
+        st.orphans.retain(|b, _| loose.contains_key(b));
+        for (b, names) in &loose {
+            let first = *st.orphans.entry(b.clone()).or_insert(now);
+            if now.saturating_sub(first) >= 3600 { for n in names { del(&st.url, &keys, n).await?; } st.orphans.remove(b); }
+        }
         // take it here too, without losing anything typed on this device while the host was being talked to
         let merged_for_store = merged.clone();
         let local_at_read = local0.clone();
@@ -341,6 +434,17 @@ pub async fn changed(st: &State) -> Result<bool, String> {
     Ok(now != st.seen)
 }
 
+/// Empty a store whose profile has moved to a new key, and leave the one word that tells every other device so.
+/// A device that still holds the old key learns nothing from here on: there is nothing left to read, and what the
+/// others write goes where it cannot follow.
+pub async fn retire(url: &str, old_root: &[u8; 32]) -> Result<(), String> {
+    let keys = profile_keys(old_root);
+    let all = list(url, &keys).await?;
+    if !all.contains_key(GONE) { put(url, &keys, GONE, 0, b"{\"a2k_rotated\":true}").await.or_else(|e| if e == "conflict" { Ok(()) } else { Err(e) })?; }
+    for name in all.keys().filter(|n| *n != GONE) { del(url, &keys, name).await?; }
+    Ok(())
+}
+
 // ------------------------------------------------------------------ files --
 //
 // A record names its files by the SHA-256 of their bytes (and a picture's thumbnail by its own). The record travels
@@ -351,7 +455,7 @@ pub async fn changed(st: &State) -> Result<bool, String> {
 // when the merged profile no longer names it anywhere.
 
 const PIECE: usize = 256 * 1024;
-fn is_record(name: &str) -> bool { !name.starts_with("a/") }
+fn is_record(name: &str) -> bool { !name.starts_with("a/") && !name.starts_with("p/") }
 fn is_hash(s: &str) -> bool { s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()) }
 
 /// Every file the view names: hash → is it only ever a thumbnail.
@@ -394,7 +498,7 @@ pub async fn files(st: &State, keep_all: bool, mut budget: usize, have: impl Fn(
     let mut out = Files::default();
     // what the host holds, by file
     let mut held: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for name in list(&st.url, &keys).await?.into_keys().filter(|n| !is_record(n)) { if let Some((base, _)) = name.rsplit_once('/') { held.entry(base.to_string()).or_default().push(name); } }
+    for name in list(&st.url, &keys).await?.into_keys().filter(|n| n.starts_with("a/")) { if let Some((base, _)) = name.rsplit_once('/') { held.entry(base.to_string()).or_default().push(name); } }
     let named: BTreeMap<String, &String> = refs.keys().map(|h| (keys.name_of("a", h), h)).collect();
     // send what this device holds and the host lacks
     for (base, hash) in &named {
@@ -429,7 +533,9 @@ pub async fn files(st: &State, keep_all: bool, mut budget: usize, have: impl Fn(
 
 /// One profile a key may fetch.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct Pointed { pub id: String, pub root: String, pub url: String, pub name: String, pub class: crate::profiles::Class, pub added: u64 }
+pub struct Pointed { pub id: String, pub root: String, pub url: String, pub name: String, pub class: crate::profiles::Class, pub added: u64,
+    /// how many times the profile's key had been replaced when this was written (see `State::gen`)
+    #[serde(default)] pub gen: u32 }
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 struct Pointer { v: u8, profiles: Vec<Pointed> }
 const POINTER: &str = "profiles";
@@ -567,15 +673,24 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("a2k-sync-{}", hex::encode(crate::lockbox::random::<6>())));
         let (da, db) = (tmp.join("a"), tmp.join("b"));
         let root: [u8; 32] = crate::lockbox::random();
+        // whatever happens below, the host is left as it was found
+        struct Sweep(&'static str, Vec<Keys>);
+        impl Drop for Sweep { fn drop(&mut self) { let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap(); for k in &self.1 { if let Ok(names) = rt.block_on(list(self.0, k)) { for n in names.keys() { let _ = rt.block_on(del(self.0, k, n)); } } } } }
+        let root2: [u8; 32] = crate::lockbox::random();
+        let secret: [u8; 32] = crate::lockbox::random();
+        let _sweep = Sweep(url, vec![profile_keys(&root), profile_keys(&root2), pointer_keys(&secret)]);
         let fresh = || State { v: 1, id: "t".into(), root: hex::encode(root), url: url.into(), ..Default::default() };
         let (mut sa, mut sb) = (fresh(), fresh());
+        let clock = std::cell::Cell::new(1u64);
         let a = Mutex::new(json!({ "vaults": [vault("a", "wsh(A)", json!({}))], "contacts": [{ "name": "Ann", "address": "bc1a", "network": "mainnet" }], "settings": { "electrum": "home" } }));
         let b = Mutex::new(json!({ "vaults": [], "settings": { "electrum": "phone" } }));
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let go = |dir: &std::path::Path, st: &mut State, dev: &Mutex<Value>| {
             crate::profiles::test_root(Some(dir.to_path_buf()));
-            rt.block_on(run(st, 1, || Ok(dev.lock().unwrap().clone()), |f| { let mut g = dev.lock().unwrap(); Ok(f(&mut g)) })).unwrap()
+            rt.block_on(run(st, clock.get(), || Ok(dev.lock().unwrap().clone()), |f| { let mut g = dev.lock().unwrap(); Ok(f(&mut g)) }))
         };
+        let try_go = &go;
+        let go = |dir: &std::path::Path, st: &mut State, dev: &Mutex<Value>| try_go(dir, st, dev).unwrap();
         let o = go(&da, &mut sa, &a); assert!(o.pushed >= 2 && !o.pulled, "{o:?}");
         let o = go(&db, &mut sb, &b); assert!(o.pulled && o.pushed == 0, "{o:?}");
         assert_eq!(b.lock().unwrap()["vaults"][0]["name"], "a");
@@ -623,9 +738,48 @@ mod tests {
         // one cheap listing tells b that a wrote
         assert!(rt.block_on(changed(&sb)).unwrap());
         go(&db, &mut sb, &b); assert!(!rt.block_on(changed(&sb)).unwrap());
+        // a record too large for one request goes as parts and comes back whole; its parts leave an hour after it shrinks
+        let pad: String = (0..(2 * PART + 5000)).map(|i| char::from(b'a' + ((i * 7 + i / 13) % 26) as u8)).collect();
+        a.lock().unwrap()["vaults"] = json!([vault("big", "wsh(BIG)", json!({ "notes": { "tx1": pad.clone() } }))]);
+        go(&da, &mut sa, &a); go(&db, &mut sb, &b);
+        assert_eq!(b.lock().unwrap()["vaults"][0]["notes"]["tx1"].as_str().map(str::len), Some(pad.len()));
+        let parts = |rt: &tokio::runtime::Runtime| rt.block_on(list(url, &profile_keys(&root))).unwrap().keys().filter(|n| n.starts_with("p/")).count();
+        assert!(parts(&rt) >= 3, "sent as parts");
+        a.lock().unwrap()["vaults"][0]["notes"] = json!({});
+        go(&da, &mut sa, &a); assert!(parts(&rt) >= 3, "unnamed parts are not removed at once: another device may be half-way through naming them");
+        clock.set(1 + 3601); go(&da, &mut sa, &a); assert_eq!(parts(&rt), 0, "and are an hour later");
+        go(&db, &mut sb, &b);
+        // a host that hands back an older copy, or loses a record, is refused and nothing is taken or sent
+        let keys = profile_keys(&root);
+        let book_now = rt.block_on(get(url, &keys, BOOK)).unwrap().unwrap();
+        let (n_now, body_now) = unwrap(&book_now.0).unwrap();
+        rt.block_on(put(url, &keys, BOOK, book_now.1, &wrap(n_now - 1, &body_now).unwrap())).unwrap();
+        let before = b.lock().unwrap().clone();
+        assert_eq!(try_go(&db, &mut sb, &b).unwrap_err(), OLDER); assert_eq!(*b.lock().unwrap(), before);
+        let v = rt.block_on(get(url, &keys, BOOK)).unwrap().unwrap().1;
+        rt.block_on(put(url, &keys, BOOK, v, &wrap(n_now, &body_now).unwrap())).unwrap();
+        go(&db, &mut sb, &b);
+        let vname = keys.name_of("v", &vault_id(&b.lock().unwrap()["vaults"][0]));
+        let held = rt.block_on(get(url, &keys, &vname)).unwrap().unwrap().0;
+        rt.block_on(del(url, &keys, &vname)).unwrap();
+        assert_eq!(try_go(&db, &mut sb, &b).unwrap_err(), DROPPED);
+        rt.block_on(put(url, &keys, &vname, 0, &held)).unwrap();
+        go(&db, &mut sb, &b); go(&da, &mut sa, &a);
+        // the profile's key is replaced on a: the old store is emptied and says so; b is refused until shown the new key
+        sa.rekey(hex::encode(root2), 1); sa.retiring = None;
+        go(&da, &mut sa, &a);
+        rt.block_on(retire(url, &root)).unwrap();
+        assert_eq!(rt.block_on(list(url, &profile_keys(&root))).unwrap().keys().cloned().collect::<Vec<_>>(), vec![GONE.to_string()]);
+        b.lock().unwrap()["contacts"].as_array_mut().unwrap().push(json!({ "name": "Late", "address": "bc1late", "network": "mainnet" }));
+        assert_eq!(try_go(&db, &mut sb, &b).unwrap_err(), ROTATED, "and it does not write a thing into the old store");
+        assert_eq!(rt.block_on(list(url, &profile_keys(&root))).unwrap().len(), 1);
+        sb.rekey(hex::encode(root2), 1);
+        go(&db, &mut sb, &b); go(&da, &mut sa, &a);
+        assert!(a.lock().unwrap()["contacts"].as_array().unwrap().iter().any(|c| c["name"] == "Late"), "what b did meanwhile is not lost");
+        assert_eq!(a.lock().unwrap()["vaults"], b.lock().unwrap()["vaults"]);
+        for name in rt.block_on(list(url, &profile_keys(&root2))).unwrap().keys() { rt.block_on(del(url, &profile_keys(&root2), name)).unwrap(); }
         // a key's pointer
-        let secret: [u8; 32] = crate::lockbox::random();
-        let entry = Pointed { id: "t".into(), root: hex::encode(root), url: url.into(), name: "Test".into(), class: crate::profiles::Class::Work, added: 1 };
+        let entry = Pointed { id: "t".into(), root: hex::encode(root), url: url.into(), name: "Test".into(), class: crate::profiles::Class::Work, added: 1, gen: 0 };
         rt.block_on(point(url, &secret, "t", Some(entry.clone()))).unwrap();
         assert_eq!(rt.block_on(pointed(url, &secret)).unwrap(), vec![entry]);
         assert!(rt.block_on(pointed(url, &crate::lockbox::random())).unwrap().is_empty(), "another key sees nothing");

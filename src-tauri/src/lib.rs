@@ -104,22 +104,40 @@ fn sync_card(reader: &str, pin: &str, create: bool) -> R<(sync::CardRef, [u8; 32
     let card = cards::list().map_err(|e| e.to_string())?.into_iter().find(|c| c.reader == reader).ok_or("that key is no longer plugged in")?;
     let pubkey = card.pubkey.clone().ok_or("that key has no signing key on it yet: set it up first")?;
     let secret = cards::seal_key(reader, pin, create).map_err(|e| e.to_string())?.ok_or("this key carries no profiles: it has never been added to one")?;
-    Ok((sync::CardRef { name: card_name(&pubkey, card.serial), pubkey, added: now() }, secret))
+    Ok((sync::CardRef { name: card_name(&pubkey, card.serial), pubkey, added: now(), stale: false }, secret))
 }
 
 async fn sync_once() -> R<sync::Outcome> {
     use std::sync::atomic::Ordering::Relaxed;
     let mut st = sync::state()?.ok_or("sync is not on for this profile")?;
+    // a key replaced here whose old store was not emptied yet (the app quit, the host was away): finish that first
+    if let Some(old) = st.retiring.clone() {
+        if let Some(root) = hex::decode(&old).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()) { sync::retire(&st.url, &root).await?; }
+        st.retiring = None; sync::save_state(&st)?;
+    }
+    // the profile's own name and picture live outside the store (the picker shows them before anything is opened);
+    // they ride along as one more field, and are put back where they live when a merge changes them
+    let face = || profiles::current().map(|p| serde_json::json!({ "name": p.name, "picture": p.picture })).unwrap_or(serde_json::Value::Null);
     let out = sync::run(&mut st, now(),
-        || serde_json::to_value(wallet::load()?).map_err(|e| e.to_string()),
+        || { let mut j = serde_json::to_value(wallet::load()?).map_err(|e| e.to_string())?; j["profile"] = face(); Ok(j) },
         |f| {
             let mut out: R<bool> = Ok(false);
+            let mut arrived: Option<serde_json::Value> = None;
             wallet::update(|s| {
                 let Ok(mut j) = serde_json::to_value(&*s) else { out = Err("the store could not be read for merging".into()); return };
+                j["profile"] = face();
                 if !f(&mut j) { return; }
+                let after = j.get("profile").cloned();
                 // what comes back must still be a store: nothing that does not parse is ever saved over a real one
-                match serde_json::from_value::<Store>(j) { Ok(n) => { *s = n; out = Ok(true); } Err(e) => out = Err(format!("what arrived from the sync host does not fit this build ({e}); nothing was changed here")) }
+                match serde_json::from_value::<Store>(j) { Ok(n) => { *s = n; out = Ok(true); arrived = after; } Err(e) => out = Err(format!("what arrived from the sync host does not fit this build ({e}); nothing was changed here")) }
             })?;
+            if let (Some(a), Some(p)) = (arrived, profiles::current()) {
+                if a != face() && a.is_object() {
+                    // a name another profile here already has is left as it is: two profiles are never called the same
+                    let _ = profiles::update(&p.id, profiles::Changes { name: a["name"].as_str().map(String::from), picture: Some(a["picture"].as_str().map(String::from)), start: None, discreet: None, persona_seed: None })
+                        .or_else(|_| profiles::update(&p.id, profiles::Changes { name: None, picture: Some(a["picture"].as_str().map(String::from)), start: None, discreet: None, persona_seed: None }));
+                }
+            }
             out
         }).await?;
     sync::DIRTY.store(false, Relaxed);
@@ -146,7 +164,13 @@ async fn sync_enable(reader: String, pin: String) -> R<SyncStatus> {
     let (card, secret) = block(move || sync_card(&reader, &pin, true)).await?;
     let mut st = match sync::state()? { Some(s) => s, None => sync::State { v: 1, id: hex::encode(lockbox::random::<16>()), root: hex::encode(lockbox::random::<32>()), url: sync_host(), ..Default::default() } };
     sync::save_state(&st)?;
-    sync::point(&st.url, &secret, &st.id, Some(sync::Pointed { id: st.id.clone(), root: st.root.clone(), url: st.url.clone(), name: prof.name.clone(), class: prof.class, added: now() })).await?;
+    // What does this key already say about this profile? A NEWER key for it (the profile's key was replaced on
+    // another device) is taken up here; anything older, or nothing, is written over with what this device holds.
+    let theirs = sync::pointed(&st.url, &secret).await?.into_iter().find(|p| p.id == st.id);
+    match theirs {
+        Some(p) if p.gen > st.gen => { st.rekey(p.root, p.gen); }
+        _ => sync::point(&st.url, &secret, &st.id, Some(sync::Pointed { id: st.id.clone(), root: st.root.clone(), url: st.url.clone(), name: prof.name.clone(), class: prof.class, added: now(), gen: st.gen })).await?,
+    }
     st.cards.retain(|c| c.pubkey != card.pubkey); st.cards.push(card);
     sync::save_state(&st)?;
     profiles::set_sync_id(&prof.id, Some(st.id.clone()))?;
@@ -165,13 +189,59 @@ async fn sync_tick() -> R<Option<sync::Outcome>> {
     let Some(prof) = profiles::current() else { return Ok(None) };
     let adopting = ADOPTING.lock().map_err(|_| "sync lock poisoned".to_string())?.take_if(|(id, _, _)| *id == prof.id);
     if let Some((_, p, card)) = adopting {
-        if sync::state()?.is_none() { sync::save_state(&sync::State { v: 1, id: p.id.clone(), root: p.root.clone(), url: p.url.clone(), cards: vec![card], ..Default::default() })?; }
+        if sync::state()?.is_none() { sync::save_state(&sync::State { v: 1, id: p.id.clone(), root: p.root.clone(), url: p.url.clone(), gen: p.gen, cards: vec![card], ..Default::default() })?; }
         return sync_once().await.map(Some);
     }
     let Some(st) = sync::state()? else { return Ok(None) };
     // nothing to say here and heard from the host recently: one cheap listing says whether another device has written
     if !sync::DIRTY.load(std::sync::atomic::Ordering::Relaxed) && now().saturating_sub(st.last) < 300 && !sync::changed(&st).await? { return Ok(None); }
     sync_once().await.map(Some)
+}
+
+/// A device or a key is lost: give the profile a new key. Everything is sealed again under it in a new store, this
+/// YubiKey is told the new key, and the old store is emptied. A device that still holds the old key keeps what it
+/// already had and gets nothing more. Every other device, and every other key, must be shown one another once:
+/// the devices ask for a key, and the keys are added again from a device that has the new one.
+#[tauri::command]
+async fn sync_rotate(reader: String, pin: String) -> R<SyncStatus> {
+    lockbox::key()?;
+    let prof = profiles::current().ok_or("open a profile first")?;
+    let pin = zeroize::Zeroizing::new(pin);
+    let (card, secret) = block(move || sync_card(&reader, &pin, true)).await?;
+    // be whole first: everything other devices have said, and every file the host holds that this device lacks
+    sync_once().await?;
+    let mut st = sync::state()?.ok_or("sync is not on for this profile")?;
+    sync::files(&st, true, usize::MAX, attach::have, attach::read, attach::keep).await?;
+    let old = st.root.clone();
+    let gen = st.gen + 1;
+    st.rekey(hex::encode(lockbox::random::<32>()), gen);
+    st.retiring = Some(old);
+    for c in st.cards.iter_mut() { c.stale = c.pubkey != card.pubkey; }
+    if !st.cards.iter().any(|c| c.pubkey == card.pubkey) { st.cards.push(card); }
+    sync::save_state(&st)?;
+    // the key in hand learns the new one before the old store goes, so there is always a way back in
+    sync::point(&st.url, &secret, &st.id, Some(sync::Pointed { id: st.id.clone(), root: st.root.clone(), url: st.url.clone(), name: prof.name.clone(), class: prof.class, added: now(), gen })).await?;
+    sync::DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+    sync_once().await?;   // empties the old store, fills the new one, starts sending the files
+    sync_status_now()
+}
+
+/// Take a key off this profile. With the key plugged in and its PIN, the profile is taken out of the key's own
+/// pointer, so it can no longer fetch it. Without the key it only leaves this list: a lost key can still fetch
+/// the profile until the profile's key is replaced.
+#[tauri::command]
+async fn sync_remove_card(pubkey: String, reader: Option<String>, pin: Option<String>) -> R<SyncStatus> {
+    lockbox::key()?;
+    let mut st = sync::state()?.ok_or("sync is not on for this profile")?;
+    if let (Some(reader), Some(pin)) = (reader, pin) {
+        let pin = zeroize::Zeroizing::new(pin);
+        let (card, secret) = block(move || sync_card(&reader, &pin, false)).await?;
+        if card.pubkey != pubkey { return Err("that is a different key".into()); }
+        sync::point(&st.url, &secret, &st.id, None).await?;
+    }
+    st.cards.retain(|c| c.pubkey != pubkey);
+    sync::save_state(&st)?;
+    sync_status_now()
 }
 
 /// Stop syncing on THIS device. What is on the host and on other devices stays; the keys can still bring it back.
@@ -2583,7 +2653,24 @@ async fn profile_create(name: String, class: profiles::Class, picture: Option<St
 
 #[tauri::command]
 fn profile_update(id: String, name: Option<String>, picture: Option<Option<String>>, start: Option<bool>, discreet: Option<bool>, persona_seed: Option<Option<String>>) -> R<profiles::Profile> {
-    profiles::update(&id, profiles::Changes { name, picture, start, discreet, persona_seed })
+    let p = profiles::update(&id, profiles::Changes { name, picture, start, discreet, persona_seed })?;
+    sync::DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);   // its name and picture travel with a synced profile
+    Ok(p)
+}
+
+/// A picture to look at inside the window, for a device with no viewer to hand it to (a phone). Pictures only: what
+/// it IS decides, not what its record says.
+#[derive(Serialize)]
+struct Viewed { mime: &'static str, base64: String }
+#[tauri::command]
+async fn attach_view(sha256: String) -> R<Viewed> {
+    block(move || {
+        use bitcoin::base64::Engine;
+        let bytes = attach::read(&sha256)?;
+        let mime = attach::sniff(&bytes);
+        if !["image/jpeg", "image/png", "image/gif", "image/webp"].contains(&mime) { return Err("this kind of file cannot be shown on the phone yet; it is kept, and opens on a computer".into()); }
+        Ok(Viewed { mime, base64: bitcoin::base64::engine::general_purpose::STANDARD.encode(&bytes) })
+    }).await
 }
 
 /// Gone for good: its Keychain item first, then its folder. The person at the Mac confirms with Touch ID whatever the
@@ -3274,7 +3361,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![profiles_list, profile_open, profile_close, profile_create, profile_update, profile_delete, profile_picture_pick, guard_displays, guard_sharing, guard_override, vault_move_start, move_land, persona_generate, persona_defaults, transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
-            cards_list, card_generate, sync_status, sync_enable, sync_now, sync_tick, sync_disable, sync_find, sync_adopt, card_survey, card_tap, platform, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
+            cards_list, card_generate, attach_view, sync_status, sync_enable, sync_rotate, sync_remove_card, sync_now, sync_tick, sync_disable, sync_find, sync_adopt, card_survey, card_tap, platform, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
         ])
         .build(tauri::generate_context!())

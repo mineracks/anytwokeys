@@ -30,6 +30,8 @@ const H = {
   sync_now: () => { SYNC.last = 1791000200; return { pulled: false, pushed: 1, last: SYNC.last }; },
   sync_tick: () => { const t = __tick; __tick = null; if (t && t.vaults) { __vaults = t.vaults.map(V); } if (t && t.error) throw t.error; return t ? { pulled: !!t.vaults, pushed: 0, last: 1791000300 } : null; },
   sync_disable: () => { SYNC.on = false; SYNC.cards = []; return { ...SYNC }; },
+  sync_remove_card: (a) => { if (a.reader && a.pin !== '493817') throw 'wrong PIN, 2 tries left'; window.__removed = a; SYNC.cards = SYNC.cards.filter(k => k.pubkey !== a.pubkey); return { ...SYNC }; },
+  sync_rotate: (a) => { if (a.pin !== '493817') throw 'wrong PIN, 2 tries left'; const c = CFG.cards.map(card).find(c => c.reader === a.reader); SYNC.cards = SYNC.cards.map(k => ({ ...k, stale: k.pubkey !== c.pubkey })); window.__rotated = a.reader; return { ...SYNC }; },
   sync_find: (a) => { if (a.pin !== '493817') throw 'wrong PIN, 2 tries left'; return CFG.found; },
   sync_adopt: (a) => { const f = CFG.found.find(p => p.id === a.id); const p = { id: 'new1', name: f.name, class: f.class, sync_id: f.id }; __profiles.push(p); __vaults = []; return prof(p.id, p.name, p); },
 };
@@ -76,6 +78,24 @@ with sync_playwright() as p:
     check("a second key is offered to be added, the first is listed as enrolled", "off-site" in pg.inner_text("#sync-slots form") and "Add this key" in pg.inner_text("#sync-slots form") and "laptop" in pg.inner_text("#sync-slots .slot:not(.add)"))
     pg.fill("#sync-slots form input", "493817"); pg.keyboard.press("Enter"); pg.wait_for_timeout(500)
     check("and after its PIN both can bring the profile to a new device", pg.locator("#sync-slots .slot:not(.add)").count() == 2 and pg.evaluate("__args.sync_enable.reader") == "Yubico YubiKey 1")
+    # ---- removing a key, replacing the profile's key, and a device left behind by a replacement ----
+    check("each enrolled key can be removed", pg.locator("#sync-slots [data-sync-x]").count() == 2)
+    pg.locator("#sync-slots [data-sync-x]").nth(1).click(); pg.wait_for_timeout(200)
+    check("removing a plugged-in key asks for its PIN, because the profile is taken off the key itself", pg.locator("#sync-slots form[data-remove] input").count() == 1 and "off the key itself" in pg.inner_text("#sync-slots"))
+    pg.fill("#sync-slots form[data-remove] input", "493817"); pg.keyboard.press("Enter"); pg.wait_for_timeout(400)
+    check("and with it the key is gone from the list and from its own pointer", pg.evaluate("__removed.reader") == "Yubico YubiKey 1" and pg.locator("#sync-slots .slot:not(.add)").count() == 1)
+    pg.click("#sync-rotate"); pg.wait_for_timeout(200)
+    t = pg.inner_text("#sync-card")
+    check("replacing the key says what it does, what it cannot do, and what is needed afterwards", "keeps what it already had" in t and "asks for a key once" in t and "added again" in t and pg.locator("#sync-slots form").count() == 2 and "Replace the key" in pg.inner_text("#sync-slots"), t)
+    pg.locator("#sync-card").screenshot(path=str(out / "sync-rotate.png"))
+    pg.fill("#sync-slots form input >> nth=0", "493817"); pg.locator("#sync-slots form").nth(0).locator("button").click(); pg.wait_for_timeout(500)
+    check("with a key's PIN the profile's key is replaced, and nothing was replaced before that", pg.evaluate("__rotated") == "Yubico YubiKey 0" and "Replace this profile" not in pg.inner_text("#sync-state"))
+    pg.evaluate("window.__tick = { error: 'this profile\u2019s key was replaced on another device. Plug in one of its keys and enter its PIN to carry on.' }; syncTick()"); pg.wait_for_timeout(2600)
+    t = pg.inner_text("#sync-card")
+    check("a device left behind by a replacement says so, says nothing is lost, and asks for a key", "stopped syncing" in t and "Nothing here is lost" in t and "Carry on with this key" in t and pg.locator("#sync-acts").is_hidden(), t)
+    pg.locator("#sync-card").screenshot(path=str(out / "sync-moved.png"))
+    pg.fill("#sync-slots form input >> nth=0", "493817"); pg.locator("#sync-slots form").nth(0).locator("button").click(); pg.wait_for_timeout(500)
+    check("and carries on once it has been shown one", "Last synced" in pg.inner_text("#sync-state") and pg.locator("#sync-acts").is_visible(), pg.inner_text("#sync-state"))
     # ---- a blank device: bring a profile with a key ----
     found = [dict(id="s1", name="Household money", **{"class": "private"}, added=1790000000, here=False), dict(id="s2", name="Bench", **{"class": "work"}, added=1790000000, here=True)]
     pg = page(b, current=None, vaults=[], found=found)

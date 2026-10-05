@@ -51,3 +51,8 @@
   .pencil{padding:9px !important;margin:-6px 0;min-height:36px}
   #lock,#curtain{padding:calc(24px + env(safe-area-inset-top)) 16px}
 }
+/* a picture shown in the window, on a device with no viewer to hand it to */
+#phone-view{position:fixed;inset:0;z-index:180;background:rgba(10,10,10,.94);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:calc(16px + env(safe-area-inset-top)) 12px calc(16px + env(safe-area-inset-bottom))}
+#phone-view[hidden]{display:none}
+#phone-view img{max-width:100%;max-height:calc(100% - 60px);object-fit:contain;border-radius:4px}
+#phone-view .pv-name{color:#eee;font:600 14px var(--display)} #phone-view .pv-hint{color:#aaa;font-size:12.5px}
