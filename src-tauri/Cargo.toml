@@ -92,3 +92,5 @@ opt-level = 0
 # file patched by hand in one computer's download cache.
 [patch.crates-io]
 swift-rs = { path = "vendor/swift-rs" }
+# tao handed UIKit a scene configuration it had already released; a release build on iOS crashed at launch. One line.
+tao = { path = "vendor/tao" }
