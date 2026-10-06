@@ -50,6 +50,9 @@ class SlotArgs { lateinit var account: String; var key: String? = null }
 @InvokeArg
 class PresenceArgs { lateinit var reason: String }
 
+@InvokeArg
+class SecureArgs { var on: Boolean = false }
+
 private fun unhex(s: String): ByteArray = ByteArray(s.length / 2) { s.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
 private fun hex(b: ByteArray): String = b.joinToString("") { "%02x".format(it) }
 
@@ -178,6 +181,17 @@ class KeylinkPlugin(private val activity: Activity) : Plugin(activity) {
         override fun onAuthenticationError(code: Int, message: CharSequence) { invoke.reject(message.toString()) }
       })
       prompt.authenticate(BiometricPrompt.PromptInfo.Builder().setTitle("Any Two Keys").setSubtitle(args.reason).setAllowedAuthenticators(allowed).build())
+    }
+  }
+
+  // ---- the window kept out of screenshots, recordings and the recents preview ----
+  @Command
+  fun secure(invoke: Invoke) {
+    val args = invoke.parseArgs(SecureArgs::class.java)
+    activity.runOnUiThread {
+      if (args.on) activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+      else activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+      invoke.resolve(JSObject())
     }
   }
 

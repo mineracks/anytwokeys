@@ -2774,8 +2774,11 @@ fn guard_sharing(window: tauri::WebviewWindow, none: bool) -> R<()> {
     #[cfg(target_os = "macos")]
     { let ptr = window.ns_window().map_err(|e| e.to_string())? as usize;
       window.run_on_main_thread(move || unsafe { profiles::guard::set_sharing(ptr, none) }).map_err(|e| e.to_string()) }
-    // a phone has no such switch: what it can do instead (curtain while recorded or mirrored) is the window's own job
-    #[cfg(not(target_os = "macos"))]
+    // Android has the same switch under another name: FLAG_SECURE blacks the window out of screenshots, recordings
+    // and the recents preview. iOS has none; what it can do (a curtain while recorded or mirrored) is the window's job.
+    #[cfg(target_os = "android")]
+    { let _ = window; #[derive(serde::Deserialize)] struct Nothing {} tauri_plugin_keylink::call::<Nothing>("secure", serde_json::json!({ "on": none })).map(|_| ()) }
+    #[cfg(target_os = "ios")]
     { let _ = (window, none); Ok(()) }
 }
 
