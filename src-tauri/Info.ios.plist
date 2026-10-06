@@ -26,6 +26,11 @@
     <key>UIApplicationSupportsMultipleScenes</key>
     <true/>
   </dict>
+  <!-- Export compliance, answered once for every build: the app uses only standard, published algorithms
+       (XChaCha20-Poly1305, AES, HKDF, secp256k1, TLS), which Apple classes as exempt. Piers gave this answer in
+       App Store Connect for the first build on 2026-10-06. -->
+  <key>ITSAppUsesNonExemptEncryption</key>
+  <false/>
   <key>UIFileSharingEnabled</key>
   <true/>
   <key>LSSupportsOpeningDocumentsInPlace</key>
