@@ -231,3 +231,15 @@ mod tests {
         assert_eq!(i32::from_le_bytes([c[4], c[5], c[6], 0]), 54 * STEPS_PER_MM);
     }
 }
+
+#[cfg(test)]
+mod live {
+    #[test]
+    #[ignore]
+    fn what_serialport_sees() {
+        for p in serialport::available_ports().unwrap() {
+            println!("{} -> {:?}", p.port_name, p.port_type);
+        }
+        println!("find() -> {:?}", super::find());
+    }
+}
