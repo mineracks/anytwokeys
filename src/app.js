@@ -4351,6 +4351,15 @@ const restoreParts = new Set(); let restoreBusy = false;
 async function restoreCode(t) {
   const note = $('#cam-note');
   if (/^(wsh|wpkh|sh|tr)\(/.test(t)) { stopCam(); note.textContent = 'Read the descriptor. Check it on the right.'; scanDone(note, 1, 'Read the descriptor'); return readDescriptor(t); }
+  // a share off a METAL PLATE: the QR carries the share's raw bytes (the scanner hands them over as a
+  // byte string), the text side is base32 - either is re-wrapped as ur:envelope by the app and joins as usual
+  if (!/^ur:/i.test(t)) {
+    const compact = t.replace(/\s+/g, '');
+    const asText = /^[A-Za-z2-7]{120,}$/.test(compact), asBytes = t.length >= 60 && /[\x80-\xff]/.test(t);
+    if (!asText && !asBytes) return;
+    try { t = await invoke('share_rewrap', asBytes ? { bytes: Array.from(t, c => c.charCodeAt(0) & 255), text: null } : { bytes: null, text: compact }); }
+    catch (e) { note.textContent = String(e); return; }
+  }
   if (!/^ur:(crypto-output|output-descriptor|envelope)\//i.test(t)) return;
   const n = restoreParts.size; restoreParts.add(t.toLowerCase()); if (restoreParts.size === n || restoreBusy) return;
   restoreBusy = true;

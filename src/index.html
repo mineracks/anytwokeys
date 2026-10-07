@@ -259,7 +259,7 @@
               <div class="label">Split it into shares</div>
               <div class="muted" style="font-size:13px">For metal plates or paper kept apart: the recovery line split so that any few of the shares rebuild it, and fewer say nothing about this vault. SSKR, the Blockchain Commons standard.</div>
               <div class="row"><label class="cap" for="vs-shares-k">Any</label><select id="vs-shares-k"></select><label class="cap" for="vs-shares-n">of</label><select id="vs-shares-n"></select><span class="muted" style="font-size:13px">shares rebuild it</span></div>
-              <div class="row"><button class="btn small" id="vs-shares-go">Save the share sheets…</button></div>
+              <div class="row" style="gap:10px"><button class="btn small" id="vs-shares-go">Save the share sheets…</button><button class="btn small" id="vs-shares-metal">Engrave them on metal…</button></div>
               <div class="muted" style="font-size:13px" id="vs-shares-note"></div>
             </div>
             <div id="vs-rewrite" hidden style="display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--line);padding-top:12px;margin-top:4px"><div class="muted" style="font-size:13px">Written differently in your other wallet? Some wallets write <span class="mono">48h</span>, others <span class="mono">48'</span>, and the checksum at the end covers the text, so the same wallet can carry two different checksums. Paste the other wallet's version, checksum and all: if it is the same wallet, it takes this one's place.</div><textarea id="vs-rewrite-in" class="mono" rows="3" spellcheck="false" placeholder="wsh(sortedmulti(2,[…]xpub…/&lt;0;1&gt;/*,…))#checksum"></textarea><div class="row"><button class="btn small" id="vs-rewrite-go">Use this wording</button></div></div></div>
@@ -757,6 +757,16 @@
           <div class="card"><div class="label">Addresses</div>
             <div class="field"><div class="label">Gap limit</div><div class="row" style="gap:10px;align-items:center"><input id="gap-in" inputmode="numeric" style="max-width:110px"><button class="btn" id="gap-save">Save</button></div></div>
             <div class="muted" style="font-size:13px">How many unused addresses past the last used one a scan looks at, on the receive chain and the change chain each. 20 is the usual. Raise it if you hand out many addresses before any is paid; every scan costs one server query per address.</div></div>
+          <div class="card" id="any-card"><div class="label">Engrave anything</div>
+            <div class="muted" style="font-size:13px">A SeedHammer v1 on a USB cable hammers text or line art onto a metal plate: a label for a drawer, a logo, a line to remember. Nothing about a vault goes on these unless you type it.</div>
+            <div class="stack tight" style="max-width:520px">
+              <div class="row" style="gap:10px;align-items:center"><span class="cap">Plate</span><div class="seg" id="any-plate" role="radiogroup"><button type="button" data-plate="1" aria-pressed="true">SH-02 · 85×85</button><button type="button" data-plate="2" aria-pressed="false">SH-03 · 85×134</button></div></div>
+              <div class="field"><label class="cap" for="any-text">Text, one line each (capitals, digits and a little punctuation — the engraver's one font)</label><textarea id="any-text" rows="3" spellcheck="false" placeholder="FAMILY VAULT&#10;KEEP DRY"></textarea></div>
+              <div class="row" style="gap:8px;align-items:center"><span class="cap">Size</span><div id="any-size"><button type="button" class="vchip" data-pt="9" aria-pressed="false">3 mm</button><button type="button" class="vchip" data-pt="12" aria-pressed="true">4 mm</button><button type="button" class="vchip" data-pt="18" aria-pressed="false">6 mm</button><button type="button" class="vchip" data-pt="27" aria-pressed="false">9 mm</button></div></div>
+              <label class="dropzone slim" id="any-svg"><input type="file" accept=".svg,image/svg+xml" hidden><span class="dz-main">Drop an SVG drawing here</span><span class="dz-sub">or <u>choose one</u> · outlines only, scaled to fit</span></label>
+              <div class="row"><button type="button" class="btn small" id="any-go">Lay it out</button></div>
+            </div>
+          </div>
           <div class="card" id="places-card"><div class="label">Places</div>
             <div class="row" style="justify-content:space-between;flex-wrap:nowrap;gap:16px"><div style="font-family:var(--display);font-weight:600;font-size:14px;min-width:0">Keep where each transaction was made<small class="muted" style="display:block;font-weight:400;font-family:var(--serif);font-size:13px">From this computer's Location Services, kept with the transaction's label: encrypted here and in your backup, sent nowhere else. Which computer it was made on is always kept.</small></div><div class="toggle" id="loc-on" role="switch" tabindex="0" aria-label="Keep where each transaction was made"><i></i></div></div>
             <div class="row" style="justify-content:space-between;flex-wrap:nowrap;gap:16px" id="loc-exact-row"><div style="font-family:var(--display);font-weight:600;font-size:14px;min-width:0">Keep the exact spot<small class="muted" style="display:block;font-weight:400;font-family:var(--serif);font-size:13px">Off: rounded to about 110 metres, which is enough to say which street.</small></div><div class="toggle" id="loc-exact" role="switch" tabindex="0" aria-label="Keep the exact spot"><i></i></div></div>
@@ -875,7 +885,23 @@
 <div id="notices" aria-live="polite"></div>
 <script src="vendor/jsQR.js"></script>
 <script src="vendor/qrcode.js"></script>
+<div id="metal" class="card hot" hidden style="margin:18px auto;max-width:1000px">
+  <div class="guide-row">
+    <div class="guide ctx-map nopin" id="metal-preview" style="flex:0 0 300px;max-width:300px;aspect-ratio:auto;padding:8px;background:var(--ground)">the plate</div>
+    <div class="guide-body">
+      <div class="cer-act-title">Engrave</div>
+      <div class="chips" id="metal-chips"></div>
+      <div class="muted" style="font-size:13px" id="metal-facts"></div>
+      <div class="muted" style="font-size:13px" id="metal-mount"></div>
+      <div class="tp" id="metal-engraver"></div>
+      <div class="row" style="gap:10px;align-items:center"><button type="button" class="btn small" id="metal-trace">Trace it, pen up</button><button type="button" class="btn small primary" id="metal-go" disabled>Engrave</button><button type="button" class="btn small" id="metal-cancel" hidden>Stop</button><button type="button" class="linkish" id="metal-close">Close</button></div>
+      <div class="busybar pct" id="metal-bar" hidden></div>
+      <div class="muted" style="font-size:13px" id="metal-say">Trace first: the head draws the design with the pen up, so you can see it land on the plate before anything is hammered.</div>
+    </div>
+  </div>
+</div>
 <script src="devices.js"></script>
+<script src="metal.js"></script>
 <script src="scan.js"></script>
 <script src="app.js"></script>
 <script src="keyinit.js"></script>

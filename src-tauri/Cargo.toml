@@ -60,6 +60,8 @@ zeroize = "1"
 # the wire to a key on a computer is PC/SC; on a phone it is the keylink plugin (transport.rs)
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
 pcsc = "2"
+# the SeedHammer v1 engraver is a USB-serial device (engraver.rs); a phone has no serial port
+serialport = { version = "4", default-features = false }
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 
 [target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]

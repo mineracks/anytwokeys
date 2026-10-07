@@ -807,3 +807,10 @@ body.offer-on .toast{bottom:150px}
 .recv-grid{display:grid;grid-template-columns:300px 1fr;gap:28px;align-items:start}
 /* sync: keys listed one under another, in App settings and on the profile picker */
 #sync-slots,#pb-keys,#pb-found{display:flex;flex-direction:column;gap:8px}
+
+/* metal: the engraving panel */
+#metal-preview svg{width:100%;height:auto;display:block}
+#metal .chips{display:flex;flex-wrap:wrap;gap:6px}
+.busybar.pct::after{animation:none;left:0;width:var(--pct,0%);transition:width .3s}
+.busybar.pct:not(.live)::after{display:none}
+#any-text{font-family:var(--mono);text-transform:uppercase}

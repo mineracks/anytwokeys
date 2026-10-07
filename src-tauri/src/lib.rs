@@ -33,6 +33,8 @@ mod places;
 mod seal;
 mod transport;
 mod wallet;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod engraver;
 
 use serde::{Deserialize, Serialize};
 use tauri::async_runtime::spawn_blocking;
@@ -42,6 +44,113 @@ type R<T> = Result<T, String>;
 
 async fn block<T: Send + 'static>(f: impl FnOnce() -> R<T> + Send + 'static) -> R<T> {
     spawn_blocking(f).await.map_err(|e| e.to_string())?
+}
+
+// ---------- the engraver: SeedHammer v1 over USB serial, desktop only ----------
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod engrave_cmds {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    static CANCEL: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
+    static BUSY: AtomicBool = AtomicBool::new(false);
+    fn cancel_flag() -> Arc<AtomicBool> { CANCEL.get_or_init(|| Arc::new(AtomicBool::new(false))).clone() }
+
+    #[tauri::command]
+    pub async fn engraver_find() -> R<Vec<engraver::Port>> { block(|| Ok(engraver::find())).await }
+
+    #[tauri::command]
+    pub async fn engraver_jog(port: String) -> R<String> {
+        if BUSY.swap(true, Ordering::SeqCst) { return Err("the engraver is busy".into()); }
+        let r = block(move || engraver::jog(&port)).await;
+        BUSY.store(false, Ordering::SeqCst);
+        r
+    }
+
+    /// Stream a program. `commands` are 10-byte records in plate steps from the composer;
+    /// progress goes out as `engrave-progress` events; `dry` keeps the pen up throughout.
+    #[tauri::command]
+    pub async fn engraver_run(port: String, plate: u8, commands: Vec<u8>, dry: bool) -> R<String> {
+        if BUSY.swap(true, Ordering::SeqCst) { return Err("the engraver is busy".into()); }
+        let cancel = cancel_flag();
+        cancel.store(false, Ordering::SeqCst);
+        let job = engraver::Job { plate, commands, dry };
+        let r = block(move || {
+            let mut last = std::time::Instant::now();
+            engraver::run(&port, &job, cancel, |p| {
+                if p.done == p.total || last.elapsed().as_millis() > 150 {
+                    last = std::time::Instant::now();
+                    net::emit("engrave-progress", serde_json::json!({ "done": p.done, "total": p.total, "dry": dry }));
+                }
+            })?;
+            Ok(if dry { format!("traced {} commands with the pen up", job.commands.len() / 10) } else { format!("engraved {} commands", job.commands.len() / 10) })
+        }).await;
+        BUSY.store(false, Ordering::SeqCst);
+        r
+    }
+
+    #[tauri::command]
+    pub async fn engraver_cancel() -> R<()> { cancel_flag().store(true, Ordering::SeqCst); Ok(()) }
+}
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+use engrave_cmds::*;
+
+#[cfg(any(target_os = "ios", target_os = "android"))]
+mod engrave_cmds {
+    use super::*;
+    #[tauri::command] pub async fn engraver_find() -> R<Vec<serde_json::Value>> { Ok(Vec::new()) }
+    #[tauri::command] pub async fn engraver_jog(port: String) -> R<String> { let _ = port; Err("engraving needs a computer or an Android phone with a USB cable".into()) }
+    #[tauri::command] pub async fn engraver_run(port: String, plate: u8, commands: Vec<u8>, dry: bool) -> R<String> { let _ = (port, plate, commands, dry); Err("engraving needs a computer or an Android phone with a USB cable".into()) }
+    #[tauri::command] pub async fn engraver_cancel() -> R<()> { Ok(()) }
+}
+#[cfg(any(target_os = "ios", target_os = "android"))]
+use engrave_cmds::*;
+
+/// The recovery line split into shares, as the engraving engine wants them: the raw UR payload
+/// bytes of each share (what goes in the plate's QR and, as base32, its text side). The set id is
+/// printed on the plate so shares of the same split can be told apart from another vault's.
+#[derive(serde::Serialize)]
+struct SharePlate { index: usize, set: String, ur_type: String, payload: Vec<u8>, ur: String }
+#[tauri::command]
+async fn vault_shares_plates(name: String, k: usize, n: usize) -> R<Vec<SharePlate>> {
+    block(move || {
+        let s = wallet::load()?;
+        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
+        let shares = sskrdesc::split(&wallet::recovery_line(v), k, n)?;
+        shares.iter().enumerate().map(|(i, sh)| {
+            let (_, payload) = ur::ur::decode(&sh.to_lowercase()).map_err(|e| format!("share {}: {e}", i + 1))?;
+            Ok(SharePlate { index: i + 1, set: sskrdesc::set_of(sh).unwrap_or_default(), ur_type: "envelope".into(), payload, ur: sh.clone() })
+        }).collect()
+    }).await
+}
+
+/// A share read off a plate - the QR's raw bytes, or the text side's base32 - back into the
+/// `ur:envelope/...` form the Restore screen joins.
+#[tauri::command]
+async fn share_rewrap(bytes: Option<Vec<u8>>, text: Option<String>) -> R<String> {
+    let payload = match (bytes, text) {
+        (Some(b), _) if !b.is_empty() => b,
+        (_, Some(t)) => {
+            let clean: String = t.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_uppercase();
+            base32_decode(&clean).ok_or("that is not the text of a share plate (base32 letters A-Z and digits 2-7)")?
+        }
+        _ => return Err("nothing to read".into()),
+    };
+    let ur = ur::ur::encode(&payload, &ur::Type::Custom("envelope"));
+    if sskrdesc::set_of(&ur).is_none() { return Err("those bytes are not a share of a recovery line".into()); }
+    Ok(ur)
+}
+
+fn base32_decode(s: &str) -> Option<Vec<u8>> {
+    const A: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut out = Vec::with_capacity(s.len() * 5 / 8);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in s.bytes() {
+        let v = A.iter().position(|&a| a == c)? as u32;
+        acc = (acc << 5) | v; bits += 5;
+        if bits >= 8 { bits -= 8; out.push((acc >> bits) as u8); acc &= (1 << bits) - 1; }
+    }
+    Some(out)
 }
 
 #[tauri::command]
@@ -3406,7 +3515,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![profiles_list, profile_open, profile_close, profile_create, profile_update, profile_delete, profile_picture_pick, guard_displays, guard_sharing, guard_override, vault_move_start, move_land, persona_generate, persona_defaults, transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
             cards_list, card_generate, attach_view, profiles_refresh, sync_face_refresh, sync_status, sync_enable, sync_rotate, sync_remove_card, sync_now, sync_tick, sync_disable, sync_find, sync_adopt, card_survey, card_tap, platform, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
-            settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard
+            settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard,
+            engraver_find, engraver_jog, engraver_run, engraver_cancel, vault_shares_plates, share_rewrap
         ])
         .build(tauri::generate_context!())
         .expect("error while running Any Two Keys")
@@ -3936,5 +4046,22 @@ mod report_tests {
         if let Ok(o) = std::env::var("A2K_REPORT_OUT") { std::fs::write(o, &pdf).unwrap(); }   // to look at it
         let text = String::from_utf8_lossy(&pdf);
         for want in ["(HOLDING)", "(9,430 sats in 1 coin)", "(BALANCE, IN SATS)", "(TRANSACTIONS \\(4\\))", "(The recovery line is not in this report.)"] { assert!(text.contains(want), "{want}"); }
+    }
+}
+
+#[cfg(test)]
+mod metal_tests {
+    use super::*;
+
+    #[test]
+    fn plate_text_round_trips_through_rewrap() {
+        // base32 of the bytes 0x00..0x0f, no padding, as plate.ShareText writes it
+        let bytes: Vec<u8> = (0u8..16).collect();
+        let text = "AAAQEAYEAUDAOCAJBIFQYDIOB4";
+        assert_eq!(base32_decode(text).unwrap(), bytes);
+        assert_eq!(base32_decode("aaaq"), None, "lowercase is normalised by the command, not here");
+        let ur = ur::ur::encode(&bytes, &ur::Type::Custom("envelope"));
+        let (_, back) = ur::ur::decode(&ur).unwrap();
+        assert_eq!(back, bytes);
     }
 }
