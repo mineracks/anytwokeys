@@ -55,10 +55,12 @@ hmac = "0.12"
 bech32 = "0.11"
 bip39 = { version = "2", features = ["rand", "zeroize"] }
 zeroize = "1"
+zip = { version = "9.0.0", default-features = false, features = ["deflate"] }
 
 # the store key's slot on this Mac: a Keychain item, behind a Touch ID / password prompt (lockbox.rs)
 # the wire to a key on a computer is PC/SC; on a phone it is the keylink plugin (transport.rs)
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
+hidapi = "2"                                   # Nitrokey firmware over CTAPHID (nkfw.rs): no HID on iOS or Android
 pcsc = "2"
 # the SeedHammer v1 engraver is a USB-serial device (engraver.rs); a phone has no serial port
 serialport = { version = "4", default-features = false }

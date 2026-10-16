@@ -109,6 +109,7 @@
   <div class="nav" data-go="addresses"><svg><use href="#i-addr"/></svg>Addresses</div>
   <div class="nav" data-go="messages"><svg><use href="#i-msg"/></svg>Messages</div>
   <div class="nav" data-go="keys"><svg><use href="#i-keys"/></svg>Keys</div>
+  <div class="nav" data-go="backup"><svg><use href="#i-book"/></svg>Backup</div>
   <div class="nav" data-go="vault"><svg><use href="#i-vault-cog"/></svg>Vault settings</div>
   <div class="sidefoot">
     <div class="label sidegroup">Any Two Keys</div>
@@ -232,7 +233,7 @@
             <div id="vs-sp-off" class="stack seed-root" hidden>
               <div class="muted" style="font-size:13px">If this wallet also receives <b>silent payments</b> (it has an <span class="mono">sp1…</span> address), those coins are taproot outputs its exported key cannot see: the sender derives each one from their own inputs. Finding them needs the wallet's <b>scan key</b> — a key that can read every payment ever made to it, and cannot spend one. Enter the seed words once: the app checks they are this wallet's by the account key they give, keeps the scan key sealed on this computer, and keeps nothing else.</div>
               <div class="sk-warn"><b>Seed words unlock everything that wallet can spend.</b> They are used once, here, to derive the scan key and the spend <i>public</i> key, then cleared. Do this only on a computer you trust with that wallet.</div>
-              <div class="field"><div class="row" style="justify-content:space-between;align-items:center"><div class="label">Seed words</div><div class="pick tight seed-len"><div class="opt on" data-n="12">12 words</div><div class="opt" data-n="24">24 words</div></div></div>
+              <div class="field"><div class="row" style="justify-content:space-between;align-items:center"><div class="label">Seed words</div><div class="pick tight seed-len"><div class="opt on" data-n="12">12</div><div class="opt" data-n="15">15</div><div class="opt" data-n="18">18</div><div class="opt" data-n="21">21</div><div class="opt" data-n="24">24</div></div></div>
                 <div class="muted" style="font-size:13px">Only the word you are on is shown; the rest stay hidden. Type the first letters and pick, or paste the whole set into the first box.</div>
                 <div class="seed-grid"></div>
                 <div class="row seed-suggest" style="gap:var(--s2);flex-wrap:wrap;min-height:34px" aria-live="polite"></div>
@@ -247,14 +248,27 @@
             <div class="row"><button class="btn small" data-go="settings">Open App settings</button></div></div>
         </div>
         <div style="display:flex;flex-direction:column;gap:18px">
+        </div>
+      </div>
+    </section>
+
+    <section id="s-backup" class="screen">
+      <div class="grid2" style="align-items:start;max-width:1000px">
+        <div style="display:flex;flex-direction:column;gap:18px">
+      <div class="card"><div class="row" style="justify-content:space-between;min-height:32px"><div class="label">Recovery line</div><button type="button" class="btn icon small-icon" id="desc-copy" title="Copy the recovery line" aria-label="Copy the recovery line" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button></div><div class="secret" id="desc-wrap" data-hidden="1"><div class="mono" id="keys-desc" aria-hidden="true"></div><button type="button" class="reveal" id="desc-reveal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>Reveal the recovery line</button></div><button type="button" class="linkish" id="desc-hide" hidden>Hide it again</button><div class="muted" style="font-size:13px"><span id="keys-desc-cards">Once the keys are sealed, any <span id="keys-k"></span> of them rebuild the vault with nothing else. This line is the second way in, for a sheet or a safe: with it, any <span class="keys-k2"></span> keys rebuild the vault even if they were never sealed; the part before <span class="mono">cc=</span> is a standard descriptor Bitcoin Core imports for the first address. Keep it away from the PINs.</span><span id="keys-desc-ext" hidden></span></div><div class="row"><button class="btn" id="copy-desc">Copy descriptor</button><button class="btn" id="vault-pdf" title="A printable recovery sheet: the code the Restore screen scans, the keys, and the line as text">Save as PDF</button><button class="btn" id="bsms-export" title="Bitcoin Secure Multisig Setup descriptor record (BIP 129)">Save as BSMS</button><button class="btn" id="forget-vault" style="border-color:var(--no);color:var(--no)">Forget this vault on this computer</button></div></div>
+          <div class="card" id="vs-backup" hidden><div class="label">Backup of the keys</div>
+            <div class="muted" style="font-size:13px">A key made inside its card has no copy anywhere: if the card is lost, the other keys replace it. A key made outside its card, at setup, is carried by its words on a page — and those words can write the same key to another card, a spare, kept somewhere else.</div>
+            <div id="vs-backup-rows"></div></div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:18px">
           <div class="card"><div class="label">Can this vault still be recovered?</div>
             <div class="muted" style="font-size:13px" id="vs-drill-when"></div>
             <div class="muted" style="font-size:13px" id="vs-drill-what">A drill rebuilds this vault from the cards themselves — each with its own PIN, exactly as a real recovery would — and checks that what comes back is this vault and derives the same addresses. It reads the cards only. Nothing is spent, nothing is written to the chain, and the vault is not changed.</div>
             <div class="row"><button class="btn primary" id="vs-drill">Run a recovery drill</button></div>
             <div id="vs-drill-out" hidden></div></div>
-          <div class="card"><div class="label">The recovery line</div><div class="muted" style="font-size:13px" id="vs-desc-what">The descriptor that rebuilds this vault's addresses. It can watch, and it cannot spend — but it shows whoever reads it everything this vault holds and has done, so it stays hidden until you ask.</div>
-            <div class="secret" id="vs-desc-wrap" data-hidden="1"><div class="mono" id="vs-desc" aria-hidden="true" style="padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--ground);word-break:break-all;font-size:12px;-webkit-user-select:text;user-select:text"></div><button type="button" class="reveal" id="vs-desc-reveal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>Reveal the recovery line</button></div>
-            <div class="row" style="gap:10px"><button class="btn small" id="vs-copy-desc">Copy it</button><button class="btn small" id="vs-pdf">Save the recovery sheet</button><button class="btn small" type="button" data-vault-report>Save a report of this vault</button></div>
+          <div class="card"><div class="label">Shares and metal</div><div class="muted" style="font-size:13px" id="vs-desc-what" hidden>The descriptor that rebuilds this vault's addresses. It can watch, and it cannot spend — but it shows whoever reads it everything this vault holds and has done, so it stays hidden until you ask.</div>
+            <div class="secret" id="vs-desc-wrap" data-hidden="1" hidden><div class="mono" id="vs-desc" aria-hidden="true" style="padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--ground);word-break:break-all;font-size:12px;-webkit-user-select:text;user-select:text"></div><button type="button" class="reveal" id="vs-desc-reveal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>Reveal the recovery line</button></div>
+            <div class="row" style="gap:10px" hidden><button class="btn small" id="vs-copy-desc">Copy it</button><button class="btn small" id="vs-pdf">Save the recovery sheet</button><button class="btn small" type="button" data-vault-report>Save a report of this vault</button></div>
             <div id="vs-shares" class="stack tight" style="border-top:1px solid var(--line);padding-top:var(--s3)">
               <div class="label">Split it into shares</div>
               <div class="muted" style="font-size:13px">For metal plates or paper kept apart: the recovery line split so that any few of the shares rebuild it, and fewer say nothing about this vault. SSKR, the Blockchain Commons standard.</div>
@@ -290,6 +304,7 @@
               <button class="btn small" data-plan="fewest" title="Largest first: the smallest fee">Fewest coins</button>
               <button class="btn small" data-plan="gain" title="The coins standing at the smallest gain, or at a loss, go first">Least gain</button>
               <button class="btn small" data-plan="oldest" title="The coins that have been here longest go first">Longest held</button>
+              <button class="btn small" data-plan="dear" title="The coins received at the highest historical percentile go first">Received highest</button>
               <button class="btn small" data-plan="private" title="As few of your addresses joined together as possible">Keep addresses apart</button>
             </div>
             <div id="coin-list" class="coins"></div>
@@ -397,8 +412,8 @@
       <div class="card"><div class="label">This vault’s keys</div><div class="muted" style="font-size:14px" id="seal-note"></div><div id="keys-list" style="display:flex;flex-direction:column;gap:10px"></div><div class="muted" style="font-size:13px" id="keys-now" hidden></div><div id="keys-other" hidden style="display:flex;flex-direction:column;gap:10px"></div></div>
       <div class="card" id="key-life">
       </div>
-      <div class="card"><div class="row" style="justify-content:space-between;min-height:32px"><div class="label">Recovery line</div><button type="button" class="btn icon small-icon" id="desc-copy" title="Copy the recovery line" aria-label="Copy the recovery line" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button></div><div class="secret" id="desc-wrap" data-hidden="1"><div class="mono" id="keys-desc" aria-hidden="true"></div><button type="button" class="reveal" id="desc-reveal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>Reveal the recovery line</button></div><button type="button" class="linkish" id="desc-hide" hidden>Hide it again</button><div class="muted" style="font-size:13px"><span id="keys-desc-cards">Once the keys are sealed, any <span id="keys-k"></span> of them rebuild the vault with nothing else. This line is the second way in, for a sheet or a safe: with it, any <span class="keys-k2"></span> keys rebuild the vault even if they were never sealed; the part before <span class="mono">cc=</span> is a standard descriptor Bitcoin Core imports for the first address. Keep it away from the PINs.</span><span id="keys-desc-ext" hidden></span></div><div class="row"><button class="btn" id="copy-desc">Copy descriptor</button><button class="btn" id="vault-pdf" title="A printable recovery sheet: the code the Restore screen scans, the keys, and the line as text">Save as PDF</button><button class="btn" id="bsms-export" title="Bitcoin Secure Multisig Setup descriptor record (BIP 129)">Save as BSMS</button><button class="btn" id="forget-vault" style="border-color:var(--no);color:var(--no)">Forget this vault on this computer</button></div></div>
-          </div>
+      <div class="card"><div class="label">Backup</div><div class="muted" style="font-size:13px">The recovery line and its sheet, share plates and engraving, recovery drills, and each key’s own backup live under <b>Backup</b>.</div><div class="row"><button class="btn small" type="button" data-go="backup">Open Backup</button></div></div>
+      </div>
       <div class="card" id="key-detail" hidden></div>
     </section>
 
@@ -496,7 +511,7 @@
                 <div class="sk-warn">
                   <b>Seed words unlock everything that wallet can spend.</b> Enrolment uses them to derive the owner key and sign Spark's login challenge. The words and private keys are not saved or sent to Spark. Temporary owner sessions remain in memory for up to ten minutes while you review; they are cleared on completion, cancellation or app lock. Memory clearing is best effort, not proof that this computer never retained a copy. Even so, a computer that has seen them is a computer that could have kept them. Do this only on a machine you would trust with the wallet itself.
                 </div>
-                <div class="field"><div class="row" style="justify-content:space-between;align-items:center"><div class="label">Seed words</div><div class="pick tight seed-len" id="seed-len"><div class="opt on" data-n="12">12 words</div><div class="opt" data-n="24">24 words</div></div></div>
+                <div class="field"><div class="row" style="justify-content:space-between;align-items:center"><div class="label">Seed words</div><div class="pick tight seed-len" id="seed-len"><div class="opt on" data-n="12">12</div><div class="opt" data-n="15">15</div><div class="opt" data-n="18">18</div><div class="opt" data-n="21">21</div><div class="opt" data-n="24">24</div></div></div>
                   <div class="muted" style="font-size:13px">Only the word you are on is shown; the rest stay hidden. Type the first letters and pick, or paste the whole set into the first box.</div>
                   <div class="seed-grid" id="seed-grid"></div>
                   <div class="row seed-suggest" id="spark-suggest" style="gap:var(--s2);flex-wrap:wrap;min-height:34px" aria-live="polite"></div>
@@ -903,6 +918,7 @@
 <script src="devices.js"></script>
 <script src="metal.js"></script>
 <script src="scan.js"></script>
+<script src="cycle.js"></script>
 <script src="app.js"></script>
 <script src="keyinit.js"></script>
 <script src="sync.js"></script>

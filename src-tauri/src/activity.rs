@@ -28,6 +28,9 @@ pub struct Activity { #[serde(default, skip_serializing_if = "Vec::is_empty")] p
     /// txid → this person's other vaults the same transaction belongs to (transfers between vaults)
     #[serde(default)] pub transfers: HashMap<String, Vec<String>> }
 
+/// A price already kept, by its cache key (`USD:2024-01-04` for a day, `USD:2024-01-04T09` for an hour).
+pub(crate) fn cached_price(key: &str) -> Option<Quote> { load_cache().prices.get(key).cloned() }
+
 fn cache_path() -> std::path::PathBuf { wallet::store_path().with_file_name("cache.json") }
 // a cache that cannot be read is an empty cache: everything in it can be asked for again
 fn load_cache() -> Cache {
@@ -51,7 +54,7 @@ fn http() -> &'static reqwest::blocking::Client {
 }
 
 /// Today's price, kept five minutes: every screen that shows money asked for it afresh.
-fn now_quote(base: &str, ccy: &str) -> Option<Quote> {
+pub(crate) fn now_quote(base: &str, ccy: &str) -> Option<Quote> {
     static NOW: std::sync::Mutex<Option<HashMap<String, (std::time::Instant, Quote)>>> = std::sync::Mutex::new(None);
     let key = format!("{base}|{ccy}");
     if let Some((at, q)) = NOW.lock().ok()?.as_ref().and_then(|m| m.get(&key)).cloned() { if at.elapsed() < std::time::Duration::from_secs(300) { return Some(q); } }
@@ -84,7 +87,7 @@ fn fill_later(vault: &str, base: &str, ccy: &str, wanted: Vec<(String, u32)>) {
 }
 
 /// (day, hour) in UTC for a Unix time.
-fn day_hour(t: u32) -> (String, u32) { (crate::export::ymd(t as u64), (t % 86_400) / 3_600) }
+pub(crate) fn day_hour(t: u32) -> (String, u32) { (crate::export::ymd(t as u64), (t % 86_400) / 3_600) }
 
 /// Parse the price service's answer for one currency. `None` for anything that is not a positive finite price.
 pub fn read_quote(body: &serde_json::Value, ccy: &str, day: &str) -> Option<Quote> {

@@ -43,6 +43,7 @@
     "iOS": {
       "developmentTeam": "NB859QPG78",
       "minimumSystemVersion": "16.0"
-    }
+    },
+    "android": { "versionCode": 1001 }
   }
 }

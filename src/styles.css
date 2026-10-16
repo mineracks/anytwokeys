@@ -272,7 +272,7 @@ table.act .amt.in{color:var(--signal)}
 .guide-body{display:flex;flex-direction:column;gap:10px;min-width:0;flex:1 1 280px}
 .linkish{align-self:flex-start;background:none;border:0;padding:0;font:inherit;font-size:13px;color:var(--muted);text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:3px;cursor:pointer}
 .linkish:hover{color:var(--ink);text-decoration-color:var(--gold)}
-.g-ink{fill:var(--ink)} .g-line{fill:none;stroke:var(--muted);stroke-width:2} .g-gold{fill:none;stroke:var(--gold);stroke-width:4} .g-strip{fill:var(--gold)} .g-led{fill:var(--signal)} .g-hole{fill:var(--ground)}
+.g-ink{fill:var(--ink)} .g-line{fill:none;stroke:var(--muted);stroke-width:2} .g-ring{fill:none;stroke:var(--panel);stroke-width:2;stroke-linecap:round;opacity:.85} .g-no{fill:none;stroke:var(--no);stroke-width:2.5;stroke-linecap:round} .g-spark{fill:var(--gold)} .ki-t.cap{font-size:8.5px;letter-spacing:.08em;font-weight:600;fill:var(--muted)} .ki-t.c{font-weight:600;font-size:8.5px;letter-spacing:.02em;text-anchor:middle} .g-gold{fill:none;stroke:var(--gold);stroke-width:4} .g-strip{fill:var(--gold)} .g-led{fill:var(--signal)} .g-hole{fill:var(--ground)}
 .g-lap{fill:var(--panel);stroke:var(--line);stroke-width:2} .g-cap{fill:var(--ground);stroke:var(--line);stroke-width:1.5} .g-nail{fill:none;stroke:var(--muted);stroke-width:1.5;stroke-linecap:round} .g-port{fill:var(--ink)} .g-finger{fill:var(--panel);stroke:var(--ink);stroke-width:2;stroke-linejoin:round} .g-arrow{fill:none;stroke:var(--gold);stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
 .g-nudge{animation:gnudge 1.4s ease-in-out infinite}
 .g-pulse{fill:none;stroke:var(--gold);stroke-width:2;transform-box:fill-box;transform-origin:center;animation:pulse 1.5s ease-out infinite}
@@ -814,3 +814,70 @@ body.offer-on .toast{bottom:150px}
 .busybar.pct::after{animation:none;left:0;width:var(--pct,0%);transition:width .3s}
 .busybar.pct:not(.live)::after{display:none}
 #any-text{font-family:var(--mono);text-transform:uppercase}
+
+/* the firmware update's progress, in the walk */
+.ki-bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin:10px 0;max-width:520px} .ki-bar i{display:block;height:100%;background:var(--gold);transition:width .3s} .ki-bar i.full{background:var(--signal)} .dice-bar{margin:2px 0 4px}
+
+/* a secret made outside the key: the source choices and the 24 words */
+.ki-rows.ki-src{display:flex;flex-direction:column;gap:10px;margin:6px 0 14px;border:0;padding:0}
+.ki-src .ki-srcopt{text-align:left;cursor:pointer;background:none;border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:0;font:inherit;color:inherit;display:flex;flex-direction:column;gap:4px;width:100%} .ki-src .ki-srcopt.on{border-color:var(--signal);box-shadow:inset 0 0 0 1px var(--signal)}
+.ki-words{margin:8px 0;max-width:640px} .seed-show button{position:relative;width:100%;text-align:left;font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px 12px 10px 36px;cursor:pointer;letter-spacing:.12em} .seed-show button span{position:absolute;left:11px;top:50%;transform:translateY(-50%);font-family:var(--display);font-size:12px;color:var(--muted)} .seed-show button b{font-weight:500;font-size:14px;letter-spacing:0} .seed-show button.on{border-color:var(--gold);background:var(--ground)} .seed-show button.seen{border-color:var(--signal)} .seed-show button:focus{outline:none;box-shadow:0 0 0 2px var(--gold)}
+.dice-pad{border:1px solid var(--line);border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:10px;max-width:560px;outline:none} .dice-pad:focus{border-color:var(--gold)} .dice-rolls{display:flex;flex-wrap:wrap;gap:6px 14px;min-height:28px;font-size:15px;letter-spacing:.14em} .dice-rolls span{padding:2px 6px;background:var(--ground);border-radius:4px} .dice-keys{display:flex;gap:10px;flex-wrap:wrap} .dice-key{display:flex;flex-direction:column;align-items:center;gap:2px;background:none;border:0;padding:4px 2px;cursor:pointer;color:var(--ink);font:inherit;border-radius:10px} .dice-key svg{width:48px;height:48px} .dice-key span{font-family:var(--display);font-size:12px;color:var(--muted)} .dice-key:hover .die-body,.dice-key:focus-visible .die-body{stroke:var(--gold)} .dice-key:active .die-body{fill:var(--ground)} .dice-key:focus-visible{outline:none;box-shadow:0 0 0 2px var(--gold)} .die-body{fill:var(--panel);stroke:var(--ink);stroke-width:2} .die-pip{fill:var(--ink)} .dice-del{margin-left:6px} .dice-count{font-size:14px} .ki-endings{flex-wrap:wrap;gap:6px}
+.vs-backrow{display:flex;flex-direction:column;gap:8px;padding:10px 0;border-top:1px solid var(--line)} .vs-backrow:first-child{border-top:0}
+
+/* the signing-key choice: two cards, each with its picture and its claim */
+.ki-ways{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:10px 0 6px} @media (max-width:760px){.ki-ways{grid-template-columns:1fr}}
+.ki-way{border:1px solid var(--line);border-radius:12px;padding:16px 16px 14px;display:flex;flex-direction:column;gap:8px;background:var(--panel)} .ki-way h4{font-family:var(--display);font-weight:600;font-size:20px;margin:0 0 2px} .ki-way>.muted{font-size:13px} .ki-way .btn{align-self:flex-start;margin-top:auto}
+.ki-way-pic{display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px 0 6px} .ki-way-cap{font-size:12.5px;color:var(--muted)} .ki-wordspage{width:70px;height:62px} .ki-branch{width:160px;height:30px} .ki-way-keys{display:flex;gap:28px;align-items:flex-start} .ki-way-keys>div{display:flex;flex-direction:column;align-items:center;gap:4px;font-size:12px;color:var(--muted)} .ki-spare{opacity:.5}
+.ki-footnote{display:flex;gap:12px;align-items:center;border-top:1px solid var(--line);padding-top:12px;margin-top:4px} .ki-fp{width:40px;height:40px;border-radius:50%;background:var(--ground);display:inline-flex;align-items:center;justify-content:center;color:var(--signal);flex:0 0 40px}
+
+.ki-procon{list-style:none;margin:2px 0 6px;padding:0;display:flex;flex-direction:column;gap:6px;font-size:13px} .ki-procon li{position:relative;padding-left:20px;color:var(--muted)} .ki-procon li::before{position:absolute;left:0;top:0;font-weight:700} .ki-procon li.pro::before{content:"\2713";color:var(--signal)} .ki-procon li.con::before{content:"\2212";color:var(--no)} .ki-procon li.note{padding-left:20px;font-style:italic} .ki-procon li.note::before{content:"\2022";color:var(--muted)}
+
+/* where the price sat on the long cycle: four small segments, the one it falls in lit; the bands and dots of the Home picture */
+.cyc{display:inline-flex;gap:2px;vertical-align:middle;margin-left:4px}
+.cyc i{display:inline-block;width:9px;height:7px;border-radius:2px;background:var(--line)}
+.cyc i.on{background:var(--gold)}
+.chart .band{fill:var(--gold);opacity:.05} .chart .band.b1{opacity:.1} .chart .band.b2{opacity:.17} .chart .band.b3{opacity:.26}
+.chart .bandlbl{fill:var(--muted);font:600 11px var(--display)}
+.chart .edge{fill:var(--muted);font:11px var(--display);font-variant-numeric:tabular-nums}
+.chart .buy{fill:var(--series-value);stroke:var(--panel);stroke-width:1.5;opacity:.85}
+.chart .sell{fill:var(--panel);stroke:var(--series-cost);stroke-width:2}
+.legend .dotkey{width:10px;height:10px;border-radius:50%;display:inline-block} .legend .dotkey.buy{background:var(--series-value)} .legend .dotkey.sell{background:var(--panel);border:2px solid var(--series-cost);box-sizing:border-box}
+
+/* market context: the compact table on a transaction and on Send */
+.mkt{border-collapse:collapse;font-size:13px;margin:4px 0 2px;width:100%;max-width:440px}
+.mkt th{text-align:right;font:600 11px var(--display);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:0 0 4px 12px;vertical-align:bottom;white-space:nowrap}
+.mkt th:first-child{text-align:left;padding-left:0}
+.mkt th small{display:block;font:12px var(--serif);letter-spacing:0;text-transform:none;color:var(--muted)}
+.mkt td{padding:5px 0 5px 12px;border-top:1px solid var(--line);text-align:right;font-variant-numeric:tabular-nums;color:var(--ink);font-weight:600}
+.mkt td:first-child{text-align:left;padding-left:0;color:var(--muted);font-weight:400}
+.mkt-n{font-size:12px;color:var(--muted);margin-top:4px}
+dd .mkt-n{display:block}
+/* the Purchase context card on Home and All vaults */
+.pc{margin-top:18px;border:1px solid var(--line);border-radius:10px;padding:18px 20px;background:var(--panel)}
+.pc-eyebrow{font:600 11px var(--display);letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.pc-title{margin:4px 0 2px;font:700 20px var(--display);letter-spacing:-.01em;color:var(--ink)}
+.pc-sub{font-size:14px;color:var(--muted)}
+.pc-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin:14px 0 16px;padding-bottom:14px;border-bottom:1px solid var(--line)}
+.pc-stat .k{font-size:13px;color:var(--muted)} .pc-stat .v{font:700 30px var(--display);color:var(--ink);line-height:1.1;margin-top:2px} .pc-stat .v small{font:500 14px var(--display);color:var(--muted);margin-left:4px} .pc-stat .s{font-size:12.5px;color:var(--muted);margin-top:4px}
+.pc-bar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px} .pc-range{font-size:12.5px}
+.pc-chart{margin-top:4px}
+.chart .axlbl{fill:var(--muted);font:11px var(--display)}
+.chart .mkt-line{fill:none;stroke:var(--muted);stroke-width:1.5;opacity:.55}
+.chart .pt{cursor:pointer} .chart .pt:focus-visible{outline:none;stroke:var(--gold);stroke-width:3}
+.chart .halo{fill:var(--gold-soft)}
+.legend .linekey{width:16px;height:2px;background:var(--muted);opacity:.7;display:inline-block}
+.pc-sel{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;background:var(--ground);border-radius:8px;padding:10px 12px;margin-top:10px;font-size:13px}
+.pc-sel b{display:block;font-weight:600;color:var(--ink)} .pc-sel span{color:var(--muted)} .pc-sel>div:last-child{text-align:right}
+.pc-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.pc-pick{font:600 12px var(--display);padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);cursor:pointer;min-height:32px}
+.pc-pick[aria-pressed="true"]{border-color:var(--gold);background:var(--gold-soft)} .pc-pick.left{color:var(--muted)}
+.pc-how{margin-top:12px;border-top:1px solid var(--line);padding-top:10px} .pc-howbody{font-size:12.5px;margin-top:6px;max-width:760px}
+@media (max-width:600px){.pc-sel>div:last-child{text-align:left}.pc{padding:14px}}
+.chart .px-line{fill:none;stroke:var(--gold);stroke-width:2;stroke-linejoin:round}
+.chart .wma-line{fill:none;stroke:var(--muted);stroke-width:1.5;stroke-dasharray:5 4;opacity:.8}
+.chart .nowmark{fill:var(--panel);stroke:var(--muted);stroke-width:1.5}
+.legend .linekey.px{background:var(--gold);opacity:1} .legend .linekey.wma{background:repeating-linear-gradient(90deg,var(--muted) 0 4px,transparent 4px 7px);opacity:.9}
+/* the market-context table inside a transaction's facts: its words must not be broken, and on a phone it takes the full width under its label */
+.tx-dl dd .mkt td:first-child,.tx-dl dd .mkt th{overflow-wrap:normal}
+@media (max-width:700px){.tx-dl dt:has(+ dd > .mkt),.tx-dl dd:has(> .mkt){grid-column:1 / -1} .tx-dl dd:has(> .mkt){margin-top:-6px}}

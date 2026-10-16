@@ -541,7 +541,7 @@ with sync_playwright() as p:
     check("worth and cost basis are the two lines on the money chart", "Worth" in charts.nth(1).locator(".legend").inner_text() and "Cost basis" in charts.nth(1).locator(".legend").inner_text())
     check("every line ends in a labelled dot", charts.nth(1).locator("circle.dot").count() == 2 and charts.nth(1).locator("text.endlbl").count() == 2)
     # the crosshair: one readout for every series at the moment under the pointer
-    hb = charts.nth(1).locator("rect.hit").bounding_box()
+    charts.nth(1).scroll_into_view_if_needed(); hb = charts.nth(1).locator("rect.hit").bounding_box()   # the pointer only reaches what is in the viewport
     pg.mouse.move(hb["x"] + hb["width"] * 0.6, hb["y"] + hb["height"] / 2); pg.wait_for_timeout(200)
     tip = charts.nth(1).locator(".ctip")
     check("hovering shows ONE readout listing every series, the value leading the name", tip.is_visible() and tip.locator(".r").count() == 2 and tip.locator(".r b").count() == 2, tip.inner_text() if tip.is_visible() else "hidden")

@@ -98,7 +98,7 @@ function show(name) {
   $$('.nav[data-go=receive], #s-home [data-go=receive]').forEach(n => { n.hidden = !!(vault && (vault.muun || vault.spark || vault.statement || vault.node || vault.exchange)); });
   const inVault = vault && !APP_LEVEL.has(name);
   $$('#vault-tabs .nav').forEach(n => n.classList.toggle('on', !!inVault && n.dataset.vault === vault.name));
-  $('#title').textContent = { overview: 'All vaults', home: vault ? vault.name : 'Vault', activity: 'Activity', send: 'Send', receive: 'Receive', coins: 'Coins', addresses: 'Addresses', vault: 'Vault settings', keys: 'Keys', settings: 'App settings', places: 'Locations', entities: 'Entities', allkeys: 'Keys', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
+  $('#title').textContent = { overview: 'All vaults', home: vault ? vault.name : 'Vault', activity: 'Activity', send: 'Send', receive: 'Receive', coins: 'Coins', addresses: 'Addresses', vault: 'Vault settings', backup: 'Backup', keys: 'Keys', settings: 'App settings', places: 'Locations', entities: 'Entities', allkeys: 'Keys', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
   $('#title-edit').hidden = !(name === 'home' && vault); $('#title-input').hidden = true; $('#title').hidden = false;
   if (name === 'own') $('#title').textContent = ownState.kind === 'split' ? 'Split coin' : 'Combine coins';
   if (name === 'entity') $('#title').textContent = (entityOf(entPage) || {}).name || 'Entity';
@@ -117,6 +117,7 @@ function show(name) {
   if (name === 'addresses') { recPageClose('addr'); renderAddresses(); }
   if (name === 'coins') { recPageClose('coin'); if (vault && !vault._coins) sync().then(() => Promise.resolve(renderAddresses()).then(renderCoins2)); else Promise.resolve(renderAddresses()).then(renderCoins2); }
   if (name === 'vault') renderVaultSettings();
+  if (name === 'backup') { renderVaultSettings(); renderKeys(); }
   if (name === 'overview') renderOverview();
   if (name === 'send') { closeBook(); paintTo(); loadFees(); if (vault && !vault._coins) sync().then(() => { renderCoins(); sendPreview(); }); else { renderCoins(); sendPreview(); } paintExtSend(); paintSendFrom(); }
   if (name === 'messages') renderMessages();
@@ -154,7 +155,7 @@ function paintCrumbs(name) {
   if (APP_LEVEL.has(name)) trail.push(['Any Two Keys', null]);
   if (name === 'entity') trail.push(['Entities', 'entities']);
   if (name === 'place') trail.push(['Locations', 'places']);
-  const here = { home: '', send: 'Send', receive: 'Receive', keys: recPage.kind === 'key' ? recPage.leaf : 'Keys', settings: 'App settings', places: 'Locations', entities: 'Entities', allkeys: 'Keys', entity: (entityOf(entPage) || {}).name || 'Entity', place: ((store.places || []).find(p => p.id === placePage) || {}).name || 'Location', own: ownState.kind === 'split' ? 'Split coin' : 'Combine coins', setup: 'New vault', restore: 'Restore', sign: 'Sign', messages: 'Messages', tx: name === 'tx' && vault && txView.txid ? txHeadline() : '', coins: recPage.kind === 'coin' ? recPage.leaf : '', addresses: recPage.kind === 'addr' ? recPage.leaf : '' }[name] || '';
+  const here = { home: '', send: 'Send', receive: 'Receive', backup: 'Backup', keys: recPage.kind === 'key' ? recPage.leaf : 'Keys', settings: 'App settings', places: 'Locations', entities: 'Entities', allkeys: 'Keys', entity: (entityOf(entPage) || {}).name || 'Entity', place: ((store.places || []).find(p => p.id === placePage) || {}).name || 'Location', own: ownState.kind === 'split' ? 'Split coin' : 'Combine coins', setup: 'New vault', restore: 'Restore', sign: 'Sign', messages: 'Messages', tx: name === 'tx' && vault && txView.txid ? txHeadline() : '', coins: recPage.kind === 'coin' ? recPage.leaf : '', addresses: recPage.kind === 'addr' ? recPage.leaf : '' }[name] || '';
   const el = $('#crumbs'); el.hidden = !trail.length;
   const html = trail.map(([t, go]) => (go ? `<a tabindex="0" role="link" data-crumb="${go}">${esc(t)}</a>` : `<span>${esc(t)}</span>`) + '<span class="sep">›</span>').join('') + `<span class="here">${esc(here)}</span>`;
   if (el._html !== html) { el._html = html; el.innerHTML = html; }   // a poll must not take focus off a crumb
@@ -510,10 +511,12 @@ async function pollCards() {
   if ($('#s-restore').classList.contains('on') && restoreTab.now === 'keys') readSeals();
   if ($('#s-sign').classList.contains('on')) renderSign();
   if ($('#s-messages').classList.contains('on')) { const c = cards.find(c => c.pubkey); const was = renderMessages.had; renderMessages.had = !!c; if (was !== !!c) renderMessages(); }
-  if (typeof keyOfferTick === 'function') keyOfferTick().catch(() => {});
+  // awaited: the survey talks to the card for a while, and on macOS a poll closing its own connection in the
+  // meantime resets the card under it — the key drops out of the list, the offer blinks, and it starts again
+  if (typeof keyOfferTick === 'function') { try { await keyOfferTick(); } catch {} }
   setTimeout(pollCards, 2000);
 }
-function cardLabel(c) { return `YubiKey 5 · serial ${c.serial} · ${c.version}`; }
+function cardLabel(c) { return `${modelName(c.form, c.nfc)} · serial ${c.serial} · ${c.version}`; }
 
 // ---------- home ----------
 // the balance leads with sats or with money, whichever the person last clicked it to; the other sits underneath
@@ -619,13 +622,19 @@ async function renderTx() {
     rows.push(['Fee', d.fee !== null ? `${sats(d.fee)} sats<small>${d.fee_rate.toFixed(2)} sat/vB · ${sats(d.vsize)} vB</small>` : 'not known']);
     rows.push(['Signed by', signers.length ? signers.map(esc).join(' and ') + `<small>read from the signatures on the transaction</small>` : 'could not be read from the witness']);
     const rl = realisedRow(name, txid); if (rl) rows.push(['Realised', rl]);
+    const mr = marketRow(name, txid); if (mr) rows.push(['Market context', mr]);
   } else {                        // a deposit
     const fromPeer = [...new Set(d.inputs.filter(i => i.peer).map(i => i.peer[0]))];
     rows.push(['From', fromPeer.length ? fromPeer.map(n => `<a href="#" class="tag peer" data-go-vault-tx="${esc(n)}" data-txid="${d.txid}">\u21c4 ${esc(n)}</a>`).join(' ') : `outside this vault · ${d.inputs.length} input${d.inputs.length === 1 ? '' : 's'}`]);
     rows.push(['To', oursOut.map(outLine).join('') || '—']);
     rows.push(['Fee', d.fee !== null ? `${sats(d.fee)} sats, paid by the sender` : 'paid by the sender']);
     const facts = txFacts[name], q = facts && facts.rows[txid] && facts.rows[txid].quote;
-    if (q && vault.network === 'mainnet') rows.push(['Cost', `${money(Math.abs(facts.rows[txid].net) / 1e8 * q.price, facts.ccy)}<small>what it was worth as it arrived \u2014 its cost, if it was bought</small>`]);
+    if (q && vault.network === 'mainnet') {
+      rows.push(['Cost', `${money(Math.abs(facts.rows[txid].net) / 1e8 * q.price, facts.ccy)}<small>what it was worth as it arrived \u2014 its cost, if it was bought</small>`]);
+      // where the price sat the day it arrived, against now: its own row, after the money
+      const t = facts.rows[txid].time, cm = t ? (cycleWant([t], renderTx) ? cycleAt(t) : undefined) : null, nm = cycleNowHere();
+      if (nm === undefined) cycleNow().then(renderTx);
+      rows.push(['Market context', cycleTable({ title: 'When received', sub: t ? cycleDay(t) : 'not in a block yet', mark: cm }, { title: 'Now', sub: cycleStale(nm) ? `as of ${cycleDay(nm.t)}` : '', mark: nm })]); }
   }
   $('#tx-dl').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
   $('#tx-proof').textContent = d.proof === 'proved' ? `the node proved it is in block ${sats(d.height)}` : d.proof === 'unconfirmed' ? 'not in a block yet' : d.proof;
@@ -732,6 +741,14 @@ function realisedRow(name, txid) {
   if (r.moved) return `<span class="muted">not a disposal</span><small>you said these ${sats(Math.round(r.sats))} sats went to a wallet of your own \u00b7 their cost of ${r.cost === null ? 'an unknown amount' : money(r.cost, ccy)} left the books with them \u00b7 ${held}</small>`;
   if (r.gain === null) return `unknown<small>${r.cost === null ? 'some of the coins that left have no known cost' : 'no price for the day they left'} \u00b7 ${held} \u00b7 by ${esc(COST_METHODS[r.method].short)}</small>`;
   return `<span class="${r.gain >= 0 ? 'ok' : 'warn'}">${r.gain >= 0 ? '\u25b2 +' : '\u25bc \u2212'}${money(Math.abs(r.gain), ccy)}</span><small>worth ${money(r.proceeds, ccy)} as ${sats(Math.round(r.sats))} sats left \u00b7 they had cost ${money(r.cost, ccy)} \u00b7 ${held} \u00b7 by ${esc(COST_METHODS[r.method].short)}</small>`;
+}
+/// Where the price sat when the coins that left were received, against the day they left (cycle.js). Its own row,
+/// after the money: market context is kept apart from what was realised.
+function marketRow(name, txid) {
+  const L = vaultLedger(name), r = L && L.realised[txid], ccy = (txFacts[name] || {}).ccy;
+  if (!r || !ccy) return '';
+  const sm = r.t ? (cycleWant([r.t], renderTx) ? cycleAt(r.t) : undefined) : null, bm = cycleOfLots(r.lots, renderTx);
+  return cycleTable({ title: 'When received', sub: cycleSpan(r.from, r.to), mark: bm }, { title: 'When it left', sub: cycleDay(r.t), mark: sm });
 }
 // the picture is drawn in Rust from tiles on our own host; the window only adds the dot and how sure it is
 async function paintMap(ctx) {
@@ -1462,7 +1479,7 @@ async function renderOwn() {
     <div class="warn" id="own-err" hidden></div>
     <details class="adv" open id="own-dest-box"><summary>Destination addresses</summary><div class="dest" id="own-dest" style="margin-top:10px"></div><div class="muted" style="font-size:12.5px;margin-top:8px">${vault._rotating ? 'Each is a fresh receive address of this vault, the next ones Receive would hand out.' : 'This vault has one fixed address, so every coin goes back to it.'}</div></details>
     <div style="font-size:15px;max-width:720px" id="own-say"></div>
-    <div class="muted" style="font-size:13px;max-width:720px">The amount returned to this vault keeps its cost basis${split ? ', shared across the coins by their amounts' : ''}. The network fee is recorded separately. ${vault.ext ? 'A signer with a screen will show every output as this vault\u2019s own.' : 'A YubiKey has no screen of its own, so this card and the review that follows are where you check the destinations and amounts.'}</div>
+    <div class="muted" style="font-size:13px;max-width:720px">The amount returned to this vault keeps its cost basis${split ? ', shared across the coins by their amounts' : ''}. The network fee is recorded separately. ${vault.ext ? 'A signer with a screen will show every output as this vault\u2019s own.' : 'A security key has no screen of its own, so this card and the review that follows are where you check the destinations and amounts.'}</div>
     <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-start;margin-top:4px"><div class="row" style="gap:10px"><button class="btn primary" type="button" id="own-build">Build transaction</button><button class="btn" type="button" data-go="coins">Back to Coins</button></div><span class="muted" style="font-size:13px">Next: review, sign with ${vault.keys.length === 1 ? 'the key' : `${vault.threshold} of ${vault.keys.length} keys`}, then broadcast.</span></div>`;
   $$('#own-fee [data-fee-own]').forEach(b => b.onclick = () => { feeLevel = b.dataset.feeOwn; $$('#fee-pick .opt').forEach(x => x.classList.toggle('on', x.dataset.fee === feeLevel)); $$('#own-fee [data-fee-own]').forEach(x => x.setAttribute('aria-checked', x === b ? 'true' : 'false')); $('#own-rate').hidden = feeLevel !== 'custom'; if (feeLevel === 'custom') $('#own-rate').focus(); ownPreview(); });
   $('#own-rate').addEventListener('input', () => { $('#fee-custom').value = $('#own-rate').value; paintCustomFee(); ownPreviewSoon(); });
@@ -1958,7 +1975,7 @@ function costOfLeaving(L, vaultName, chosen, spending, leaving) {
   }
   const dated = lots.filter(l => l.t !== null);
   return { sats: leaving, cost: lots.some(l => l.cost === null) ? null : lots.reduce((a, l) => a + l.cost, 0),
-    from: dated.length ? Math.min(...dated.map(l => l.t)) : null, to: dated.length ? Math.max(...dated.map(l => l.t)) : null,
+    from: dated.length ? Math.min(...dated.map(l => l.t)) : null, to: dated.length ? Math.max(...dated.map(l => l.t)) : null, lots: dated,
     why: lots.some(l => l.cost === null) ? 'part of what leaves has no known cost' : '' };
 }
 
@@ -2180,6 +2197,8 @@ async function renderSummary(box, names, opts = {}) {
       series: [{ name: 'Worth', color: 'var(--series-value)', pts: S.val, step: false }, { name: 'Cost basis', color: 'var(--series-cost)', pts: S.cost, step: true }],
       fmt: (v) => money(v, ccy), fmtAxis: (v) => cmoney(v, ccy) });
   }
+  // where the price sat on the long cycle as coins arrived and left: drawn when its marks are here, into its own slot
+  if (priced) { const card = document.createElement('div'); box.appendChild(card); cycleSummary(L, card, () => me === renderSummary.seq); }
   // what the figures rest on, said once and plainly
   const notes = [];
   if (!priced) notes.push(inputs.some(i => i.network !== 'mainnet') ? 'Test coins have no price, so only the balance is drawn.' : 'No currency is chosen in App settings, so only the balance is drawn.');
@@ -2665,10 +2684,16 @@ function paintReview() {
     out += `<div style="border-top:1px solid var(--line);padding-top:10px;display:flex;flex-direction:column;gap:6px">
       <div><span class="tag out">leaves your vaults</span> ${sats(ch.leaving)} sats — ${sats(ch.send)} paid and ${sats(ch.fee)} in fee</div>`;
     if (!k || !k.ccy) out += `<div class="muted" style="font-size:13px">No price is loaded for this vault, so what it cost and what it is worth cannot be shown here.</div>`;
-    else out += `${row('They cost', k.cost === null ? `<span class="muted">not known — ${esc(k.why)}</span>` : money_(k.cost))}
+    else {
+      out += `${row('They cost', k.cost === null ? `<span class="muted">not known — ${esc(k.why)}</span>` : money_(k.cost))}
       ${row('Worth now', money_(k.value) || '—')}
       ${row('Gain if this is a disposal', k.gain === null ? '<span class="muted">unknown</span>' : `<span class="${k.gain >= 0 ? 'ok' : 'warn'}">${k.gain >= 0 ? '\u25b2 +' : '\u25bc \u2212'}${money_(Math.abs(k.gain))}</span>`)}
       <div class="muted" style="font-size:13px">${held ? held + ' · ' : ''}by ${esc(COST_METHODS[k.method].short)}${k.method === 'utxo' ? '' : ' — which coins you pick does not change this'}.</div>`;
+      // where the price sat when the coins leaving were received, against now: after the money, at the moment of deciding
+      const nm = cycleNowHere(); if (nm === undefined) cycleNow().then(() => paintReview());
+      const bm = cycleOfLots(k.lots, paintReview);
+      out += cycleTable({ title: 'When received', sub: k.from ? cycleSpan(k.from, k.to) : 'day not known here', mark: bm }, { title: 'Now', sub: cycleStale(nm) ? `as of ${cycleDay(nm.t)}` : '', mark: nm });
+    }
     out += `<div class="field" style="margin-top:4px"><div class="label">What is this?</div><div class="pick tight" id="disposal-pick">
       ${DISPOSALS.map(([v, n]) => `<div class="opt${v === disposalKind ? ' on' : ''}" data-kind="${v}">${n}</div>`).join('')}</div>
       <div class="muted" style="font-size:13px;margin-top:6px" id="disposal-note"></div></div>`;
@@ -2714,10 +2739,17 @@ $('#build-btn').onclick = async () => {
 const packedForm = (pub) => (store.forms || {})[pub] || 0;        // low 4 bits: form factor; top bit: NFC
 const isNano = (pub) => [2, 4].includes(packedForm(pub) & 0x0F);
 // packed byte: low 4 bits form factor · 0x80 has NFC · 0x40 NFC was actually asked (older builds stored the form alone)
-const modelName = (form, nfc, asked = true) => ({ 1: nfc ? 'YubiKey 5 NFC' : asked ? 'YubiKey 5 (USB-A)' : 'YubiKey 5, USB-A', 2: 'YubiKey 5 Nano', 3: nfc ? 'YubiKey 5C NFC' : asked ? 'YubiKey 5C' : 'YubiKey 5, USB-C', 4: 'YubiKey 5C Nano', 5: 'YubiKey 5Ci' }[form & 0x0F] || 'YubiKey 5');
+// form 14 is a Nitrokey 3 (cards.rs FORM_NITROKEY3): its maker is read from the card's AID, never from the reader's name
+const FORM_NITROKEY3 = 14;
+const isNitro = (form) => (form & 0x0F) === FORM_NITROKEY3;
+const modelName = (form, nfc, asked = true) => ({ 1: nfc ? 'YubiKey 5 NFC' : asked ? 'YubiKey 5 (USB-A)' : 'YubiKey 5, USB-A', 2: 'YubiKey 5 Nano', 3: nfc ? 'YubiKey 5C NFC' : asked ? 'YubiKey 5C' : 'YubiKey 5, USB-C', 4: 'YubiKey 5C Nano', 5: 'YubiKey 5Ci', [FORM_NITROKEY3]: 'Nitrokey 3' }[form & 0x0F] || 'YubiKey 5');
+// where a key is touched, in words: a YubiKey on its gold contact (a Nano: the strip along its edge), a Nitrokey 3 on its top
+const touchWhere = (form) => isNitro(form) ? 'top of the key' : [2, 4].includes(form & 0x0F) ? 'gold strip' : 'gold contact';
 // our own drawings of each shape (not Yubico's artwork): body, gold touch contact, the plug that tells A from C, the keyring hole, an NFC mark
 function keyArt(form, nfc, h = 44) {
   const f = form & 0x0F, usbC = [3, 4, 5].includes(f), nano = [2, 4].includes(f);
+  // a Nitrokey 3 is the silhouette the device chooser draws, at this height
+  if (f === FORM_NITROKEY3) { const w = Math.round(h * 72 / 56); return deviceOf('nitrokey3').svg.replace('<svg ', `<svg style="width:${w}px;height:${h}px;flex:0 0 auto;color:var(--ink)" `); }
   const plug = usbC ? '<rect x="15" y="2" width="14" height="9" rx="4.5" fill="none" stroke="var(--muted)" stroke-width="1.8"/>' : '<rect x="12" y="2" width="20" height="12" rx="1.5" fill="none" stroke="var(--muted)" stroke-width="1.8"/><rect x="16" y="5" width="4" height="4" fill="var(--muted)"/><rect x="24" y="5" width="4" height="4" fill="var(--muted)"/>';
   const top = usbC ? 10 : 13;
   const body = nano ? `<rect x="9" y="${top}" width="26" height="22" rx="5" fill="var(--ink)"/><circle cx="22" cy="${top + 11}" r="6" fill="none" stroke="var(--gold)" stroke-width="3"/><circle cx="22" cy="${top + 11}" r="1.8" fill="var(--signal)"/>`
@@ -2770,7 +2802,12 @@ function guideArt(step, form) {
   const caps = [0, 1, 2].map(i => `<rect class="g-cap" x="${180 + i * 30}" y="28" width="24" height="22" rx="4"/><rect class="g-cap" x="${180 + i * 30}" y="56" width="24" height="22" rx="4"/><rect class="g-cap" x="${180 + i * 30}" y="84" width="24" height="22" rx="4"/>`).join('');
   const lap = `<rect class="g-lap" x="158" y="14" width="120" height="104" rx="12"/>${caps}<rect class="g-port" x="158" y="${usbA ? 55 : 58}" width="7" height="${usbA ? 22 : 16}" rx="${usbA ? 1.5 : 3.5}"/>`;
   let key, touchAt;
-  if (nano) {
+  if (isNitro(form)) {
+    // a Nitrokey 3: the flat wedge, widest at the plug, the whole top face its touch; a finger mark and a lanyard slot
+    const x = seated ? 60 : 26;
+    key = `<g${seated ? '' : ' class="g-nudge"'}><rect class="g-line" x="${x + 84}" y="58" width="20" height="16" rx="6"/><path class="g-ink" d="M${x + 8} 55L${x + 84} 49q5 -.5 5 5v24q0 5.5 -5 5L${x + 8} 77q-8 0 -8 -8v-6q0 -8 8 -8z"/><rect class="g-hole" x="${x + 10}" y="62" width="5" height="8" rx="1.5"/><circle class="g-ring" cx="${x + 48}" cy="66" r="7.5"/><path class="g-ring" d="M${x + 59} 59l2 -2.6M${x + 61} 66h3.5M${x + 59} 73l2 2.6"/><circle class="g-led${step === 'touch' ? ' g-blink' : ''}" cx="${x + 76}" cy="57" r="2.2"/></g>`;
+    touchAt = [x + 48, 66];
+  } else if (nano) {
     const x = seated ? 136 : 82;   // only the head shows once it is in
     key = `<g${seated ? '' : ' class="g-nudge"'}><rect class="g-line" x="${x + 22}" y="${usbA ? 57 : 60}" width="18" height="${usbA ? 18 : 12}" rx="${usbA ? 1.5 : 5}"/><rect class="g-ink" x="${x}" y="52" width="24" height="28" rx="5"/><rect class="g-strip" x="${x + 3}" y="52" width="18" height="4" rx="2"/>${step === 'touch' ? `<circle class="g-led g-blink" cx="${x + 12}" cy="68" r="2.4"/>` : ''}</g>`;
     touchAt = [x + 12, 54];
@@ -2881,7 +2918,7 @@ async function renderSign() {
     $('#pin-field').hidden = true; $('#sign-warn').hidden = true; $('#sign-btn').disabled = true;
     renderSign.focusedFor = null; paintGuide('plug', next ? (packedForm(next.pubkey) || 3) : 3); return;
   }
-  const c = usable[0]; const k = vault.keys.find(k => k.pubkey === c.pubkey), nano = [2, 4].includes(c.form & 0x0F), where = nano ? 'gold strip' : 'gold contact';
+  const c = usable[0]; const k = vault.keys.find(k => k.pubkey === c.pubkey), nano = [2, 4].includes(c.form & 0x0F), where = touchWhere(c.form);
   $('#sign-title').textContent = `Enter the PIN for ${q(k.name)}`; $('#sign-text').textContent = `${modelName(c.form, c.nfc)} · serial ${c.serial}. Press Enter, then touch the key when its light flashes.`;
   $('#pin-field').hidden = false; $('#sign-warn').hidden = false; $('#sign-btn').disabled = false;
   paintGuide('pin', c.form || 3);
@@ -2895,7 +2932,7 @@ async function renderSign() {
     // the next action is physical: the software steps back — no buttons, one status line, the picture moves in on the key
     renderSign.signing = c.pubkey; renderSign.tiles = null; $('#act-row').hidden = true; $('#sign-cancel').hidden = true; $('#sign-warn').hidden = true; $('#sign-waiting').hidden = false;
     $('#sign-title').textContent = `Touch the ${where} now`;
-    $('#sign-text').textContent = `${nano ? 'It runs along the key’s top edge. Touch it' : 'Touch it'} when its light flashes${st.inputs > 1 ? `, once for each of the ${st.inputs} inputs` : ''}. Keep the key plugged in.`;
+    $('#sign-text').textContent = `${nano ? 'It runs along the key’s top edge. Touch it' : isNitro(c.form) ? 'Press it' : 'Touch it'} when its light flashes${st.inputs > 1 ? `, once for each of the ${st.inputs} inputs` : ''}. Keep the key plugged in.`;
     paintGuide('touch', c.form || 3); renderSign();
     try { const r = await invoke('spend_sign', { name: vault.name, reader: c.reader, pin }); $('#pin').value = ''; toast(`${r.signer} signed ${r.signed_inputs.length} input${r.signed_inputs.length === 1 ? '' : 's'}`); }
     catch (e) { fail(e); }
@@ -3036,6 +3073,12 @@ function coinTax(L, c, price, ccy) {
     const dated = lots.filter(l => l.t !== null), from = dated.length ? Math.min(...dated.map(l => l.t)) : null;
     if (from) bits.push(heldFor(from, from).split(' \u00b7 ')[1]);
   }
+  // where the price sat when it was bought: by its lots when it has them, else by the day the coin itself arrived
+  if (vault.network === 'mainnet') {
+    const dated = lots && lots.length ? lots.filter(l => l.t !== null) : [], row = ((txFacts[vault.name] || {}).rows || {})[c.txid];
+    const cm = dated.length ? cycleOfLots(dated, renderCoins) : row && row.time && cycleWant([row.time], renderCoins) ? cycleAt(row.time) : null;
+    if (cm) bits.push(`received at the ${cycleOrd(cm.pct)} percentile ${cycleStrip(cm)}`);
+  }
   return bits.length ? `<span class="coin-tax">${bits.join(' \u00b7 ')}</span>` : '';
 }
 
@@ -3046,6 +3089,7 @@ const COIN_PLANS = {
   gain:    { name: 'Least gain', why: 'the coins standing at the smallest gain (or a loss) go first', cmp: null },
   oldest:  { name: 'Longest held', why: 'the coins that have been here longest go first', cmp: null },
   private: { name: 'Keep addresses apart', why: 'as few of your addresses joined in one transaction as possible', cmp: null },
+  dear:    { name: 'Received highest', why: 'the coins received at the highest historical percentile go first', cmp: null },
 };
 function planPick(plan) {
   const coins = ((vault && vault._coins) || []).slice(); if (!coins.length) return toast('the vault holds no coins');
@@ -3059,6 +3103,11 @@ function planPick(plan) {
   const ageOf = (c) => { const d = lotsOf(c).filter(l => l.t !== null); return d.length ? Math.min(...d.map(l => l.t)) : Infinity; };
   if (plan === 'gain') coins.sort((a, b) => (gainOf(a) - gainOf(b)) || (b.value - a.value));
   else if (plan === 'oldest') coins.sort((a, b) => (ageOf(a) - ageOf(b)) || (b.value - a.value));
+  else if (plan === 'dear') {
+    if (!cycleWant(coins.flatMap(c => lotsOf(c).filter(l => l.t !== null).map(l => l.t)), null)) return toast('Still working out where the price sat when these coins arrived; try again in a moment');
+    const multOf = (c) => { const m = cycleOfLots(lotsOf(c), null); return m ? m.pct : -Infinity; };
+    coins.sort((a, b) => (multOf(b) - multOf(a)) || (b.value - a.value));
+  }
   else if (plan === 'private') coins.sort((a, b) => (b.value >= f.amount) - (a.value >= f.amount) || a.value - b.value || 0);
   else coins.sort(COIN_PLANS.fewest.cmp);
   // a coin costs roughly one input in fee; the exact figure comes back from the preview, which is the real arithmetic
@@ -3251,7 +3300,8 @@ const verLt = (a, b) => { const p = (v) => String(v || '').split('.').map(n => p
 const ADVISORIES = [{
   id: 'YSA-2024-03',
   title: 'Infineon ECDSA private key recovery (\u201cEUCLEAK\u201d)',
-  hits: (card) => !!card.firmware && verLt(card.firmware, '5.7.0'),
+  // a YubiKey 5 Series advisory: only a 5.x firmware can be hit by it (a Nitrokey 3's 1.9.1 is not "before 5.7.0")
+  hits: (card) => !!card.firmware && /^5\./.test(card.firmware) && verLt(card.firmware, '5.7.0'),
   says: 'Yubico\u2019s advisory covers YubiKey 5 Series firmware before 5.7.0; 5.7.0 and newer are not affected. Someone who had the key in their hands for a time, with laboratory equipment, could recover the secret it holds. Yubico does not allow firmware to be updated on a key that already exists, so this one cannot be moved to 5.7 \u2014 only replaced. Their own advice is to keep physical control of it.',
   here: 'In a vault like this one that matters less on its own: an attacker would need this key AND enough of the others to sign. It is still a reason to keep it somewhere only you reach, and a reason to prefer 5.7.0 or newer for a key you buy next.',
 }];
@@ -3338,6 +3388,23 @@ function openKeyCard(pub) {
   paintIcons(d);
   paintKeyPrivate();
   paintCrumbs('keys');
+  // ---- the key's signing part can be wiped: a factory reset of its OpenPGP applet, under its admin PIN ----
+  if (bare) {
+    const here = cards.find(c => c.pubkey === pub);
+    const uses = store.vaults.filter(v => v.keys.some(x => x.pubkey === pub));
+    const amount = (v) => v === vault && vault._balance != null ? `${sats(vault._balance)} sats` : 'balance not read on this computer yet';
+    d.insertAdjacentHTML('beforeend', `<div class="card" style="margin-top:18px;border-color:var(--no)"><div class="label">Reset this key</div>
+      <div class="muted" style="font-size:13px">Wipes the signing part of the key (its OpenPGP applet): the signing key, both PINs, any seal share and this computer\u2019s unlock slot on it. The key comes back factory-fresh and can be set up again \u2014 as a <b>different</b> key. Nothing else on it (passkeys, authenticator codes) is touched.</div>
+      <div class="warn" style="font-size:13px"><b>This key signs for ${uses.length === 1 ? 'one vault' : sats(uses.length) + ' vaults'}, and each loses this cosigner for good:</b><ul style="margin:6px 0 0 18px;padding:0">${uses.map(v => `<li>${esc(v.name)} \u2014 ${v.network === 'mainnet' ? 'mainnet' : esc(v.network)} \u00b7 any ${v.threshold} of ${v.keys.length} keys \u00b7 ${amount(v)}</li>`).join('')}</ul>${uses.some(v => v.keys.length === 1) ? '<div style="margin-top:6px"><b>A vault of one key is lost outright.</b></div>' : '<div style="margin-top:6px">A vault of several keys still spends with the others, but has one fewer to lose; move its coins to a new vault with a replacement key.</div>'}${!here ? '<div style="margin-top:6px">Plug the key in to go on.</div>' : ''}</div>
+      ${here ? `<div class="grid2"><div class="field"><div class="label">Its admin PIN</div><input type="password" id="key-reset-pin" autocomplete="off" style="max-width:260px"></div></div>
+      <div class="row"><button class="btn" type="button" id="key-reset" style="border-color:var(--no);color:var(--no)">Reset this key\u2019s signing part\u2026</button></div><div class="muted" id="key-reset-note" aria-live="polite"></div>` : ''}</div>`);
+    if (here) askTwice($('#key-reset'), `Wipe the signing part of “${k.name}” (serial ${here.serial})? ${uses.length ? uses.map(v => v.name).join(', ') + (uses.length === 1 ? ' loses' : ' lose') + ' this cosigner for good.' : ''} The key cannot be brought back.`, 'Yes, reset it', async () => {
+      const pin = $('#key-reset-pin').value; $('#key-reset-pin').value = ''; if (!pin) return toast('Enter the admin PIN');
+      $('#key-reset').disabled = true; $('#key-reset-note').textContent = 'Resetting\u2026';
+      try { store = await invoke('card_reset', { reader: here.reader, adminPin: pin, serial: here.serial }); if (vault) vault = store.vaults.find(v => v.name === vault.name) || vault; toast(`${k.name} is factory-fresh again. Its vaults keep the record of the key it was; a new key can be set up on it.`, 9000); closeKeyCard(); renderKeys(); }
+      catch (e) { $('#key-reset-note').textContent = String(e); $('#key-reset').disabled = false; }
+    });
+  }
 }
 // The map to the custody — where the key is kept, photos, who knows — is drawn only while a proof of presence
 // holds: Touch ID, or one of this vault's keys signing a fresh challenge. The proof is the window's for ten minutes.
@@ -3355,7 +3422,7 @@ function paintKeyPrivate() {
   box.innerHTML = `<div class="label" style="margin-top:18px">Kept with this key</div>
     <div class="muted" style="font-size:13.5px;max-width:640px">Where it is kept, photos of it and its sheet, notes on who knows — a map to the custody. It is sealed on disk like everything else; putting it on a screen deserves a second look first.</div>
     <div class="row" style="margin-top:12px"><button class="btn primary" type="button" id="key-open-mac">Show it — Touch ID</button></div>
-    ${here.length ? `<div class="muted" style="font-size:13px;margin-top:14px">Or with one of this vault’s keys, its PIN and a touch:</div><div style="display:flex;flex-direction:column;gap:8px;margin-top:6px;max-width:640px">${here.map((c, i) => `<form class="lock-key" data-reader="${esc(c.reader)}"><b>${esc(nameOfCard(c))}<small>plugged in · YubiKey ${esc(String(c.serial))}</small></b><input type="password" autocomplete="off" placeholder="Key PIN" aria-label="PIN of ${esc(nameOfCard(c))}"><button class="btn" type="submit">Show it</button></form>`).join('')}</div>` : `<div class="muted" style="font-size:13px;margin-top:10px">Or plug in one of this vault’s keys to open it with a PIN and a touch.</div>`}
+    ${here.length ? `<div class="muted" style="font-size:13px;margin-top:14px">Or with one of this vault’s keys, its PIN and a touch:</div><div style="display:flex;flex-direction:column;gap:8px;margin-top:6px;max-width:640px">${here.map((c, i) => `<form class="lock-key" data-reader="${esc(c.reader)}"><b>${esc(nameOfCard(c))}<small>plugged in · ${esc(modelName(c.form, c.nfc))} ${esc(String(c.serial))}</small></b><input type="password" autocomplete="off" placeholder="Key PIN" aria-label="PIN of ${esc(nameOfCard(c))}"><button class="btn" type="submit">Show it</button></form>`).join('')}</div>` : `<div class="muted" style="font-size:13px;margin-top:10px">Or plug in one of this vault’s keys to open it with a PIN and a touch.</div>`}
     <div class="muted" id="key-open-note" aria-live="polite" style="margin-top:8px"></div>`;
   const opened = (until) => { keyCardOpenUntil = until * 1000; paintKeyPrivate(); setTimeout(() => { if (recPage.kind === 'key' && Date.now() >= keyCardOpenUntil) paintKeyPrivate(); }, Math.max(0, keyCardOpenUntil - Date.now()) + 50); };
   $('#key-open-mac').onclick = async () => { $('#key-open-note').textContent = ''; try { opened(await invoke('key_card_open', { name: vault.name, reader: null, pin: null })); } catch (e) { $('#key-open-note').textContent = String(e); } };
@@ -3468,7 +3535,7 @@ function paintProofGate(gate, title, words, onOpened) {
   const here = cards.filter(c => c.pubkey && store.vaults.some(v => v.keys.some(k => k.pubkey === c.pubkey)));
   gate.innerHTML = `<div class="label">${title}</div><div class="muted" style="font-size:13.5px;max-width:640px">${words} It is sealed on disk like everything else; putting it on a screen deserves a second look first.</div>
       <div class="row" style="margin-top:12px"><button class="btn primary" type="button" id="places-open-mac">Show it — Touch ID</button></div>
-      ${here.length ? `<div class="muted" style="font-size:13px;margin-top:14px">Or with any key kept here, its PIN and a touch:</div><div style="display:flex;flex-direction:column;gap:8px;margin-top:6px;max-width:640px">${here.map(c => `<form class="lock-key" data-reader="${esc(c.reader)}"><b>${esc((store.vaults.flatMap(v => v.keys).find(k => k.pubkey === c.pubkey) || {}).name || 'key')}<small>plugged in · YubiKey ${esc(String(c.serial))}</small></b><input type="password" autocomplete="off" placeholder="Key PIN"><button class="btn" type="submit">Show it</button></form>`).join('')}</div>` : ''}
+      ${here.length ? `<div class="muted" style="font-size:13px;margin-top:14px">Or with any key kept here, its PIN and a touch:</div><div style="display:flex;flex-direction:column;gap:8px;margin-top:6px;max-width:640px">${here.map(c => `<form class="lock-key" data-reader="${esc(c.reader)}"><b>${esc((store.vaults.flatMap(v => v.keys).find(k => k.pubkey === c.pubkey) || {}).name || 'key')}<small>plugged in · ${esc(modelName(c.form, c.nfc))} ${esc(String(c.serial))}</small></b><input type="password" autocomplete="off" placeholder="Key PIN"><button class="btn" type="submit">Show it</button></form>`).join('')}</div>` : ''}
       <div class="muted" id="places-open-note" aria-live="polite" style="margin-top:8px"></div>`;
   const opened = (until) => { keyCardOpenUntil = until * 1000; onOpened(); };
   gate.querySelector('#places-open-mac').onclick = async () => { try { opened(await invoke('key_card_open', { name: null, reader: null, pin: null })); } catch (e) { gate.querySelector('#places-open-note').textContent = String(e); } };
@@ -3704,7 +3771,7 @@ function paintKeyLife() {
   const fwOf = (pk) => { const c = cards.find(c => c.pubkey === pk); return (c && c.firmware) || ((store && store.key_fw) || {})[pk] || ''; };
   const known = keys.filter(k => fwOf(k.pubkey)), hit = known.filter(k => keyAdvisories({ firmware: fwOf(k.pubkey) }).length);
   $('#key-life').innerHTML = `<div class="label">Age, end of life and warranty</div>
-    <div class="muted" style="font-size:13px">A YubiKey tells this computer its serial, its firmware version and its shape. It does <b>not</b> carry the day it was made, an end-of-life date, or anything about a warranty \u2014 so none is shown here, because a guessed one would be worse than nothing.</div>
+    <div class="muted" style="font-size:13px">A key tells this computer its serial and, for a YubiKey, its firmware version and its shape. It does <b>not</b> carry the day it was made, an end-of-life date, or anything about a warranty \u2014 so none is shown here, because a guessed one would be worse than nothing. A Nitrokey 3 keeps its firmware version for Nitrokey App 2, which can also update it.</div>
     <div class="muted" style="font-size:13px;margin-top:8px">Yubico retires a whole <b>product line</b>, not your particular key, and sets no date in advance: their policy is six months\u2019 notice before a product stops being sold, and support for a year after that. A warranty runs from a purchase this app knows nothing about. The nearest thing to an age it can honestly give is when this computer first saw each key, which is a floor and never the real age.</div>
     <div class="muted" style="font-size:13px;margin-top:8px">The firmware each key reports <b>is</b> checked, here on this computer, against advisories known when this app was built (${esc(ADVISORIES_AS_OF)}). Nothing is asked of anyone: a question like \u201cis serial 12345678 still supported?\u201d would hand over a list of exactly which keys guard this vault.</div>
     <div class="${hit.length ? 'warn' : 'muted'}" style="font-size:13px;margin-top:8px">${!keys.length ? '' : `The firmware of ${sats(known.length)} of this vault\u2019s ${sats(keys.length)} keys is known${known.length < keys.length ? ' \u2014 plug in the others once each and it is remembered, since it can never change' : ''}. ${hit.length === keys.length && keys.length ? `<b>All ${sats(keys.length)} are on firmware an advisory covers.</b> A vault of several keys usually means an attacker must beat more than one \u2014 but here every one of them has the same weakness, so that comfort is gone.` : hit.length ? `${sats(hit.length)} ${hit.length === 1 ? 'has' : 'have'} something against ${hit.length === 1 ? 'it' : 'them'} \u2014 see ${hit.length === 1 ? 'its row' : 'their rows'} above.` : known.length ? 'Nothing known stands against them.' : ''}`}</div>`;
@@ -3712,11 +3779,11 @@ function paintKeyLife() {
 function renderKeysNow() {
   // keys of this vault say "plugged in" on their own rows; this line is only for what ELSE is in the ports
   const others = cards.filter(c => !vault || !vault.keys.some(k => k.pubkey === c.pubkey));
-  const devName = (r) => { const m = r.match(/YubiKey[^,()]*/i); const n = (m ? m[0] : r).replace(/\s+(OTP|FIDO|CCID|U2F)(\+\w+)*.*$/i, '').trim(); return /bio/i.test(r) ? 'YubiKey Bio' : (n || 'A Yubico device'); };
+  const devName = (r) => { const m = r.match(/YubiKey[^,()]*/i); const n = (m ? m[0] : r).replace(/\s+(OTP|FIDO|CCID|U2F)(\+\w+)*.*$/i, '').trim(); return /bio/i.test(r) ? 'YubiKey Bio' : /nitrokey|^8352 /i.test(r) ? 'Nitrokey' : (n || 'A smart card'); };
   const unusable = otherDevices.map(d => `<div class="keyrow"><svg width="22" height="22"><use href="#ring"/></svg><div class="who"><div class="name">${esc(devName(d.reader))} <span class="muted" style="font-weight:400">\u00b7 plugged in, cannot be used here</span></div><div class="muted" style="font-size:13px">${esc(d.why.charAt(0).toUpperCase() + d.why.slice(1))}.${/bio/i.test(d.reader) ? ' A YubiKey Bio signs in to websites with a fingerprint; it does not hold the kind of key a vault needs. It is perfectly fine \u2014 just for something else.' : ''} It is not one of this vault\u2019s keys and nothing was done to it.</div></div><div class="state"><i></i>not usable</div></div>`).join('');
   $('#keys-other').innerHTML = unusable; $('#keys-other').hidden = !unusable;
   const text = others.length ? 'Also plugged in: ' + others.map(c => `${modelName(c.form, c.nfc)} · serial ${c.serial}${c.pubkey ? '' : ' · no signing key yet'}`).join('; ') + '. Not one of this vault’s keys.'
-    : cardsErr && !/no YubiKey found/i.test(cardsErr) ? 'Card reader problem: ' + cardsErr : '';
+    : cardsErr && !/no (YubiKey|key) found/i.test(cardsErr) ? 'Card reader problem: ' + cardsErr : '';
   $('#keys-now').textContent = text; $('#keys-now').hidden = !text;
 }
 // rename a key in place from the pencil on its row
@@ -3788,7 +3855,7 @@ function renderSetup() {
   // every plugged-in key that is not in the vault yet is offered, each in its own panel: with two keys in the
   // computer the person chooses which one is next, and is never shown one of them as though it were the only one
   const waiting = cards.filter(c => !setup.keys.some(k => k.serial === c.serial));
-  if (!waiting.length) { box.innerHTML = `<div class="muted">Key ${setup.keys.length + 1} of ${setup.n}: plug in a YubiKey${setup.n > 1 ? ', or add a signing device' : ''}.</div>`; renderSetup.nowSig = null; return; }
+  if (!waiting.length) { box.innerHTML = `<div class="muted">Key ${setup.keys.length + 1} of ${setup.n}: plug in a YubiKey or a Nitrokey 3${setup.n > 1 ? ', or add a signing device' : ''}.</div>`; renderSetup.nowSig = null; return; }
   const spare = ['laptop', 'keyring', 'off-site'].filter(n => !setup.keys.some(k => k.name === n));
   const rows = waiting.map((c, i) => {
     // a card already named in another vault keeps that name: it is the same key, and the person knows it by it
@@ -3813,7 +3880,7 @@ function renderSetup() {
     + rows.map((r, i) => { const c = r.c, date = r.ready ? new Date(r.ready.at * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' }) : '';
       const head = `<span class="keyart">${keyArt(c.form || 3, !!c.nfc, 52)}</span><div class="enrol-body"><div style="font-family:var(--display);font-weight:600;font-size:15px">${esc(modelName(c.form, c.nfc))} · serial ${c.serial}${c.firmware ? ' · firmware ' + esc(c.firmware) : ''}</div>`;
       if (r.isNew) return `<div class="enrol" data-serial="${c.serial}">${head}
-        <div class="muted" style="font-size:13px">${r.begun ? 'This key’s PINs were set here, but its setup was not finished: it has no signing key yet.' : 'This key is new: it has never been set up, and both its PINs are still the ones every YubiKey ships with.'} Setting it up here takes a few minutes and needs no other software.</div>
+        <div class="muted" style="font-size:13px">${r.begun ? 'This key’s PINs were set here, but its setup was not finished: it has no signing key yet.' : 'This key is new: it has never been set up, and both its PINs are still the ones every key ships with.'} Setting it up here takes a few minutes and needs no other software.</div>
         <div class="row"><button class="btn primary enrol-init"${id(i, 'enrol-init')} type="button">${r.begun ? 'Finish setting this key up' : 'Set this key up'}</button></div></div></div>`;
       return `<div class="enrol" data-serial="${c.serial}">${head}
         <div class="muted" style="font-size:13px">${r.has ? (r.ready ? `Set up here on ${date}: its PINs are yours, its signing key is made and its first signature was checked. Nothing more to do but add it.` : 'This card already holds a signing key (touch ' + esc(c.touch) + '). Use it: the same card key can belong to any number of vaults.') : 'This key has PINs of its own already and no signing key: one will be made on it.'}</div>
@@ -3844,7 +3911,8 @@ function renderSetup() {
     } else wireGenerate();
   });
 }
-function cardDevice(c) { return /nitrokey/i.test(c.reader || '') ? 'nitrokey3' : 'yubikey'; }
+// the card says who made it (its AID), and cards.rs turns that into the devices.js id; a reader's name says nothing
+function cardDevice(c) { return c.device || 'yubikey'; }
 function deviceRow(k) {
   const d = deviceOf(k.device), m = /^\[([0-9a-f]{8})\/([^\]]+)\](\w+)/.exec(k.expression) || [];
   return `<div class="keyrow"><span class="devart">${d.svg}</span><div class="who"><div class="name"><span class="name-text">${esc(k.name)}</span></div><div class="muted" style="font-size:13px">${esc(d.name)} · fingerprint <span class="mono">${esc(m[1] || '?')}</span> · m/${esc(m[2] || '?')} · <span class="mono">${esc((m[3] || '').slice(0, 12))}…</span></div></div><div class="state ok"><i></i>added</div></div>`;
@@ -3884,9 +3952,7 @@ function devShow(id) {
   const chips = d.offers.map(o => `<span class="chip${DEVICE_NOW[o] ? ' on' : ''}" title="${DEVICE_NOW[o] ? 'This app uses it' : 'The device has it; this app does not use it yet'}">${DEVICE_WORDS[o]}${DEVICE_NOW[o] ? '' : ' · later'}</span>`).join('');
   const head = `<div class="devhead">${d.svg}<div style="display:flex;flex-direction:column;gap:6px"><div class="muted" style="font-size:13px">${esc(d.maker)}</div><div class="chips">${chips}</div></div></div>`;
   if (d.group === 'card') {
-    $('#dev-one').innerHTML = head + (d.id === 'yubikey'
-      ? '<div>Plug it in and close this: a YubiKey appears on the setup screen by itself, ready to enrol.</div>'
-      : '<div>Not yet. A Nitrokey 3 can hold the same kind of key as a YubiKey, and the app will read it once it has been tested on a real one.</div>');
+    $('#dev-one').innerHTML = head + `<div>Plug it in and close this: a ${esc(d.name)} appears on the setup screen by itself, ready to enrol${d.id === 'nitrokey3' ? ' (proven on firmware 1.9.0, 9 October 2026)' : ''}.</div>`;
     return;
   }
   const qr = d.offers.includes('qr') || d.group === 'other', sd = d.offers.includes('sd') || d.group === 'other';
@@ -4172,9 +4238,9 @@ async function readSeals(force) {
   const seen = [...new Set(sealFound.map(f => f.serial))];
   $('#seal-read-list').innerHTML =
     lockedHere.map(c => `<div class="keyrow vk"><span class="keyart">${keyArt(c.form || 3, !!c.nfc, 52)}</span><div class="who"><div class="name">${esc(modelName(c.form, c.nfc))} · serial ${c.serial}</div><div class="muted" style="font-size:13px">Its share is locked. The key gives it up for its PIN, the same one it signs with.</div></div><div class="kseal"><input type="password" autocomplete="off" placeholder="key PIN" data-unlock-pin="${esc(c.reader)}" aria-label="PIN of key ${c.serial}"><button class="btn" data-unlock="${esc(c.reader)}">Unlock</button></div></div>`).join('')
-    + seen.map(sn => `<div class="keyrow"><svg width="22" height="22"><use href="#ring"/></svg><div class="who"><div class="name">YubiKey ${sn}</div><div class="muted" style="font-size:13px">${sealFound.filter(f => f.serial === sn).length} share(s) open${cards.some(c => c.serial === sn) ? '' : ' · unplugged, remembered'}</div></div><div class="state ok"><i></i>open</div></div>`).join('')
+    + seen.map(sn => `<div class="keyrow"><svg width="22" height="22"><use href="#ring"/></svg><div class="who"><div class="name">Key ${sn}</div><div class="muted" style="font-size:13px">${sealFound.filter(f => f.serial === sn).length} share(s) open${cards.some(c => c.serial === sn) ? '' : ' · unplugged, remembered'}</div></div><div class="state ok"><i></i>open</div></div>`).join('')
     + (r.cards && !r.found.length ? `<div class="muted" style="font-size:13px">${r.foreign.length ? 'This key\'s certificate object holds something that is not a seal.' : 'The key plugged in now is not sealed. A vault sealed by this app writes a share to each key from the Keys screen.'}</div>` : '')
-    + (!r.cards && !seen.length ? '<div class="muted" style="font-size:13px">No YubiKey plugged in.</div>' : '');
+    + (!r.cards && !seen.length ? '<div class="muted" style="font-size:13px">No key plugged in.</div>' : '');
   $$('[data-unlock]').forEach(b => { const inp = $(`[data-unlock-pin="${CSS.escape(b.dataset.unlock)}"]`);
     const go = async () => { const pin = inp.value; if (!pin) return toast('Enter this key’s PIN');
       if (/^[cbdefghijklnrtuv]{32,}$/.test(pin)) { inp.value = ''; return toast('That was the key typing a one-time code, not a PIN. Nothing was sent to the card.', 8000); }
@@ -4263,6 +4329,8 @@ async function seedBuild(n, root) {
   const verdict = async () => {
     const filled = boxes.filter(b => b.value.trim()).length, bad = boxes.filter(b => b.parentElement.className === 'bad').length;
     if (filled < n) { count.innerHTML = `${filled} of ${n}${bad ? ` \u00b7 <span class="warn">${bad} not in the list</span>` : ''}`; return; }
+    // 23 drawn words (Entropia) carry no checksum yet: the 24th is chosen next
+    if (n === 23) { count.innerHTML = bad ? `<span class="warn">${bad} not in the list</span>` : '<span class="ok">\u2713 23 drawn words, all on the list \u2014 the 24th is chosen next</span>'; return; }
     try { await invoke('seed_check', { words: seedPhrase() }); count.innerHTML = '<span class="ok">\u2713 all ' + n + ' words are in the list and the checksum matches</span>'; }
     catch (e) { count.innerHTML = `<span class="warn">\u2717 ${esc(String(e && e.message || e))}</span>`; }
   };
@@ -4303,7 +4371,7 @@ $('#spark-words-go') && ($('#spark-words-go').onclick = async () => {
   const words = seedPhrase(), note = $('#spark-words-note');
   const name = $('#spark-name').value.trim() || 'Wallet of Satoshi';
   const n = words.split(/\s+/).filter(Boolean).length;
-  if (![12, 15, 18, 21, 24].includes(n)) return toast(`Seed words come in 12 or 24 (this has ${n})`);
+  if (![12, 15, 18, 21, 24].includes(n)) return toast(`Seed words come in 12, 15, 18, 21 or 24 (this has ${n})`);
   note.textContent = 'Working out the identity and asking Spark\u2026';
   try {
     const request = invoke('spark_restore_words', { name, words }); seedClear();
@@ -4474,6 +4542,40 @@ function paintDrillNudge() {
     : `<b>It has been ${sats(d.days)} days since this vault was proved recoverable.</b> A key can die, be wiped or lock itself out without saying so.`;
 }
 $('#drill-nudge-hide').onclick = () => { paintDrillNudge.hidden = vault && vault.name; paintDrillNudge(); };
+// ---------- Backup of the keys: the card keys of this vault, and the spare that a key made outside its card can have ----------
+function paintBackupKeys() {
+  const box = $('#vs-backup'), rows = $('#vs-backup-rows'); if (!box) return;
+  const cardKeys = vault ? vault.keys.filter(k => /^0[23][0-9a-f]{64}$/i.test(k.pubkey)) : [];
+  box.hidden = !cardKeys.length; if (!cardKeys.length) return;
+  const ready = (store && store.key_ready) || {};
+  const open = paintBackupKeys.open || {};
+  rows.innerHTML = cardKeys.map((k, i) => {
+    const r = ready[k.pubkey] || {}, off = !!r.offkey, c = cards.find(c => c.pubkey === k.pubkey), pf = packedForm(k.pubkey);
+    const model = c ? modelName(c.form, c.nfc) : pf ? modelName(pf, !!(pf & 0x80), !!(pf & 0x40)) : 'card';
+    const spares = cards.filter(c => !c.pubkey);
+    const form = open[k.pubkey] ? `<div class="stack" data-backup-form="${esc(k.pubkey)}" style="gap:8px;max-width:560px">
+        <div class="muted" style="font-size:13px">The words from the page are checked against this key before anything is written: they must make exactly this key. The other card must be set up (its own PINs) with its signing slot empty; it is written with the same key, so the vault does not change.</div>
+        <div class="field seed-root bk-seed"><div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><div class="label">The words, from the page</div><div class="pick tight seed-len">${[12, 15, 18, 21, 24].map(n => `<div class="opt${n === 24 ? ' on' : ''}" data-n="${n}">${n}</div>`).join('')}</div></div><div class="muted" style="font-size:13px">Only the word you are on is shown; the rest stay hidden. Type the first letters and pick, or paste the whole set into the first box.</div><div class="seed-grid"></div><div class="row seed-suggest" style="gap:var(--s2);flex-wrap:wrap;min-height:34px" aria-live="polite"></div><div class="seed-count" style="font-size:14px" aria-live="polite"></div></div>
+        <div class="grid2"><div class="field"><label class="cap">The other card</label><select class="bk-card">${spares.length ? spares.map(c => `<option value="${esc(c.reader)}">${esc(modelName(c.form, c.nfc))} \u00b7 serial ${c.serial}</option>`).join('') : '<option value="">plug in a set-up card with an empty slot</option>'}</select></div>
+        <div class="field"><label class="cap">Its admin PIN</label><input type="password" class="bk-admin" autocomplete="off"></div></div>
+        <div class="row"><button class="btn primary bk-go" type="button"${spares.length ? '' : ' disabled'}>Write the key to it</button><button class="btn bk-metal" type="button">Engrave the words on metal\u2026</button><button class="btn bk-cancel" type="button">Cancel</button></div><div class="muted bk-note" aria-live="polite"></div></div>` : '';
+    return `<div class="vs-backrow" data-backup="${esc(k.pubkey)}"><div><b>${esc(k.name)}</b> <span class="muted">\u00b7 ${esc(model)}${k.serial ? ' \u00b7 serial ' + k.serial : ''}</span></div>
+      <div class="muted" style="font-size:13px">${off ? 'Made <b>outside</b> its card at setup: its words are its backup, and can write it to a spare card or onto metal.' : 'Made <b>inside</b> its card: no copy exists. If the card is lost, the other keys replace it through a new vault.'}</div>
+      ${off && !open[k.pubkey] ? `<div class="row"><button class="btn small bk-open" type="button">Write it to another card\u2026</button></div>` : ''}${form}</div>`;
+  }).join('');
+  $$('#vs-backup-rows .bk-open').forEach(b => b.onclick = () => { const pub = b.closest('[data-backup]').dataset.backup; paintBackupKeys.open = { [pub]: true }; paintBackupKeys(); });
+  const seedRootHere = $('#vs-backup-rows .bk-seed'); if (seedRootHere && !seedRootHere.querySelector('.seed-grid input')) seedBuild(24, seedRootHere);
+  $$('#vs-backup-rows .bk-cancel').forEach(b => b.onclick = () => { paintBackupKeys.open = {}; paintBackupKeys(); });
+  $$('#vs-backup-rows .bk-metal').forEach(b => b.onclick = () => { const f = b.closest('[data-backup-form]'), words = [...f.querySelectorAll('.seed-grid input')].map(i => i.value.trim().toLowerCase()).filter(Boolean); if (![12, 15, 18, 21, 24].includes(words.length)) return toast('Type the words from the page first'); const k = vault.keys.find(k => k.pubkey === f.dataset.backupForm); metalEngraveWords(words, `${k ? k.name : 'key'} \u00b7 ${vault.name}`).catch(fail); });
+  $$('#vs-backup-rows .bk-go').forEach(b => b.onclick = async () => {
+    const f = b.closest('[data-backup-form]'), pub = f.dataset.backupForm, words = [...f.querySelectorAll('.seed-grid input')].map(i => i.value.trim().toLowerCase()).filter(Boolean).join(' '), reader = f.querySelector('.bk-card').value, admin = f.querySelector('.bk-admin').value, note = f.querySelector('.bk-note');
+    if (!words.trim()) return toast('Type the words from the page'); if (!reader) return toast('Plug in the other card'); if (!admin) return toast('Enter the other card\u2019s admin PIN');
+    b.disabled = true; note.textContent = 'Checking the words, then writing\u2026';
+    try { const got = await invoke('card_import', { reader, adminPin: admin, words, expect: pub }); seedClear(); f.querySelector('.bk-admin').value = '';
+      const c = cards.find(c => c.reader === reader); paintBackupKeys.open = {}; paintBackupKeys(); toast(`The same key is now on ${c ? modelName(c.form, c.nfc) + ' serial ' + c.serial : 'that card'} too (${got.slice(0, 12)}\u2026). Keep it somewhere else.`, 9000); }
+    catch (e) { note.textContent = String(e); b.disabled = false; }
+  });
+}
 function renderVaultSettings() {
   paintShares();
   if (!vault) return;
@@ -4506,6 +4608,7 @@ function renderVaultSettings() {
   $('#vs-desc-wrap').dataset.hidden = shown ? '0' : '1'; $('#vs-desc-reveal').hidden = shown;
   $('#vs-rewrite').hidden = !vault.ext;
   renderSpCard();
+  paintBackupKeys();
   const ds = drillState(vault);
   $('#vs-drill-when').innerHTML = ds.never
     ? '<b>This vault has never been drilled.</b> Until it has, "the keys can recover it" is something you believe rather than something you have seen.'
@@ -4543,7 +4646,7 @@ async function runDrill() {
   try { cands = await invoke('seal_preview', { found: drillFound.concat(stillLocked) }); } catch (e) { return drillSay(`<div class="warn">${esc(String(e))}</div>`); }
   const mine = cands.find(c => c.known_as === vault.name) || cands.find(c => c.address && c.address === vault.address) || cands[0];
   const serials = [...new Set(drillFound.map(f => f.serial))];
-  const pinRows = [...new Set(stillLocked.map(f => f.serial))].map(sn => { const c = cards.find(c => c.serial === sn); return c ? `<div class="keyrow vk"><div class="who"><div class="name">YubiKey ${sn}</div><div class="muted" style="font-size:13px">Its share is locked. The drill is only a drill if the PIN opens it.</div></div><div class="kseal"><input type="password" autocomplete="off" placeholder="key PIN" data-drill-pin="${esc(c.reader)}" aria-label="PIN of key ${sn}"><button class="btn" data-drill-unlock="${esc(c.reader)}">Unlock</button></div></div>` : ''; }).join('');
+  const pinRows = [...new Set(stillLocked.map(f => f.serial))].map(sn => { const c = cards.find(c => c.serial === sn); return c ? `<div class="keyrow vk"><div class="who"><div class="name">Key ${sn}</div><div class="muted" style="font-size:13px">Its share is locked. The drill is only a drill if the PIN opens it.</div></div><div class="kseal"><input type="password" autocomplete="off" placeholder="key PIN" data-drill-pin="${esc(c.reader)}" aria-label="PIN of key ${sn}"><button class="btn" data-drill-unlock="${esc(c.reader)}">Unlock</button></div></div>` : ''; }).join('');
   if (!mine || !mine.record) {
     const need = mine ? mine.need : vault.threshold;
     drillSay(pinRows + `<div class="muted" style="font-size:13px;margin-top:10px">${r.cards ? sats(r.cards) + ' key' + (r.cards === 1 ? '' : 's') + ' plugged in. ' : 'No key plugged in. '}${drillFound.length ? sats(drillFound.length) + ' share(s) open' : 'Nothing open yet'} \u2014 this vault needs ${need}. ${stillLocked.length ? 'Open the locked one(s) above.' : 'Plug in another key of this vault; what has been opened is remembered until you leave this screen.'}</div>`);
@@ -4867,7 +4970,7 @@ $('#spark-discovery-stop').onclick = () => sparkCancel().catch(fail);
 async function sparkLoadCards() {
   const picked = $('#spark-card').value;
   try { sparkCards = await invoke('cards_list'); } catch { sparkCards = []; }
-  $('#spark-card').innerHTML = sparkCards.length ? sparkCards.map(c => `<option value="${esc(c.reader)}">YubiKey ${c.serial} · ${c.pubkey ? 'key present · touch ' + c.touch : 'empty or unsupported slot'}</option>`).join('') : '<option value="">Plug in a YubiKey and refresh</option>';
+  $('#spark-card').innerHTML = sparkCards.length ? sparkCards.map(c => `<option value="${esc(c.reader)}">${esc(modelName(c.form, c.nfc))} ${c.serial} · ${c.pubkey ? 'key present · touch ' + c.touch : 'empty or unsupported slot'}</option>`).join('') : '<option value="">Plug in a key and refresh</option>';
   if (sparkCards.some(c => c.reader === picked)) $('#spark-card').value = picked;
 }
 $('#spark-cards-refresh').onclick = () => sparkLoadCards().catch(fail);
@@ -4903,7 +5006,7 @@ $('#spark-gate').onclick = async () => {
 $('#spark-generate').onclick = async () => {
   if (sparkBusy) return;
   const c = sparkCards.find(c => c.reader === $('#spark-card').value);
-  if (!c) return toast('Plug in and select a YubiKey');
+  if (!c) return toast('Plug in and select a key');
   if (c.pubkey) return toast('That slot already holds a key. It will not be replaced.');
   let adminPin = $('#spark-admin-pin').value; $('#spark-admin-pin').value = '';
   if (!adminPin) return toast('Enter the card’s admin PIN');

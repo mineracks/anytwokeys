@@ -7,6 +7,7 @@ mod spark_auth;
 mod sync;
 mod muun;
 mod activity;
+mod cycle;
 mod transfers;
 mod net;
 mod signers;
@@ -21,6 +22,12 @@ mod export;
 mod files;
 mod hd;
 mod keyinit;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod nkfw;   // Nitrokey firmware over USB HID: a desktop thing
+#[cfg(any(target_os = "ios", target_os = "android"))]
+mod nkfw { /// a phone never reads a Nitrokey's firmware, so there is nothing cached to say
+    pub fn firmware_cached(_serial: u32) -> Option<String> { None } }
+mod secret;
 mod labels;
 mod location;
 mod lockbox;
@@ -174,6 +181,27 @@ async fn prices_series(ccy: String, from: String, to: String) -> R<PriceRun> {
         if prices.is_empty() { return Ok(PriceRun { every, points: vec![] }); }
         Ok(PriceRun { every, points: activity::price_series(&prices, &ccy, &from, &to, every)? })
     }).await
+}
+
+// ---------- where the price sat on the long cycle (cycle.rs) ----------
+fn prices_base() -> R<String> { let s = wallet::load()?; Ok(if s.settings.custom { s.settings.prices.clone() } else { activity::PRICES.to_string() }) }
+
+/// The 200-week curve itself, for the picture on Home: one point a week, with the average and the multiple.
+#[tauri::command]
+async fn cycle_curve() -> R<cycle::Curve> {
+    block(|| { let p = prices_base()?; if p.is_empty() { return Err("no price service is set".into()); } cycle::curve(&p) }).await
+}
+
+/// Where the price sits now against its 200-week average, for the line on Send.
+#[tauri::command]
+async fn cycle_now() -> R<Option<cycle::Mark>> {
+    block(|| { let p = prices_base()?; if p.is_empty() { return Ok(None); } cycle::now(&p) }).await
+}
+
+/// Where the price sat at each of these moments: one answer per time asked, `null` where no price or no average exists.
+#[tauri::command]
+async fn cycle_marks(times: Vec<u32>) -> R<Vec<Option<cycle::Mark>>> {
+    block(move || { let p = prices_base()?; if p.is_empty() { return Ok(times.iter().map(|_| None).collect()); } cycle::marks(&p, &times) }).await
 }
 
 /// Yubico devices that are plugged in but cannot hold a key for this app — shown so a person who plugs one in is
@@ -447,6 +475,97 @@ async fn sync_adopt(reader: String, pin: String, id: String, host: Option<String
 
 /// Every plugged-in key, looked at with no PIN and nothing written: what state its OpenPGP part is in, and what
 /// else the key holds that setting it up will leave alone.
+/// Wipe a key's signing part (its OpenPGP applet) under its admin PIN. The vaults keep their record of the key it
+/// was — they have lost that cosigner — and this computer forgets the key as set up here.
+#[tauri::command]
+async fn card_reset(reader: String, admin_pin: String, serial: u32) -> R<Store> {
+    let admin = zeroize::Zeroizing::new(admin_pin);
+    block(move || {
+        cards::reset_openpgp(&reader, &admin, serial).map_err(|e| e.to_string())?;
+        wallet::update(move |s| { s.key_begun.retain(|b| *b != serial); s.key_ready.retain(|_, r| r.serial != serial); })
+    }).await
+}
+
+/// Is a key this computer remembers as "setup begun" still that way? Its FACTORY key PIN is tried once: if it
+/// opens, the key was reset since (fresh again); if not, the key keeps the PINs it was given (begun). A missed try
+/// is repaired by the next right PIN, and the verification is forgotten either way.
+#[tauri::command]
+async fn card_init_resume_check(serial: u32) -> R<String> {
+    block(move || keyinit::resume_check(serial)).await
+}
+/// Forget that a key's setup was begun here: it is to be set up from the start.
+#[tauri::command]
+async fn key_setup_restart(serial: u32) -> R<Store> {
+    block(move || wallet::update(move |s| { s.key_begun.retain(|b| *b != serial); })).await
+}
+
+/// What a secret made outside the key looks like before it is written: its words (to record) and its public key.
+#[derive(serde::Serialize)]
+struct SecretView { words: Option<String>, pubkey: String, endings: Option<Vec<String>> }
+#[derive(serde::Deserialize)]
+struct SecretSource { kind: String, text: Option<String>, #[serde(default)] words: Option<usize> }
+fn entropy_from(src: &SecretSource) -> R<secret::Entropy> {
+    let text = src.text.as_deref().unwrap_or("");
+    match src.kind.as_str() { "app" => secret::from_app(src.words.unwrap_or(24)), "words" => secret::from_words(text), "dice" => secret::from_dice(text), "hex" => secret::from_hex(text), k => Err(format!("unknown secret source {k}")) }
+}
+fn secret_from(src: &SecretSource) -> R<secret::Secret> { secret::secret_of(&entropy_from(src)?) }
+/// Look at a secret source without touching any key: the words that carry it (so they can be written down first)
+/// and the public key the card will have to report. A phrase drawn one word short comes back with its endings.
+#[tauri::command]
+async fn secret_preview(source: SecretSource) -> R<SecretView> {
+    block(move || {
+        let text = source.text.as_deref().unwrap_or("");
+        if source.kind == "words" && secret::LENGTHS.iter().any(|n| n - 1 == text.split_whitespace().count()) {
+            return Ok(SecretView { words: None, pubkey: String::new(), endings: Some(secret::completions(text)?) });
+        }
+        let e = entropy_from(&source)?;
+        let s = secret::secret_of(&e)?;
+        Ok(SecretView { words: (source.kind != "words").then(|| secret::words_of(&e)), pubkey: secret::pubkey_of(&s), endings: None })
+    }).await
+}
+/// Write a secret made outside the key into a new key's empty signature slot (the setup walk). Returns the public key.
+#[tauri::command]
+async fn card_init_key_from(serial: u32, admin_pin: String, source: SecretSource) -> R<String> {
+    let admin = zeroize::Zeroizing::new(admin_pin);
+    block(move || { let s = secret_from(&source)?; keyinit::make_key_from(serial, &admin, &s) }).await
+}
+/// Write a key's words onto ANOTHER card (a spare, or a replacement): the words must reproduce the vault's key, and
+/// the card's slot must be empty. Returns the public key, which equals `expect`.
+#[tauri::command]
+async fn card_import(reader: String, admin_pin: String, words: String, expect: String) -> R<String> {
+    let admin = zeroize::Zeroizing::new(admin_pin);
+    let words = zeroize::Zeroizing::new(words);
+    block(move || {
+        let s = secret::secret_of(&secret::from_words(&words)?)?;
+        if secret::pubkey_of(&s) != expect.to_lowercase() { return Err("those words are not this key's: the key they carry is a different one. Check them against the page".into()); }
+        let card = cards::list().map_err(|e| e.to_string())?.into_iter().find(|c| c.reader == reader).ok_or("that card is no longer plugged in")?;
+        cards::import_empty(&reader, &admin, card.serial, &s, &secret::point_of(&s)).map_err(|e| e.to_string())
+    }).await
+}
+
+/// What a Nitrokey 3 runs, against the newest release known when this build was made. No network.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[tauri::command]
+async fn nk_firmware(serial: u32) -> R<nkfw::Firmware> {
+    block(move || nkfw::firmware(serial)).await
+}
+
+/// Update a Nitrokey 3's firmware the way Nitrokey's own tool does: fetch the signed release, one touch, flash, back.
+/// Progress goes out as `nk-firmware` events; the answer is what the key runs afterwards.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[tauri::command]
+async fn nk_firmware_update(app: tauri::AppHandle, serial: u32) -> R<nkfw::Firmware> {
+    block(move || { use tauri::Emitter; nkfw::update(serial, &|p| { let _ = app.emit("nk-firmware", &p); }) }).await
+}
+
+// A phone has no USB HID path to a Nitrokey's bootloader: the window is told so, in the same words it would say elsewhere.
+#[cfg(any(target_os = "ios", target_os = "android"))]
+#[tauri::command]
+async fn nk_firmware(serial: u32) -> R<serde_json::Value> { let _ = serial; Err("checking a Nitrokey's firmware needs a computer with a USB port".into()) }
+#[cfg(any(target_os = "ios", target_os = "android"))]
+#[tauri::command]
+async fn nk_firmware_update(serial: u32) -> R<serde_json::Value> { let _ = serial; Err("updating a Nitrokey's firmware needs a computer with a USB port".into()) }
+
 #[tauri::command]
 async fn card_survey() -> R<Vec<keyinit::Survey>> {
     block(|| keyinit::survey().map_err(|e| e.to_string())).await
@@ -500,12 +619,12 @@ async fn card_init_key(serial: u32, admin_pin: String) -> R<String> {
 
 /// The key's first signature, checked. Only then is it remembered as ready, under the name it was given.
 #[tauri::command]
-async fn card_init_prove(serial: u32, user_pin: String, pubkey: String, name: String) -> R<Store> {
+async fn card_init_prove(serial: u32, user_pin: String, pubkey: String, name: String, offkey: Option<bool>) -> R<Store> {
     let user = zeroize::Zeroizing::new(user_pin);
     block(move || {
         keyinit::prove(serial, &user, &pubkey)?;
         let t = now();
-        wallet::update(move |s| { s.key_begun.retain(|b| *b != serial); s.key_ready.insert(pubkey, wallet::KeyReady { name: name.trim().to_string(), serial, at: t }); })
+        wallet::update(move |s| { s.key_begun.retain(|b| *b != serial); s.key_ready.insert(pubkey, wallet::KeyReady { name: name.trim().to_string(), serial, at: t, offkey: offkey.unwrap_or(false) }); })
     }).await
 }
 
@@ -3513,8 +3632,8 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![profiles_list, profile_open, profile_close, profile_create, profile_update, profile_delete, profile_picture_pick, guard_displays, guard_sharing, guard_override, vault_move_start, move_land, persona_generate, persona_defaults, transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
-            cards_list, card_generate, attach_view, profiles_refresh, sync_face_refresh, sync_status, sync_enable, sync_rotate, sync_remove_card, sync_now, sync_tick, sync_disable, sync_find, sync_adopt, card_survey, card_tap, platform, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
+        .invoke_handler(tauri::generate_handler![profiles_list, profile_open, profile_close, profile_create, profile_update, profile_delete, profile_picture_pick, guard_displays, guard_sharing, guard_override, vault_move_start, move_land, persona_generate, persona_defaults, transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, cycle_curve, cycle_now, cycle_marks, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
+            cards_list, card_generate, attach_view, profiles_refresh, sync_face_refresh, sync_status, sync_enable, sync_rotate, sync_remove_card, sync_now, sync_tick, sync_disable, sync_find, sync_adopt, card_survey, card_tap, nk_firmware, nk_firmware_update, secret_preview, card_init_key_from, card_import, card_init_resume_check, key_setup_restart, card_reset, platform, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard,
             engraver_find, engraver_jog, engraver_run, engraver_cancel, vault_shares_plates, share_rewrap
         ])
