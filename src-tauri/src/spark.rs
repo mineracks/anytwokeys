@@ -111,7 +111,7 @@ pub fn words_check(words: &str) -> Result<usize, String> {
     let mut norm = words.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
     let n = norm.split(' ').filter(|w| !w.is_empty()).count();
     let r = bip39::Mnemonic::parse_normalized(&norm).map(|_| n).map_err(|e| match e {
-        bip39::Error::BadWordCount(c) => format!("{c} words — a set is 12 or 24"),
+        bip39::Error::BadWordCount(c) => format!("{c} words — a set is 12, 15, 18, 21 or 24"),
         bip39::Error::UnknownWord(i) => format!("word {} is not in the list", i + 1),
         bip39::Error::InvalidChecksum => "the checksum does not match: one of the words is wrong, or two are swapped".into(),
         other => other.to_string(),

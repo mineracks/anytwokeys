@@ -189,7 +189,7 @@ pub struct Store {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct KeyReady { pub name: String, pub serial: u32, pub at: u64 }
+pub struct KeyReady { pub name: String, pub serial: u32, pub at: u64, #[serde(default)] pub offkey: bool }
 
 pub fn network_of(s: &str) -> Network {
     match s {

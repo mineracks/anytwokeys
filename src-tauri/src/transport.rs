@@ -1,4 +1,4 @@
-//! The wire to a key. Everything the app says to a YubiKey is a sequence of APDUs written once, in `cards.rs` and
+//! The wire to a key. Everything the app says to a key is a sequence of APDUs written once, in `cards.rs` and
 //! `keyinit.rs`; this is only how the bytes travel. On a computer that is PC/SC. On a phone it is the operating
 //! system's own smart-card service for a key in the USB-C port, or an NFC session for a key held to the phone —
 //! both behind one small Swift plugin (`plugins/keylink`).
@@ -29,12 +29,14 @@ mod imp {
     impl Wire for Tx<'_> { fn send(&self, cmd: &[u8]) -> Result<Vec<u8>, CardError> { transmit(&self.0, cmd) } }
     impl Card { pub fn transaction(&mut self) -> Result<Tx<'_>, CardError> { Ok(Tx(self.0.transaction().map_err(err)?)) } }
 
-    /// Yubico readers present. No smart-card service, or no reader at all, is a real empty answer.
+    /// Every reader present — `cards::probe` decides by what answers. Nothing is picked by name: macOS named a
+    /// Nitrokey 3's reader "8352 17074" on firmware 1.9.0 and "Nitrokey Nitrokey 3" on 1.9.1. No smart-card service,
+    /// or no reader at all, is a real empty answer.
     pub fn readers() -> Result<Vec<String>, CardError> {
         let ctx = match Context::establish(Scope::User) { Ok(c) => c, Err(pcsc::Error::NoService) => return Ok(vec![]), Err(e) => return Err(err(e)) };
         let mut buf = vec![0u8; 2048];
         let names = match ctx.list_readers(&mut buf) { Ok(n) => n, Err(pcsc::Error::NoReadersAvailable) | Err(pcsc::Error::NoService) => return Ok(vec![]), Err(e) => return Err(err(e)) };
-        Ok(names.map(|n| n.to_string_lossy().into_owned()).filter(|n| n.to_lowercase().contains("yubi")).collect())
+        Ok(names.map(|n| n.to_string_lossy().into_owned()).collect())
     }
 
     pub fn open(reader: &str) -> Result<Opened, CardError> {

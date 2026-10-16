@@ -21,8 +21,10 @@ const DEVICES = (() => {
     // ---- security keys: a card, plugged in, appears by itself ----
     { id: 'yubikey', name: 'YubiKey 5', maker: 'Yubico', group: 'card', offers: ['usb', 'nfc'],
       art: b(4, 24, 11, 10, 1.5) + b(14, 19, 48, 20, 4) + lens(40, 29, 6) + `<circle class="c-line" cx="55" cy="29" r="2.4"/>` },
+    // a Nitrokey 3: a flat wedge, widest at the plug and tapering to a lanyard slot, the whole top face being the touch
     { id: 'nitrokey3', name: 'Nitrokey 3', maker: 'Nitrokey', group: 'card', offers: ['usb', 'nfc'],
-      art: b(6, 25, 10, 8, 3) + b(15, 18, 46, 22, 8) + ring(44, 29, 4.5) + f(24, 27.5, 7, 3, 1.5) + `<circle class="c-line" cx="55" cy="29" r="2"/>` },
+      art: b(3, 24.5, 9, 7, 2.5) + `<path class="c-body" d="M14 14h2l48 5.2q4 .5 4 4.3v9q0 3.8-4 4.3L16 42h-2q-4 0-4-4V18q0-4 4-4z"/>`
+        + `<rect class="c-glass" x="57" y="25.5" width="5" height="5" rx="1.2"/>` + ring(36, 28, 4.5) + `<path class="c-beam" d="M44 22.5l1.6-2.4M46 27h3M44.5 31.5l1.6 2.4"/>` + f(14.5, 19, 3, 2.2, 1) },
     // ---- air-gapped: codes on a screen, or a file on a card ----
     { id: 'seedsigner', name: 'SeedSigner', maker: 'SeedSigner', group: 'airgap', offers: ['qr'],
       how: 'Seeds › (the seed) › Export Xpub › Multisig › Native Segwit › Sparrow. Point this camera at the code it shows.',

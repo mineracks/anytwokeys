@@ -1,4 +1,6 @@
-//! Setting up a brand-new YubiKey from inside the app, so nobody is sent to YubiKey Manager to change two PINs.
+//! Setting up a brand-new key — a YubiKey 5 or a Nitrokey 3 — from inside the app, so nobody is sent to the maker's
+//! software to change two PINs. Both ship with the same factory PINs and the same empty OpenPGP applet; what differs
+//! (Yubico's management, OTP and OATH applets) is asked of a Yubico key only.
 //!
 //! Three rules shape everything here:
 //!  * LOOKING never costs anything. `survey` sends no PIN and writes nothing, to any applet.
@@ -8,7 +10,7 @@
 //!  * A factory PIN is only ever tried on a key that LOOKS untouched in every way that can be read without a PIN.
 //!    Changing the PIN is itself the test: a key PIN try that misses is repaired by the next right one, an admin PIN
 //!    try that misses three times is repaired by nothing — so the key PIN goes first.
-use crate::cards::{self, apdu, apdu_more, app_data, find, pin_refusal, probe, read_sig_pubkey, readers, select, serial_of, tlv, verify, CardError, Probe, OID_SECP256K1};
+use crate::cards::{self, apdu, apdu_more, app_data, find, maker_of, pin_refusal, probe, read_sig_pubkey, readers, select, serial_of, tlv, verify, CardError, Maker, Probe, OID_SECP256K1};
 use crate::transport::{Card, Wire};
 use serde::Serialize;
 
@@ -47,6 +49,7 @@ pub struct Otp { pub slot1: bool, pub slot2: bool }
 #[derive(Debug, Clone, Serialize)]
 pub struct Survey {
     pub reader: String, pub serial: u32, pub firmware: String, pub form: u8, pub nfc: bool,
+    pub maker: String, pub device: String,   // from the AID (cards::Maker): yubico/yubikey · nitrokey/nitrokey3
     pub pubkey: Option<String>,
     /// fresh — untouched, can be set up · ours — already holds a signing key this app can use ·
     /// blocked — a PIN has run out of tries · used — something else lives on its OpenPGP applet
@@ -80,7 +83,7 @@ fn be(v: &[u8]) -> u16 { v.iter().fold(0u16, |a, b| (a << 8) | *b as u16) }
 /// The value inside `tag`, whether the card answered wrapped in the tag or bare.
 fn inside(raw: &[u8], tag: u16) -> &[u8] { match tlv(raw) { Some((t, v, _)) if t == tag => v, _ => raw } }
 
-fn pgp_facts(card: &dyn Wire) -> Result<(OpenPgp, Option<[u8; 33]>), CardError> {
+pub(crate) fn pgp_facts(card: &dyn Wire) -> Result<(OpenPgp, Option<[u8; 33]>), CardError> {
     let ad = app_data(card)?;
     let disc = find(&ad, 0x73).unwrap_or(&ad);
     let mut p = OpenPgp::default();
@@ -137,14 +140,16 @@ fn mgmt(card: &dyn Wire) -> Option<Mgmt> {
     })
 }
 
-/// The other things a YubiKey can hold, as far as each will say with no PIN. `None` = switched off or would not answer.
-fn neighbours(card: &dyn Wire) -> (Option<Piv>, Option<Oath>, Option<Otp>) {
-    let otp = apdu(card, 0x00, 0xA4, 0x04, 0x00, AID_OTP).ok().filter(|s| s.len() >= 6).map(|s| Otp { slot1: s[4] & 0x01 != 0, slot2: s[4] & 0x02 != 0 });
-    let oath = apdu(card, 0x00, 0xA4, 0x04, 0x00, AID_OATH).ok().map(|sel| {
+/// The other things a key can hold, as far as each will say with no PIN. `None` = switched off or would not answer.
+/// The OTP and OATH applets are Yubico's own and are not asked of another maker's key; PIV is a standard and is.
+fn neighbours(card: &dyn Wire, maker: Maker) -> (Option<Piv>, Option<Oath>, Option<Otp>) {
+    let yubico = maker == Maker::Yubico;
+    let otp = if yubico { apdu(card, 0x00, 0xA4, 0x04, 0x00, AID_OTP).ok().filter(|s| s.len() >= 6).map(|s| Otp { slot1: s[4] & 0x01 != 0, slot2: s[4] & 0x02 != 0 }) } else { None };
+    let oath = if !yubico { None } else { apdu(card, 0x00, 0xA4, 0x04, 0x00, AID_OATH).ok().map(|sel| {
         let password = find(&sel, 0x74).is_some();
         let accounts = if password { None } else { apdu_more(card, 0x00, 0xA1, 0x00, 0x00, &[], 0xA5).ok().map(|l| { let (mut n, mut rest) = (0, &l[..]); while let Some((t, _, r)) = tlv(rest) { if t == 0x72 { n += 1; } rest = r; } n }) };
         Oath { password, accounts }
-    });
+    }) };
     let piv = apdu(card, 0x00, 0xA4, 0x04, 0x00, AID_PIV).ok().map(|_| {
         // certificates are readable by anyone: 9A, 9C, 9D, 9E
         let certs = [[0x5F, 0xC1, 0x05u8], [0x5F, 0xC1, 0x0A], [0x5F, 0xC1, 0x0B], [0x5F, 0xC1, 0x01]].iter()
@@ -152,7 +157,8 @@ fn neighbours(card: &dyn Wire) -> (Option<Piv>, Option<Oath>, Option<Otp>) {
         // metadata (firmware 5.3 and newer) says which slots hold a key, and whether the PIN is still the factory one
         let pin = apdu(card, 0x00, 0xF7, 0x00, 0x80, &[]).ok();
         let pin_default = pin.as_deref().and_then(|m| find(m, 0x05)).map(|v| v.first().copied().unwrap_or(0) != 0);
-        let keys = pin.as_ref().map(|_| [0x9Au8, 0x9C, 0x9D, 0x9E].into_iter().chain(0x82..=0x95).filter(|s| apdu(card, 0x00, 0xF7, 0x00, *s, &[]).is_ok()).count() as u8);
+        // a slot's metadata is non-empty when it holds a key; a Nitrokey's PIV answers 9000 and nothing to every slot
+        let keys = pin.as_ref().map(|_| [0x9Au8, 0x9C, 0x9D, 0x9E].into_iter().chain(0x82..=0x95).filter(|s| apdu(card, 0x00, 0xF7, 0x00, *s, &[]).map(|m| !m.is_empty()).unwrap_or(false)).count() as u8);
         Piv { keys, certs, pin_default }
     });
     (piv, oath, otp)
@@ -160,14 +166,17 @@ fn neighbours(card: &dyn Wire) -> (Option<Piv>, Option<Oath>, Option<Otp>) {
 
 fn survey_card(card: &dyn Wire, reader: String) -> Result<Survey, CardError> {
     let (pgp, ours) = pgp_facts(card)?;
-    let serial = serial_of(&app_data(card)?);
-    let m = mgmt(card);
-    let (piv, oath, otp) = neighbours(card);
+    let ad = app_data(card)?;
+    let (serial, maker) = (serial_of(&ad), maker_of(&ad));
+    let m = if maker == Maker::Yubico { mgmt(card) } else { None };
+    let (piv, oath, otp) = neighbours(card, maker);
     select(card)?;   // leave it where every other part of the app expects it
     let (state, why) = judge(&pgp, ours.is_some());
     Ok(Survey {
         reader, serial, pubkey: ours.map(hex::encode), state: state.into(), why, pgp, piv, oath, otp,
-        firmware: m.as_ref().map(|m| m.firmware.clone()).unwrap_or_default(), form: m.as_ref().map(|m| m.form).unwrap_or(0), nfc: m.as_ref().map(|m| m.nfc).unwrap_or(false),
+        maker: maker.name().into(), device: maker.device().into(),
+        firmware: m.as_ref().map(|m| m.firmware.clone()).or_else(|| (maker == Maker::Nitrokey).then(|| crate::nkfw::firmware_cached(serial)).flatten()).unwrap_or_default(),
+        form: m.as_ref().map(|m| m.form).unwrap_or(maker.form()), nfc: m.as_ref().map(|m| m.nfc).unwrap_or(false),
         otp_usb: m.as_ref().and_then(|m| m.usb_enabled).map(|e| e & CAP_OTP != 0),
         fido: m.as_ref().and_then(|m| m.usb_enabled).map(|e| e & 0x202 != 0),
         config_locked: m.as_ref().map(|m| m.locked).unwrap_or(false), pin_complexity: m.as_ref().map(|m| m.pin_complexity).unwrap_or(false),
@@ -210,7 +219,7 @@ pub fn survey_nfc() -> Result<Survey, CardError> {
 // ---------- which PINs are refused before the key ever sees them ----------
 
 const COMMON: &[&str] = &["password", "passw0rd", "qwerty", "qwertyui", "qwertyuiop", "asdfgh", "asdfghjk", "zxcvbn", "1qaz2wsx", "letmein", "iloveyou", "welcome", "abc123", "admin123",
-    "yubikey", "yubico", "bitcoin", "satoshi", "nakamoto", "anytwokeys", "147258", "147258369", "159753", "123321", "12344321", "112233", "11223344", "102030", "10203040", "696969", "314159", "31415926"];
+    "yubikey", "yubico", "nitrokey", "bitcoin", "satoshi", "nakamoto", "anytwokeys", "147258", "147258369", "159753", "123321", "12344321", "112233", "11223344", "102030", "10203040", "696969", "314159", "31415926"];
 
 /// Why this PIN will not do, or `None`. `admin`: the admin PIN (8 or more) rather than the key PIN (6 or more).
 pub fn refuse(pin: &str, admin: bool, serial: u32) -> Option<String> {
@@ -221,7 +230,7 @@ pub fn refuse(pin: &str, admin: bool, serial: u32) -> Option<String> {
     let min = if admin { 8 } else { 6 };
     if n < min { return Some(format!("The {what} needs at least {min} characters.")); }
     if n > 127 { return Some(format!("The {what} can be at most 127 characters.")); }
-    if pin == FACTORY_PIN || pin == FACTORY_ADMIN { return Some("That is the factory PIN every YubiKey ships with. Anyone who picks the key up would try it first.".into()); }
+    if pin == FACTORY_PIN || pin == FACTORY_ADMIN { return Some("That is the factory PIN every key ships with, YubiKey or Nitrokey. Anyone who picks the key up would try it first.".into()); }
     let c: Vec<char> = pin.chars().collect();
     if c.iter().all(|x| *x == c[0]) { return Some("One character repeated is among the first things anyone would try.".into()); }
     let step = |a: char, b: char, d: i32| -> bool { let (a, b) = (a as i32, b as i32); b - a == d || (a >= 48 && a <= 57 && b >= 48 && b <= 57 && (b - 48) == (a - 48 + d).rem_euclid(10)) };
@@ -286,7 +295,17 @@ pub fn set_pins(serial: u32, user: &str, admin: &str, user_done: bool) -> Result
     }
     out.admin_done = true;
     if let Err(e) = verify(&tx, 0x83, admin) { out.error = Some(format!("The admin PIN was changed but did not check afterwards: {e}")); }
+    cards::forget_pin(&tx); cards::forget_admin(&tx);
     Ok(out)
+}
+
+/// "fresh" if the factory key PIN opens the key (it was reset since this computer saw its PINs set), "begun" if not.
+pub fn resume_check(serial: u32) -> Result<String, String> {
+    let (mut card, _) = open(serial).map_err(|e| e.to_string())?;
+    let tx = card.transaction().map_err(|e| e.to_string())?;
+    let r = match verify(&tx, 0x81, FACTORY_PIN) { Ok(()) => "fresh", Err(CardError::WrongPin(_)) => "begun", Err(e) => return Err(e.to_string()) };
+    cards::forget_pin(&tx);
+    Ok(r.into())
 }
 
 /// Both PINs asked of the key itself. The window compares what was typed with what was set BEFORE calling this, so a
@@ -295,7 +314,9 @@ pub fn check_pins(serial: u32, user: &str, admin: &str) -> Result<(), String> {
     let (mut card, _) = open(serial).map_err(|e| e.to_string())?;
     let tx = card.transaction().map_err(|e| e.to_string())?;
     verify(&tx, 0x81, user).map_err(|e| format!("key PIN: {e}"))?;
-    verify(&tx, 0x83, admin).map_err(|e| format!("admin PIN: {e}"))
+    let r = verify(&tx, 0x83, admin).map_err(|e| format!("admin PIN: {e}"));
+    cards::forget_pin(&tx); cards::forget_admin(&tx);
+    r
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -337,6 +358,7 @@ pub fn harden(serial: u32, admin: &str, sig_pin_each: bool, otp_off: bool) -> Re
         }
         let _ = select(&tx);
     }
+    cards::forget_admin(&tx);
     Ok(out)
 }
 
@@ -345,6 +367,14 @@ pub fn make_key(serial: u32, admin: &str) -> Result<String, String> {
     let (card, reader) = open(serial).map_err(|e| e.to_string())?;
     drop(card);
     cards::generate_empty(&reader, admin, serial).map_err(|e| e.to_string())
+}
+
+/// A key made OUTSIDE the card, written into its EMPTY signature slot: the one way a card key can have a backup or a
+/// spare. The card must report the public key the secret implies before anything else is done.
+pub fn make_key_from(serial: u32, admin: &str, secret: &crate::secret::Secret) -> Result<String, String> {
+    let (card, reader) = open(serial).map_err(|e| e.to_string())?;
+    drop(card);
+    cards::import_empty(&reader, admin, serial, secret, &crate::secret::point_of(secret)).map_err(|e| e.to_string())
 }
 
 /// The first signature: key PIN, a touch, and the answer checked against the public key the key just made.

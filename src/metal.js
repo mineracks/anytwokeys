@@ -56,6 +56,13 @@
   }
   const b64 = (arr) => btoa(String.fromCharCode(...arr));
 
+  /// A key's words on an SH-03, two to a line with their numbers, from the setup walk or the Backup card.
+  window.metalEngraveWords = async (words, title) => {
+    const lines = []; for (let i = 0; i < words.length; i += 2) lines.push(`${i + 1} ${words[i]}` + (words[i + 1] ? `   ${i + 2} ${words[i + 1]}` : ''));
+    open(await customJob(2, [title.slice(0, 24)].concat(lines), words.length > 18 ? 13 : 15, []), `${words.length} words \u00b7 ${title}`);
+    document.querySelector('#metal').scrollIntoView({ block: 'start', behavior: 'smooth' });
+  };
+
   // ---------- the panel ----------
   const $m = (s) => document.querySelector('#metal ' + s);
   function open(newJobs, what) {
