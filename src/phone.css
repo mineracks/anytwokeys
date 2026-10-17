@@ -10,7 +10,11 @@
   .side{position:fixed;inset:0;z-index:60;width:auto;flex:none;transform:translateX(-102%);transition:transform .22s ease;padding:calc(18px + env(safe-area-inset-top)) 16px calc(18px + env(safe-area-inset-bottom));border-right:0}
   body.drawer .side{transform:none}
   #side-close{display:block;position:absolute;top:calc(20px + env(safe-area-inset-top));right:18px;font-size:14px;z-index:1}
-  .side .nav{min-height:46px;font-size:15px}
+  /* The desktop rows switch touch handling off so a vault tab can be dragged to reorder. On a phone that swallowed
+     every scroll that began on a row, and the bottom of the drawer (App settings) was unreachable. Vertical pans
+     scroll here; reordering vaults by drag is a desktop gesture. */
+  .side .nav{min-height:46px;font-size:15px;touch-action:pan-y}
+  .side{overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
   .main{flex:1 1 auto;min-height:0}
   .top{padding:calc(10px + env(safe-area-inset-top)) 16px 10px;gap:10px}
   .top h1{font-size:19px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
