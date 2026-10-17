@@ -187,12 +187,24 @@ fn key_for(api: &hidapi::HidApi, serial: u32) -> Result<(String, String, &'stati
     keys(api).into_iter().find(|k| k.0.starts_with(&want)).ok_or_else(|| "that Nitrokey does not answer on its FIDO interface".to_string())
 }
 
-fn api() -> Result<hidapi::HidApi, String> { hidapi::HidApi::new().map_err(|e| format!("HID: {e}")) }
+/// One HID manager for the whole process, used by one thread at a time. hidapi's macOS backend builds an
+/// IOHIDManager and schedules it on the calling thread's run loop for every init and enumerate; two threads
+/// doing that at once -- the card poller asking two keys their firmware, or a poll during an update -- trapped
+/// inside CFRunLoopAddSource (EXC_BREAKPOINT on a tokio worker, 2026-10-17). So: created once, refreshed per
+/// use, never rebuilt per call, and never used concurrently. Devices opened from it stay open on their own.
+fn with_hid<T>(f: impl FnOnce(&hidapi::HidApi) -> T) -> Result<T, String> {
+    static HID: std::sync::Mutex<Option<hidapi::HidApi>> = std::sync::Mutex::new(None);
+    let mut g = HID.lock().unwrap_or_else(|p| p.into_inner());
+    let api = match g.as_mut() {
+        Some(a) => { a.refresh_devices().map_err(|e| format!("HID: {e}"))?; a }
+        None => g.insert(hidapi::HidApi::new().map_err(|e| format!("HID: {e}"))?),
+    };
+    Ok(f(api))
+}
 
 /// What this key runs, against the newest release known at build time. One HID conversation, no network.
 pub fn firmware(serial: u32) -> Result<Firmware, String> {
-    let api = api()?;
-    let (uuid, version, variant, _) = key_for(&api, serial)?;
+    let (uuid, version, variant, _) = with_hid(|api| key_for(api, serial))??;
     Ok(Firmware { behind: is_behind(&version, LATEST_KNOWN), flashable: variant == "lpc55", uuid, version, variant: variant.into(), latest_known: LATEST_KNOWN.into(), latest_known_as_of: LATEST_KNOWN_AS_OF.into() })
 }
 
@@ -351,7 +363,7 @@ pub fn update_with(serial: u32, report: &dyn Fn(Progress), given: Option<Contain
     let say = |phase: &'static str, pct: u8, text: String| report(Progress { phase, pct, text });
     // A key already sitting in its loader (an earlier attempt stopped after the touch) is taken from there: no
     // version to read, nothing to confirm, just the image to write.
-    let in_loader = api().ok().and_then(|a| Boot::find(&a)).is_some();
+    let in_loader = with_hid(Boot::find).ok().flatten().is_some();
     let before = match firmware(serial) { Ok(f) => Some(f), Err(e) if in_loader => { say("flash", 12, "The key is already in its loader".into()); let _ = e; None }, Err(e) => return Err(e) };
     if before.as_ref().map_or(false, |b| !b.flashable) { return Err("this Nitrokey is the nRF52 kind (a 3A Mini); update it with Nitrokey App 2".into()); }
     let container = match given {
@@ -370,14 +382,15 @@ pub fn update_with(serial: u32, report: &dyn Fn(Progress), given: Option<Contain
     if let Some(b) = &before {
         if is_behind(&version, &b.version) { return Err(format!("{version} is older than the {} on the key; a Nitrokey does not go backwards", b.version)); }
         say("touch", 10, format!("Touch the key when it blinks white: it restarts into its loader to take {version}"));
-        let api = api()?;
-        let (_, _, _, path) = key_for(&api, serial)?;
-        let c = Ctap::open(&api, &path).map_err(|e| e.text())?;
+        let c = with_hid(|api| -> Result<Ctap, String> {
+            let (_, _, _, path) = key_for(api, serial)?;
+            Ctap::open(api, &path).map_err(|e| e.text())
+        })??;
         c.reboot_to_bootloader()?;
         say("flash", 12, "Waiting for the loader".into());
         std::thread::sleep(Duration::from_secs(1));
     }
-    let boot = wait_for(30, || api().ok().and_then(|a| Boot::find(&a))).ok_or("the key did not come back as a loader; unplug it, plug it in and try again")?;
+    let boot = wait_for(30, || with_hid(Boot::find).ok().flatten()).ok_or("the key did not come back as a loader; unplug it, plug it in and try again")?;
     boot.receive_sb_file(&container.lpc55, &|sent, total| say("flash", 12 + (sent * 80 / total.max(1)) as u8, format!("Writing {version}: {} of {} KB", sent / 1024, total / 1024)))?;
     boot.reset()?;
     drop(boot);
@@ -445,8 +458,8 @@ mod tests {
     #[test]
     #[ignore]
     fn hardware_nk_firmware_read() {
-        let api = api().unwrap();
-        for (uuid, version, variant, _) in keys(&api) { println!("Nitrokey 3 {uuid} firmware {version} ({variant})"); let serial = u32::from_be_bytes([u8::from_str_radix(&uuid[0..2], 16).unwrap(), u8::from_str_radix(&uuid[2..4], 16).unwrap(), u8::from_str_radix(&uuid[4..6], 16).unwrap(), u8::from_str_radix(&uuid[6..8], 16).unwrap()]); println!("{:?}", firmware(serial)); }
+        let found = with_hid(keys).unwrap();
+        for (uuid, version, variant, _) in found { println!("Nitrokey 3 {uuid} firmware {version} ({variant})"); let serial = u32::from_be_bytes([u8::from_str_radix(&uuid[0..2], 16).unwrap(), u8::from_str_radix(&uuid[2..4], 16).unwrap(), u8::from_str_radix(&uuid[4..6], 16).unwrap(), u8::from_str_radix(&uuid[6..8], 16).unwrap()]); println!("{:?}", firmware(serial)); }
     }
 
     /// The real update from the release list, touch and all:
