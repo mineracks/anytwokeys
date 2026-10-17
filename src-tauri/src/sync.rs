@@ -475,10 +475,28 @@ pub fn file_refs(view: &Value) -> BTreeMap<String, bool> {
                 for x in o.values() { walk(x, out); }
             }
             Value::Array(a) => for x in a { walk(x, out); },
+            // an entity's, a place's or a key's picture: `img:<thumbnail hash>` in `icons` -- a thumbnail nothing else
+            // names, so without this line it stayed on the device that picked it and every other device drew a ring
+            Value::String(s) => if let Some(h) = s.strip_prefix("img:").filter(|h| is_hash(h)) { out.entry(h.to_lowercase()).or_insert(true); },
             _ => {}
         }
     }
     let mut out = BTreeMap::new(); walk(view, &mut out); out
+}
+
+#[cfg(test)]
+mod icon_refs {
+    #[test]
+    fn an_icon_is_a_thumbnail_the_sync_carries() {
+        let ht = "ab".repeat(32);
+        let hf = "cd".repeat(32);
+        let v = serde_json::json!({ "icons": { "entity:1": format!("img:{ht}"), "place:2": "glyph:home", "key:3": format!("img:{hf}") },
+            "records": { "files": { "place:2": [{ "name": "a.jpg", "sha256": hf, "size": 9 }] } } });
+        let refs = super::file_refs(&v);
+        assert_eq!(refs.get(&ht), Some(&true), "the picture is fetched like any thumbnail");
+        assert_eq!(refs.get(&hf), Some(&false), "a whole file named elsewhere stays a whole file");
+        assert_eq!(refs.len(), 2);
+    }
 }
 
 #[derive(Serialize, Clone, Debug, Default, PartialEq)]

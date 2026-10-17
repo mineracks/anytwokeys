@@ -3258,7 +3258,9 @@ async fn attach_remove(name: String, key: String, sha256: String) -> R<Store> {
         }
     })?;
     // bytes go only when no record of ANY vault on this computer still names them
-    let in_use: std::collections::HashSet<String> = st.vaults.iter().flat_map(|v| v.files.values().flatten()).flat_map(|e| ["sha256", "thumb"].into_iter().filter_map(|f| e.get(f).and_then(|x| x.as_str()).map(String::from)).collect::<Vec<_>>()).collect();
+    let in_use: std::collections::HashSet<String> = st.vaults.iter().flat_map(|v| v.files.values().flatten()).flat_map(|e| ["sha256", "thumb"].into_iter().filter_map(|f| e.get(f).and_then(|x| x.as_str()).map(String::from)).collect::<Vec<_>>())
+        .chain(st.icons.values().filter_map(|i| i.strip_prefix("img:").map(String::from)))   // a picture chosen as an icon outlives the attachment it came from
+        .collect();
     attach::sweep(&gone, &in_use);
     // off the host too, once no record of THIS vault names them (the record itself travels with the sync below)
     if let Some(v) = st.vaults.iter().find(|v| v.name == name) {
