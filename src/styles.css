@@ -881,3 +881,6 @@ dd .mkt-n{display:block}
 /* the market-context table inside a transaction's facts: its words must not be broken, and on a phone it takes the full width under its label */
 .tx-dl dd .mkt td:first-child,.tx-dl dd .mkt th{overflow-wrap:normal}
 @media (max-width:700px){.tx-dl dt:has(+ dd > .mkt),.tx-dl dd:has(> .mkt){grid-column:1 / -1} .tx-dl dd:has(> .mkt){margin-top:-6px}}
+
+/* Vault settings names the field once; the chip row's own "Owner" word is for places it stands alone */
+#vs-owner .row > .label:first-child{display:none}

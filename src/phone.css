@@ -60,3 +60,76 @@
 #phone-view[hidden]{display:none}
 #phone-view img{max-width:100%;max-height:calc(100% - 60px);object-fit:contain;border-radius:4px}
 #phone-view .pv-name{color:#eee;font:600 14px var(--display)} #phone-view .pv-hint{color:#aaa;font-size:12.5px}
+
+/* ---- tables on a phone: rows become small cards; the columns of a wide table stack inside one row ---- */
+@media (max-width:700px){
+  /* the header: one line of crumbs that never wraps (a long vault name shrank the row and pushed "›" to its own
+     line); the chips on the right give way to the name instead of the other way round */
+  #crumbs{flex-wrap:nowrap;overflow:hidden;white-space:nowrap;max-width:100%}
+  #crumbs a,#crumbs > span{flex:0 1 auto;min-width:0;max-width:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #crumbs .sep{flex:none}
+  .topleft{flex:1 1 auto}
+  .top > .row:last-child{flex:0 1 auto;min-width:0}
+  .top .pchip{max-width:150px;font-size:12px;gap:6px}
+  .net{padding:4px 8px;font-size:11px;letter-spacing:.04em;gap:6px}
+  /* any table that would push the page wider than the screen scrolls inside its box instead */
+  table{display:block;overflow-x:auto;max-width:100%;-webkit-overflow-scrolling:touch}
+  /* the activity list: txid and amount on the first line, when and status under them, the label across the bottom */
+  table.act thead{display:none}
+  table.act,table.act tbody{display:block;overflow:visible}
+  table.act tr{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:12px;row-gap:2px;padding:10px 0;border-bottom:1px solid var(--line);align-items:baseline}
+  table.act td{display:block;padding:0;border:0;min-width:0}
+  table.act td.mono{grid-column:1;grid-row:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  table.act td.when{grid-column:1;grid-row:2;font-size:12.5px;white-space:normal}
+  table.act td.when small{display:inline;margin-left:6px}
+  table.act td.amt{grid-column:2;grid-row:1;text-align:right}
+  table.act td.amt small{font-size:11.5px}
+  table.act td:nth-child(3){grid-column:1 / -1;grid-row:3}
+  table.act td:nth-child(3):empty{display:none}
+  table.act td:nth-child(5){grid-column:2;grid-row:2;text-align:right;font-size:12px;white-space:nowrap}
+  table.act tr.grp,table.act td[colspan]{display:block;padding:14px 0 4px}
+  table.act tr.grp td{padding:0}
+  #activity td:nth-child(2){width:auto}
+  /* coins: tick, then coin id and amount, label and status, the address last */
+  #coin-table thead{display:none}
+  #coin-table,#coin-table tbody{display:block;overflow:visible}
+  #coin-table tr{display:grid;grid-template-columns:auto minmax(0,1fr) auto;column-gap:10px;row-gap:3px;padding:10px 0;border-bottom:1px solid var(--line);align-items:center}
+  #coin-table td{display:block;padding:0;border:0;min-width:0}
+  #coin-table td.tick{grid-column:1;grid-row:1 / span 3}
+  #coin-table td:nth-child(2){grid-column:2;grid-row:2;white-space:normal}
+  #coin-table td:nth-child(3){grid-column:3;grid-row:1;text-align:right;white-space:nowrap}
+  #coin-table td:nth-child(4){grid-column:2;grid-row:1}
+  #coin-table td:nth-child(5){grid-column:2 / -1;grid-row:3;font-family:var(--mono);font-size:12px;color:var(--muted)}
+  #coin-table td:nth-child(6){grid-column:3;grid-row:2;text-align:right;font-size:12px}
+  #coin-table tr.grp,#coin-table td[colspan]{display:block;padding:14px 0 4px}
+  #coin-table tr.grp td{padding:0}
+  #coin-table tr.picked{background:var(--gold-soft)} #coin-table tr.picked td{background:none}
+  /* addresses: number and address, then label and balance, status under the balance */
+  #addr-recv thead,#addr-chg thead,#addr-recv colgroup,#addr-chg colgroup{display:none}
+  #addr-recv,#addr-chg,#addr-recv tbody,#addr-chg tbody{display:block;overflow:visible}
+  #addr-recv tr,#addr-chg tr{display:grid;grid-template-columns:auto minmax(0,1fr) auto;column-gap:10px;row-gap:3px;padding:10px 0;border-bottom:1px solid var(--line);align-items:baseline}
+  #addr-recv td,#addr-chg td{display:block;padding:0;border:0;min-width:0}
+  #addr-recv td:nth-child(1),#addr-chg td:nth-child(1){grid-column:1;grid-row:1}
+  #addr-recv td:nth-child(2),#addr-chg td:nth-child(2){grid-column:2;grid-row:1;overflow:hidden;text-overflow:ellipsis}
+  #addr-recv td:nth-child(3),#addr-chg td:nth-child(3){grid-column:2;grid-row:2;white-space:normal}
+  #addr-recv td:nth-child(4),#addr-chg td:nth-child(4){grid-column:3;grid-row:1;text-align:right;white-space:nowrap}
+  #addr-recv td:nth-child(5),#addr-chg td:nth-child(5){grid-column:3;grid-row:2;text-align:right;font-size:12px}
+  #addr-recv td[colspan],#addr-chg td[colspan]{grid-column:1 / -1}
+  #addr-recv tr.cur,#addr-chg tr.cur{background:var(--gold-soft);margin:0 -8px;padding-inline:8px} #addr-recv tr.cur td,#addr-chg tr.cur td{background:none}
+  /* the screen's own name is the heading under the crumbs: on a phone the crumbs are only the way back */
+  #crumbs .here,#crumbs .sep-here{display:none}
+  /* a list row with no label shows no label line; the record's own page is where one is written. A transfer
+     chip in that line is cut with an ellipsis rather than running off the screen */
+  .lbl .text{max-width:100%}
+  table.act .lbl:has(> .text:empty),#coin-table .lbl:has(> .text:empty),#addr-recv .lbl:has(> .text:empty),#addr-chg .lbl:has(> .text:empty){display:none}
+  table.act td:nth-child(3){display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;min-width:0}
+  table.act td:nth-child(3):not(:has(.text:not(:empty), .tag)){display:none}
+  table.act .xfer{display:contents}
+  table.act .tag.peer{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block}
+  /* an odd last figure spans the row rather than sitting alone on the left */
+  .kpis{grid-template-columns:repeat(2,minmax(0,1fr))} .kpis > .kpi:last-child:nth-child(odd){grid-column:1 / -1}
+}
+/* no hover on a touch screen: the pencils that appear on hover are simply there */
+@media (hover:none){
+  .lbl .pencil,.top .pencil,.pencil{color:var(--muted)}
+}

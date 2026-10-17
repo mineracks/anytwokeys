@@ -157,7 +157,8 @@ function paintCrumbs(name) {
   if (name === 'place') trail.push(['Locations', 'places']);
   const here = { home: '', send: 'Send', receive: 'Receive', backup: 'Backup', keys: recPage.kind === 'key' ? recPage.leaf : 'Keys', settings: 'App settings', places: 'Locations', entities: 'Entities', allkeys: 'Keys', entity: (entityOf(entPage) || {}).name || 'Entity', place: ((store.places || []).find(p => p.id === placePage) || {}).name || 'Location', own: ownState.kind === 'split' ? 'Split coin' : 'Combine coins', setup: 'New vault', restore: 'Restore', sign: 'Sign', messages: 'Messages', tx: name === 'tx' && vault && txView.txid ? txHeadline() : '', coins: recPage.kind === 'coin' ? recPage.leaf : '', addresses: recPage.kind === 'addr' ? recPage.leaf : '' }[name] || '';
   const el = $('#crumbs'); el.hidden = !trail.length;
-  const html = trail.map(([t, go]) => (go ? `<a tabindex="0" role="link" data-crumb="${go}">${esc(t)}</a>` : `<span>${esc(t)}</span>`) + '<span class="sep">›</span>').join('') + `<span class="here">${esc(here)}</span>`;
+  // separators only BETWEEN crumbs: a screen with no name of its own (Home, Activity) used to end in a dangling ›
+  const html = trail.map(([t, go]) => (go ? `<a tabindex="0" role="link" data-crumb="${go}">${esc(t)}</a>` : `<span>${esc(t)}</span>`)).join('<span class="sep">›</span>') + (here ? `<span class="sep sep-here">›</span><span class="here">${esc(here)}</span>` : '');
   if (el._html !== html) { el._html = html; el.innerHTML = html; }   // a poll must not take focus off a crumb
 }
 document.addEventListener('click', (e) => { const c = e.target.closest('[data-crumb]'); if (!c) return; if (c.dataset.crumb === 'welcome') showWelcome(); else show(c.dataset.crumb); });
