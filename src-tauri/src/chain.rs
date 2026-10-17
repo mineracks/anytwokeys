@@ -16,7 +16,7 @@ pub struct Servers {
 pub fn defaults(network: Network) -> Servers {
     match network {
         Network::Bitcoin => Servers { electrum: "ssl://electrum.mineracks.com:50002".into(), explorer: "https://mempool.mineracks.com".into() },
-        _ => Servers { electrum: "tcp://100.94.4.10:50001".into(), explorer: "https://signet.mineracks.com".into() },
+        _ => Servers { electrum: "ssl://electrum.blockstream.info:60002".into(), explorer: "https://signet.mineracks.com".into() },
     }
 }
 

@@ -1,6 +1,6 @@
 # Spark reader — hardware test handoff
 
-The implementation is in `/Users/piersmacraecockram/anytwokeys`. This is ready for hardware acceptance testing, not a claim that Wallet of Satoshi enrolment has already been proved on your wallet.
+The implementation is in this repository. This is ready for hardware acceptance testing, not a claim that Wallet of Satoshi enrolment has already been proved on your wallet.
 
 ## Start the new build
 

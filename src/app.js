@@ -4759,7 +4759,7 @@ function renderSettings() {
   $('#drill-every').value = String(store.settings.drill_days === undefined ? 90 : store.settings.drill_days);
   renderLock(); renderPlaces();
   $$('#net-pick .opt').forEach(o => o.classList.toggle('on', o.dataset.net === store.settings.network));
-  const def = store.settings.network === 'mainnet' ? ['ssl://electrum.mineracks.com:50002', 'https://mempool.mineracks.com'] : ['tcp://100.94.4.10:50001', 'https://signet.mineracks.com'];
+  const def = store.settings.network === 'mainnet' ? ['ssl://electrum.mineracks.com:50002', 'https://mempool.mineracks.com'] : ['ssl://electrum.blockstream.info:60002', 'https://signet.mineracks.com'];
   $('#def-electrum').textContent = def[0]; $('#def-explorer').textContent = def[1];
   $('#own-servers').classList.toggle('on', !store.settings.custom);
   $('#offline-switch').classList.toggle('on', !!store.settings.offline);
