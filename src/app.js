@@ -3662,8 +3662,10 @@ async function paintIcons(root) {
     // Painted whether or not the element is in the document yet: the All vaults chips are built and painted
     // BEFORE renderSummary attaches them, and the old `isConnected` test after the await skipped them for good --
     // an empty ring beside the entity's name. A picture on a detached node costs nothing and is right once attached.
-    try { if (!thumbCache.has(h)) thumbCache.set(h, await invoke('attach_thumb', { sha256: h })); const img = new Image(); img.alt = ''; img.src = thumbCache.get(h); el.replaceChildren(img); } catch {} }
+    try { if (!thumbCache.has(h)) thumbCache.set(h, await thumbOf(h)); const img = new Image(); img.alt = ''; img.src = thumbCache.get(h); el.replaceChildren(img); } catch {} }
 }
+// the thumbnail's bytes; a picture another device chose is pulled from the sync host the first time it is drawn here
+async function thumbOf(h) { try { return await invoke('attach_thumb', { sha256: h }); } catch (e) { if (!(await invoke('icon_fetch', { sha256: h }))) throw e; return invoke('attach_thumb', { sha256: h }); } }
 // the picker, under the mark it changes: the glyphs, a picture, or none
 function iconPicker(anchor, kind, id, done) {
   let box = anchor.parentElement.querySelector('.icpick'); if (box) { box.remove(); return; }

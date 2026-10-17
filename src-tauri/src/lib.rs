@@ -3372,6 +3372,17 @@ async fn attach_fetch(name: String, sha256: String, size: u64) -> R<bool> {
     Ok(true)
 }
 
+/// An icon's thumbnail that another device chose: fetch it from the sync host the moment it is asked for, rather than
+/// waiting for this device's next sync round. Only a hash the profile's icons name; nothing is drawn until it is here.
+#[tauri::command]
+async fn icon_fetch(sha256: String) -> R<bool> {
+    let s = wallet::load()?;
+    if !s.icons.values().any(|i| i.strip_prefix("img:") == Some(sha256.as_str())) { return Err("no icon names that picture".into()); }
+    if attach::have(&sha256) { return Ok(true); }
+    let Some(st) = sync::state()? else { return Ok(false) };
+    match sync::download(&st, &sha256).await? { Some(bytes) => { block(move || attach::keep(&sha256, &bytes)).await?; Ok(true) } None => Ok(false) }
+}
+
 #[tauri::command]
 fn labels_export(name: String) -> R<String> {
     let s = wallet::load()?;
@@ -3634,7 +3645,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![profiles_list, profile_open, profile_close, profile_create, profile_update, profile_delete, profile_picture_pick, guard_displays, guard_sharing, guard_override, vault_move_start, move_land, persona_generate, persona_defaults, transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, cycle_curve, cycle_now, cycle_marks, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
+        .invoke_handler(tauri::generate_handler![profiles_list, profile_open, profile_close, profile_create, profile_update, profile_delete, profile_picture_pick, guard_displays, guard_sharing, guard_override, vault_move_start, move_land, persona_generate, persona_defaults, transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, cycle_curve, cycle_now, cycle_marks, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, icon_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
             cards_list, card_generate, attach_view, profiles_refresh, sync_face_refresh, sync_status, sync_enable, sync_rotate, sync_remove_card, sync_now, sync_tick, sync_disable, sync_find, sync_adopt, card_survey, card_tap, nk_firmware, nk_firmware_update, secret_preview, card_init_key_from, card_import, card_init_resume_check, key_setup_restart, card_reset, platform, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard,
             engraver_find, engraver_jog, engraver_run, engraver_cancel, vault_shares_plates, share_rewrap
