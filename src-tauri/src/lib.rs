@@ -580,7 +580,7 @@ async fn card_tap() -> R<keyinit::Survey> {
 
 /// Which kind of device this is: the window draws and words itself differently on a phone.
 #[tauri::command]
-fn platform() -> &'static str { if cfg!(target_os = "ios") { "ios" } else if cfg!(target_os = "android") { "android" } else if cfg!(target_os = "macos") { "macos" } else { "other" } }
+fn platform() -> &'static str { if cfg!(target_os = "ios") { "ios" } else if cfg!(target_os = "android") { "android" } else if cfg!(target_os = "macos") { "macos" } else if cfg!(target_os = "linux") { "linux" } else if cfg!(target_os = "windows") { "windows" } else { "other" } }
 
 /// Why each PIN will not do (or null), said while it is being typed. The same rules are applied again before a write.
 #[tauri::command]
@@ -1179,7 +1179,7 @@ async fn key_card_open(name: Option<String>, reader: Option<String>, pin: Option
                 let pk = bitcoin::secp256k1::PublicKey::from_str(&pub_hex).map_err(|_| "this key's public key is damaged")?;
                 secp.verify_ecdsa(&bitcoin::secp256k1::Message::from_digest(digest), &sig, &pk).map_err(|_| "the key did not prove itself: its signature does not match its public key")?;
             }
-            _ => lockbox::mac::presence("show this key's card")?,
+            _ => { if lockbox::mac::PRESENCE.is_none() { return Err("nothing on this computer can vouch for you: use one of the keys, its PIN and a touch".into()); } lockbox::mac::presence("show this key's card")? }
         }
         Ok(now() + 600)
     }).await
@@ -3016,17 +3016,19 @@ fn guard_sharing(window: tauri::WebviewWindow, none: bool) -> R<()> {
 
 /// "Show anyway for 10 minutes": the person at the Mac, again.
 #[tauri::command]
-async fn guard_override() -> R<()> { block(|| lockbox::mac::presence("show the private profile while another display is attached")).await }
+async fn guard_override() -> R<()> { block(|| { if lockbox::mac::PRESENCE.is_none() { return Err("nothing on this computer can vouch for you: unplug the other display".into()); } lockbox::mac::presence("show the private profile while another display is attached") }).await }
 
 #[derive(serde::Serialize)]
 struct LockCard { pubkey: String, name: String, added: u64 }
 #[derive(serde::Serialize)]
-struct LockStatus { sealed: bool, unlocked: bool, finished: bool, touch: bool, idle_minutes: u32, with_screen: bool, cards: Vec<LockCard>, moved: Option<lockbox::Migration> }
+struct LockStatus { sealed: bool, unlocked: bool, finished: bool, touch: bool, idle_minutes: u32, with_screen: bool, cards: Vec<LockCard>, moved: Option<lockbox::Migration>,
+    /// what the system can vouch with ("Touch ID"), or null on a platform with nothing of the kind — the screen words itself from this
+    presence: Option<&'static str> }
 
 fn lock_state(moved: Option<lockbox::Migration>) -> R<LockStatus> {
     let s = lockbox::slots()?;
     Ok(LockStatus { sealed: lockbox::sealed_mode(), unlocked: lockbox::unlocked(), finished: s.as_ref().map(|s| s.migrated).unwrap_or(false), touch: s.as_ref().map(|s| s.touch).unwrap_or(true),
-        idle_minutes: s.as_ref().map(|s| s.idle_minutes).unwrap_or(0), with_screen: s.as_ref().map(|s| s.with_screen).unwrap_or(true), cards: s.map(|s| s.cards.into_iter().map(|c| LockCard { pubkey: c.pubkey, name: c.name, added: c.added }).collect()).unwrap_or_default(), moved })
+        idle_minutes: s.as_ref().map(|s| s.idle_minutes).unwrap_or(0), with_screen: s.as_ref().map(|s| s.with_screen).unwrap_or(true), cards: s.map(|s| s.cards.into_iter().map(|c| LockCard { pubkey: c.pubkey, name: c.name, added: c.added }).collect()).unwrap_or_default(), moved, presence: lockbox::mac::PRESENCE })
 }
 
 #[tauri::command]

@@ -259,6 +259,9 @@ async function reorderVaults(from, to, before) {
 
 // ---------- locked: everything this app keeps on the computer is encrypted, and something you hold opens it ----------
 let lockInfo = null;
+// What the system can vouch with on this device — Touch ID on a Mac, Face ID or Touch ID on an iPhone, the phone's lock
+// on Android — or null where there is nothing of the kind (Linux, Windows): there, one of the keys is the only proof.
+const presenceName = () => (lockInfo && lockInfo.presence) || ({ macos: 'Touch ID', ios: 'Face ID or Touch ID', android: 'the phone\'s lock' })[document.body.dataset.platform] || null;
 const OTP = /^[cbdefghijklnrtuv]{32,}$/;   // a brushed key typing a Yubico one-time code, not a PIN
 const lockSaid = (text) => { $('#lock-err').textContent = text || ''; $('#lock-err').hidden = !text; };
 function lockScreen() {
@@ -268,7 +271,10 @@ function lockScreen() {
     const opened = (ls) => { stop = true; lockInfo = ls; $('#lock').hidden = true; $('#lock-keys').innerHTML = ''; done(ls); };
     const withMac = async () => { if (busy) return; busy = true; lockSaid(''); $('#lock-mac').disabled = true;
       try { opened(await invoke('lock_open_mac')); } catch (e) { lockSaid(String(e)); } finally { busy = false; $('#lock-mac').disabled = false; } };
-    $('#lock-mac').textContent = lockInfo.touch ? 'Open with Touch ID' : 'Open'; $('#lock-mac').onclick = withMac;
+    const P = presenceName();
+    $('#lock-mac').hidden = !P; $('#lock-or').hidden = !P;
+    $('#lock-say').textContent = P ? 'Everything it keeps on this computer is encrypted. Open it with this computer, or with one of your keys and its PIN.' : 'Everything it keeps on this computer is encrypted. Open it with one of your keys and its PIN.';
+    $('#lock-mac').textContent = lockInfo.touch && P ? `Open with ${P}` : 'Open'; $('#lock-mac').onclick = withMac;
     const keys = async () => { if (stop) return;
       let seen = []; try { seen = await invoke('cards_list'); } catch {}
       const now = seen.map(c => c.reader + c.pubkey).join('|');
@@ -295,7 +301,11 @@ function idleLock() {
 for (const ev of ['pointerdown', 'keydown', 'wheel']) document.addEventListener(ev, () => idleLock(), { passive: true, capture: true });
 function renderLock() {
   const card = $('#lock-card'); if (!lockInfo || !lockInfo.sealed) { card.hidden = true; return; } card.hidden = false;
-  $('#lock-state').textContent = 'Vaults, labels, notes, contacts and attachments are encrypted on this computer. The key is in this Mac\'s Keychain' + (lockInfo.cards.length ? `, and ${lockInfo.cards.length === 1 ? 'one of your keys' : lockInfo.cards.length + ' of your keys'} can open the app without it.` : '. No key of yours can open the app yet: add one, so a lost Keychain is not a lost address book.');
+  const P = presenceName(), nKeys = lockInfo.cards.length === 1 ? 'one of your keys' : lockInfo.cards.length + ' of your keys';
+  $('#lock-state').textContent = 'Vaults, labels, notes, contacts and attachments are encrypted on this computer. ' + (P
+    ? 'The key is in this computer\'s keychain' + (lockInfo.cards.length ? `, and ${nKeys} can open the app without it.` : '. No key of yours can open the app yet: add one, so a lost keychain is not a lost address book.')
+    : (lockInfo.cards.length ? `This platform has no system keychain yet, so ${nKeys} is what opens the app.` : 'This platform has no system keychain yet: add one of your keys.'));
+  $('#lock-touch-row').hidden = !P; if (P) $('#lock-touch-label').textContent = `Ask for ${P} when the app opens`;
   $('#lock-state').classList.toggle('warn', !lockInfo.cards.length);
   $('#lock-screen').classList.toggle('on', lockInfo.with_screen !== false); $('#lock-screen').setAttribute('aria-checked', lockInfo.with_screen !== false ? 'true' : 'false');
   $('#lock-touch').classList.toggle('on', lockInfo.touch); $('#lock-touch').setAttribute('aria-checked', lockInfo.touch ? 'true' : 'false'); $('#lock-idle').value = String(lockInfo.idle_minutes);
@@ -330,7 +340,7 @@ const ptagHtml = (p) => `<span class="ptag ${PCLASS[p.class][1]}">${PCLASS[p.cla
 function renderProfiles(view) {
   $('#shell').hidden = true; $('#welcome').hidden = true; $('#lock').hidden = true; $('#profiles').hidden = false;
   const when = (t) => t ? 'opened ' + new Date(t * 1000).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : 'never opened';
-  const line = (p) => p.class === 'private' ? 'Your own holdings. Asks for Touch ID or a key every time, and will not draw while another display is attached.'
+  const line = (p) => p.class === 'private' ? `Your own holdings. Asks for ${presenceName() ? presenceName() + ' or a key' : 'a key'} every time, and will not draw while another display is attached.`
     : p.class === 'fiction' ? 'A made-up person\'s holdings for showing to a room. Nothing in it is real.' : 'Demo vaults for working on the app. Opens on a click.';
   $('#profiles-grid').innerHTML = view.profiles.map(p => `<div class="card pcard${p.start ? ' hot' : ''}" data-profile="${esc(p.id)}">${picHtml(p, 64, true)}<div class="ctitle"><span class="nm">${esc(p.name)}</span>${ptagHtml(p)}</div><div class="muted grow">${line(p)}<br><small>${when(p.last_opened)}</small></div><div class="acts"><button class="btn${p.start ? ' primary' : ''}" data-open="${esc(p.id)}">${p.class === 'private' ? 'Open…' : 'Open'}</button>${p.start ? '<span class="vchip on" aria-pressed="true">Opens on start</span>' : ''}</div></div>`).join('')
     + `<div class="card pcard ghost"><div class="ctitle" style="font-size:16px">New profile</div><div class="muted">Name it, say who it is for, give it a picture later.</div><button class="btn small" id="pn-start">Start</button></div>`
@@ -345,8 +355,9 @@ function renderProfiles(view) {
   $('#pn-start').onclick = () => { $('#profile-new').hidden = false; $('#pn-name').focus(); pnNote(); };
 }
 const pnClass = () => ($('#pn-class .opt.on') || {}).dataset?.class || 'work';
-function pnNote() { $('#pn-note').textContent = { work: 'Opens on a click. Touch ID can be asked for in App settings › Lock once it is open.', fiction: 'Opens on a click and carries a DEMO · fictional tag wherever its name is shown. A persona can be generated into it from App settings.',
-  private: 'Made only by the person at this Mac: Touch ID first. Always asked when it opens, never opens on start, uncapturable on screen, and closed while another display is attached.' }[pnClass()]; }
+function pnNote() { const P = presenceName(); $('#pn-note').textContent = { work: 'Opens on a click.' + (P ? ` ${P} can be asked for in App settings › Lock once it is open.` : ''), fiction: 'Opens on a click and carries a DEMO · fictional tag wherever its name is shown. A persona can be generated into it from App settings.',
+  private: P ? `Made only by the person at this computer: ${P} first. Always asked when it opens, never opens on start, uncapturable on screen, and closed while another display is attached.`
+    : 'Opens only with one of its keys: always asked when it opens, never opens on start, and closed while another display is attached.' }[pnClass()]; }
 $('#pn-class').addEventListener('click', (e) => { const o = e.target.closest('.opt'); if (!o) return; $$('#pn-class .opt').forEach(x => x.classList.toggle('on', x === o)); pnNote(); });
 $('#pn-cancel').onclick = () => { $('#profile-new').hidden = true; };
 $('#pn-create').onclick = async () => { const name = $('#pn-name').value.trim(); if (!name) return toast('A profile needs a name');
@@ -392,7 +403,7 @@ function curtainCheck(d) {
   const risky = d && (d.count > 1 || d.mirrored);
   const show = risky && Date.now() > curtainUntil;
   $('#curtain').hidden = !show;
-  if (show) { $('#curtain-pic').innerHTML = picHtml(profile, 88, true); $('#curtain-say').textContent = (d.mirrored ? 'A mirrored display is attached' : `${d.count} displays are attached`) + ': a projector, a room\'s TV, or a shared screen. This private profile stays closed while it is. Unplug it, or show anyway for ten minutes with Touch ID.'; }
+  if (show) { $('#curtain-pic').innerHTML = picHtml(profile, 88, true); $('#curtain-say').textContent = (d.mirrored ? 'A mirrored display is attached' : `${d.count} displays are attached`) + ': a projector, a room\'s TV, or a shared screen. This private profile stays closed while it is. Unplug it' + (presenceName() ? `, or show anyway for ten minutes with ${presenceName()}.` : '.'); $('#curtain-anyway').hidden = !presenceName(); }
   if (risky && !show) { clearTimeout(curtainCheck.t); curtainCheck.t = setTimeout(() => invoke('guard_displays').then(curtainCheck).catch(() => {}), Math.max(1000, curtainUntil - Date.now() + 50)); }
 }
 $('#curtain-anyway').onclick = async () => { try { await invoke('guard_override'); curtainUntil = Date.now() + 10 * 60000; curtainCheck(await invoke('guard_displays')); } catch (e) { fail(e); } };
@@ -416,6 +427,7 @@ for (const ev of ['pointerup', 'pointercancel']) document.addEventListener(ev, (
   navigator.clipboard.writeText = (t) => wt(t).then((r) => { if (isPrivate()) setTimeout(async () => { try { if ((await navigator.clipboard.readText()) === t) await wt(''); } catch {} }, 60000); return r; }); }
 
 async function boot() {
+  try { document.body.dataset.platform = await invoke('platform'); } catch {}   // the words on the lock and profile screens depend on it
   try { profilesView = await invoke('profiles_list'); } catch (e) { profilesView = null; boot.profilesFailed = String(e); }
   if (profilesView) {
     profile = profilesView.current || null;
@@ -3422,11 +3434,11 @@ function paintKeyPrivate() {
   const nameOfCard = (c) => (vault.keys.find(k => k.pubkey === c.pubkey) || {}).name || 'key';
   box.innerHTML = `<div class="label" style="margin-top:18px">Kept with this key</div>
     <div class="muted" style="font-size:13.5px;max-width:640px">Where it is kept, photos of it and its sheet, notes on who knows — a map to the custody. It is sealed on disk like everything else; putting it on a screen deserves a second look first.</div>
-    <div class="row" style="margin-top:12px"><button class="btn primary" type="button" id="key-open-mac">Show it — Touch ID</button></div>
-    ${here.length ? `<div class="muted" style="font-size:13px;margin-top:14px">Or with one of this vault’s keys, its PIN and a touch:</div><div style="display:flex;flex-direction:column;gap:8px;margin-top:6px;max-width:640px">${here.map((c, i) => `<form class="lock-key" data-reader="${esc(c.reader)}"><b>${esc(nameOfCard(c))}<small>plugged in · ${esc(modelName(c.form, c.nfc))} ${esc(String(c.serial))}</small></b><input type="password" autocomplete="off" placeholder="Key PIN" aria-label="PIN of ${esc(nameOfCard(c))}"><button class="btn" type="submit">Show it</button></form>`).join('')}</div>` : `<div class="muted" style="font-size:13px;margin-top:10px">Or plug in one of this vault’s keys to open it with a PIN and a touch.</div>`}
+    ${presenceName() ? `<div class="row" style="margin-top:12px"><button class="btn primary" type="button" id="key-open-mac">Show it — ${presenceName()}</button></div>` : ''}
+    ${here.length ? `<div class="muted" style="font-size:13px;margin-top:14px">${presenceName() ? 'Or with' : 'With'} one of this vault’s keys, its PIN and a touch:</div><div style="display:flex;flex-direction:column;gap:8px;margin-top:6px;max-width:640px">${here.map((c, i) => `<form class="lock-key" data-reader="${esc(c.reader)}"><b>${esc(nameOfCard(c))}<small>plugged in · ${esc(modelName(c.form, c.nfc))} ${esc(String(c.serial))}</small></b><input type="password" autocomplete="off" placeholder="Key PIN" aria-label="PIN of ${esc(nameOfCard(c))}"><button class="btn" type="submit">Show it</button></form>`).join('')}</div>` : `<div class="muted" style="font-size:13px;margin-top:10px">Or plug in one of this vault’s keys to open it with a PIN and a touch.</div>`}
     <div class="muted" id="key-open-note" aria-live="polite" style="margin-top:8px"></div>`;
   const opened = (until) => { keyCardOpenUntil = until * 1000; paintKeyPrivate(); setTimeout(() => { if (recPage.kind === 'key' && Date.now() >= keyCardOpenUntil) paintKeyPrivate(); }, Math.max(0, keyCardOpenUntil - Date.now()) + 50); };
-  $('#key-open-mac').onclick = async () => { $('#key-open-note').textContent = ''; try { opened(await invoke('key_card_open', { name: vault.name, reader: null, pin: null })); } catch (e) { $('#key-open-note').textContent = String(e); } };
+  if ($('#key-open-mac')) $('#key-open-mac').onclick = async () => { $('#key-open-note').textContent = ''; try { opened(await invoke('key_card_open', { name: vault.name, reader: null, pin: null })); } catch (e) { $('#key-open-note').textContent = String(e); } };
   $$('#key-private form.lock-key').forEach(f => f.onsubmit = async (ev) => {
     ev.preventDefault(); const inp = f.querySelector('input'); let pin = inp.value; inp.value = ''; if (!pin) return toast('Enter the key’s PIN');
     if (/^[cbdefghijklnrtuv]{32,}$/.test(pin)) { pin = ''; return toast('That was the key typing a one-time code, not a PIN. Nothing was sent to the card and no PIN try was used.', 8000); }
@@ -3535,11 +3547,11 @@ function placeForm(slot, p, done) {
 function paintProofGate(gate, title, words, onOpened) {
   const here = cards.filter(c => c.pubkey && store.vaults.some(v => v.keys.some(k => k.pubkey === c.pubkey)));
   gate.innerHTML = `<div class="label">${title}</div><div class="muted" style="font-size:13.5px;max-width:640px">${words} It is sealed on disk like everything else; putting it on a screen deserves a second look first.</div>
-      <div class="row" style="margin-top:12px"><button class="btn primary" type="button" id="places-open-mac">Show it — Touch ID</button></div>
-      ${here.length ? `<div class="muted" style="font-size:13px;margin-top:14px">Or with any key kept here, its PIN and a touch:</div><div style="display:flex;flex-direction:column;gap:8px;margin-top:6px;max-width:640px">${here.map(c => `<form class="lock-key" data-reader="${esc(c.reader)}"><b>${esc((store.vaults.flatMap(v => v.keys).find(k => k.pubkey === c.pubkey) || {}).name || 'key')}<small>plugged in · ${esc(modelName(c.form, c.nfc))} ${esc(String(c.serial))}</small></b><input type="password" autocomplete="off" placeholder="Key PIN"><button class="btn" type="submit">Show it</button></form>`).join('')}</div>` : ''}
+      ${presenceName() ? `<div class="row" style="margin-top:12px"><button class="btn primary" type="button" id="places-open-mac">Show it — ${presenceName()}</button></div>` : ''}
+      ${here.length ? `<div class="muted" style="font-size:13px;margin-top:14px">${presenceName() ? 'Or with' : 'With'} any key kept here, its PIN and a touch:</div><div style="display:flex;flex-direction:column;gap:8px;margin-top:6px;max-width:640px">${here.map(c => `<form class="lock-key" data-reader="${esc(c.reader)}"><b>${esc((store.vaults.flatMap(v => v.keys).find(k => k.pubkey === c.pubkey) || {}).name || 'key')}<small>plugged in · ${esc(modelName(c.form, c.nfc))} ${esc(String(c.serial))}</small></b><input type="password" autocomplete="off" placeholder="Key PIN"><button class="btn" type="submit">Show it</button></form>`).join('')}</div>` : ''}
       <div class="muted" id="places-open-note" aria-live="polite" style="margin-top:8px"></div>`;
   const opened = (until) => { keyCardOpenUntil = until * 1000; onOpened(); };
-  gate.querySelector('#places-open-mac').onclick = async () => { try { opened(await invoke('key_card_open', { name: null, reader: null, pin: null })); } catch (e) { gate.querySelector('#places-open-note').textContent = String(e); } };
+  const pm = gate.querySelector('#places-open-mac'); if (pm) pm.onclick = async () => { try { opened(await invoke('key_card_open', { name: null, reader: null, pin: null })); } catch (e) { gate.querySelector('#places-open-note').textContent = String(e); } };
   $$('form.lock-key', gate).forEach(f => f.onsubmit = async (ev) => { ev.preventDefault(); const inp = f.querySelector('input'); let pin = inp.value; inp.value = ''; if (!pin) return toast('Enter the key’s PIN'); gate.querySelector('#places-open-note').textContent = 'Touch the key when it flashes…'; try { const req = invoke('key_card_open', { name: null, reader: f.dataset.reader, pin }); pin = ''; opened(await req); } catch (e) { gate.querySelector('#places-open-note').textContent = String(e); } });
 }
 const proofOpen = () => Date.now() < keyCardOpenUntil;

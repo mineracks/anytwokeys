@@ -795,8 +795,8 @@
           </div>
           <div class="card" id="lock-card"><div class="label">Lock</div>
             <div class="muted" style="font-size:13px" id="lock-state"></div>
-            <div class="row" style="justify-content:space-between;flex-wrap:nowrap;gap:16px"><div style="font-family:var(--display);font-weight:600;font-size:14px;min-width:0">Ask for Touch ID when the app opens<small class="muted" style="display:block;font-weight:400;font-family:var(--serif);font-size:13px">Off: the app opens without asking. Its files stay encrypted either way.</small></div><div class="toggle on" id="lock-touch" role="switch" tabindex="0" aria-label="Ask for Touch ID when the app opens"><i></i></div></div>
-            <div class="row" style="justify-content:space-between;flex-wrap:nowrap;gap:16px"><div style="font-family:var(--display);font-weight:600;font-size:14px;min-width:0">Lock when the Mac's screen locks<small class="muted" style="display:block;font-weight:400;font-family:var(--serif);font-size:13px">Which is also what a sleeping Mac wakes to. A spend being signed at that moment has to be started again.</small></div><div class="toggle on" id="lock-screen" role="switch" tabindex="0" aria-label="Lock when the Mac's screen locks"><i></i></div></div>
+            <div class="row" id="lock-touch-row" style="justify-content:space-between;flex-wrap:nowrap;gap:16px"><div style="font-family:var(--display);font-weight:600;font-size:14px;min-width:0"><span id="lock-touch-label">Ask for Touch ID when the app opens</span><small class="muted" style="display:block;font-weight:400;font-family:var(--serif);font-size:13px">Off: the app opens without asking. Its files stay encrypted either way.</small></div><div class="toggle on" id="lock-touch" role="switch" tabindex="0" aria-label="Ask for Touch ID when the app opens"><i></i></div></div>
+            <div class="row" style="justify-content:space-between;flex-wrap:nowrap;gap:16px"><div style="font-family:var(--display);font-weight:600;font-size:14px;min-width:0">Lock when the screen locks<small class="muted" style="display:block;font-weight:400;font-family:var(--serif);font-size:13px">Which is also what a sleeping computer wakes to. A spend being signed at that moment has to be started again.</small></div><div class="toggle on" id="lock-screen" role="switch" tabindex="0" aria-label="Lock when the screen locks"><i></i></div></div>
             <div class="field"><label class="cap" for="lock-idle">Lock again</label><select id="lock-idle" style="max-width:420px"><option value="0">only when the app quits</option><option value="5">after 5 minutes without a click or a key press</option><option value="15">after 15 minutes</option><option value="60">after an hour</option></select></div>
             <div class="field"><div class="cap">Keys that can open this app</div><div id="lock-slots"></div></div>
             <div class="row"><button class="btn" id="lock-now" type="button">Lock now</button></div>
@@ -871,10 +871,10 @@
   <div class="lock-card" role="dialog" aria-modal="true" aria-labelledby="lock-h">
     <svg width="54" height="54" aria-hidden="true"><use href="#ring"/></svg>
     <h2 id="lock-h">Any Two Keys is locked</h2>
-    <p class="muted" id="lock-say">Everything it keeps on this computer is encrypted. Open it with this Mac, or with one of your keys and its PIN.</p>
+    <p class="muted" id="lock-say">Everything it keeps on this computer is encrypted. Open it with this computer, or with one of your keys and its PIN.</p>
     <button type="button" class="btn primary" id="lock-mac">Open with Touch ID</button>
     <div class="lock-err" id="lock-err" hidden></div>
-    <div class="lock-or"><span>or with one of your keys</span></div>
+    <div class="lock-or" id="lock-or"><span>or with one of your keys</span></div>
     <div id="lock-keys"></div>
     <button type="button" class="linkish" id="lock-switch" hidden>Choose another profile</button>
   </div>
@@ -883,7 +883,7 @@
   <div class="lock-card" role="dialog" aria-modal="true" aria-labelledby="curtain-h">
     <span id="curtain-pic"></span>
     <h2 id="curtain-h">Another display is connected</h2>
-    <p class="muted" id="curtain-say">This private profile stays closed while a second or mirrored display is attached: a projector, a room's TV, a shared screen. Unplug it, or show anyway for ten minutes with Touch ID.</p>
+    <p class="muted" id="curtain-say">This private profile stays closed while a second or mirrored display is attached: a projector, a room's TV, a shared screen. Unplug it.</p>
     <button type="button" class="btn primary" id="curtain-anyway">Show anyway for 10 minutes</button>
     <button type="button" class="linkish" id="curtain-switch">Switch to another profile</button>
   </div>

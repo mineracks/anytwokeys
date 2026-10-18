@@ -1,6 +1,6 @@
 {
   "name": "anytwokeys",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Any Two Keys — a Bitcoin vault signed by your YubiKeys (research software)",
   "license": "MIT",

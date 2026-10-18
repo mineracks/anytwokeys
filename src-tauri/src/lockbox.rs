@@ -24,7 +24,10 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 pub const MAGIC: &[u8; 5] = b"A2KS\x01";
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
 pub const LOCKED: &str = "locked: open Any Two Keys with Touch ID or one of your keys first";
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
+pub const LOCKED: &str = "locked: open Any Two Keys with one of your keys first";
 const SLOT_INFO: &[u8] = b"a2k-store-slot-v1";
 
 static KEY: RwLock<Option<[u8; 32]>> = RwLock::new(None);
@@ -270,6 +273,8 @@ pub fn migrate() -> Result<Migration, String> {
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub mod mac {
+    /// What the system can vouch with, in the words the screen uses. `None` where there is nothing of the kind.
+    pub const PRESENCE: Option<&str> = if cfg!(target_os = "ios") { Some("Face ID or Touch ID") } else { Some("Touch ID") };
     const SERVICE: &str = "com.anytwokeys.app.store-key";
     // errSecItemNotFound
     const NOT_FOUND: i32 = -25300;
@@ -341,6 +346,7 @@ pub mod mac {
 /// (plugins/keylink, Kotlin side). The module keeps its name so every caller reads the same on every platform.
 #[cfg(target_os = "android")]
 pub mod mac {
+    pub const PRESENCE: Option<&str> = Some("the phone's lock");
     #[derive(serde::Deserialize)] struct Slot { key: Option<String> }
     #[derive(serde::Deserialize)] struct Nothing {}
     pub fn screen_locked() -> bool { false }
@@ -361,6 +367,10 @@ pub mod mac {
 
 #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
 pub mod mac {
+    // Linux and Windows (2026-10-18): no keychain and nothing that can vouch for the person at the computer, so a key is
+    // the only slot and the only proof. `presence` answers Ok for the plain confirmations (delete a profile, stop
+    // asking); the two proof gates — the custody map and the display curtain — check PRESENCE and refuse instead.
+    pub const PRESENCE: Option<&str> = None;
     pub fn screen_locked() -> bool { false }
     pub fn get(_: &str) -> Result<Option<[u8; 32]>, String> { Ok(None) }
     pub fn set(_: &str, _: &[u8; 32]) -> Result<(), String> { Err("no system keychain on this platform yet: add one of your keys instead".into()) }
