@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Any Two Keys
+Comment=A Bitcoin vault signed by your YubiKeys (research software)
+Exec=anytwokeys
+Icon=com.anytwokeys.app
+Terminal=false
+Categories=Office;Finance;
+StartupWMClass=anytwokeys

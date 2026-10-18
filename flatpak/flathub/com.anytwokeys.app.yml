@@ -1,0 +1,68 @@
+# Flathub manifest: Any Two Keys built from source inside flatpak-builder, the way Flathub asks of
+# open-source apps. Everything cargo needs is listed in cargo-sources.json (regenerate it from
+# src-tauri/Cargo.lock with flatpak-builder-tools' flatpak-cargo-generator.py whenever the lock changes).
+# The card driver links libpcsclite, which the GNOME runtime does not carry, so pcsc-lite's client
+# library is built first; the daemon itself is the host's, reached through --socket=pcsc.
+# Test locally:  flatpak-builder --user --install-deps-from=flathub --force-clean build flatpak/flathub/com.anytwokeys.app.yml
+id: com.anytwokeys.app
+runtime: org.gnome.Platform
+runtime-version: '51'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: anytwokeys
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  - --share=network                       # Electrum, the explorer, the VSS host, exchange rates
+  - --socket=pcsc                         # the YubiKeys and Nitrokeys, through the host's pcscd
+  - --device=all                          # Nitrokey firmware over USB HID, the SeedHammer engraver over USB serial, the camera for QR codes
+  - --talk-name=org.freedesktop.Notifications
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/anytwokeys/cargo
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /share/man
+  - '*.a'
+  - '*.la'
+modules:
+  - name: pcsc-lite
+    buildsystem: meson
+    config-opts:
+      - -Dlibsystemd=false
+      - -Dlibudev=false
+      - -Dlibusb=false
+      - -Dpolkit=false
+      - -Dusb=false
+      - -Dserial=false
+      - -Dipcdir=/run/pcscd
+    cleanup:
+      - /sbin
+      - /lib/pcsc
+      - /share
+    sources:
+      - type: archive
+        url: https://pcsclite.apdu.fr/files/pcsc-lite-2.5.2.tar.xz
+        sha256: 60a08942d8c00a1d86a3bf4c64eddbf7a5569c7c54f6904e3f07801bb5316acd
+  - name: anytwokeys
+    buildsystem: simple
+    build-commands:
+      - cargo --offline fetch --manifest-path src-tauri/Cargo.toml --verbose
+      - cargo --offline build --release --manifest-path src-tauri/Cargo.toml
+      - install -Dm755 src-tauri/target/release/anytwokeys /app/bin/anytwokeys
+      - install -Dm644 flatpak/com.anytwokeys.app.desktop /app/share/applications/com.anytwokeys.app.desktop
+      - install -Dm644 src-tauri/icons/32x32.png /app/share/icons/hicolor/32x32/apps/com.anytwokeys.app.png
+      - install -Dm644 src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/com.anytwokeys.app.png
+      - install -Dm644 src-tauri/icons/128x128@2x.png /app/share/icons/hicolor/256x256/apps/com.anytwokeys.app.png
+      - install -Dm644 flatpak/com.anytwokeys.app.metainfo.xml /app/share/metainfo/com.anytwokeys.app.metainfo.xml
+    sources:
+      - type: git
+        url: https://github.com/mineracks/anytwokeys.git
+        tag: v0.1.1
+        commit: 9366bb62870b32d18446768dc9a368f04ad14794
+      - cargo-sources.json
