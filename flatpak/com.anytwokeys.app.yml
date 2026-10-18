@@ -1,13 +1,13 @@
 # Flatpak of Any Two Keys, built from the .deb that `npm run build -- --bundles deb` leaves under
 # src-tauri/target/release/bundle/deb/. One bundle for every distro that has Flatpak (Ubuntu, Fedora,
-# Debian, openSUSE, Arch, Steam Deck…): the GNOME runtime carries WebKitGTK 4.1 and GTK 3, so the only
-# thing the host must provide is pcscd for the keys. Build and bundle with flatpak/build.sh.
+# Debian, openSUSE, Arch, Steam Deck…): the GNOME runtime carries WebKitGTK 4.1 and GTK 3, and the pcsc-lite client
+# library is built in, so the only thing the host must provide is pcscd for the keys. Build and bundle with flatpak/build.sh.
 #
 # Flathub itself asks open-source apps to be built from source inside flatpak-builder (vendored cargo
 # sources, the Rust SDK extension); that is a later, separate manifest. This one is for the release page.
 id: com.anytwokeys.app
 runtime: org.gnome.Platform
-runtime-version: '47'
+runtime-version: '51'
 sdk: org.gnome.Sdk
 command: anytwokeys
 finish-args:
@@ -20,6 +20,31 @@ finish-args:
   - --device=all                          # Nitrokey firmware over USB HID, the SeedHammer engraver over USB serial, the camera for QR codes
   - --talk-name=org.freedesktop.Notifications
 modules:
+  - name: pcsc-lite                       # the card driver links libpcsclite, which the GNOME runtime does not carry; the daemon is the host's, reached over --socket=pcsc
+    buildsystem: meson
+    config-opts:
+      - --libdir=lib                      # meson's default here is lib64, which is not on the runtime's library path
+      - -Dlibsystemd=false
+      - -Dlibudev=false
+      - -Dlibusb=false
+      - -Dpolkit=false
+      - -Dusb=false
+      - -Dserial=false
+      - -Dipcdir=/run/pcscd
+    cleanup:
+      - /sbin
+      - /bin/pcsc-spy
+      - /etc
+      - /lib/pcsc
+      - /lib/systemd
+      - /sysusers.d
+      - /share
+      - /include
+      - /lib/pkgconfig
+    sources:
+      - type: archive
+        url: https://pcsclite.apdu.fr/files/pcsc-lite-2.5.2.tar.xz
+        sha256: 60a08942d8c00a1d86a3bf4c64eddbf7a5569c7c54f6904e3f07801bb5316acd
   - name: anytwokeys
     buildsystem: simple
     sources:

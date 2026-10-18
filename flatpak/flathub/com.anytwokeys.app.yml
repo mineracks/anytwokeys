@@ -34,6 +34,7 @@ modules:
   - name: pcsc-lite
     buildsystem: meson
     config-opts:
+      - --libdir=lib                      # meson's default here is lib64, which is not on the runtime's library path
       - -Dlibsystemd=false
       - -Dlibudev=false
       - -Dlibusb=false
@@ -43,7 +44,11 @@ modules:
       - -Dipcdir=/run/pcscd
     cleanup:
       - /sbin
+      - /bin/pcsc-spy
+      - /etc
       - /lib/pcsc
+      - /lib/systemd
+      - /sysusers.d
       - /share
     sources:
       - type: archive
@@ -55,14 +60,18 @@ modules:
       - cargo --offline fetch --manifest-path src-tauri/Cargo.toml --verbose
       - cargo --offline build --release --manifest-path src-tauri/Cargo.toml
       - install -Dm755 src-tauri/target/release/anytwokeys /app/bin/anytwokeys
-      - install -Dm644 flatpak/com.anytwokeys.app.desktop /app/share/applications/com.anytwokeys.app.desktop
+      - install -Dm644 com.anytwokeys.app.desktop /app/share/applications/com.anytwokeys.app.desktop
       - install -Dm644 src-tauri/icons/32x32.png /app/share/icons/hicolor/32x32/apps/com.anytwokeys.app.png
       - install -Dm644 src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/com.anytwokeys.app.png
       - install -Dm644 src-tauri/icons/128x128@2x.png /app/share/icons/hicolor/256x256/apps/com.anytwokeys.app.png
-      - install -Dm644 flatpak/com.anytwokeys.app.metainfo.xml /app/share/metainfo/com.anytwokeys.app.metainfo.xml
+      - install -Dm644 com.anytwokeys.app.metainfo.xml /app/share/metainfo/com.anytwokeys.app.metainfo.xml
     sources:
       - type: git
         url: https://github.com/mineracks/anytwokeys.git
         tag: v0.1.1
         commit: 9366bb62870b32d18446768dc9a368f04ad14794
       - cargo-sources.json
+      - type: file
+        path: com.anytwokeys.app.desktop     # the desktop entry and AppStream data live beside the manifest, as Flathub keeps them
+      - type: file
+        path: com.anytwokeys.app.metainfo.xml

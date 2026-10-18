@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build the Flatpak bundle from a built .deb:  flatpak/build.sh path/to/Any\ Two\ Keys_0.1.1_amd64.deb
-# Needs flatpak-builder and the GNOME 47 runtime + SDK (flatpak install flathub org.gnome.Platform//47 org.gnome.Sdk//47).
+# Needs flatpak-builder and the GNOME 51 runtime + SDK (flatpak install flathub org.gnome.Platform//51 org.gnome.Sdk//51).
 # Leaves flatpak/out/AnyTwoKeys-<version>-linux-x86_64.flatpak; install it with `flatpak install --user <file>`.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
