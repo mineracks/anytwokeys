@@ -16,6 +16,16 @@
   <url type="bugtracker">https://github.com/mineracks/anytwokeys/issues</url>
   <categories><category>Office</category><category>Finance</category></categories>
   <content_rating type="oars-1.1"/>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://anytwokeys.com/img/screenshots/vaults.png</image>
+      <caption>The vault screen: new multisig vault, single key, or restore from sealed keys</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://anytwokeys.com/img/screenshots/profiles.png</image>
+      <caption>Profiles: each one is its own sealed set of vaults, records and keys</caption>
+    </screenshot>
+  </screenshots>
   <releases>
     <release version="0.1.1" date="2026-10-18"><description><p>First Linux and Windows builds.</p></description></release>
     <release version="0.1.0" date="2026-10-17"><description><p>First public release, macOS.</p></description></release>
