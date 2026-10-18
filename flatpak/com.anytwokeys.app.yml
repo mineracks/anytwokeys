@@ -1,0 +1,39 @@
+# Flatpak of Any Two Keys, built from the .deb that `npm run build -- --bundles deb` leaves under
+# src-tauri/target/release/bundle/deb/. One bundle for every distro that has Flatpak (Ubuntu, Fedora,
+# Debian, openSUSE, Arch, Steam Deck…): the GNOME runtime carries WebKitGTK 4.1 and GTK 3, so the only
+# thing the host must provide is pcscd for the keys. Build and bundle with flatpak/build.sh.
+#
+# Flathub itself asks open-source apps to be built from source inside flatpak-builder (vendored cargo
+# sources, the Rust SDK extension); that is a later, separate manifest. This one is for the release page.
+id: com.anytwokeys.app
+runtime: org.gnome.Platform
+runtime-version: '47'
+sdk: org.gnome.Sdk
+command: anytwokeys
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  - --share=network                       # Electrum, the explorer, the VSS host, exchange rates
+  - --socket=pcsc                         # the YubiKeys and Nitrokeys, through the host's pcscd
+  - --device=all                          # Nitrokey firmware over USB HID, the SeedHammer engraver over USB serial, the camera for QR codes
+  - --talk-name=org.freedesktop.Notifications
+modules:
+  - name: anytwokeys
+    buildsystem: simple
+    sources:
+      - type: file
+        path: anytwokeys.deb              # build.sh copies the .deb here
+      - type: file
+        path: com.anytwokeys.app.metainfo.xml
+    build-commands:
+      - ar -x anytwokeys.deb
+      - tar -xf data.tar.*
+      - install -Dm755 usr/bin/anytwokeys /app/bin/anytwokeys
+      - install -Dm644 "usr/share/applications/Any Two Keys.desktop" /app/share/applications/com.anytwokeys.app.desktop
+      - sed -i 's/^Icon=anytwokeys$/Icon=com.anytwokeys.app/' /app/share/applications/com.anytwokeys.app.desktop
+      - install -Dm644 usr/share/icons/hicolor/32x32/apps/anytwokeys.png /app/share/icons/hicolor/32x32/apps/com.anytwokeys.app.png
+      - install -Dm644 usr/share/icons/hicolor/128x128/apps/anytwokeys.png /app/share/icons/hicolor/128x128/apps/com.anytwokeys.app.png
+      - install -Dm644 usr/share/icons/hicolor/256x256@2/apps/anytwokeys.png /app/share/icons/hicolor/256x256@2/apps/com.anytwokeys.app.png
+      - install -Dm644 com.anytwokeys.app.metainfo.xml /app/share/metainfo/com.anytwokeys.app.metainfo.xml

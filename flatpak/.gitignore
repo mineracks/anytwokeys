@@ -1,0 +1,5 @@
+build
+repo
+out
+.flatpak-builder
+anytwokeys.deb

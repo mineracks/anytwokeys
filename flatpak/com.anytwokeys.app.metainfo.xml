@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.anytwokeys.app</id>
+  <name>Any Two Keys</name>
+  <summary>A Bitcoin vault signed by your YubiKeys</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="com.mineracks"><name>mineracks pty ltd</name></developer>
+  <description>
+    <p>Three security keys form a 2-of-3 Bitcoin vault. Each key generates and holds its own signing key; the host never sees it. Any two of the keys, with their PINs and a touch, sign a spend — and any two of them, sealed, bring the vault back.</p>
+    <p>Research software: not audited, not a product. Test on signet first and never keep savings in it.</p>
+  </description>
+  <launchable type="desktop-id">com.anytwokeys.app.desktop</launchable>
+  <url type="homepage">https://anytwokeys.com</url>
+  <url type="vcs-browser">https://github.com/mineracks/anytwokeys</url>
+  <url type="bugtracker">https://github.com/mineracks/anytwokeys/issues</url>
+  <categories><category>Office</category><category>Finance</category></categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.1" date="2026-10-18"><description><p>First Linux and Windows builds.</p></description></release>
+    <release version="0.1.0" date="2026-10-17"><description><p>First public release, macOS.</p></description></release>
+  </releases>
+  <requires><control>pointing</control><control>keyboard</control></requires>
+  <recommends><display_length compare="ge">768</display_length></recommends>
+</component>
