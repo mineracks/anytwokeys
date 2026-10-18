@@ -3008,6 +3008,10 @@ fn guard_sharing(window: tauri::WebviewWindow, none: bool) -> R<()> {
     { let _ = window; #[derive(serde::Deserialize)] struct Nothing {} tauri_plugin_keylink::call::<Nothing>("secure", serde_json::json!({ "on": none })).map(|_| ()) }
     #[cfg(target_os = "ios")]
     { let _ = (window, none); Ok(()) }
+    // Linux has no such switch (X11 cannot keep a window out of a capture; Wayland leaves it to the compositor).
+    // Windows does — SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) — and should get it when that build is proven.
+    #[cfg(not(any(target_os = "macos", target_os = "android", target_os = "ios")))]
+    { let _ = (window, none); Ok(()) }
 }
 
 /// "Show anyway for 10 minutes": the person at the Mac, again.
