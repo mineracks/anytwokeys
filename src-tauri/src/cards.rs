@@ -691,4 +691,36 @@ mod tests {
     fn hardware_read_sealed() {
         for c in super::read_sealed().unwrap() { println!("serial {} pubkey {:?} container {} bytes, room {}", c.serial, c.pubkey, c.container.len(), c.room); assert!(c.room >= 255); }
     }
+
+    /// The 2026-10-19 fault, as a check that needs a key plugged in: one handle held open and asked every 300 ms
+    /// while two threads run the card-list poll flat out for 8 s. Before transport.rs held a transaction and left
+    /// the card alone on drop, the held handle died within two seconds ("the smart card was reset").
+    /// `cargo test hardware_polls_do_not_reset_a_held_card -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn hardware_polls_do_not_reset_a_held_card() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+        let reader = readers().unwrap().into_iter().find(|r| matches!(probe(r), Ok(Probe::Key(_)))).expect("plug in a key");
+        let stop = Arc::new(AtomicBool::new(false));
+        let passes = Arc::new(AtomicUsize::new(0));
+        let pollers: Vec<_> = (0..2).map(|_| { let (stop, passes) = (stop.clone(), passes.clone()); std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) { if list().is_ok() { passes.fetch_add(1, Ordering::Relaxed); } }
+        }) }).collect();
+        std::thread::sleep(Duration::from_millis(300));
+        let held = connect(&reader).expect("open the key");
+        let start = Instant::now();
+        let mut asks = 0;
+        while start.elapsed() < Duration::from_secs(8) {
+            apdu(&held, 0x00, 0xCA, 0x00, 0x4F, &[]).unwrap_or_else(|e| panic!("held handle failed after {asks} asks: {e}"));
+            asks += 1;
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        drop(held);
+        stop.store(true, Ordering::Relaxed);
+        for p in pollers { p.join().unwrap(); }
+        println!("held handle answered {asks} times over 8 s while the poll completed {} passes on two threads", passes.load(Ordering::Relaxed));
+        assert!(passes.load(Ordering::Relaxed) > 0, "the polls never completed a pass");
+    }
 }
