@@ -419,7 +419,8 @@ fn generate_empty_once(reader: &str, admin_pin: &str, serial: u32, touch: Option
     Ok(hex::encode(comp))
 }
 
-/// The slot must be EMPTY: 6A88 by the specification, 6581 from a YubiKey 5.4, and a key whose public key can be
+/// The slot must be EMPTY: 6A88 by the specification, 6581 from a YubiKey 5.4, 6984 from a Token2 key or card
+/// (measured 2026-10-19: the walk's first "Make it inside the key" on the card died here, before any PIN), and a key whose public key can be
 /// read is occupied even with its fingerprints unset.
 fn require_empty(card: &dyn Wire, serial: u32) -> Result<(), CardError> {
     let ad = app_data(card)?;
@@ -427,8 +428,12 @@ fn require_empty(card: &dyn Wire, serial: u32) -> Result<(), CardError> {
     let disc = find(&ad, 0x73).ok_or(CardError::Parse)?;
     let fingerprints = find(disc, 0xC5).ok_or(CardError::Parse)?;
     if fingerprints.len() < 20 || fingerprints[..20].iter().any(|b| *b != 0) { return Err(CardError::Changed); }
+    // Key information (DE), where the card keeps it, says outright whether slot 1 holds anything
+    if let Some(st) = find(disc, 0xDE).filter(|d| d.len() >= 2).and_then(|d| d.chunks(2).find(|c| c.len() == 2 && c[0] == 1)) {
+        return if st[1] == 0 { Ok(()) } else { Err(CardError::Changed) };
+    }
     match apdu(card, 0x00, 0x47, 0x81, 0x00, &[0xB6, 0x00]) {
-        Err(CardError::Sw { sw: 0x6A88 | 0x6581, .. }) => Ok(()),
+        Err(CardError::Sw { sw: 0x6A88 | 0x6581 | 0x6984, .. }) => Ok(()),
         Ok(_) => Err(CardError::Changed),
         Err(e) => Err(e),
     }

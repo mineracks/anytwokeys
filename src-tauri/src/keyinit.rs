@@ -96,12 +96,12 @@ pub(crate) fn pgp_facts(card: &dyn Wire) -> Result<(OpenPgp, Option<[u8; 33]>), 
     match find(disc, 0xC5) { Some(f) => p.fingerprints = f[..f.len().min(60)].iter().any(|b| *b != 0), None => p.unread.push("fingerprints".into()) }
     // Key information (DE, firmware 5.2 and newer): pairs of slot (1 signature, 2 decryption, 3 authentication) and
     // state (0 none, 1 generated, 2 imported). Without it, ask each slot for its public key: an empty one answers
-    // 6A88, or 6581 on a YubiKey 5.4 (measured), and anything else is taken for occupied.
+    // 6A88, 6581 on a YubiKey 5.4 or 6984 on a Token2 (both measured), and anything else is taken for occupied.
     let info = find(disc, 0xDE).filter(|d| d.len() >= 6);
     for (i, crt) in [0xB6u8, 0xB8, 0xA4].into_iter().enumerate() {
         if let Some(st) = info.and_then(|d| d.chunks(2).find(|c| c.len() == 2 && c[0] == i as u8 + 1)) { p.slots[i] = st[1] != 0; continue; }
         match apdu(card, 0x00, 0x47, 0x81, 0x00, &[crt, 0x00]) {
-            Err(CardError::Sw { sw: 0x6A88 | 0x6581, .. }) => {}
+            Err(CardError::Sw { sw: 0x6A88 | 0x6581 | 0x6984, .. }) => {}
             Ok(_) => p.slots[i] = true,
             Err(_) => { p.slots[i] = true; p.unread.push(["signature slot", "decryption slot", "authentication slot"][i].into()); }
         }
