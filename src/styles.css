@@ -773,6 +773,8 @@ a.tag{text-decoration:none;cursor:pointer} a.tag:hover{text-decoration:underline
 /* a brand-new key: the offer, which never takes the focus, and the walk */
 #keyoffer{position:fixed;right:22px;bottom:22px;z-index:30;display:flex;gap:14px;align-items:center;width:min(470px,calc(100vw - 44px));padding:14px 16px;background:var(--panel);border:1px solid var(--gold);border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.14)}
 #keyoffer[hidden]{display:none}
+.ko-one{display:flex;gap:14px;align-items:center;min-width:0}
+#keyoffer.ko-many{flex-direction:column;align-items:stretch;gap:12px} .ko-head{font-family:var(--display);font-weight:700;font-size:15px} #keyoffer.ko-many .ko-one{padding-top:12px;border-top:1px solid var(--line)} #keyoffer.ko-many .ko-body b{font-weight:600;font-size:14px}
 .ko-art{flex:0 0 auto;line-height:0} .ko-body{display:flex;flex-direction:column;gap:6px;min-width:0}
 .ko-body b{font-family:var(--display);font-weight:700;font-size:15px} .ko-body .muted{font-size:13px} .ko-body .row{gap:10px;align-items:center;margin-top:2px} .ko-body .linkish{align-self:center}
 body.offer-on .toast{bottom:150px}

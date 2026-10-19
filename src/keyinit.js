@@ -46,26 +46,34 @@ async function keyOfferTick() {
   }
   paintOffer();
 }
-// the key on offer: untouched, not waved away, and not one the person asked never to hear about
-const kiCandidate = () => [...kiSeen.values()].find(s => s && s.state === 'fresh' && !kiLater.has(s.serial) && !(store.key_skip || []).includes(s.serial) && cards.some(c => c.serial === s.serial && !c.pubkey));
+// the keys on offer: untouched, not waved away, and not ones the person asked never to hear about. All of them:
+// a person with two new keys on the desk is never shown one as though it were the only one
+const kiCandidates = () => [...kiSeen.values()].filter(s => s && s.state === 'fresh' && !kiLater.has(s.serial) && !(store.key_skip || []).includes(s.serial) && cards.some(c => c.serial === s.serial && !c.pubkey));
 function paintOffer() {
-  const el = $('#keyoffer'), s = kiCandidate();
+  const el = $('#keyoffer'), list = kiCandidates(), s = list[0];
   // never over a lock, a curtain or the walk itself; never while a PIN is being typed anywhere; never from behind
   const quiet = !s || ki.open || !$('#lock').hidden || !$('#curtain').hidden || !document.hasFocus() || $('#s-setup').classList.contains('on')
     || $$('input[type=password]').some(i => i.offsetParent !== null && (i.value || i === document.activeElement));   // only a field that is on screen: one left filled on a screen long since left must not silence this for good
   document.body.classList.toggle('offer-on', !quiet);
   if (quiet) { el.hidden = true; paintOffer.sig = null; return; }
-  const begun = kiBegun(s.serial), sig = s.serial + '|' + begun;
+  const sig = list.map(x => x.serial + '|' + kiBegun(x.serial)).join(',');
   if (paintOffer.sig === sig) return;
   paintOffer.sig = sig;
-  el.innerHTML = `<span class="ko-art">${keyArt(s.form || 3, s.nfc, 58)}</span>
-    <div class="ko-body"><b>${begun ? 'This key’s setup is not finished' : `A new ${esc(modelName(s.form, s.nfc))} ${s.reader === 'NFC' ? 'was held to the phone' : isCard(s.form) ? 'is in the reader' : 'is plugged in'}`}</b>
-      <span class="muted">serial ${kiSerial(s.serial)}${s.firmware ? ' · firmware ' + esc(s.firmware) : ''} · ${begun ? 'its PINs are set, its signing key is not made yet' : 'never set up, still on its factory PINs'}</span>
-      <div class="row"><button type="button" class="btn small primary" id="ko-go">${begun ? 'Finish setting it up' : 'Set it up'}</button><button type="button" class="btn small" id="ko-later">Not now</button><button type="button" class="linkish" id="ko-never">Don’t ask for this key again</button></div></div>`;
+  const one = (x, many) => { const begun = kiBegun(x.serial), name = esc(modelName(x.form, x.nfc)), where = x.reader === 'NFC' ? 'was held to the phone' : isCard(x.form) ? 'is in the reader' : 'is plugged in';
+    return `<div class="ko-one" data-serial="${x.serial}"><span class="ko-art">${keyArt(x.form || 3, x.nfc, many ? 44 : 58)}</span>
+    <div class="ko-body"><b>${begun ? (many ? `${name}: its setup is not finished` : 'This key’s setup is not finished') : many ? `${name} ${where}` : `A new ${name} ${where}`}</b>
+      <span class="muted">serial ${kiSerial(x.serial)}${x.firmware ? ' · firmware ' + esc(x.firmware) : ''} · ${begun ? 'its PINs are set, its signing key is not made yet' : 'never set up, still on its factory PINs'}</span>
+      <div class="row"><button type="button" class="btn small primary ko-go">${begun ? 'Finish setting it up' : 'Set it up'}</button><button type="button" class="btn small ko-later">Not now</button><button type="button" class="linkish ko-never">Don’t ask for this ${isCard(x.form) ? 'card' : 'key'} again</button></div></div></div>`; };
+  const many = list.length > 1;
+  el.classList.toggle('ko-many', many);
+  el.innerHTML = (many ? `<div class="ko-head">${list.length} new keys are here. Set up whichever is next; the others wait.</div>` : '') + list.map(x => one(x, many)).join('');
   el.hidden = false;
-  $('#ko-go').onclick = () => kiOpen(s);
-  $('#ko-later').onclick = () => { kiLater.add(s.serial); paintOffer(); };
-  $('#ko-never').onclick = async () => { try { kiTake(await invoke('key_setup_skip', { serial: s.serial })); toast('It will not be offered again. New vault can still set it up.', 6000); } catch (e) { fail(e); } paintOffer(); };
+  for (const x of list) {
+    const row = el.querySelector(`.ko-one[data-serial="${x.serial}"]`);
+    row.querySelector('.ko-go').onclick = () => kiOpen(x);
+    row.querySelector('.ko-later').onclick = () => { kiLater.add(x.serial); paintOffer(); };
+    row.querySelector('.ko-never').onclick = async () => { try { kiTake(await invoke('key_setup_skip', { serial: x.serial })); toast('It will not be offered again. New vault can still set it up.', 6000); } catch (e) { fail(e); } paintOffer(); };
+  }
 }
 window.addEventListener('focus', () => { if (store) paintOffer(); });
 window.addEventListener('blur', () => { if (store) paintOffer(); });
