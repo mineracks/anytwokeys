@@ -68,8 +68,8 @@ modules:
     sources:
       - type: git
         url: https://github.com/mineracks/anytwokeys.git
-        tag: v0.1.1
-        commit: 9366bb62870b32d18446768dc9a368f04ad14794
+        tag: v0.1.3
+        commit: 8568afae1a7c4aa7cbb27845671f5f32a4eadcd3
       - cargo-sources.json
       - type: file
         path: com.anytwokeys.app.desktop     # the desktop entry and AppStream data live beside the manifest, as Flathub keeps them

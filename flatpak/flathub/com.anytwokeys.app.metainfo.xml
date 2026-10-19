@@ -27,6 +27,8 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.1.3" date="2026-10-19"><description><p>Cards are held for each whole conversation and released without a reset, so keys no longer flicker or lose a touch when several readers are attached. A YubiKey's touch timeout is recognised.</p></description></release>
+    <release version="0.1.2" date="2026-10-19"><description><p>macOS: HID work on one long-lived thread, fixing a crash a day after launch.</p></description></release>
     <release version="0.1.1" date="2026-10-18"><description><p>First Linux and Windows builds.</p></description></release>
     <release version="0.1.0" date="2026-10-17"><description><p>First public release, macOS.</p></description></release>
   </releases>
