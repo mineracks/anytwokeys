@@ -33,7 +33,7 @@
     }
     if (what !== 'ios' && what !== 'android') return;
     if (what === 'ios') document.body.classList.add('ios');
-    const tap = document.getElementById('nav-tap'); tap.hidden = false;
+    const tap = document.getElementById('nav-tap'); tap.hidden = false; const note = (m) => { try { invoke('ui_note', { msg: m }).catch(() => {}); } catch {} }; note('nav-tap shown');
     const nfcWait = (on) => {
       let w = document.getElementById('nfc-wait');
       if (!on) { if (w) w.hidden = true; return; }
@@ -43,13 +43,14 @@
       w.hidden = false;
     };
     tap.onclick = async () => {
-      let s; if (what === 'android') nfcWait(true);
-      try { s = await invoke('card_tap'); } catch (e) { if (String(e) !== 'cancelled') fail(e); return; } finally { nfcWait(false); }
+      let s; if (what === 'android') nfcWait(true); note('nav-tap clicked');
+      try { s = await invoke('card_tap'); note('card_tap ok ' + s.serial); } catch (e) { note('card_tap failed: ' + e); if (String(e) !== 'cancelled') fail(e); return; } finally { nfcWait(false); }
       if (s.state === 'fresh') return kiOpen(s);
-      const what = s.state === 'ours' ? 'holds a signing key and is ready to use' : s.state === 'blocked' ? 'has a PIN with no tries left' : 'is already in use for something else';
-      toast(`${modelName(s.form, s.nfc)} \u00b7 serial ${s.serial}${s.firmware ? ' \u00b7 firmware ' + s.firmware : ''}: it ${what}.`, 9000);
+      // not `what`: that is the platform, read on the first line of this handler
+      const said = s.state === 'ours' ? 'holds a signing key and is ready to use' : s.state === 'blocked' ? 'has a PIN with no tries left' : 'is already in use for something else';
+      toast(`${modelName(s.form, s.nfc)} \u00b7 serial ${s.serial}${s.firmware ? ' \u00b7 firmware ' + s.firmware : ''}: it ${said}.`, 9000);
     };
-  }).catch(() => {});
+  }).catch((e) => { try { invoke('ui_note', { msg: 'phone init failed: ' + e }).catch(() => {}); } catch {} });
 })();
 
 // A picture kept with a record, shown in the window: tap anywhere to put it away.

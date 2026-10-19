@@ -8,6 +8,7 @@
 // Every command here carries bytes and nothing else. What the bytes MEAN (select, verify, sign) is written once, in
 // Rust, and is the same on every platform. This file never sees a PIN as anything but part of an opaque command.
 import CoreNFC
+import os.log
 import CryptoTokenKit
 import Tauri
 import UIKit
@@ -16,6 +17,7 @@ import WebKit
 class OpenArgs: Decodable { let reader: String; let prompt: String? }
 class TransmitArgs: Decodable { let id: UInt32; let apdu: String }
 class CloseArgs: Decodable { let id: UInt32 }
+class NoteArgs: Decodable { let msg: String }
 
 private func bytes(_ hex: String) -> Data? {
   var out = Data(capacity: hex.count / 2); var i = hex.startIndex
@@ -38,6 +40,13 @@ class KeylinkPlugin: Plugin, NFCTagReaderSessionDelegate {
   private var nfcWaiting: Invoke?
   private var nfcLinger: DispatchWorkItem?
 
+  // ---- a line from the window into the phone's log (diagnostics) ----
+  @objc public func note(_ invoke: Invoke) throws {
+    let a = try invoke.parseArgs(NoteArgs.self)
+    os_log("keylink note: %{public}@", log: .default, type: .default, a.msg)
+    invoke.resolve()
+  }
+
   // ---- listing ----
   @objc public func readers(_ invoke: Invoke) {
     // every slot the system shows: a YubiKey, a Token2 key, any OpenPGP card in a reader on the port. What answers
@@ -49,6 +58,7 @@ class KeylinkPlugin: Plugin, NFCTagReaderSessionDelegate {
   // ---- opening ----
   @objc public func open(_ invoke: Invoke) throws {
     let args = try invoke.parseArgs(OpenArgs.self)
+    os_log("keylink open reader=%{public}@", log: .default, type: .default, args.reader)
     if args.reader == KeylinkPlugin.nfcName { q.async { self.openNfc(invoke, prompt: args.prompt) }; return }
     guard let manager = TKSmartCardSlotManager.default else { invoke.reject("this iPhone will not let the app talk to a key in its port"); return }
     manager.getSlot(withName: args.reader) { slot in
@@ -67,10 +77,13 @@ class KeylinkPlugin: Plugin, NFCTagReaderSessionDelegate {
       nfcLinger?.cancel(); nfcLinger = nil
       let id = next; next += 1; nfcIds.insert(id); invoke.resolve(["id": id]); return
     }
-    guard NFCTagReaderSession.readingAvailable else { invoke.reject("this iPhone cannot read a key by NFC"); return }
+    let available = NFCTagReaderSession.readingAvailable
+    os_log("keylink openNfc readingAvailable=%{public}d waiting=%{public}d", log: .default, type: .default, available ? 1 : 0, nfcWaiting != nil ? 1 : 0)
+    guard available else { invoke.reject("this iPhone cannot read a key by NFC"); return }
     if nfcWaiting != nil { invoke.reject("the phone is already waiting for a key"); return }
     endNfc(nil)
-    guard let session = NFCTagReaderSession(pollingOption: [.iso14443], delegate: self, queue: q) else { invoke.reject("the phone would not start looking for a key"); return }
+    guard let session = NFCTagReaderSession(pollingOption: [.iso14443], delegate: self, queue: q) else { os_log("keylink openNfc: no session", log: .default, type: .error); invoke.reject("the phone would not start looking for a key"); return }
+    os_log("keylink openNfc: session begins", log: .default, type: .default)
     session.alertMessage = prompt ?? "Hold your key flat against the top of the iPhone and keep it there."
     nfcSession = session; nfcWaiting = invoke
     session.begin()
@@ -95,6 +108,7 @@ class KeylinkPlugin: Plugin, NFCTagReaderSessionDelegate {
   func tagReaderSession(_ session: NFCTagReaderSession, didInvalidateWithError error: Error) {
     guard session === nfcSession else { return }
     nfcSession = nil; nfcTag = nil; nfcIds.removeAll(); nfcLinger?.cancel(); nfcLinger = nil
+    os_log("keylink nfc invalidated: %{public}@", log: .default, type: .error, error.localizedDescription)
     if let invoke = nfcWaiting {
       nfcWaiting = nil
       let code = (error as? NFCReaderError)?.code
