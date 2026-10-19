@@ -421,6 +421,9 @@ pub(crate) fn sign_on_card(card: &dyn Wire, pin: &str, digest: &[u8;32]) -> Resu
             // A Nitrokey 3 answers 6982 when the touch does not come (about 15 s; its source says 6600 is "not
             // available" to it). The PIN was verified a moment ago on this very connection, so here 6982 is the touch.
             Err(CardError::Sw { sw: 0x6982, .. }) => continue,
+            // A YubiKey closes its 15 s touch window with 6985 "conditions of use not satisfied" (seen 2026-10-19 on a
+            // 5C Nano whose tap landed before the key was waiting). Same meaning, same answer: the next window.
+            Err(CardError::Sw { sw: 0x6985, .. }) => continue,
             Err(e) => return Err(e),
         }
     }
