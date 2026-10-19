@@ -7,7 +7,8 @@
   // going anywhere from the drawer puts it away
   side.addEventListener('click', (e) => { if (e.target.closest('.nav')) set(false); });
   document.getElementById('tabbar').addEventListener('click', (e) => { if (e.target.closest('[data-go]')) set(false); });
-  // On an iPhone a key is not always in the port: one held to the phone is read when asked, by NFC.
+  // On a phone a key is not always in the port: one held to the phone is read when asked, by NFC. iOS puts up its
+  // own sheet while it listens; Android shows nothing, so the app says what to do itself and takes it away after.
   invoke('platform').then((what) => {
     if (what === 'android') document.body.classList.add('android');
     // A phone has no open-file dialog for the app to call. The system's own chooser (photos, camera, files) is
@@ -30,11 +31,20 @@
         if (last) attachDone({ store: last.store, added, notes, errors }, at.name); else if (errors.length) toast(errors.join(' \u00b7 '), 9000);
       };
     }
-    if (what !== 'ios') return;
-    document.body.classList.add('ios');
+    if (what !== 'ios' && what !== 'android') return;
+    if (what === 'ios') document.body.classList.add('ios');
     const tap = document.getElementById('nav-tap'); tap.hidden = false;
+    const nfcWait = (on) => {
+      let w = document.getElementById('nfc-wait');
+      if (!on) { if (w) w.hidden = true; return; }
+      if (!w) { w = document.createElement('div'); w.id = 'nfc-wait'; w.setAttribute('role', 'status'); w.setAttribute('aria-live', 'polite');
+        w.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M5 8a9 9 0 0 1 14 0M8 11a5 5 0 0 1 8 0"/><rect x="7.5" y="14" width="9" height="6.5" rx="1.8"/></svg><b>Hold the key or card against the back of the phone</b><span>Keep it still until the phone has read it.</span>';
+        document.body.appendChild(w); }
+      w.hidden = false;
+    };
     tap.onclick = async () => {
-      let s; try { s = await invoke('card_tap'); } catch (e) { if (String(e) !== 'cancelled') fail(e); return; }
+      let s; if (what === 'android') nfcWait(true);
+      try { s = await invoke('card_tap'); } catch (e) { if (String(e) !== 'cancelled') fail(e); return; } finally { nfcWait(false); }
       if (s.state === 'fresh') return kiOpen(s);
       const what = s.state === 'ours' ? 'holds a signing key and is ready to use' : s.state === 'blocked' ? 'has a PIN with no tries left' : 'is already in use for something else';
       toast(`${modelName(s.form, s.nfc)} \u00b7 serial ${s.serial}${s.firmware ? ' \u00b7 firmware ' + s.firmware : ''}: it ${what}.`, 9000);

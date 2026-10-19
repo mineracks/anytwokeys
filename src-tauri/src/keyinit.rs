@@ -172,11 +172,12 @@ fn survey_card(card: &dyn Wire, reader: String) -> Result<Survey, CardError> {
     let (piv, oath, otp) = neighbours(card, maker);
     select(card)?;   // leave it where every other part of the app expects it
     let (state, why) = judge(&pgp, ours.is_some());
+    let form = m.as_ref().map(|m| m.form).unwrap_or(maker.form_for(&reader));
     Ok(Survey {
         reader, serial, pubkey: ours.map(hex::encode), state: state.into(), why, pgp, piv, oath, otp,
-        maker: maker.name().into(), device: maker.device().into(),
+        maker: maker.name().into(), device: maker.device(form).into(),
         firmware: m.as_ref().map(|m| m.firmware.clone()).or_else(|| (maker == Maker::Nitrokey).then(|| crate::nkfw::firmware_cached(serial)).flatten()).unwrap_or_default(),
-        form: m.as_ref().map(|m| m.form).unwrap_or(maker.form()), nfc: m.as_ref().map(|m| m.nfc).unwrap_or(false),
+        form, nfc: m.as_ref().map(|m| m.nfc).unwrap_or(maker.nfc()),
         otp_usb: m.as_ref().and_then(|m| m.usb_enabled).map(|e| e & CAP_OTP != 0),
         fido: m.as_ref().and_then(|m| m.usb_enabled).map(|e| e & 0x202 != 0),
         config_locked: m.as_ref().map(|m| m.locked).unwrap_or(false), pin_complexity: m.as_ref().map(|m| m.pin_complexity).unwrap_or(false),
@@ -201,7 +202,7 @@ fn open(serial: u32) -> Result<(Card, String), CardError> {
         if app_data(&card).map(|ad| serial_of(&ad)).unwrap_or(0) == serial { return Ok((card, reader)); }
     }
     // on a phone, a key that is not in the port is asked for by NFC; a different key held up is not the one wanted
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", target_os = "android"))]
     if let Probe::Key(card) = probe(NFC)? {
         return if app_data(&card).map(|ad| serial_of(&ad)).unwrap_or(0) == serial { Ok((card, NFC.to_string())) } else { Err(CardError::Changed) };
     }
@@ -219,7 +220,7 @@ pub fn survey_nfc() -> Result<Survey, CardError> {
 // ---------- which PINs are refused before the key ever sees them ----------
 
 const COMMON: &[&str] = &["password", "passw0rd", "qwerty", "qwertyui", "qwertyuiop", "asdfgh", "asdfghjk", "zxcvbn", "1qaz2wsx", "letmein", "iloveyou", "welcome", "abc123", "admin123",
-    "yubikey", "yubico", "nitrokey", "bitcoin", "satoshi", "nakamoto", "anytwokeys", "147258", "147258369", "159753", "123321", "12344321", "112233", "11223344", "102030", "10203040", "696969", "314159", "31415926"];
+    "yubikey", "yubico", "nitrokey", "token2", "bitcoin", "satoshi", "nakamoto", "anytwokeys", "147258", "147258369", "159753", "123321", "12344321", "112233", "11223344", "102030", "10203040", "696969", "314159", "31415926"];
 
 /// Why this PIN will not do, or `None`. `admin`: the admin PIN (8 or more) rather than the key PIN (6 or more).
 pub fn refuse(pin: &str, admin: bool, serial: u32) -> Option<String> {
@@ -230,7 +231,7 @@ pub fn refuse(pin: &str, admin: bool, serial: u32) -> Option<String> {
     let min = if admin { 8 } else { 6 };
     if n < min { return Some(format!("The {what} needs at least {min} characters.")); }
     if n > 127 { return Some(format!("The {what} can be at most 127 characters.")); }
-    if pin == FACTORY_PIN || pin == FACTORY_ADMIN { return Some("That is the factory PIN every key ships with, YubiKey or Nitrokey. Anyone who picks the key up would try it first.".into()); }
+    if pin == FACTORY_PIN || pin == FACTORY_ADMIN { return Some("That is the factory PIN every key ships with: YubiKey, Nitrokey or Token2. Anyone who picks the key up would try it first.".into()); }
     let c: Vec<char> = pin.chars().collect();
     if c.iter().all(|x| *x == c[0]) { return Some("One character repeated is among the first things anyone would try.".into()); }
     let step = |a: char, b: char, d: i32| -> bool { let (a, b) = (a as i32, b as i32); b - a == d || (a >= 48 && a <= 57 && b >= 48 && b <= 57 && (b - 48) == (a - 48 + d).rem_euclid(10)) };
@@ -362,19 +363,21 @@ pub fn harden(serial: u32, admin: &str, sig_pin_each: bool, otp_off: bool) -> Re
     Ok(out)
 }
 
-/// A fresh secp256k1 key in the EMPTY signature slot, touch fixed on. Refuses an occupied slot.
-pub fn make_key(serial: u32, admin: &str) -> Result<String, String> {
+/// A fresh secp256k1 key in the EMPTY signature slot, touch fixed on where the device has a button. Refuses an
+/// occupied slot. `touch` is the person's answer for a Token2 reached by NFC, where the app cannot see whether it
+/// is holding a key or a card; every other device knows by itself.
+pub fn make_key(serial: u32, admin: &str, touch: Option<bool>) -> Result<String, String> {
     let (card, reader) = open(serial).map_err(|e| e.to_string())?;
     drop(card);
-    cards::generate_empty(&reader, admin, serial).map_err(|e| e.to_string())
+    cards::generate_empty(&reader, admin, serial, touch).map_err(|e| e.to_string())
 }
 
 /// A key made OUTSIDE the card, written into its EMPTY signature slot: the one way a card key can have a backup or a
 /// spare. The card must report the public key the secret implies before anything else is done.
-pub fn make_key_from(serial: u32, admin: &str, secret: &crate::secret::Secret) -> Result<String, String> {
+pub fn make_key_from(serial: u32, admin: &str, secret: &crate::secret::Secret, touch: Option<bool>) -> Result<String, String> {
     let (card, reader) = open(serial).map_err(|e| e.to_string())?;
     drop(card);
-    cards::import_empty(&reader, admin, serial, secret, &crate::secret::point_of(secret)).map_err(|e| e.to_string())
+    cards::import_empty(&reader, admin, serial, secret, &crate::secret::point_of(secret), touch).map_err(|e| e.to_string())
 }
 
 /// The first signature: key PIN, a touch, and the answer checked against the public key the key just made.

@@ -47,7 +47,7 @@
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Any Two Keys can keep where each of your transactions was made, on this computer and in your encrypted backup only. It is off until you turn it on.</string>
 	<key>NFCReaderUsageDescription</key>
-	<string>Any Two Keys reads your YubiKey when you hold it to the phone, to sign with it or set it up.</string>
+	<string>Any Two Keys reads your security key or smart card when you hold it to the phone, to sign with it or set it up.</string>
 	<key>com.apple.developer.nfc.readersession.iso7816.select-identifiers</key>
 	<array>
 		<string>D27600012401</string>

@@ -40,7 +40,9 @@ class KeylinkPlugin: Plugin, NFCTagReaderSessionDelegate {
 
   // ---- listing ----
   @objc public func readers(_ invoke: Invoke) {
-    let names = (TKSmartCardSlotManager.default?.slotNames ?? []).filter { $0.lowercased().contains("yubi") }
+    // every slot the system shows: a YubiKey, a Token2 key, any OpenPGP card in a reader on the port. What answers
+    // decides whether it is a key (cards.rs probes it); the name decides nothing.
+    let names = TKSmartCardSlotManager.default?.slotNames ?? []
     invoke.resolve(["readers": names, "nfc": NFCTagReaderSession.readingAvailable])
   }
 

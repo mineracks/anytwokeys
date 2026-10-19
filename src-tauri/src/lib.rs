@@ -525,9 +525,9 @@ async fn secret_preview(source: SecretSource) -> R<SecretView> {
 }
 /// Write a secret made outside the key into a new key's empty signature slot (the setup walk). Returns the public key.
 #[tauri::command]
-async fn card_init_key_from(serial: u32, admin_pin: String, source: SecretSource) -> R<String> {
+async fn card_init_key_from(serial: u32, admin_pin: String, source: SecretSource, touch: Option<bool>) -> R<String> {
     let admin = zeroize::Zeroizing::new(admin_pin);
-    block(move || { let s = secret_from(&source)?; keyinit::make_key_from(serial, &admin, &s) }).await
+    block(move || { let s = secret_from(&source)?; keyinit::make_key_from(serial, &admin, &s, touch) }).await
 }
 /// Write a key's words onto ANOTHER card (a spare, or a replacement): the words must reproduce the vault's key, and
 /// the card's slot must be empty. Returns the public key, which equals `expect`.
@@ -539,7 +539,7 @@ async fn card_import(reader: String, admin_pin: String, words: String, expect: S
         let s = secret::secret_of(&secret::from_words(&words)?)?;
         if secret::pubkey_of(&s) != expect.to_lowercase() { return Err("those words are not this key's: the key they carry is a different one. Check them against the page".into()); }
         let card = cards::list().map_err(|e| e.to_string())?.into_iter().find(|c| c.reader == reader).ok_or("that card is no longer plugged in")?;
-        cards::import_empty(&reader, &admin, card.serial, &s, &secret::point_of(&s)).map_err(|e| e.to_string())
+        cards::import_empty(&reader, &admin, card.serial, &s, &secret::point_of(&s), None).map_err(|e| e.to_string())
     }).await
 }
 
@@ -574,7 +574,7 @@ async fn card_survey() -> R<Vec<keyinit::Survey>> {
 /// A key held to the phone, read by NFC: the same look as `card_survey`, for a key that is never "plugged in".
 #[tauri::command]
 async fn card_tap() -> R<keyinit::Survey> {
-    if !cfg!(target_os = "ios") { return Err("a key is read by NFC on the phone; on a computer, plug it in".into()); }
+    if !cfg!(any(target_os = "ios", target_os = "android")) { return Err("a key is read by NFC on the phone; on a computer, plug it in".into()); }
     block(|| keyinit::survey_nfc().map_err(|e| e.to_string())).await
 }
 
@@ -612,9 +612,9 @@ async fn card_init_harden(serial: u32, admin_pin: String, sig_pin_each: bool, ot
 }
 
 #[tauri::command]
-async fn card_init_key(serial: u32, admin_pin: String) -> R<String> {
+async fn card_init_key(serial: u32, admin_pin: String, touch: Option<bool>) -> R<String> {
     let admin = zeroize::Zeroizing::new(admin_pin);
-    block(move || keyinit::make_key(serial, &admin)).await
+    block(move || keyinit::make_key(serial, &admin, touch)).await
 }
 
 /// The key's first signature, checked. Only then is it remembered as ready, under the name it was given.
@@ -1487,7 +1487,7 @@ async fn spark_unlock(name: String, reader: String, pin: String) -> R<spark_auth
 #[tauri::command]
 async fn spark_reader_generate(reader: String, admin_pin: String, serial: u32) -> R<String> {
     let pin = zeroize::Zeroizing::new(admin_pin);
-    block(move || { wallet::load()?; cards::generate_empty(&reader, &pin, serial).map_err(|e| format!("{e}. If generation succeeded but touch setup failed, the slot may now hold a key; inspect it before continuing.")) }).await
+    block(move || { wallet::load()?; cards::generate_empty(&reader, &pin, serial, None).map_err(|e| format!("{e}. If generation succeeded but touch setup failed, the slot may now hold a key; inspect it before continuing.")) }).await
 }
 #[tauri::command]
 fn spark_session_status(name: String) -> R<bool> {

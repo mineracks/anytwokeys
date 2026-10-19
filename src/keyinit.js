@@ -1,4 +1,4 @@
-// Any Two Keys — setting up a brand-new key (a YubiKey 5 or a Nitrokey 3) without leaving the app.
+// Any Two Keys — setting up a brand-new key (a YubiKey 5, a Nitrokey 3, a Token2 key or a Token2 smart card) without leaving the app.
 //
 // A key that has never been used is noticed wherever the person happens to be, and setup is OFFERED in a quiet strip:
 // it never takes the focus, never appears over a PIN being typed, and waits until the window is the one in front.
@@ -12,8 +12,18 @@
 const kiSeen = new Map();     // serial → what the key said about itself (null: it would not say)
 const kiLater = new Set();    // "Not now" — until the key is unplugged
 const ki = { open: false };
-const KI_STEPS = ['meet', 'pins', 'record', 'set', 'readback', 'harden', 'key', 'done'];
-const KI_NAMES = { meet: 'This key', pins: 'Two PINs', record: 'Write down', set: 'Set', readback: 'Read back', harden: 'Switches', key: 'Signing key', done: 'Ready' };
+// 'which' is only walked for a Token2 reached by NFC (form 11): the app cannot tell the key from the card there, and
+// they sign differently (the key wants its button pressed, the card has none), so the person says which before the key is made
+const KI_STEPS_ALL = ['meet', 'pins', 'record', 'set', 'readback', 'harden', 'which', 'key', 'done'];
+const KI_NAMES = { meet: 'This key', pins: 'Two PINs', record: 'Write down', set: 'Set', readback: 'Read back', harden: 'Switches', which: 'Key or card', key: 'Signing key', done: 'Ready' };
+const kiAsk = () => !!(ki.survey && (ki.survey.form & 0x0F) === FORM_TOKEN2);
+const kiSteps = () => KI_STEPS_ALL.filter(k => k !== 'which' || kiAsk());
+const kiAfterHarden = () => kiAsk() ? 'which' : 'key';
+// the shape the walk draws and speaks for: a Token2 of unknown shape becomes the card or the key once the person has said
+const kiForm = (s) => { const f = s.form || 3; return (f & 0x0F) === FORM_TOKEN2 && ki.kind ? (ki.kind === 'card' ? FORM_TOKEN2_CARD : FORM_TOKEN2_KEY) : f; };
+const kiIsCard = (s) => isCard(kiForm(s));
+const kiPress = (s) => isNitro(s.form) || isToken2(s.form);   // a Nitrokey 3 and a Token2 key are pressed, a YubiKey is touched
+const kiToken2 = (s) => s.maker === 'token2' || s.device === 'token2key' || s.device === 'token2card' || isToken2(s.form);
 const kiSleep = (ms) => new Promise(r => setTimeout(r, ms));
 const kiSerial = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
 const kiBegun = (serial) => !!(store && (store.key_begun || []).includes(serial));
@@ -25,7 +35,7 @@ async function keyOfferTick() {
   const present = new Set(cards.map(c => c.serial));
   for (const s of [...kiSeen.keys()]) if (!present.has(s) && !(ki.open && ki.serial === s)) { kiSeen.delete(s); kiLater.delete(s); }
   // a key reached by NFC is asked for at each step, never "plugged in"
-  if (ki.open) { const here = ki.nfc || present.has(ki.serial), el = $('#ki-here'); el.textContent = here ? '' : `Plug key ${kiSerial(ki.serial)} back in to go on`; el.classList.toggle('warn', !here); return; }
+  if (ki.open) { const here = ki.nfc || present.has(ki.serial), el = $('#ki-here'); el.textContent = here ? '' : kiIsCard(ki.survey) ? `Put card ${kiSerial(ki.serial)} back in the reader to go on` : `Plug key ${kiSerial(ki.serial)} back in to go on`; el.classList.toggle('warn', !here); return; }
   // only a key with no signing key this app can use is worth a second look, and each is looked at once per plugging-in
   if (cards.some(c => !c.pubkey && !kiSeen.has(c.serial))) {
     let all = [], failed = false; try { all = await invoke('card_survey'); } catch { failed = true; }
@@ -49,7 +59,7 @@ function paintOffer() {
   if (paintOffer.sig === sig) return;
   paintOffer.sig = sig;
   el.innerHTML = `<span class="ko-art">${keyArt(s.form || 3, s.nfc, 58)}</span>
-    <div class="ko-body"><b>${begun ? 'This key’s setup is not finished' : `A new ${esc(modelName(s.form, s.nfc))} is plugged in`}</b>
+    <div class="ko-body"><b>${begun ? 'This key’s setup is not finished' : `A new ${esc(modelName(s.form, s.nfc))} ${s.reader === 'NFC' ? 'was held to the phone' : isCard(s.form) ? 'is in the reader' : 'is plugged in'}`}</b>
       <span class="muted">serial ${kiSerial(s.serial)}${s.firmware ? ' · firmware ' + esc(s.firmware) : ''} · ${begun ? 'its PINs are set, its signing key is not made yet' : 'never set up, still on its factory PINs'}</span>
       <div class="row"><button type="button" class="btn small primary" id="ko-go">${begun ? 'Finish setting it up' : 'Set it up'}</button><button type="button" class="btn small" id="ko-later">Not now</button><button type="button" class="linkish" id="ko-never">Don’t ask for this key again</button></div></div>`;
   el.hidden = false;
@@ -69,7 +79,10 @@ async function kiOpen(survey) {
     try { const r = await invoke('card_init_resume_check', { serial: survey.serial }); if (r === 'fresh') { kiTake(await invoke('key_setup_restart', { serial: survey.serial })); } } catch {}
   }
   const n = Object.keys((store && store.key_ready) || {}).length;
-  Object.assign(ki, { open: true, serial: survey.serial, survey, nfc: survey.reader === 'NFC', resume: kiBegun(survey.serial), name: ['laptop', 'keyring', 'off-site'][n] || `key ${n + 1}`,
+  // what the key is told to want for a signature: a touch for every maker but a Token2 card, which has no button; a
+  // Token2 reached by NFC is asked (the 'which' step) before its signing key is made
+  const f = survey.form & 0x0F, kind = f === FORM_TOKEN2_CARD ? 'card' : f === FORM_TOKEN2_KEY ? 'key' : null;
+  Object.assign(ki, { open: true, serial: survey.serial, survey, nfc: survey.reader === 'NFC', resume: kiBegun(survey.serial), name: ['laptop', 'keyring', 'off-site'][n] || `key ${n + 1}`, kind, touch: kind !== 'card',
     user: '', admin: '', userDone: false, written: false, sig: !survey.pgp.sig_pin_each, otp: survey.otp_usb === true && !survey.config_locked,
     notes: [], pubkey: null, phase: 'idle', err: '', stop: null, busy: false, offkey: false, src: null, preview: null, srcWritten: false });
   ki.step = ki.resume ? 'readback' : 'meet';
@@ -84,8 +97,8 @@ function kiClose() {
   if ($('#s-setup').classList.contains('on')) { renderSetup.nowSig = null; renderSetup(); }
 }
 $('#ki-close').onclick = () => {
-  const mid = KI_STEPS.indexOf(ki.step) > KI_STEPS.indexOf('set') && ki.step !== 'done' && !ki.stop;
-  if (mid) toast(`Both PINs are set on key ${kiSerial(ki.serial)}. Plug it in again to finish: it will ask for them.`, 9000);
+  const mid = kiSteps().indexOf(ki.step) > kiSteps().indexOf('set') && ki.step !== 'done' && !ki.stop;
+  if (mid) toast(`Both PINs are set on key ${kiSerial(ki.serial)}. ${kiIsCard(ki.survey) ? 'Put it in the reader again' : 'Plug it in again'} to finish: it will ask for them.`, 9000);
   kiClose();
 };
 const kiGo = (step) => { ki.step = step; ki.err = ''; ki.busy = false; kiPaint(); };
@@ -96,8 +109,13 @@ const kiLock = (x, y, w, label, pips) => `<path class="g-line" d="M${x + w * .25
   + [0, 1, 2].map(i => `<circle cx="${x + w / 2 + (i - 1) * 11}" cy="${y + w * .39}" r="3.4" class="${i < pips ? 'g-strip' : 'g-hole'}"/>`).join('') + `<text class="ki-t" x="${x + w / 2}" y="${y + w * .78 + 18}" text-anchor="middle">${label}</text>`;
 const kiPage = (x, lines) => `<rect class="g-lap" x="${x}" y="14" width="104" height="104" rx="6"/>` + [0, 1, 2, 3, 4].map(i => `<circle class="g-hole" cx="${x + 9}" cy="${28 + i * 19}" r="2.6" stroke="var(--line)"/>`).join('')
   + lines.map((l, i) => `<text class="ki-t s" x="${x + 20}" y="${36 + i * 21}">${l}</text><path class="ki-rule" d="M${x + 20} ${41 + i * 21}h74"/>`).join('');
-// the key standing on its plug, for the read-back page: a YubiKey with its gold contact, a Nitrokey 3 as its wedge
-const kiKeyUpright = (form) => isNitro(form)
+// the key standing on its plug, for the read-back page: a YubiKey with its gold contact, a Nitrokey 3 as its wedge, a
+// Token2 key with its button, a Token2 card lying flat with its chip
+const kiKeyUpright = (form) => isCard(form)
+  ? `<rect class="g-ink" x="166" y="46" width="72" height="46" rx="5"/><rect class="g-strip" x="174" y="58" width="14" height="10" rx="2"/><path class="g-ring" d="M174 61.5h14M174 65h14M181 58v10"/><path class="g-ring" d="M218 62a6 6 0 0 1 0 12M223 58a11 11 0 0 1 0 20"/>`
+  : isToken2(form)
+  ? `<rect class="g-ink" x="186" y="40" width="32" height="58" rx="7"/><circle class="g-ring" cx="202" cy="60" r="7"/><circle class="g-led" cx="202" cy="60" r="2"/><circle cx="202" cy="86" r="3.5" class="g-hole"/>`
+  : isNitro(form)
   ? `<path class="g-ink" d="M184 40h36q4 0 4 4v36q0 14 -12 14h-20q-12 0 -12 -14V44q0 -4 4 -4z"/><circle class="g-ring" cx="202" cy="64" r="7"/><path class="g-ring" d="M212 56l2.4 -2M214 64h3.5M212 72l2.4 2"/><rect class="g-hole" x="198" y="84" width="8" height="4" rx="1.5"/><circle class="g-led" cx="190" cy="46" r="2"/>`
   : `<rect class="g-ink" x="182" y="40" width="40" height="56" rx="8"/><circle class="g-gold" cx="202" cy="62" r="9"/><circle cx="202" cy="84" r="4" class="g-hole"/>`;
 // a page of 24 words, for the "made outside" card
@@ -116,15 +134,16 @@ function kiChoiceArt(form) {
     + `<text class="ki-t c" x="125" y="124">the words write it in \u2014 and into a spare, if you want one</text>`);
 }
 const KI_ART = {
-  meet: (s) => `<div class="ki-keyart">${keyArt(s.form || 3, s.nfc, 150)}</div>`,
-  firmware: (s) => ki.fw && ki.fw.phase === 'touch' ? guideArt('touch', s.form || 3) : `<div class="ki-keyart">${keyArt(s.form || 3, s.nfc, 150)}</div>`,
+  meet: (s) => `<div class="ki-keyart">${keyArt(kiForm(s), s.nfc, 150)}</div>`,
+  firmware: (s) => ki.fw && ki.fw.phase === 'touch' ? guideArt('touch', kiForm(s)) : `<div class="ki-keyart">${keyArt(kiForm(s), s.nfc, 150)}</div>`,
   pins: () => kiPic(kiLock(42, 44, 52, 'KEY PIN', 3) + kiLock(144, 30, 70, 'ADMIN PIN', 3)),
   record: () => kiPic(kiPage(40, ['name', 'serial', 'key PIN', 'admin PIN']) + `<g transform="translate(176 92) rotate(-38)"><rect class="g-finger" x="-5" y="-62" width="10" height="56" rx="2"/><path class="g-ink" d="M-5 -6h10l-5 12z"/></g>`),
-  set: (s) => guideArt('in', s.form || 3),
-  readback: (s) => kiPic(kiPage(22, ['name', 'serial', '••••••', '••••••••']) + `<path class="g-arrow" d="M138 66h30m-8 -8l8 8l-8 8"/>` + kiKeyUpright(s.form || 3)),
+  set: (s) => guideArt('in', kiForm(s)),
+  readback: (s) => kiPic(kiPage(22, ['name', 'serial', '••••••', '••••••••']) + `<path class="g-arrow" d="M138 66h30m-8 -8l8 8l-8 8"/>` + kiKeyUpright(kiForm(s))),
   harden: () => kiPic([0, 1].map(i => `<rect x="62" y="${30 + i * 44}" width="62" height="30" rx="15" fill="var(--signal)"/><circle cx="109" cy="${45 + i * 44}" r="11" fill="var(--panel)"/><path class="ki-rule" d="M138 ${40 + i * 44}h54M138 ${51 + i * 44}h34"/>`).join('')),
-  key: (s) => ki.phase === 'idle' ? `<div class="ki-keyart">${keyArt(s.form || 3, s.nfc, 150)}</div>` : ki.phase === 'source' ? kiChoiceArt(s.form || 3) : ki.phase === 'words' ? kiPic(kiPage(40, ['1 word', '2 word', '3 word', '\u2026 ' + ((ki.preview && ki.preview.words) ? ki.preview.words.split(' ').length : 24)]) + `<path class="g-arrow" d="M156 66h30m-8 -8l8 8l-8 8"/>` + kiKeyUpright(s.form || 3).replace(/translate\([^)]*\)/g, '')) : guideArt(ki.phase === 'touch' ? 'touch' : 'in', s.form || 3),
-  done: (s) => `<div class="ki-keyart done">${keyArt(s.form || 3, s.nfc, 150)}<svg class="ki-tick" viewBox="0 0 40 40" width="44" height="44" aria-hidden="true"><circle cx="20" cy="20" r="19" fill="var(--signal)"/><path d="M11 21l6 6l12 -14" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>`,
+  which: () => `<div class="ki-keyart" style="gap:18px">${keyArt(FORM_TOKEN2_KEY, true, 96)}${keyArt(FORM_TOKEN2_CARD, true, 96)}</div>`,
+  key: (s) => ki.phase === 'idle' ? `<div class="ki-keyart">${keyArt(kiForm(s), s.nfc, 150)}</div>` : ki.phase === 'source' ? kiChoiceArt(kiForm(s)) : ki.phase === 'words' ? kiPic(kiPage(40, ['1 word', '2 word', '3 word', '\u2026 ' + ((ki.preview && ki.preview.words) ? ki.preview.words.split(' ').length : 24)]) + `<path class="g-arrow" d="M156 66h30m-8 -8l8 8l-8 8"/>` + kiKeyUpright(kiForm(s)).replace(/translate\([^)]*\)/g, '')) : guideArt(ki.phase === 'touch' && !kiIsCard(s) ? 'touch' : 'in', kiForm(s)),
+  done: (s) => `<div class="ki-keyart done">${keyArt(kiForm(s), s.nfc, 150)}<svg class="ki-tick" viewBox="0 0 40 40" width="44" height="44" aria-hidden="true"><circle cx="20" cy="20" r="19" fill="var(--signal)"/><path d="M11 21l6 6l12 -14" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>`,
 };
 const kiPinField = (id, label, hint) => `<div class="field"><label class="cap" for="${id}">${label}</label><input id="${id}" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"><div class="ki-say" id="${id}-say">${hint || ''}</div></div>`;
 const kiErr = () => ki.err ? `<div class="warnbox ki-err" role="alert">${esc(ki.err)}</div>` : '';
@@ -133,16 +152,16 @@ const kiErr = () => ki.err ? `<div class="warnbox ki-err" role="alert">${esc(ki.
 function kiNeighbours(s) {
   const rows = [['Signing (OpenPGP)', 'empty, on the factory PINs', 'set up here']];
   const p = s.piv; rows.push(['Smart-card login (PIV)', !p ? 'switched off, or would not say' : (p.keys || p.certs) ? `${p.keys == null ? '' : p.keys + ' key' + (p.keys === 1 ? '' : 's') + ', '}${p.certs} certificate${p.certs === 1 ? '' : 's'}` : 'nothing stored', 'left alone']);
-  const nitro = s.device === 'nitrokey3';
-  const o = s.oath; rows.push(['Authenticator codes', nitro ? 'kept by Nitrokey’s own app; not looked into' : !o ? 'switched off, or would not say' : o.password ? 'behind a password; not looked into' : o.accounts == null ? 'would not say' : o.accounts ? `${o.accounts} account${o.accounts === 1 ? '' : 's'}` : 'none', 'left alone']);
-  const t = s.otp; rows.push(['One-time-code slots', nitro ? 'none on a Nitrokey' : !t ? 'switched off' : [t.slot1 ? 'slot 1 in use' + (t.slot2 ? '' : ' (every key leaves the factory that way)') : '', t.slot2 ? 'slot 2 in use' : ''].filter(Boolean).join(', ') || 'both empty', 'left alone']);
+  const nitro = s.device === 'nitrokey3', token2 = kiToken2(s);
+  const o = s.oath; rows.push(['Authenticator codes', nitro ? 'kept by Nitrokey’s own app; not looked into' : token2 ? 'not looked into on a Token2' : !o ? 'switched off, or would not say' : o.password ? 'behind a password; not looked into' : o.accounts == null ? 'would not say' : o.accounts ? `${o.accounts} account${o.accounts === 1 ? '' : 's'}` : 'none', 'left alone']);
+  const t = s.otp; rows.push(['One-time-code slots', nitro ? 'none on a Nitrokey' : token2 ? 'none on a Token2' : !t ? 'switched off' : [t.slot1 ? 'slot 1 in use' + (t.slot2 ? '' : ' (every key leaves the factory that way)') : '', t.slot2 ? 'slot 2 in use' : ''].filter(Boolean).join(', ') || 'both empty', 'left alone']);
   rows.push(['Passkeys and website logins', 'cannot be listed by anyone without the key’s own passkey PIN; not read', 'left alone']);
   return `<div class="ki-rows">${rows.map(r => `<div class="ki-row"><b>${r[0]}</b><span class="muted">${esc(r[1])}</span><span class="tag${r[2] === 'set up here' ? ' out' : ''}">${r[2]}</span></div>`).join('')}</div>`;
 }
 
 function kiPaint() {
-  const s = ki.survey, at = KI_STEPS.indexOf(ki.step === 'firmware' ? 'meet' : ki.step);
-  $('#ki-prog').innerHTML = KI_STEPS.map((k, i) => `<li class="${i < at ? 'done' : i === at ? 'now' : ''}"${i === at ? ' aria-current="step"' : ''}><span>${KI_NAMES[k]}</span></li>`).join('');
+  const s = ki.survey, steps = kiSteps(), at = steps.indexOf(ki.step === 'firmware' ? 'meet' : ki.step);
+  $('#ki-prog').innerHTML = steps.map((k, i) => `<li class="${i < at ? 'done' : i === at ? 'now' : ''}"${i === at ? ' aria-current="step"' : ''}><span>${KI_NAMES[k]}</span></li>`).join('');
   $('#ki-art').innerHTML = KI_ART[ki.step](s);
   const body = $('#ki-body'), title = (t) => `<div class="cer-act-title" id="ki-title">${t}</div>`;
   const foot = (...b) => `<div class="row ki-foot">${b.join('')}</div>`;
@@ -154,16 +173,17 @@ function kiPaint() {
   }
 
   if (ki.step === 'meet') {
-    const adv = keyAdvisories({ firmware: s.firmware }), newer = s.firmware && !verLt(s.firmware, '5.7.0'), nitro = s.device === 'nitrokey3';
+    const adv = keyAdvisories({ firmware: s.firmware }), newer = s.firmware && !verLt(s.firmware, '5.7.0'), nitro = s.device === 'nitrokey3', token2 = kiToken2(s), card = kiIsCard(s);
     body.innerHTML = title(`A new ${esc(modelName(s.form, s.nfc))}`)
       + `<div class="muted">Serial ${kiSerial(s.serial)}${s.firmware ? ' · firmware ' + esc(s.firmware) : ''}. It has never been set up: no key on it, and both PINs still the ones every key ships with.</div>`
       + (adv.length ? adv.map(a => `<div class="warnbox"><b>${esc(a.id)}: ${esc(a.title)}.</b> ${esc(a.says)} ${esc(a.here)}</div>`).join('')
         : nitro ? `<div class="muted" id="ki-nkfw">${s.firmware ? `Firmware ${esc(s.firmware)}. Checking it against the newest release known to this app…` : 'Reading its firmware version…'}</div>`
+        : token2 ? `<div class="muted">A Token2 does not say its firmware, so there is nothing to check against known advisories.</div>`
         : `<div class="muted">${s.firmware ? `No security advisory is known for firmware ${esc(s.firmware)} as of ${ADVISORIES_AS_OF}. Firmware cannot be changed on a YubiKey, so this is checked here, on this computer, each time the list is updated.` : 'The key would not say its firmware, so it could not be checked against known advisories.'}</div>`)
-      + (newer ? `<div class="muted">Signing with this app was proven on firmware 5.4. This key is newer; the last step of setup has it sign and checks the answer, so nothing is taken on trust.</div>` : nitro ? `<div class="muted">Signing with a Nitrokey 3 was proven on firmware 1.9.0 and 1.9.1. The last step of setup has this key sign and checks the answer, so nothing is taken on trust.</div>` : '')
+      + (newer ? `<div class="muted">Signing with this app was proven on firmware 5.4. This key is newer; the last step of setup has it sign and checks the answer, so nothing is taken on trust.</div>` : nitro ? `<div class="muted">Signing with a Nitrokey 3 was proven on firmware 1.9.0 and 1.9.1. The last step of setup has this key sign and checks the answer, so nothing is taken on trust.</div>` : token2 ? `<div class="muted">Signing with a Token2 is checked the way it is with every key: the last step of setup has it sign and checks the answer, so nothing is taken on trust.</div>` : '')
       + `<div class="cap">Already on this key</div>` + kiNeighbours(s)
       + `<div class="muted">Setting it up changes its two signing PINs and makes one signing key in an empty slot. Nothing is erased, here or anywhere else on the key.</div>`
-      + foot('<button type="button" class="btn primary" data-ki-go="pins">Set this key up</button>', '<button type="button" class="btn" id="ki-later">Not now</button>');
+      + foot(`<button type="button" class="btn primary" data-ki-go="pins">Set this ${card ? 'card' : 'key'} up</button>`, '<button type="button" class="btn" id="ki-later">Not now</button>');
     $('#ki-later').onclick = () => { kiLater.add(ki.serial); kiClose(); };
     if (nitro) kiNkFirmware(s);
   }
@@ -279,7 +299,7 @@ function kiPaint() {
   }
 
   if (ki.step === 'harden') {
-    const otpSay = s.device === 'nitrokey3' ? 'A Nitrokey has no one-time-code keyboard, so there is nothing to switch off.' : s.config_locked ? 'This key’s settings are locked with a code, so this is left as it is.' : s.otp_usb === false ? 'Already off on this key.' : s.otp_usb == null ? 'The key would not say, so this is left as it is.'
+    const otpSay = s.device === 'nitrokey3' ? 'A Nitrokey has no one-time-code keyboard, so there is nothing to switch off.' : kiToken2(s) ? 'A Token2 has no one-time-code keyboard, so there is nothing to switch off.' : s.config_locked ? 'This key’s settings are locked with a code, so this is left as it is.' : s.otp_usb === false ? 'Already off on this key.' : s.otp_usb == null ? 'The key would not say, so this is left as it is.'
       : 'A brushed YubiKey types a 44-letter code and presses Enter, into whatever has the cursor: a chat, a document, a PIN field. Turning that off erases nothing and can be turned back on.';
     body.innerHTML = title('Two switches worth setting')
       + `<div class="ki-two"><div><button type="button" class="vchip" id="ki-sig" aria-pressed="${ki.sig || s.pgp.sig_pin_each}"${s.pgp.sig_pin_each ? ' disabled' : ''}>Ask the key PIN for every signature</button><div class="muted">${s.pgp.sig_pin_each ? 'Already on.' : 'Out of the box a key PIN entered once covers every signature until the key is unplugged, for any program on the computer. This makes each signature ask.'}</div></div>
@@ -290,40 +310,53 @@ function kiPaint() {
     $('#ki-otp').onclick = () => { ki.otp = !ki.otp; $('#ki-otp').setAttribute('aria-pressed', ki.otp); };
     $('#ki-apply').onclick = async () => {
       const sig = ki.sig && !s.pgp.sig_pin_each, otp = ki.otp && s.otp_usb === true && !s.config_locked;
-      if (!sig && !otp) return kiGo('key');
+      if (!sig && !otp) return kiGo(kiAfterHarden());
       const b = $('#ki-apply'); b.disabled = true; b.textContent = otp ? 'Applying; the key restarts…' : 'Applying…';
       try {
         const r = await invoke('card_init_harden', { serial: s.serial, adminPin: ki.admin, sigPinEach: sig, otpOff: otp }); ki.notes = r.notes || [];
         if (r.sig_pin_each) s.pgp.sig_pin_each = true;
         if (otp && r.otp_off) { s.otp_usb = false; for (let i = 0; i < 20 && !ki.nfc; i++) { await kiSleep(750); let l = []; try { l = await invoke('cards_list'); } catch {} if (l.some(c => c.serial === s.serial)) break; } }
-        kiGo('key');
+        kiGo(kiAfterHarden());
       } catch (e) { ki.err = String(e); kiPaint(); }
     };
   }
 
+  if (ki.step === 'which') {
+    body.innerHTML = title('Which Token2 is this?')
+      + `<div class="muted">Held to a phone, the two look the same to the app, and they sign differently: the key has a button that must be pressed for every signature; the card has no button, so its PIN alone signs. Say which one this is and its signing key is made that way. It cannot be changed afterwards without wiping the key.</div>`
+      + `<div class="ki-ways">
+          <button type="button" class="ki-way ki-which${ki.kind === 'key' ? ' on' : ''}" data-kind="key"><div class="cap">A security key</div><div class="ki-way-pic">${keyArt(FORM_TOKEN2_KEY, true, 92)}</div><b>A small stick with a button.</b><div class="muted">Every signature asks for the PIN and a press of the button.</div></button>
+          <button type="button" class="ki-way ki-which${ki.kind === 'card' ? ' on' : ''}" data-kind="card"><div class="cap">A smart card</div><div class="ki-way-pic">${keyArt(FORM_TOKEN2_CARD, true, 92)}</div><b>A card the size of a bank card.</b><div class="muted">No button: its PIN alone signs, so keep that PIN private.</div></button>
+        </div>`
+      + kiErr() + foot(back('harden'));
+    $$('#ki-body [data-kind]').forEach(b => b.onclick = () => { ki.kind = b.dataset.kind; ki.touch = ki.kind === 'key'; kiGo('key'); });
+  }
+
   if (ki.step === 'key') {
-    const notes = ki.notes.map(n => `<div class="muted">${esc(n)}</div>`).join('');
+    const notes = ki.notes.map(n => `<div class="muted">${esc(n)}</div>`).join(''), card = kiIsCard(s), form = kiForm(s);
     if (ki.phase === 'idle') body.innerHTML = title('One secret. Two ways to make it.')
       + `<div class="muted">The difference is where the risk sits: inside, the secret can never have been seen; outside, you hold a backup, and the moment it was made had better have been safe.</div>`
       + `<div class="ki-ways">
           <div class="ki-way"><div class="cap">Made inside</div><h4>Only in your key.</h4>
-            <div class="ki-way-pic">${keyArt(s.form || 3, s.nfc, 92)}<div class="ki-way-cap">Created here. Stays here.</div></div>
+            <div class="ki-way-pic">${keyArt(form, s.nfc, 92)}<div class="ki-way-cap">Created here. Stays here.</div></div>
             <b>No copy. Nothing to write down.</b>
             <ul class="ki-procon"><li class="pro">The secret never exists on any computer, so no laptop, however compromised, can have seen it. This is cryptography at its safest.</li><li class="pro">Nothing to write down, hide, or lose.</li><li class="con">No copy: lose the key or its PINs and that key is gone for good.</li><li class="note">In a vault where any two keys sign, that is fine: the other keys are its backup, and a new key takes its place. For a vault of one key it is a single point of failure.</li></ul>
             <button type="button" class="btn primary" id="ki-make">Make it inside the key</button></div>
           <div class="ki-way"><div class="cap">Made outside</div><h4>A key. And a backup.</h4>
-            <div class="ki-way-pic">${kiWordsPage()}<svg class="ki-branch" viewBox="0 0 160 30" aria-hidden="true"><path class="g-arrow" d="M80 0v9M40 9h80M40 9v15m-5 -5l5 5l5 -5M120 9v15m-5 -5l5 5l5 -5"/></svg><div class="ki-way-keys"><div>${keyArt(s.form || 3, s.nfc, 54)}<small>Your key</small></div><div class="ki-spare">${keyArt(s.form || 3, s.nfc, 54)}<small>A spare, if needed</small></div></div></div>
+            <div class="ki-way-pic">${kiWordsPage()}<svg class="ki-branch" viewBox="0 0 160 30" aria-hidden="true"><path class="g-arrow" d="M80 0v9M40 9h80M40 9v15m-5 -5l5 5l5 -5M120 9v15m-5 -5l5 5l5 -5"/></svg><div class="ki-way-keys"><div>${keyArt(form, s.nfc, 54)}<small>Your key</small></div><div class="ki-spare">${keyArt(form, s.nfc, 54)}<small>A spare, if needed</small></div></div></div>
             <b>Keep the words. Make a spare.</b>
             <ul class="ki-procon"><li class="pro">24 words on a page restore this key and can write it to a spare: the key is never the only copy.</li><li class="pro">The randomness can be your own, from Entropia tablets or dice, checkable by hand.</li><li class="con">The secret has existed outside the key once \u2014 on this computer, on the page, in the room. It is only as safe as that moment was: a clean machine, nobody watching, no camera.</li><li class="con">Two things to guard from then on, the key and the page. Anyone holding the page needs nothing else.</li></ul>
             <button type="button" class="btn" id="ki-make-out">Make it outside, with a backup\u2026</button></div>
         </div>`
-      + `<div class="ki-footnote"><span class="ki-fp" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M6 10a6 6 0 0 1 12 0v4M9 10a3 3 0 0 1 6 0v6M12 10v8M4 13a8 8 0 0 0 1 3M20 13a8 8 0 0 1-1 3"/></svg></span><div><b>Either way, signing needs your touch.</b><div class="muted">That is set for good here; turning it off means wiping the key.</div></div></div>`
+      + `<div class="ki-footnote"><span class="ki-fp" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M6 10a6 6 0 0 1 12 0v4M9 10a3 3 0 0 1 6 0v6M12 10v8M4 13a8 8 0 0 0 1 3M20 13a8 8 0 0 1-1 3"/></svg></span><div>${card ? '<b>A card has no button: its PIN alone signs, so keep the key PIN private.</b><div class="muted">Anyone holding the card and its PIN can sign; there is no touch to stop them.</div>' : '<b>Either way, signing needs your touch.</b><div class="muted">That is set for good here; turning it off means wiping the key.</div>'}</div></div>`
       + notes + kiErr();
     else if (ki.phase === 'source') body.innerHTML = kiSourceHtml(s) + kiErr();
     else if (ki.phase === 'words') body.innerHTML = kiWordsHtml(s) + kiErr();
-    else if (ki.phase === 'making') body.innerHTML = title('Making the key…') + `<div class="muted">Inside the key. Leave it plugged in.</div>`;
-    else if (ki.phase === 'touch') body.innerHTML = title(isNitro(s.form) ? 'Press the key' : 'Touch the key') + `<div>Its light is blinking. ${isNitro(s.form) ? 'Press the top of the key now.' : 'Touch the gold contact now.'}</div><div class="muted">This is its first signature. The answer is checked against the key it just made, which proves the PIN, the touch and the key together.</div>`;
-    else body.innerHTML = title('The key was not touched in time') + `<div class="muted">The signing key is made. Only its first signature is left.</div>` + kiErr() + foot('<button type="button" class="btn primary" id="ki-prove">Try the touch again</button>');
+    else if (ki.phase === 'making') body.innerHTML = title('Making the key…') + `<div class="muted">${card ? 'Inside the card. Leave it in the reader.' : 'Inside the key. Leave it plugged in.'}</div>`;
+    else if (ki.phase === 'touch') body.innerHTML = card
+      ? title('The card is signing') + `<div>Its PIN alone signs: there is no button to press.</div><div class="muted">This is its first signature. The answer is checked against the key it just made, which proves the PIN and the key together.</div>`
+      : title(kiPress(s) ? 'Press the key' : 'Touch the key') + `<div>Its light is blinking. ${isToken2(s.form) ? 'Press the button on the key now.' : isNitro(s.form) ? 'Press the top of the key now.' : 'Touch the gold contact now.'}</div><div class="muted">This is its first signature. The answer is checked against the key it just made, which proves the PIN, the ${kiPress(s) ? 'press' : 'touch'} and the key together.</div>`;
+    else body.innerHTML = title(card ? 'The first signature did not go through' : 'The key was not touched in time') + `<div class="muted">The signing key is made. Only its first signature is left.</div>` + kiErr() + foot(`<button type="button" class="btn primary" id="ki-prove">${card ? 'Try again' : 'Try the touch again'}</button>`);
     const prove = async () => {
       ki.phase = 'touch'; ki.err = ''; kiPaint();   // the picture and the words are on screen BEFORE the key starts waiting
       try { kiTake(await invoke('card_init_prove', { serial: s.serial, userPin: ki.user, pubkey: ki.pubkey, name: ki.name, offkey: ki.offkey })); ki.phase = 'idle'; ki.src = null; ki.preview = null; kiGo('done'); }
@@ -331,7 +364,7 @@ function kiPaint() {
     };
     if ($('#ki-make')) $('#ki-make').onclick = async () => {
       ki.phase = 'making'; ki.err = ''; ki.offkey = false; kiPaint();
-      try { ki.pubkey = await invoke('card_init_key', { serial: s.serial, adminPin: ki.admin }); } catch (e) { ki.phase = 'idle'; ki.err = String(e); kiPaint(); return; }
+      try { ki.pubkey = await invoke('card_init_key', { serial: s.serial, adminPin: ki.admin, touch: ki.touch !== false }); } catch (e) { ki.phase = 'idle'; ki.err = String(e); kiPaint(); return; }
       prove();
     };
     if ($('#ki-make-out')) $('#ki-make-out').onclick = () => { ki.phase = 'source'; ki.err = ''; ki.src = { kind: 'app', text: '', n: 24, words: 24, short: false }; ki.preview = null; ki.wordAt = null; ki.wordsSeen = null; kiPaint(); };
@@ -342,12 +375,12 @@ function kiPaint() {
 
   if (ki.step === 'done') {
     ki.user = ''; ki.admin = '';   // nothing left to ask the key: the PINs leave memory here
-    const did = ['Both PINs are yours, and the page was checked against the key', s.pgp.sig_pin_each ? 'The key PIN is asked for every signature' : '', s.otp_usb === false ? 'It no longer types one-time codes' : '', ki.offkey ? 'Its signing key was made outside it and written in: the 24 words on your page are its backup, and can write it to a spare key (Vault settings › Backup of the keys)' : 'Its signing key was made inside it, and needs a touch every time', 'Its first signature checked out'].filter(Boolean);
+    const did = ['Both PINs are yours, and the page was checked against the key', s.pgp.sig_pin_each ? 'The key PIN is asked for every signature' : '', s.otp_usb === false ? 'It no longer types one-time codes' : '', ki.offkey ? 'Its signing key was made outside it and written in: the 24 words on your page are its backup, and can write it to a spare key (Vault settings › Backup of the keys)' : kiIsCard(s) ? 'Its signing key was made inside it' : 'Its signing key was made inside it, and needs a touch every time', 'Its first signature checked out'].filter(Boolean);
     body.innerHTML = title(`${esc(ki.name)} is ready`)
       + `<div class="ki-did">${did.map(d => `<div><span class="ok">✓</span>${d}</div>`).join('')}</div>`
       + `<div class="muted">It can join a vault with one click now, here or later: New vault will know it by name and ask for nothing more. Put the page back where it lives, away from this key.</div>`
       + foot('<button type="button" class="btn primary" id="ki-vault">Make a vault with it</button>', '<button type="button" class="btn" id="ki-end">Done</button>')
-      + `<div class="muted">Setting up another? Unplug this one and plug the next in.</div>`;
+      + `<div class="muted">Setting up another? ${kiIsCard(s) ? 'Take this one out of the reader and put the next in.' : 'Unplug this one and plug the next in.'}</div>`;
     $('#ki-end').onclick = kiClose;
     $('#ki-vault').onclick = () => { kiClose(); if (!$('#s-setup').classList.contains('on')) show('setup'); };
   }
@@ -469,7 +502,7 @@ function kiWireWords(s, prove) {
     // the words shown are what is written: the same source goes to the key, and the key must report the same public key
     const source = ki.src.kind === 'app' ? { kind: 'words', text: ki.preview.words } : ki.src;
     ki.phase = 'making'; ki.err = ''; ki.offkey = true; ki.wordAt = null; kiPaint();
-    try { ki.pubkey = await invoke('card_init_key_from', { serial: s.serial, adminPin: ki.admin, source }); }
+    try { ki.pubkey = await invoke('card_init_key_from', { serial: s.serial, adminPin: ki.admin, source, touch: ki.touch !== false }); }
     catch (e) { ki.phase = 'words'; ki.err = String(e); kiPaint(); return; }
     if (ki.preview.pubkey && ki.pubkey !== ki.preview.pubkey) { ki.phase = 'words'; ki.err = 'The key reported a different public key from the one these words make. Nothing more was done; do not use this key.'; kiPaint(); return; }
     prove();

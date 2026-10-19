@@ -5,8 +5,20 @@
 use crate::cards::CardError;
 
 /// One command out, one answer back (status word included).
-pub trait Wire { fn send(&self, cmd: &[u8]) -> Result<Vec<u8>, CardError>; }
-impl<T: Wire + ?Sized> Wire for &T { fn send(&self, cmd: &[u8]) -> Result<Vec<u8>, CardError> { (**self).send(cmd) } }
+pub trait Wire {
+    fn send(&self, cmd: &[u8]) -> Result<Vec<u8>, CardError>;
+    /// VERIFY with the PIN typed on the READER's own keypad (PC/SC part 10, VERIFY_PIN_DIRECT): the reader builds the
+    /// command and sends it to the card; this computer never sees a digit. `None` when the reader has no such keypad.
+    /// `p2` is the PIN wanted: 81 / 82 the key PIN, 83 the admin PIN.
+    fn pinpad_verify(&self, p2: u8) -> Option<Result<(), CardError>> { let _ = p2; None }
+    /// Whether the reader this card sits in has that keypad.
+    fn pinpad(&self) -> bool { false }
+}
+impl<T: Wire + ?Sized> Wire for &T {
+    fn send(&self, cmd: &[u8]) -> Result<Vec<u8>, CardError> { (**self).send(cmd) }
+    fn pinpad_verify(&self, p2: u8) -> Option<Result<(), CardError>> { (**self).pinpad_verify(p2) }
+    fn pinpad(&self) -> bool { (**self).pinpad() }
+}
 
 /// What was behind a reader's name: a card that answers, or something a smart-card service cannot talk to.
 pub enum Opened { Card(Card), NotACard }
@@ -55,8 +67,72 @@ mod imp {
         buf.truncate(len as usize);
         Ok(buf)
     }
-    impl Wire for Card { fn send(&self, cmd: &[u8]) -> Result<Vec<u8>, CardError> { transmit(self, cmd) } }
-    impl Wire for Tx<'_> { fn send(&self, cmd: &[u8]) -> Result<Vec<u8>, CardError> { transmit(self.0, cmd) } }
+    impl Wire for Card {
+        fn send(&self, cmd: &[u8]) -> Result<Vec<u8>, CardError> { transmit(self, cmd) }
+        fn pinpad_verify(&self, p2: u8) -> Option<Result<(), CardError>> { pinpad_verify(self, p2) }
+        fn pinpad(&self) -> bool { pinpad_code(self).is_some() }
+    }
+    impl Wire for Tx<'_> {
+        fn send(&self, cmd: &[u8]) -> Result<Vec<u8>, CardError> { transmit(self.0, cmd) }
+        fn pinpad_verify(&self, p2: u8) -> Option<Result<(), CardError>> { pinpad_verify(self.0, p2) }
+        fn pinpad(&self) -> bool { pinpad_code(self.0).is_some() }
+    }
+
+    // ---- a PIN typed on the reader (PC/SC part 10) ----
+    // Measured 2026-10-13 on a REINER SCT cyberJack RFID komfort: it advertises VERIFY_PIN_DIRECT (and MODIFY), takes
+    // the PIN on its keypad for a card in its CONTACT slot only (a card on its antenna gets 6985 at once, no prompt),
+    // and refuses a maximum PIN length above 12 (6B80). The LCD and keys are the firmware's own: the host can ask for
+    // a PIN operation, never read a key. That is the point of it.
+    /// The IOCTL for a part-10 control code: pcsc-lite (macOS, Linux) adds it to 0x42000000; Windows shifts it.
+    fn ctl(code: ffi::DWORD) -> ffi::DWORD { if cfg!(windows) { (0x31 << 16) | (code << 2) } else { 0x42000000 + code } }
+    const CM_IOCTL_GET_FEATURE_REQUEST: ffi::DWORD = 3400;
+    const FEATURE_VERIFY_PIN_DIRECT: u8 = 0x06;
+    fn control(card: &Card, code: ffi::DWORD, send: &[u8]) -> Result<Vec<u8>, CardError> {
+        let mut buf = vec![0u8; 1024];
+        let mut got: ffi::DWORD = 0;
+        let rv = unsafe { ffi::SCardControl(card.handle, code, send.as_ptr() as *const _, send.len() as ffi::DWORD, buf.as_mut_ptr() as *mut _, buf.len() as ffi::DWORD, &mut got) };
+        if rv != ffi::SCARD_S_SUCCESS { return Err(self::code(rv)); }
+        // a failing driver has been seen to hand back a length past its buffer: never trust it past what was given
+        buf.truncate((got as usize).min(1024));
+        Ok(buf)
+    }
+    /// The reader's control code for VERIFY_PIN_DIRECT, from its feature list; `None` when it has no keypad.
+    fn pinpad_code(card: &Card) -> Option<ffi::DWORD> {
+        let tlv = control(card, ctl(CM_IOCTL_GET_FEATURE_REQUEST), &[]).ok()?;
+        let mut i = 0;
+        while i + 6 <= tlv.len() {
+            let (tag, len) = (tlv[i], tlv[i + 1] as usize);
+            if tag == FEATURE_VERIFY_PIN_DIRECT && len == 4 { return Some(u32::from_be_bytes([tlv[i + 2], tlv[i + 3], tlv[i + 4], tlv[i + 5]])); }
+            i += 2 + len;
+        }
+        None
+    }
+    fn pinpad_verify(card: &Card, p2: u8) -> Option<Result<(), CardError>> {
+        let code = pinpad_code(card)?;
+        // PIN_VERIFY_STRUCTURE: timeouts default · ASCII, left-justified, byte units · no length byte in the block ·
+        // 6 to 12 digits for a key PIN, 8 to 12 for the admin PIN (the reader's own ceiling is 12) · validated by its
+        // OK key · one message, English · T=0/1 prologue zero · then the bare VERIFY header the reader completes.
+        // Shape proven on the cyberJack with a Token2 card (2026-10-19, "PIN korrekt" on its display, 9000 back):
+        // PIN block size 15 in bmPINBlockString, the reader's default message, and the VERIFY header WITH its Lc
+        // byte. The firmware ignores bTimeOut and waits about 30 s on its own clock.
+        let (min, max) = if p2 == 0x83 { (8u8, 12u8) } else { (6u8, 12u8) };
+        let apdu = [0x00, 0x20, 0x00, p2, 0x00];
+        let mut s = vec![0x00, 0x00, 0x82, 0x0F, 0x00, max, min, 0x02, 0xFF, 0x09, 0x04, 0x00, 0x00, 0x00, 0x00];
+        s.extend_from_slice(&(apdu.len() as u32).to_le_bytes());
+        s.extend_from_slice(&apdu);
+        Some(match control(card, code, &s) {
+            Err(e) => Err(e),
+            Ok(r) if r.len() < 2 => Err(CardError::Parse),
+            Ok(r) => match u16::from_be_bytes([r[r.len() - 2], r[r.len() - 1]]) {
+                0x9000 => Ok(()),
+                0x6400 => Err(CardError::Link("no PIN was typed on the reader in time".into())),
+                0x6401 => Err(CardError::Link("cancelled on the reader".into())),
+                0x6403 => Err(CardError::Link("the PIN typed on the reader was too short or too long".into())),
+                0x6B80 => Err(CardError::Link("the reader did not accept the PIN request".into())),
+                sw => Err(CardError::Sw { sw, hint: String::new() }),
+            },
+        })
+    }
     impl Drop for Card {
         fn drop(&mut self) {
             unsafe {

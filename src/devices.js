@@ -25,6 +25,12 @@ const DEVICES = (() => {
     { id: 'nitrokey3', name: 'Nitrokey 3', maker: 'Nitrokey', group: 'card', offers: ['usb', 'nfc'],
       art: b(3, 24.5, 9, 7, 2.5) + `<path class="c-body" d="M14 14h2l48 5.2q4 .5 4 4.3v9q0 3.8-4 4.3L16 42h-2q-4 0-4-4V18q0-4 4-4z"/>`
         + `<rect class="c-glass" x="57" y="25.5" width="5" height="5" rx="1.2"/>` + ring(36, 28, 4.5) + `<path class="c-beam" d="M44 22.5l1.6-2.4M46 27h3M44.5 31.5l1.6 2.4"/>` + f(14.5, 19, 3, 2.2, 1) },
+    // a Token2 security key: a small flat stick, a round button on its face, a lanyard hole at the far end, read by NFC too
+    { id: 'token2key', name: 'Token2 security key', maker: 'Token2', group: 'card', offers: ['usb', 'nfc'],
+      art: b(3, 24, 10, 8, 1.5) + b(13, 19, 46, 18, 5) + ring(38, 28, 5) + dot(38, 28, 1.6) + ring(53, 28, 2.2) + f(16, 22.5, 3, 2.2, 1) + waves(62, 12) },
+    // a Token2 OpenPGP smart card: an ID-1 card with its chip, no button at all; it sits in a reader or is held to a phone
+    { id: 'token2card', name: 'Token2 smart card', maker: 'Token2', group: 'card', offers: ['nfc'],
+      art: b(6, 10, 60, 38, 4) + g(14, 20, 12, 9, 1.5) + `<path class="c-line" d="M14 23h12M14 26h12M20 20v9"/>` + f(32, 38, 20, 2.2, 1) + waves(52, 24) },
     // ---- air-gapped: codes on a screen, or a file on a card ----
     { id: 'seedsigner', name: 'SeedSigner', maker: 'SeedSigner', group: 'airgap', offers: ['qr'],
       how: 'Seeds › (the seed) › Export Xpub › Multisig › Native Segwit › Sparrow. Point this camera at the code it shows.',

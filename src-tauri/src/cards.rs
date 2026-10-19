@@ -11,18 +11,31 @@ pub(crate) const AID_OPENPGP: &[u8] = &[0xD2, 0x76, 0x00, 0x01, 0x24, 0x01];
 pub(crate) const OID_SECP256K1: &[u8] = &[0x2B, 0x81, 0x04, 0x00, 0x0A];
 /// The form-factor nibble the screens draw for a Nitrokey 3 (Yubico's own shapes are 1–5, from its management applet).
 pub const FORM_NITROKEY3: u8 = 14;
+/// Token2 devices: the key with a button, the smart card without one, and one reached by NFC — where the card and the
+/// key answer the same applet with the same ATR ("TK PIV 4.2", measured 2026-10-19), so only the person can say which.
+pub const FORM_TOKEN2: u8 = 11;
+pub const FORM_TOKEN2_CARD: u8 = 12;
+pub const FORM_TOKEN2_KEY: u8 = 13;
+/// Whether a device of this shape has something to touch. `None` is a Token2 of unknown shape (over NFC).
+pub fn has_button(form: u8) -> Option<bool> {
+    match form & 0x0F { FORM_TOKEN2_CARD => Some(false), FORM_TOKEN2 => None, _ => Some(true) }
+}
 
 /// Who made the key, from the manufacturer bytes of the OpenPGP AID (the FSFE registry) — never from the reader's name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Maker { Yubico, Nitrokey, Other(u16) }
+pub enum Maker { Yubico, Nitrokey, Token2, Other(u16) }
 impl Maker {
     /// AID: D2760001 2401 | OpenPGP spec version (2) | manufacturer (2) | serial (4) | RFU (2).
     pub fn of(aid: &[u8]) -> Maker {
-        match aid.get(8..10) { Some([0x00, 0x06]) => Maker::Yubico, Some([0x00, 0x0F]) => Maker::Nitrokey, Some(&[a, b]) => Maker::Other(((a as u16) << 8) | b as u16), _ => Maker::Other(0) }
+        match aid.get(8..10) { Some([0x00, 0x06]) => Maker::Yubico, Some([0x00, 0x0F]) => Maker::Nitrokey, Some([0x00, 0x11]) => Maker::Token2, Some(&[a, b]) => Maker::Other(((a as u16) << 8) | b as u16), _ => Maker::Other(0) }
     }
-    pub fn name(self) -> &'static str { match self { Maker::Yubico => "yubico", Maker::Nitrokey => "nitrokey", Maker::Other(_) => "other" } }
-    /// The device id the screens use (devices.js); an unknown maker's OpenPGP card is shown as a plain card.
-    pub fn device(self) -> &'static str { match self { Maker::Yubico => "yubikey", Maker::Nitrokey => "nitrokey3", Maker::Other(_) => "card" } }
+    pub fn name(self) -> &'static str { match self { Maker::Yubico => "yubico", Maker::Nitrokey => "nitrokey", Maker::Token2 => "token2", Maker::Other(_) => "other" } }
+    /// The device id the screens use (devices.js); an unknown maker's OpenPGP card is shown as a plain card. A Token2
+    /// is drawn as the card when it sits in somebody else's reader, as the key otherwise (NFC included: the key is
+    /// the likelier thing held to a phone, and the walk asks before anything depends on it).
+    pub fn device(self, form: u8) -> &'static str {
+        match self { Maker::Yubico => "yubikey", Maker::Nitrokey => "nitrokey3", Maker::Token2 => if form & 0x0F == FORM_TOKEN2_CARD { "token2card" } else { "token2key" }, Maker::Other(_) => "card" }
+    }
     /// The serial in the AID. Yubico writes the DECIMAL serial as hex digits (BCD: 27446043 → 0x27446043); a Nitrokey 3
     /// writes a number (the first four bytes of its UUID), and so, by the specification, does everyone else.
     pub fn serial(self, aid: &[u8]) -> u32 {
@@ -30,7 +43,19 @@ impl Maker {
         let bin = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
         match self { Maker::Yubico => u32::from_str_radix(&hex::encode(b), 10).unwrap_or(bin), _ => bin }
     }
-    pub fn form(self) -> u8 { match self { Maker::Nitrokey => FORM_NITROKEY3, _ => 0 } }
+    pub fn form(self) -> u8 { match self { Maker::Nitrokey => FORM_NITROKEY3, Maker::Token2 => FORM_TOKEN2, _ => 0 } }
+    /// The shape, given where the card was found. A Token2 key is its own reader and the reader is named after it on
+    /// every desktop ("TOKEN2 FIDO2 Security Key(0024)" on macOS, measured); a Token2 card answers from somebody else's
+    /// reader (a cyberJack, an ACR122U). Over NFC (`reader` = "NFC") there is no telling, and FORM_TOKEN2 says so.
+    pub fn form_for(self, reader: &str) -> u8 {
+        match self {
+            Maker::Token2 => if reader == "NFC" { FORM_TOKEN2 } else if reader.to_ascii_lowercase().contains("token2") { FORM_TOKEN2_KEY } else { FORM_TOKEN2_CARD },
+            m => m.form(),
+        }
+    }
+    /// Whether this maker's device has an NFC antenna, as far as can be known without asking it. Yubico says in its
+    /// management applet (read elsewhere); a Nitrokey 3 does not say; every Token2 OpenPGP device sold has one.
+    pub fn nfc(self) -> bool { self == Maker::Token2 }
     /// The longest certificate (7F21) the card really stores. A Nitrokey 3 advertises 4096 in C0 and answers 6500 to
     /// anything past 3240 bytes (found by bisection, firmware 1.9.0); the write is refused whole, nothing is half-kept.
     pub fn cert_room(self, advertised: usize) -> usize { match self { Maker::Nitrokey => advertised.min(3240), _ => advertised } }
@@ -77,8 +102,9 @@ pub struct CardInfo {
     pub form: u8,                 // YubiKey form factor: 1 USB-A · 2 USB-A Nano · 3 USB-C · 4 USB-C Nano · 5 USB-C/Lightning · 14 Nitrokey 3 · 0 unknown
     pub nfc: bool,                // the key has an NFC antenna (management config tag 0x0D; a Nitrokey does not say)
     pub firmware: String,         // e.g. 5.4.3 from Yubico's management applet, 1.9.1 from a Nitrokey's admin app over HID; empty if it would not say
-    pub maker: String,            // yubico · nitrokey · other — from the AID, never the reader's name
-    pub device: String,           // the devices.js id: yubikey · nitrokey3 · card
+    pub maker: String,            // yubico · nitrokey · token2 · other — from the AID, never the reader's name
+    pub device: String,           // the devices.js id: yubikey · nitrokey3 · token2key · token2card · card
+    pub pinpad: bool,             // the reader can take the PIN on its own keypad (a class-3 reader; the PIN never reaches this computer)
 }
 
 
@@ -191,7 +217,16 @@ pub(crate) fn pin_refusal(card: &dyn Wire, p2: u8, e: CardError) -> CardError {
 }
 
 /// VERIFY: 81 the key PIN for a signature, 82 the key PIN for everything else, 83 the admin PIN.
+/// An EMPTY pin means "collect it on the reader's keypad": the reader builds the VERIFY itself and this computer
+/// never holds the digits. Only a reader that advertises VERIFY_PIN_DIRECT can; any other answers as a wrong PIN
+/// would NOT — nothing is sent to the card, so no try is spent.
 pub(crate) fn verify(card: &dyn Wire, p2: u8, pin: &str) -> Result<(), CardError> {
+    if pin.is_empty() {
+        return match card.pinpad_verify(p2) {
+            Some(r) => r.map_err(|e| pin_refusal(card, p2, e)),
+            None => Err(CardError::Link("this reader has no keypad to take the PIN on; type it here instead".into())),
+        };
+    }
     apdu(card, 0x00, 0x20, 0x00, p2, pin.as_bytes()).map(|_| ()).map_err(|e| pin_refusal(card, p2, e))
 }
 
@@ -258,9 +293,9 @@ pub(crate) fn readers() -> Result<Vec<String>, CardError> { transport::readers()
 
 /// The key's shape, NFC and firmware, from the YubiKey management applet (READ CONFIG). Leaves OpenPGP selected again.
 /// Only a Yubico key has that applet: a Nitrokey 3 answers 6A82 to it (measured) and is drawn as its own shape.
-fn hardware(card: &dyn Wire, maker: Maker, serial: u32) -> (u8, bool, String) {
+fn hardware(card: &dyn Wire, maker: Maker, serial: u32, reader: &str) -> (u8, bool, String) {
     if maker == Maker::Nitrokey { return (maker.form(), false, crate::nkfw::firmware_cached(serial).unwrap_or_default()); }
-    if maker != Maker::Yubico { return (maker.form(), false, String::new()); }
+    if maker != Maker::Yubico { return (maker.form_for(reader), maker.nfc(), String::new()); }
     const AID_MGMT: &[u8] = &[0xA0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17];
     let cfg = apdu(card, 0x00, 0xA4, 0x04, 0x00, AID_MGMT).and_then(|_| apdu(card, 0x00, 0x1D, 0x00, 0x00, &[])).ok();
     let tlvs = cfg.as_deref().and_then(|c| c.get(1..)).unwrap_or(&[]);
@@ -292,8 +327,9 @@ fn list_once() -> Result<Vec<CardInfo>, CardError> {
             .and_then(|v| v.first().copied())
             .map(|u| match u { 0 => "OFF", 1 => "ON", 2 => "FIXED", 3 => "CACHED", 4 => "CACHED_FIXED", _ => "?" }.to_string())
             .unwrap_or_else(|| "?".into());
-        let (form, nfc, firmware) = hardware(&card, maker, serial);
-        out.push(CardInfo { reader, serial, version, pubkey, touch, form, nfc, firmware, maker: maker.name().into(), device: maker.device().into() });
+        let (form, nfc, firmware) = hardware(&card, maker, serial, &reader);
+        let pinpad = card.pinpad();
+        out.push(CardInfo { reader, serial, version, pubkey, touch, form, nfc, firmware, maker: maker.name().into(), device: maker.device(form).into(), pinpad });
     }
     if out.is_empty() {
         return Err(CardError::NotFound);
@@ -301,12 +337,37 @@ fn list_once() -> Result<Vec<CardInfo>, CardError> {
     Ok(out)
 }
 
-/// Generate a fresh secp256k1 key in the SIGNATURE slot and lock touch to FIXED.
+/// Whether signing on this device is to need a touch. A key with a button: yes, FIXED, one-way. A card in a reader
+/// has nothing to touch, and FIXED on it would end its signing for good — so never. A Token2 reached by NFC could be
+/// either, and the walk ASKS (`asked`); with no answer the safe side is taken: no touch policy is written, which
+/// leaves a key weaker but never leaves a card dead.
+fn wants_touch(card: &dyn Wire, reader: &str, asked: Option<bool>) -> Result<bool, CardError> {
+    let ad = app_data(card)?;
+    let form = maker_of(&ad).form_for(reader);
+    Ok(match has_button(form) { Some(b) => b, None => asked.unwrap_or(false) })
+}
+/// Lock touch to FIXED (2, button 0x20) and read it back. One-way: the card refuses to lower it afterwards.
+fn fix_touch(card: &dyn Wire) -> Result<bool, CardError> {
+    apdu(card, 0x00, 0xDA, 0x00, 0xD6, &[0x02, 0x20])?;
+    Ok(apdu(card, 0x00, 0xCA, 0x00, 0xD6, &[])?.first() == Some(&2))
+}
+/// What the touch policy must read at signing time for the key to be the one that was set up here: FIXED on a
+/// device with a button, OFF on a card, and either for a Token2 over NFC (its shape is not known from there).
+pub(crate) fn touch_as_set_up(card: &dyn Wire, reader: &str) -> Result<(), CardError> {
+    let ad = app_data(card)?;
+    let form = maker_of(&ad).form_for(reader);
+    let uif = apdu(card, 0x00, 0xCA, 0x00, 0xD6, &[])?.first().copied().unwrap_or(0xFF);
+    let ok = match has_button(form) { Some(true) => uif == 2, Some(false) => uif == 0, None => uif == 0 || uif == 2 };
+    if ok { Ok(()) } else { Err(CardError::Unverified) }
+}
+
+/// Generate a fresh secp256k1 key in the SIGNATURE slot and lock touch to FIXED where the device has a button.
 /// Replaces whatever was in the slot. Needs the ADMIN PIN.
 pub fn generate(reader: &str, admin_pin: &str) -> Result<String, CardError> { again(|| generate_once(reader, admin_pin)) }
 fn generate_once(reader: &str, admin_pin: &str) -> Result<String, CardError> {
     let mut card = connect(reader)?;
     let card = card.transaction()?;   // nobody else's command, or disconnect, lands between ours (see write_sealed)
+    let touch = wants_touch(&card, reader, None)?;
     verify(&card, 0x83, admin_pin)?;
     let mut attrs = vec![0x13];
     attrs.extend_from_slice(OID_SECP256K1);
@@ -314,9 +375,7 @@ fn generate_once(reader: &str, admin_pin: &str) -> Result<String, CardError> {
     let resp = apdu(&card, 0x00, 0x47, 0x80, 0x00, &[0xB6, 0x00])?;
     let point = find(&resp, 0x7F49).and_then(|pk| find(pk, 0x86)).ok_or(CardError::Parse)?;
     let comp = compress(point).ok_or(CardError::Parse)?;
-    // touch: FIXED (2), button (0x20). One-way: the card refuses to lower it afterwards.
-    apdu(&card, 0x00, 0xDA, 0x00, 0xD6, &[0x02, 0x20])?;
-    let ok = apdu(&card, 0x00, 0xCA, 0x00, 0xD6, &[])?.first() == Some(&2);
+    let ok = if touch { fix_touch(&card)? } else { true };
     forget_admin(&card);
     if !ok { return Err(CardError::Unverified); }
     Ok(hex::encode(comp))
@@ -336,24 +395,24 @@ pub fn sign_digest_checked(reader: &str, pin: &str, digest: &[u8;32], expected: 
 fn sign_digest_checked_once(reader: &str, pin: &str, digest: &[u8;32], expected: &[u8;33]) -> Result<([u8;32], [u8;32]), CardError> {
     let card = connect(reader)?;
     if read_sig_pubkey(&card).as_ref() != Some(expected) { return Err(CardError::Changed); }
-    if apdu(&card, 0x00, 0xCA, 0x00, 0xD6, &[])?.first() != Some(&2) { return Err(CardError::Unverified); }
+    touch_as_set_up(&card, reader)?;
     sign_on_card(&card, pin, digest)
 }
 
 /// Spark setup is never allowed to replace a slot, including a non-secp256k1 key.
-pub fn generate_empty(reader: &str, admin_pin: &str, serial: u32) -> Result<String, CardError> { again(|| generate_empty_once(reader, admin_pin, serial)) }
-fn generate_empty_once(reader: &str, admin_pin: &str, serial: u32) -> Result<String, CardError> {
+pub fn generate_empty(reader: &str, admin_pin: &str, serial: u32, touch: Option<bool>) -> Result<String, CardError> { again(|| generate_empty_once(reader, admin_pin, serial, touch)) }
+fn generate_empty_once(reader: &str, admin_pin: &str, serial: u32, touch: Option<bool>) -> Result<String, CardError> {
     let mut card = connect(reader)?;
     let card = card.transaction()?;
     require_empty(&card, serial)?;
+    let touch = wants_touch(&card, reader, touch)?;
     verify(&card, 0x83, admin_pin)?;
     let mut attrs = vec![0x13]; attrs.extend_from_slice(OID_SECP256K1);
     apdu(&card, 0x00, 0xDA, 0x00, 0xC1, &attrs)?;
     let resp = apdu(&card, 0x00, 0x47, 0x80, 0x00, &[0xB6, 0x00])?;
     let point = find(&resp, 0x7F49).and_then(|pk| find(pk, 0x86)).ok_or(CardError::Parse)?;
     let comp = compress(point).ok_or(CardError::Parse)?;
-    apdu(&card, 0x00, 0xDA, 0x00, 0xD6, &[0x02, 0x20])?;
-    let ok = apdu(&card, 0x00, 0xCA, 0x00, 0xD6, &[])?.first() == Some(&2) && read_sig_pubkey(&card) == Some(comp);
+    let ok = (if touch { fix_touch(&card)? } else { true }) && read_sig_pubkey(&card) == Some(comp);
     forget_admin(&card);
     if !ok { return Err(CardError::Unverified); }
     Ok(hex::encode(comp))
@@ -379,11 +438,12 @@ fn require_empty(card: &dyn Wire, serial: u32) -> Result<(), CardError> {
 /// The template carries the scalar AND the public point: opcard (a Nitrokey 3) insists on both (measured 2026-10-10;
 /// "wrong data" without the point); the specification allows it, and a YubiKey takes the scalar-only form, which is
 /// tried second if the first is refused.
-pub fn import_empty(reader: &str, admin_pin: &str, serial: u32, secret: &[u8; 32], point: &[u8; 65]) -> Result<String, CardError> { again(|| import_empty_once(reader, admin_pin, serial, secret, point)) }
-fn import_empty_once(reader: &str, admin_pin: &str, serial: u32, secret: &[u8; 32], point: &[u8; 65]) -> Result<String, CardError> {
+pub fn import_empty(reader: &str, admin_pin: &str, serial: u32, secret: &[u8; 32], point: &[u8; 65], touch: Option<bool>) -> Result<String, CardError> { again(|| import_empty_once(reader, admin_pin, serial, secret, point, touch)) }
+fn import_empty_once(reader: &str, admin_pin: &str, serial: u32, secret: &[u8; 32], point: &[u8; 65], touch: Option<bool>) -> Result<String, CardError> {
     let mut card = connect(reader)?;
     let card = card.transaction()?;
     require_empty(&card, serial)?;
+    let touch = wants_touch(&card, reader, touch)?;
     let want = compress(point).ok_or(CardError::Parse)?;
     verify(&card, 0x83, admin_pin)?;
     let mut attrs = vec![0x13]; attrs.extend_from_slice(OID_SECP256K1);
@@ -402,8 +462,7 @@ fn import_empty_once(reader: &str, admin_pin: &str, serial: u32, secret: &[u8; 3
     }
     let got = read_sig_pubkey(&card);
     if got != Some(want) { forget_admin(&card); return Err(CardError::Unverified); }
-    apdu(&card, 0x00, 0xDA, 0x00, 0xD6, &[0x02, 0x20])?;
-    let ok = apdu(&card, 0x00, 0xCA, 0x00, 0xD6, &[])?.first() == Some(&2);
+    let ok = if touch { fix_touch(&card)? } else { true };
     forget_admin(&card);
     if !ok { return Err(CardError::Unverified); }
     Ok(hex::encode(want))
@@ -589,8 +648,16 @@ mod tests {
         let aid = |maker: [u8; 2], serial: [u8; 4]| [&[0xD2, 0x76, 0x00, 0x01, 0x24, 0x01, 0x03, 0x04][..], &maker, &serial, &[0, 0]].concat();
         let yk = aid([0x00, 0x06], [0x27, 0x44, 0x60, 0x43]);   // the 5C Nano, serial 27446043 in BCD
         let nk = aid([0x00, 0x0F], [0x18, 0x16, 0xB5, 0xF4]);   // the Nitrokey 3, serial = the first bytes of its UUID
-        assert_eq!(Maker::of(&yk), Maker::Yubico); assert_eq!(Maker::of(&yk).serial(&yk), 27446043); assert_eq!(Maker::of(&yk).device(), "yubikey");
-        assert_eq!(Maker::of(&nk), Maker::Nitrokey); assert_eq!(Maker::of(&nk).serial(&nk), 0x1816B5F4); assert_eq!(Maker::of(&nk).device(), "nitrokey3"); assert_eq!(Maker::of(&nk).form(), FORM_NITROKEY3);
+        assert_eq!(Maker::of(&yk), Maker::Yubico); assert_eq!(Maker::of(&yk).serial(&yk), 27446043); assert_eq!(Maker::of(&yk).device(3), "yubikey");
+        assert_eq!(Maker::of(&nk), Maker::Nitrokey); assert_eq!(Maker::of(&nk).serial(&nk), 0x1816B5F4); assert_eq!(Maker::of(&nk).device(FORM_NITROKEY3), "nitrokey3"); assert_eq!(Maker::of(&nk).form(), FORM_NITROKEY3);
+        // a Token2 (manufacturer 0x0011, measured 2026-10-19 on a key and a card): a plain number for a serial, the shape from the reader
+        let t2 = aid([0x00, 0x11], [0x85, 0x28, 0x19, 0x04]);
+        assert_eq!(Maker::of(&t2), Maker::Token2); assert_eq!(Maker::of(&t2).serial(&t2), 0x85281904); assert!(Maker::Token2.nfc());
+        assert_eq!(Maker::Token2.form_for("TOKEN2 FIDO2 Security Key(0024)"), FORM_TOKEN2_KEY); assert_eq!(Maker::Token2.device(FORM_TOKEN2_KEY), "token2key");
+        assert_eq!(Maker::Token2.form_for("REINER SCT cyberJack RFID komfort"), FORM_TOKEN2_CARD); assert_eq!(Maker::Token2.device(FORM_TOKEN2_CARD), "token2card");
+        assert_eq!(Maker::Token2.form_for("NFC"), FORM_TOKEN2); assert_eq!(Maker::Token2.device(FORM_TOKEN2), "token2key");
+        assert_eq!(has_button(FORM_TOKEN2_CARD), Some(false)); assert_eq!(has_button(FORM_TOKEN2), None); assert_eq!(has_button(FORM_TOKEN2_KEY), Some(true)); assert_eq!(has_button(3), Some(true)); assert_eq!(has_button(FORM_NITROKEY3), Some(true));
+        assert_eq!(Maker::Yubico.form_for("Yubico YubiKey FIDO+CCID"), 0);
         // a Nitrokey whose serial happens to be all decimal digits must NOT be read as BCD
         let nk2 = aid([0x00, 0x0F], [0x12, 0x34, 0x56, 0x78]);
         assert_eq!(Maker::of(&nk2).serial(&nk2), 0x12345678);
@@ -675,9 +742,9 @@ mod tests {
         assert_eq!(crate::keyinit::judge(&facts, ours.is_some()).0, "fresh", "not a factory-fresh key: {facts:?}");
         drop(card);
         let secret = crate::secret::secret_of(&crate::secret::from_hex("1e99423a4ed27608a15a2616a2b0e9e52ced330ac530edcc32c8ffc6a526aedd").unwrap()).unwrap();
-        let pk = import_empty(&reader, "12345678", serial, &secret, &crate::secret::point_of(&secret)).unwrap();
+        let pk = import_empty(&reader, "12345678", serial, &secret, &crate::secret::point_of(&secret), None).unwrap();
         assert_eq!(pk, crate::secret::pubkey_of(&secret));
-        assert!(matches!(import_empty(&reader, "12345678", serial, &secret, &crate::secret::point_of(&secret)), Err(CardError::Changed)), "an occupied slot is refused");
+        assert!(matches!(import_empty(&reader, "12345678", serial, &secret, &crate::secret::point_of(&secret), None), Err(CardError::Changed)), "an occupied slot is refused");
         // admin forgotten: a fresh connection cannot write C4 without the PIN
         let c2 = connect(&reader).unwrap();
         assert!(matches!(apdu(&c2, 0x00, 0xDA, 0x00, 0xC4, &[0x01]), Err(CardError::Sw { sw: 0x6982, .. })), "the admin PIN must be forgotten after the import");
@@ -696,6 +763,166 @@ mod tests {
     /// while two threads run the card-list poll flat out for 8 s. Before transport.rs held a transaction and left
     /// the card alone on drop, the held handle died within two seconds ("the smart card was reset").
     /// `cargo test hardware_polls_do_not_reset_a_held_card -- --ignored --nocapture`
+    /// The whole Token2 path on a FACTORY-FRESH Token2 key or card with its factory PINs, undone by a factory reset:
+    /// `A2K_TOKEN2_FACTORY_TEST=1 A2K_TOKEN2_READER=token2 cargo test hardware_token2 -- --ignored --nocapture`
+    /// (`A2K_TOKEN2_READER` is a case-insensitive piece of the reader's name: `token2` for the key, `cyberjack` for a
+    /// card in that reader). It refuses any device that is not a Token2, or not fresh. What it measures, in order:
+    /// secp256k1 attributes taken · a key generated · how the signature comes back (64 or 128 bytes) · eight
+    /// signatures verify · with `A2K_TOKEN2_TOUCH=1` (a KEY only): touch ON (01, reversible), a signature left
+    /// untouched to learn the status word and how long the window is, then one touched · with
+    /// `A2K_TOKEN2_PINPAD=1` (a card in a class-3 reader): the factory PIN typed on the READER · reset.
+    #[test]
+    #[ignore]
+    fn hardware_token2_factory_roundtrip() {
+        use bitcoin::secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1};
+        if std::env::var("A2K_TOKEN2_FACTORY_TEST").as_deref() != Ok("1") { eprintln!("set A2K_TOKEN2_FACTORY_TEST=1 to run this against a factory-fresh Token2"); return; }
+        let want = std::env::var("A2K_TOKEN2_READER").unwrap_or_else(|_| "token2".into()).to_ascii_lowercase();
+        let (reader, card) = readers().unwrap().into_iter().filter(|r| r.to_ascii_lowercase().contains(&want)).find_map(|r| match probe(&r) {
+            Ok(Probe::Key(c)) => { let ad = app_data(&c).ok()?; (maker_of(&ad) == Maker::Token2).then_some((r, c)) }
+            _ => None,
+        }).expect("a Token2 answering OpenPGP on a reader whose name contains A2K_TOKEN2_READER");
+        let ad = app_data(&card).unwrap();
+        let (facts, ours) = crate::keyinit::pgp_facts(&card).unwrap();
+        assert_eq!(crate::keyinit::judge(&facts, ours.is_some()).0, "fresh", "not a factory-fresh device: {facts:?}");
+        let serial = serial_of(&ad);
+        let form = Maker::Token2.form_for(&reader);
+        println!("Token2 serial {serial} on {reader} (form {form}, pinpad {})", card.pinpad());
+        let t = std::time::Instant::now();
+        verify(&card, 0x83, "12345678").unwrap();
+        let mut attrs = vec![0x13]; attrs.extend_from_slice(OID_SECP256K1);
+        apdu(&card, 0x00, 0xDA, 0x00, 0xC1, &attrs).expect("secp256k1 attributes taken");
+        let c1 = find(find(&app_data(&card).unwrap(), 0x73).unwrap(), 0xC1).unwrap().to_vec();
+        assert_eq!(&c1[..6], &attrs[..], "C1 reads back as secp256k1");
+        apdu(&card, 0x00, 0x47, 0x80, 0x00, &[0xB6, 0x00]).expect("a key generated");
+        apdu(&card, 0x00, 0xDA, 0x00, 0xC4, &[0x01]).expect("PIN good for many signatures");
+        let pk = PublicKey::from_slice(&read_sig_pubkey(&card).expect("the public key reads back")).unwrap();
+        println!("attributes + generate + read back: {:?}", t.elapsed());
+        let secp = Secp256k1::verification_only();
+        let compact = |r: [u8; 32], s: [u8; 32]| { let mut c = [0u8; 64]; c[..32].copy_from_slice(&r); c[32..].copy_from_slice(&s); Signature::from_compact(&c).unwrap() };
+        // the raw shape of one signature, then eight that must all verify and (random nonces) all differ
+        verify(&card, 0x81, "123456").unwrap();
+        let z = [7u8; 32];
+        let raw = apdu(&card, 0x00, 0x2A, 0x9E, 0x9A, &z).expect("a signature with touch off");
+        println!("signature comes back as {} bytes", raw.len());
+        let mut seen = std::collections::HashSet::new();
+        let t = std::time::Instant::now();
+        for _ in 0..8 { let (r, s) = sign_on_card(&card, "123456", &z).unwrap(); secp.verify_ecdsa(&Message::from_digest(z), &compact(r, s), &pk).unwrap(); seen.insert(r); }
+        println!("8 signatures verified in {:?}; {} distinct r", t.elapsed(), seen.len());
+        assert_eq!(seen.len(), 8);
+        let counter = apdu(&card, 0x00, 0xCA, 0x00, 0x7A, &[]).ok().and_then(|raw| find(find(&raw, 0x7A).unwrap_or(&raw), 0x93).map(|v| v.iter().fold(0u32, |a, b| (a << 8) | *b as u32)));
+        println!("signature counter now {counter:?}");
+        if std::env::var("A2K_TOKEN2_TOUCH").as_deref() == Ok("1") {
+            assert_ne!(form, FORM_TOKEN2_CARD, "a card has no button; touch is for the key only");
+            verify(&card, 0x83, "12345678").unwrap();
+            apdu(&card, 0x00, 0xDA, 0x00, 0xD6, &[0x01, 0x20]).expect("touch ON (reversible) taken");
+            let d6 = apdu(&card, 0x00, 0xCA, 0x00, 0xD6, &[]).unwrap();
+            println!("UIF after ON: {}", hex::encode(&d6));
+            println!("DO NOT touch the key: measuring the status word and the length of its touch window…");
+            verify(&card, 0x81, "123456").unwrap();
+            let t = std::time::Instant::now();
+            let r = apdu(&card, 0x00, 0x2A, 0x9E, 0x9A, &z);
+            println!("untouched: {:?} after {:?}", r.as_ref().map(|v| v.len()).map_err(|e| e.to_string()), t.elapsed());
+            println!("NOW touch the key when it blinks (you have the key's window)…");
+            let t = std::time::Instant::now();
+            let (r, s) = sign_on_card(&card, "123456", &z).expect("a touched signature");
+            secp.verify_ecdsa(&Message::from_digest(z), &compact(r, s), &pk).unwrap();
+            println!("touched signature verified after {:?}", t.elapsed());
+            verify(&card, 0x83, "12345678").unwrap();
+            let back = apdu(&card, 0x00, 0xDA, 0x00, 0xD6, &[0x00, 0x20]);
+            println!("UIF back to OFF: {:?}", back.as_ref().map(|_| ()).map_err(|e| e.to_string()));
+        }
+        if std::env::var("A2K_TOKEN2_PINPAD").as_deref() == Ok("1") {
+            assert!(card.pinpad(), "this reader has no keypad");
+            forget_pin(&card);
+            println!("TYPE THE FACTORY KEY PIN 123456 ON THE READER and press its OK key…");
+            let t = std::time::Instant::now();
+            let r = verify(&card, 0x81, "");
+            println!("keypad VERIFY: {:?} after {:?}", r.as_ref().map(|_| ()).map_err(|e| e.to_string()), t.elapsed());
+            r.expect("the PIN typed on the reader opened the card");
+            let (r, s) = sign_on_card(&card, "", &z).expect("a signature with the PIN from the keypad (type it again when asked)");
+            secp.verify_ecdsa(&Message::from_digest(z), &compact(r, s), &pk).unwrap();
+            println!("signature with a keypad PIN verified");
+        }
+        // back to the factory: the device must look fresh again. This handle holds the transaction, and the reset
+        // opens its own, which on macOS waits for this one to end (measured 2026-10-19, the hard way) — so let go first.
+        drop(card);
+        reset_openpgp(&reader, "12345678", serial).expect("factory reset");
+        let card = match probe(&reader).unwrap() { Probe::Key(c) => c, _ => panic!("gone after reset") };
+        let (facts, ours) = crate::keyinit::pgp_facts(&card).unwrap();
+        println!("after reset: {:?}", crate::keyinit::judge(&facts, ours.is_some()));
+        assert_eq!(crate::keyinit::judge(&facts, ours.is_some()).0, "fresh", "not fresh after the reset: {facts:?}");
+    }
+
+    /// Does a Token2 key ENFORCE its touch policy for a signature? Fresh key → secp256k1 key → UIF ON → three
+    /// signatures asked with NOBODY touching, each timed → UIF FIXED → one more untouched → reset.
+    /// `A2K_TOKEN2_TOUCH_PROBE=1 cargo test hardware_token2_touch_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn hardware_token2_touch_probe() {
+        if std::env::var("A2K_TOKEN2_TOUCH_PROBE").as_deref() != Ok("1") { return; }
+        let (reader, card) = readers().unwrap().into_iter().filter(|r| r.to_ascii_lowercase().contains("token2")).find_map(|r| match probe(&r) {
+            Ok(Probe::Key(c)) => { let ad = app_data(&c).ok()?; (maker_of(&ad) == Maker::Token2).then_some((r, c)) }
+            _ => None,
+        }).expect("a Token2 key");
+        let serial = serial_of(&app_data(&card).unwrap());
+        let (facts, ours) = crate::keyinit::pgp_facts(&card).unwrap();
+        assert_eq!(crate::keyinit::judge(&facts, ours.is_some()).0, "fresh");
+        verify(&card, 0x83, "12345678").unwrap();
+        let mut attrs = vec![0x13]; attrs.extend_from_slice(OID_SECP256K1);
+        apdu(&card, 0x00, 0xDA, 0x00, 0xC1, &attrs).unwrap();
+        apdu(&card, 0x00, 0x47, 0x80, 0x00, &[0xB6, 0x00]).unwrap();
+        apdu(&card, 0x00, 0xDA, 0x00, 0xC4, &[0x01]).unwrap();
+        let z = [9u8; 32];
+        for (uif, label) in [([0x01u8, 0x20], "ON"), ([0x02, 0x20], "FIXED")] {
+            verify(&card, 0x83, "12345678").unwrap();
+            let set = apdu(&card, 0x00, 0xDA, 0x00, 0xD6, &uif);
+            let d6 = apdu(&card, 0x00, 0xCA, 0x00, 0xD6, &[]).unwrap();
+            println!("UIF {label}: set {:?}, reads {}", set.as_ref().map(|_| ()).map_err(|e| e.to_string()), hex::encode(&d6));
+            for i in 0..3 {
+                verify(&card, 0x81, "123456").unwrap();
+                let t = std::time::Instant::now();
+                let r = apdu(&card, 0x00, 0x2A, 0x9E, 0x9A, &z);
+                println!("  untouched signature {}: {} after {:?}", i + 1, match &r { Ok(v) => format!("Ok({} bytes)", v.len()), Err(e) => e.to_string() }, t.elapsed());
+            }
+        }
+        drop(card);
+        let t = std::time::Instant::now();
+        let r = reset_openpgp(&reader, "12345678", serial);
+        println!("reset: {:?} after {:?}", r.as_ref().map(|_| ()).map_err(|e| e.to_string()), t.elapsed());
+        let card = match probe(&reader).unwrap() { Probe::Key(c) => c, _ => panic!("gone after reset") };
+        let d6 = apdu(&card, 0x00, 0xCA, 0x00, 0xD6, &[]).unwrap();
+        let (facts, ours) = crate::keyinit::pgp_facts(&card).unwrap();
+        println!("after reset: UIF {} · {:?}", hex::encode(&d6), crate::keyinit::judge(&facts, ours.is_some()));
+    }
+
+    /// Factory-reset a Token2 whose admin PIN is still the factory one (after a round trip that stopped short):
+    /// `A2K_TOKEN2_RESET=1 A2K_TOKEN2_READER=token2 cargo test hardware_token2_reset -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn hardware_token2_reset() {
+        if std::env::var("A2K_TOKEN2_RESET").as_deref() != Ok("1") { return; }
+        let want = std::env::var("A2K_TOKEN2_READER").unwrap_or_else(|_| "token2".into()).to_ascii_lowercase();
+        let (reader, serial) = readers().unwrap().into_iter().filter(|r| r.to_ascii_lowercase().contains(&want)).find_map(|r| match probe(&r) {
+            Ok(Probe::Key(c)) => { let ad = app_data(&c).ok()?; (maker_of(&ad) == Maker::Token2).then(|| (r.clone(), serial_of(&ad))) }
+            _ => None,
+        }).expect("a Token2");
+        let t = std::time::Instant::now();
+        let r = reset_openpgp(&reader, "12345678", serial);
+        println!("reset of {serial} on {reader}: {:?} after {:?}", r.as_ref().map(|_| ()).map_err(|e| e.to_string()), t.elapsed());
+        let card = match probe(&reader).unwrap() { Probe::Key(c) => c, _ => panic!("gone after reset") };
+        let (facts, ours) = crate::keyinit::pgp_facts(&card).unwrap();
+        println!("after reset: {:?} {:?}", crate::keyinit::judge(&facts, ours.is_some()), facts);
+        r.expect("factory reset");
+    }
+
+    /// Needs keys plugged in: `cargo test hardware_list -- --ignored --nocapture`. Reads only: what every screen is told.
+    #[test]
+    #[ignore]
+    fn hardware_list() {
+        for c in list().unwrap() { println!("{}", serde_json::to_string(&c).unwrap()); }
+        for o in others() { println!("other: {} — {}", o.reader, o.why); }
+    }
+
     #[test]
     #[ignore]
     fn hardware_polls_do_not_reset_a_held_card() {

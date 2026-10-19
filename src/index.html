@@ -59,7 +59,7 @@
   <div style="display:flex;flex-direction:column;align-items:center;gap:14px">
     <svg width="64" height="64"><use href="#ring"/></svg>
     <h1>Any Two Keys</h1>
-    <div class="muted" style="font-size:18px;max-width:44ch;text-align:center">A Bitcoin vault signed by your YubiKeys. Research software: test on signet first.</div>
+    <div class="muted" style="font-size:18px;max-width:44ch;text-align:center">A Bitcoin vault signed by your security keys. Research software: test on signet first.</div>
   </div>
   <div class="grid3">
     <div class="card" style="min-height:220px"><div class="row" style="gap:6px"><svg width="22" height="22"><use href="#ring"/></svg><svg width="22" height="22"><use href="#ring"/></svg><svg width="22" height="22"><use href="#ring"/></svg></div><div style="font-family:var(--display);font-weight:600;font-size:18px">New multisig vault</div><div class="muted" style="flex-grow:1">Any number of keys, any threshold you choose. 2 of 3 for one person; 3 of 5 when the keys live in more places.</div><button class="btn primary" data-go="setup" data-k="2" data-n="3">Start</button></div>
@@ -70,7 +70,7 @@
     <button type="button" class="linkish" id="welcome-pull-open" style="align-self:center">Or bring a vault across from another profile…</button>
     <div id="welcome-pull-box" hidden style="display:flex;flex-direction:column;align-items:center;gap:8px"><div class="muted" style="font-size:13px">Which profile has it? It opens, you choose the vault, and it comes back here with everything about it.</div><div class="pick tight" id="welcome-pull-pick"></div></div>
   </div>
-  <div class="muted" style="font-size:13px">Free software · not affiliated with Yubico · YubiKey 5 series, firmware 5.2.3 or later · <span id="welcome-net"></span></div>
+  <div class="muted" style="font-size:13px">Free software · not affiliated with Yubico, Nitrokey or Token2 · YubiKey 5 series (firmware 5.2.3 or later), Nitrokey 3, Token2 keys and smart cards · <span id="welcome-net"></span></div>
   <button class="btn" id="welcome-back" hidden>Back to my vaults</button>
 </div>
 
@@ -338,7 +338,7 @@
                   <div class="cer-act-title" id="sign-title">Plug in a key</div>
                   <div class="muted" id="sign-text">Any of the vault's keys that has not signed yet.</div>
                   <div class="hold" id="sign-warn" hidden>Wait for the touch prompt before touching your key. <details class="why"><summary>Why?</summary>A key with Yubico OTP switched on types a one-time code into whatever has the focus when it is brushed. The app refuses such a code as a PIN, but it is tidier not to touch early.</details></div>
-                  <div class="row act-row" id="act-row" style="align-items:flex-end"><div class="field" id="pin-field" hidden style="flex:0 1 200px"><div class="label">Key PIN</div><input type="password" id="pin" autocomplete="off"></div><button class="btn primary" id="sign-btn" disabled>Sign with this key</button></div><div class="waiting" id="sign-waiting" hidden><i></i>Waiting for your touch…</div>
+                  <div class="row act-row" id="act-row" style="align-items:flex-end"><div class="field" id="pin-field" hidden style="flex:0 1 200px"><div class="label">Key PIN</div><input type="password" id="pin" autocomplete="off"></div><button class="btn primary" id="sign-btn" disabled>Sign with this key</button><button class="btn" id="sign-pinpad" type="button" hidden>Enter the PIN on the reader</button></div><div class="waiting" id="sign-waiting" hidden><i></i>Waiting for your touch…</div>
                   <div id="dev-cer" hidden>
                     <ol class="gsteps" id="dev-steps" aria-label="The steps of signing on a device"></ol>
                     <div class="guide-row">
@@ -420,9 +420,9 @@
     <section id="s-setup" class="screen">
       <div class="split">
         <div style="display:flex;flex-direction:column;gap:14px">
-          <div class="muted">Plug each YubiKey in, one at a time: the app makes a Bitcoin key on the card that never leaves it. Or add a signing device: a SeedSigner, Coldcard, Jade, Keystone and more hand over their key by QR code or a file.</div>
+          <div class="muted">Plug each security key in, or put the smart card in its reader, one at a time: the app makes a Bitcoin key inside it that never leaves it. Or add a signing device: a SeedSigner, Coldcard, Jade, Keystone and more hand over their key by QR code or a file.</div>
           <div id="setup-done" style="display:flex;flex-direction:column;gap:10px"></div>
-          <div class="card hot" id="setup-now"><div class="muted">No YubiKey plugged in.</div></div>
+          <div class="card hot" id="setup-now"><div class="muted">No key plugged in.</div></div>
           <div class="row"><button class="btn" id="add-device">Add a signing device…</button></div>
           <div id="setup-warn" style="display:flex;flex-direction:column;gap:10px"></div>
         </div>
@@ -506,7 +506,7 @@
                     <rect x="352" y="96" width="160" height="30" rx="6" class="sk-box sk-gold"/>
                     <text x="432" y="115" class="sk-t" text-anchor="middle">a signed session</text>
                   </svg>
-                  <figcaption><b>Read this before you type.</b> A private wallet answers an anonymous read with <b>nothing</b> — indistinguishable from empty. Use authenticated discovery below to find a wallet you control, then register a YubiKey reader. Check the discovered balance against your wallet before enrolling.</figcaption>
+                  <figcaption><b>Read this before you type.</b> A private wallet answers an anonymous read with <b>nothing</b> — indistinguishable from empty. Use authenticated discovery below to find a wallet you control, then register a key as its reader. Check the discovered balance against your wallet before enrolling.</figcaption>
                 </figure>
                 <div class="sk-warn">
                   <b>Seed words unlock everything that wallet can spend.</b> Enrolment uses them to derive the owner key and sign Spark's login challenge. The words and private keys are not saved or sent to Spark. Temporary owner sessions remain in memory for up to ten minutes while you review; they are cleared on completion, cancellation or app lock. Memory clearing is best effort, not proof that this computer never retained a copy. Even so, a computer that has seen them is a computer that could have kept them. Do this only on a machine you would trust with the wallet itself.
@@ -516,7 +516,7 @@
                   <div class="seed-grid" id="seed-grid"></div>
                   <div class="row seed-suggest" id="spark-suggest" style="gap:var(--s2);flex-wrap:wrap;min-height:34px" aria-live="polite"></div>
                   <div class="seed-count" style="font-size:14px" id="spark-words-count" aria-live="polite"></div></div>
-                <div class="row"><button class="btn" id="spark-words-go">Try an anonymous read</button><button class="btn primary" id="spark-gate">Gate this wallet with a YubiKey</button></div>
+                <div class="row"><button class="btn" id="spark-words-go">Try an anonymous read</button><button class="btn primary" id="spark-gate">Gate this wallet with a key</button></div>
                 <details id="spark-discovery-options" class="adv"><summary>Account discovery options</summary><div class="stack">
                   <div class="muted">Start with Spark accounts 0–5. Blitz uses a separate child-wallet scheme; that scheme is not confirmed for Wallet of Satoshi. Scan further ranges only when needed.</div>
                   <label>Scheme<select id="spark-scheme"><option value="direct">Spark account</option><option value="blitz">Blitz derived wallet</option></select></label>
@@ -530,7 +530,7 @@
                   <div class="sk-warn" id="spark-selected"></div>
                   <label>Call this vault<input id="spark-enroll-name" placeholder="Wallet of Satoshi" maxlength="60"></label>
                   <label class="spark-check"><input type="checkbox" id="spark-owner-confirm"> I recognise this wallet's identity and balance/history and want to enrol this reader.</label>
-                  <label>Reader YubiKey<select id="spark-card"></select></label>
+                  <label>Reader key<select id="spark-card"></select></label>
                   <button class="btn" id="spark-cards-refresh">Refresh plugged-in keys</button>
                   <div class="muted">Use a dedicated card with an empty signature slot, or an existing secp256k1 key with touch locked to FIXED. Only a key generated on the card here is known to have never left it. An existing key may also sign other vaults.</div>
                   <details class="adv"><summary>Create a reader key in an empty slot</summary><div class="stack">
@@ -550,10 +550,10 @@
             </details>
 
             <figure class="sk-fig"><svg viewBox="0 0 520 168" class="sk-svg" role="img"
-     aria-label="A YubiKey key opens a Spark session with a PIN and a touch and reads the wallet's balance and history; the same key cannot move funds, so the spend path is blocked.">
+     aria-label="A security key opens a Spark session with its PIN and reads the wallet's balance and history; the same key cannot move funds, so the spend path is blocked.">
   <!-- the card: the fork point -->
   <rect x="12" y="60" width="104" height="48" rx="7" class="sk-box sk-gold"/>
-  <text x="64" y="82" class="sk-t" text-anchor="middle">YubiKey</text>
+  <text x="64" y="82" class="sk-t" text-anchor="middle">Key</text>
   <text x="64" y="98" class="sk-t sk-mut" text-anchor="middle">PIN + touch</text>
 
   <!-- allowed path: opens a session, reads -->
@@ -701,9 +701,9 @@
       <div style="display:flex;flex-direction:column;gap:22px;max-width:880px">
         <div class="card">
           <div class="label">Sign with one key</div>
-          <div class="muted" style="font-size:14px">The plugged-in YubiKey signs with its own key in the classic Bitcoin Signed Message form. Any wallet can verify the result against the key's addresses, which are shown with the signature.</div>
+          <div class="muted" style="font-size:14px">The key in the port or reader signs with its own key in the classic Bitcoin Signed Message form. Any wallet can verify the result against the key's addresses, which are shown with the signature.</div>
           <div class="field"><div class="label">Message</div><textarea id="msg-key-text" rows="3" spellcheck="false" style="min-height:80px"></textarea></div>
-          <div class="row" style="align-items:flex-end;gap:12px"><div class="field" style="max-width:220px"><div class="label">Card PIN</div><input type="password" id="msg-key-pin" autocomplete="off"></div><button class="btn primary" id="msg-key-sign" disabled>Sign with this key</button><span class="muted" style="font-size:13px" id="msg-key-who">plug in a key</span></div>
+          <div class="row" style="align-items:flex-end;gap:12px"><div class="field" style="max-width:220px"><div class="label">Card PIN</div><input type="password" id="msg-key-pin" autocomplete="off"></div><button class="btn primary" id="msg-key-sign" disabled>Sign with this key</button><button class="btn" id="msg-key-pinpad" type="button" hidden>Enter the PIN on the reader</button><span class="muted" style="font-size:13px" id="msg-key-who">plug in a key</span></div>
           <div class="warn" id="msg-key-warn" hidden>Do not touch the key before this screen asks. An untended touch can type a code into whatever has focus.</div>
           <div id="msg-key-out" class="out" hidden></div>
         </div>
@@ -828,11 +828,11 @@
     </div>
   </div>
   <select id="spark-unlock-card" hidden aria-hidden="true" tabindex="-1"></select>
-  <div class="row" id="spark-unlock-actions"><button type="submit" class="btn primary" id="spark-unlock-go" disabled>Open the reader</button><button type="button" class="btn" id="spark-unlock-cancel">Cancel</button></div>
+  <div class="row" id="spark-unlock-actions"><button type="submit" class="btn primary" id="spark-unlock-go" disabled>Open the reader</button><button type="button" class="btn" id="spark-unlock-pinpad" hidden>Enter the PIN on the reader</button><button type="button" class="btn" id="spark-unlock-cancel">Cancel</button></div>
 </form></div>
 <div class="modal" id="single-modal"><div class="box">
   <div class="row" style="color:var(--no)"><svg width="18" height="18"><use href="#i-warn"/></svg><h2>One key means no way back</h2></div>
-  <div>A single-key vault has exactly one copy of its private key, inside one YubiKey. There is no seed phrase and no backup. If that key is lost, damaged, wiped or its PIN is locked, the funds are gone for good.</div>
+  <div>A single-key vault has exactly one copy of its private key, inside one key. There is no seed phrase and no backup. If that key is lost, damaged, wiped or its PIN is locked, the funds are gone for good.</div>
   <div>Use it only for amounts you would be willing to lose. For anything else, a 2-of-3 vault survives the loss of a key.</div>
   <label style="display:flex;gap:10px;align-items:center"><input type="checkbox" id="single-ack" style="width:auto;min-height:0"> I understand that losing this key loses the funds.</label>
   <div class="row" style="justify-content:flex-end"><button class="btn primary" id="single-instead">Make it 2 of 3 instead</button><button class="btn" id="single-go" disabled>Continue with one key</button></div>
