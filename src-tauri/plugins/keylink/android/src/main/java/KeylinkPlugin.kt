@@ -67,6 +67,9 @@ class TransmitArgs { var id: Int = 0; lateinit var apdu: String }
 class CloseArgs { var id: Int = 0 }
 
 @InvokeArg
+class NoteArgs { lateinit var msg: String }
+
+@InvokeArg
 class SlotArgs { lateinit var account: String; var key: String? = null }
 
 @InvokeArg
@@ -171,6 +174,14 @@ class KeylinkPlugin(private val activity: Activity) : Plugin(activity) {
   private fun nameOf(device: UsbDevice): String {
     val name = try { listOfNotNull(device.manufacturerName, device.productName).joinToString(" ").trim() } catch (_: Exception) { "" }
     return if (name.isEmpty()) device.deviceName else name
+  }
+
+  // a line from the window into logcat (diagnostics)
+  @Command
+  fun note(invoke: Invoke) {
+    val a = invoke.parseArgs(NoteArgs::class.java)
+    android.util.Log.i("keylink", a.msg)
+    invoke.resolve()
   }
 
   @Command
