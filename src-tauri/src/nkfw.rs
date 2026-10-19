@@ -187,24 +187,48 @@ fn key_for(api: &hidapi::HidApi, serial: u32) -> Result<(String, String, &'stati
     keys(api).into_iter().find(|k| k.0.starts_with(&want)).ok_or_else(|| "that Nitrokey does not answer on its FIDO interface".to_string())
 }
 
-/// One HID manager for the whole process, used by one thread at a time. hidapi's macOS backend builds an
-/// IOHIDManager and schedules it on the calling thread's run loop for every init and enumerate; two threads
-/// doing that at once -- the card poller asking two keys their firmware, or a poll during an update -- trapped
-/// inside CFRunLoopAddSource (EXC_BREAKPOINT on a tokio worker, 2026-10-17). So: created once, refreshed per
-/// use, never rebuilt per call, and never used concurrently. Devices opened from it stay open on their own.
-fn with_hid<T>(f: impl FnOnce(&hidapi::HidApi) -> T) -> Result<T, String> {
-    static HID: std::sync::Mutex<Option<hidapi::HidApi>> = std::sync::Mutex::new(None);
-    let mut g = HID.lock().unwrap_or_else(|p| p.into_inner());
-    let api = match g.as_mut() {
-        Some(a) => { a.refresh_devices().map_err(|e| format!("HID: {e}"))?; a }
-        None => g.insert(hidapi::HidApi::new().map_err(|e| format!("HID: {e}"))?),
-    };
-    Ok(f(api))
+/// One HID manager for the whole process, living on one thread for the life of the process.
+///
+/// hidapi's macOS backend creates a single IOHIDManager on first use and schedules it on the run loop of
+/// whichever thread happened to call. Two crashes taught us the two things that makes fatal: (1) two threads
+/// enumerating at once -- the card poller asking two keys their firmware during an update -- trap inside
+/// CFRunLoopAddSource (EXC_BREAKPOINT on a tokio worker, 2026-10-17); (2) the thread that created the manager
+/// going away. tokio retires an idle blocking thread after ten seconds and its run loop dies with it, so the
+/// manager pointed at freed memory and the next device arrival during an enumerate trapped the same way, a day
+/// later (2026-10-19, Mac 0.1.0, which already had the Mutex from the first fix). So: every HID call runs on a
+/// dedicated OS thread that never exits, one at a time, with the manager created there once and refreshed per
+/// use. Devices opened from it are handles that work from any thread, so long conversations (flashing) run
+/// outside this thread as before.
+fn with_hid<T: Send + 'static>(f: impl FnOnce(&hidapi::HidApi) -> T + Send + 'static) -> Result<T, String> {
+    use std::sync::{mpsc, Mutex, OnceLock};
+    type Job = Box<dyn FnOnce(&mut Option<hidapi::HidApi>) + Send>;
+    static TX: OnceLock<Mutex<mpsc::Sender<Job>>> = OnceLock::new();
+    let tx = TX.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<Job>();
+        std::thread::Builder::new().name("hid".into()).spawn(move || {
+            let mut api: Option<hidapi::HidApi> = None;
+            for job in rx { job(&mut api); }
+        }).expect("the HID thread could not be started");
+        Mutex::new(tx)
+    });
+    let (reply, answer) = mpsc::channel();
+    let job: Job = Box::new(move |slot| {
+        let result = (|| -> Result<T, String> {
+            let api = match slot.as_mut() {
+                Some(a) => { a.refresh_devices().map_err(|e| format!("HID: {e}"))?; a }
+                None => slot.insert(hidapi::HidApi::new().map_err(|e| format!("HID: {e}"))?),
+            };
+            Ok(f(api))
+        })();
+        let _ = reply.send(result);
+    });
+    tx.lock().unwrap_or_else(|p| p.into_inner()).send(job).map_err(|_| "the HID thread is gone".to_string())?;
+    answer.recv().map_err(|_| "the HID thread stopped mid-call".to_string())?
 }
 
 /// What this key runs, against the newest release known at build time. One HID conversation, no network.
 pub fn firmware(serial: u32) -> Result<Firmware, String> {
-    let (uuid, version, variant, _) = with_hid(|api| key_for(api, serial))??;
+    let (uuid, version, variant, _) = with_hid(move |api| key_for(api, serial))??;
     Ok(Firmware { behind: is_behind(&version, LATEST_KNOWN), flashable: variant == "lpc55", uuid, version, variant: variant.into(), latest_known: LATEST_KNOWN.into(), latest_known_as_of: LATEST_KNOWN_AS_OF.into() })
 }
 
@@ -382,7 +406,7 @@ pub fn update_with(serial: u32, report: &dyn Fn(Progress), given: Option<Contain
     if let Some(b) = &before {
         if is_behind(&version, &b.version) { return Err(format!("{version} is older than the {} on the key; a Nitrokey does not go backwards", b.version)); }
         say("touch", 10, format!("Touch the key when it blinks white: it restarts into its loader to take {version}"));
-        let c = with_hid(|api| -> Result<Ctap, String> {
+        let c = with_hid(move |api| -> Result<Ctap, String> {
             let (_, _, _, path) = key_for(api, serial)?;
             Ctap::open(api, &path).map_err(|e| e.text())
         })??;

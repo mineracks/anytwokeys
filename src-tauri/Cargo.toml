@@ -1,6 +1,6 @@
 [package]
 name = "anytwokeys"
-version = "0.1.1"
+version = "0.1.2"
 description = "Any Two Keys — a Bitcoin vault signed by your YubiKeys (research software)"
 authors = ["mineracks pty ltd"]
 license = "MIT"
