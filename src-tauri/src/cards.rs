@@ -270,14 +270,15 @@ pub enum Probe { Key(Card), Other(String) }
 pub struct OtherDevice { pub reader: String, pub why: String }
 
 pub(crate) fn probe(reader: &str) -> Result<Probe, CardError> {
-    let card = match transport::open(reader)? {
+    let mut card = match transport::open(reader)? {
         Opened::Card(c) => c,
         Opened::NotACard => return Ok(Probe::Other("the computer can see it, but it does not answer as a smart card".into())),
     };
-    match select(&card) {
-        Ok(()) => Ok(Probe::Key(card)),
-        Err(_) => Ok(Probe::Other("it has no OpenPGP applet, which is what Any Two Keys signs with".into())),
-    }
+    if select(&card).is_ok() { return Ok(Probe::Key(card)); }
+    // a card that will not even select may be on a stale link (a cyberJack kept a contactless session for a card
+    // that had since seated on its contacts: 6F00 to everything); one re-power through the reader, then ask again
+    if card.repower().is_ok() && select(&card).is_ok() { return Ok(Probe::Key(card)); }
+    Ok(Probe::Other("it has no OpenPGP applet, which is what Any Two Keys signs with".into()))
 }
 
 /// Every smart card plugged in that is NOT a key this app can use, and why.

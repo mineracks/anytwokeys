@@ -47,7 +47,25 @@ mod imp {
     pub struct Card { ctx: ffi::SCARDCONTEXT, handle: ffi::SCARDHANDLE, proto: ffi::DWORD }
     /// Kept for the call sites that ask for one explicitly: the transaction is already held from `open`.
     pub struct Tx<'a>(&'a Card);
-    impl Card { pub fn transaction(&mut self) -> Result<Tx<'_>, CardError> { Ok(Tx(self)) } }
+    impl Card {
+        pub fn transaction(&mut self) -> Result<Tx<'_>, CardError> { Ok(Tx(self)) }
+
+        /// Power the card down and up again, still ours. Measured 2026-10-19 on a REINER cyberJack RFID komfort: a
+        /// Token2 card slid past the reader's antenna on its way into the slot, the reader opened a contactless
+        /// session (T=1, the 3B 8F 80 01 pseudo-ATR) and kept it once the card was seated, and every command on that
+        /// stale session came back 6F00 — the card looked like "no OpenPGP applet" for ten minutes. One cold reset
+        /// re-powered it through the contacts (T=0) and it answered at once.
+        pub fn repower(&mut self) -> Result<(), CardError> {
+            unsafe { ffi::SCardEndTransaction(self.handle, ffi::SCARD_LEAVE_CARD) };
+            let mut p: ffi::DWORD = 0;
+            let rv = unsafe { ffi::SCardReconnect(self.handle, ffi::SCARD_SHARE_SHARED, ffi::SCARD_PROTOCOL_T0 | ffi::SCARD_PROTOCOL_T1, ffi::SCARD_UNPOWER_CARD, &mut p) };
+            if rv != ffi::SCARD_S_SUCCESS { return Err(code(rv)); }
+            self.proto = p;
+            let rv = unsafe { ffi::SCardBeginTransaction(self.handle) };
+            if rv != ffi::SCARD_S_SUCCESS { return Err(code(rv)); }
+            Ok(())
+        }
+    }
 
     fn code(rv: ffi::LONG) -> CardError {
         match rv {
@@ -199,7 +217,11 @@ mod imp {
     pub struct Card { id: u32 }
     /// A phone session is the app's alone, so there is nothing to hold; this keeps the same shape as the desktop.
     pub struct Tx<'a>(&'a Card);
-    impl Card { pub fn transaction(&mut self) -> Result<Tx<'_>, CardError> { Ok(Tx(self)) } }
+    impl Card {
+        pub fn transaction(&mut self) -> Result<Tx<'_>, CardError> { Ok(Tx(self)) }
+        /// A phone session is one tag read or one slot; there is no stale link to clear.
+        pub fn repower(&mut self) -> Result<(), CardError> { Ok(()) }
+    }
 
     #[derive(Deserialize)] struct Readers { readers: Vec<String> }
     #[derive(Deserialize)] struct Session { id: Option<u32> }
