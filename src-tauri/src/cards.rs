@@ -575,6 +575,22 @@ fn write_sealed_once(reader: &str, admin_pin: &str, expect: &[u8], data: &[u8]) 
     Ok(())
 }
 
+/// Change a PIN with the old and the new typed on the READER's keypad: neither passes through this computer, which
+/// is how a PIN that once did is replaced. Not retried: a PIN change is never resent blind. The PIN only unlocks the
+/// card — nothing the app keeps (the seal secret in 0103, the shares, the unlock slot) is made from its digits, so a
+/// vault sealed on this card opens as before. 81 the key PIN, 83 the admin PIN.
+pub fn pinpad_change(reader: &str, serial: u32, p2: u8) -> Result<(), CardError> {
+    let mut card = connect(reader)?;
+    let card = card.transaction()?;
+    if serial_of(&app_data(&card)?) != serial { return Err(CardError::Changed); }
+    let r = match card.pinpad_modify(p2) {
+        Some(r) => r.map_err(|e| pin_refusal(&card, p2, e)),
+        None => Err(CardError::Link("this reader has no keypad to change the PIN on".into())),
+    };
+    if p2 == 0x83 { forget_admin(&card) } else { forget_pin(&card) }
+    r
+}
+
 /// Factory-reset the OpenPGP applet: TERMINATE DF then ACTIVATE FILE, the documented reset on a YubiKey and the one
 /// that brought a crashed Nitrokey 3 back on 2026-10-10. The signing key, both PINs, the certificate object (a seal
 /// share) and the private objects (the store's unlock slot) are gone; passkeys and the other applets are untouched.

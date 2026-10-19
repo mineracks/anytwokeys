@@ -3468,6 +3468,23 @@ function openKeyCard(pub) {
     const here = cards.find(c => c.pubkey === pub);
     const uses = store.vaults.filter(v => v.keys.some(x => x.pubkey === pub));
     const amount = (v) => v === vault && vault._balance != null ? `${sats(vault._balance)} sats` : 'balance not read on this computer yet';
+    // ---- a card in a class-3 reader can have a PIN changed on the reader's own keypad: the digits never reach this computer ----
+    if (here && here.pinpad) {
+      d.insertAdjacentHTML('beforeend', `<div class="card" style="margin-top:18px"><div class="label">Change a PIN on the reader</div>
+        <div class="muted" style="font-size:13px">This card is in a reader with its own keypad. A PIN changed here is typed on that keypad — the old one, the new one, the new one again — and never passes through this computer. That is how a PIN that was once typed on a computer is replaced. Vaults sealed on this card open as before: the PIN only unlocks the card.</div>
+        <div class="row"><button class="btn" type="button" id="key-pad-user">Change the key PIN on the reader…</button><button class="btn" type="button" id="key-pad-admin">Change the admin PIN on the reader…</button></div>
+        <div class="muted" id="key-pad-note" aria-live="polite"></div></div>`);
+      const pad = async (admin) => {
+        const which = admin ? 'admin PIN' : 'key PIN', note = $('#key-pad-note');
+        $('#key-pad-user').disabled = $('#key-pad-admin').disabled = true;
+        note.textContent = `Look at the reader: type the current ${which} and press OK, then the new one and OK, then the new one again and OK. The reader gives you about 30 seconds for each.`;
+        try { await invoke('card_pin_change_pad', { reader: here.reader, serial: here.serial, admin }); note.textContent = `The ${which} is changed. Nothing of it touched this computer. Write the new one on this key’s page and put the page away.`; }
+        catch (e) { note.textContent = `The ${which} was not changed: ${e}`; }
+        $('#key-pad-user').disabled = $('#key-pad-admin').disabled = false;
+      };
+      $('#key-pad-user').onclick = () => pad(false);
+      $('#key-pad-admin').onclick = () => pad(true);
+    }
     d.insertAdjacentHTML('beforeend', `<div class="card" style="margin-top:18px;border-color:var(--no)"><div class="label">Reset this key</div>
       <div class="muted" style="font-size:13px">Wipes the signing part of the key (its OpenPGP applet): the signing key, both PINs, any seal share and this computer\u2019s unlock slot on it. The key comes back factory-fresh and can be set up again \u2014 as a <b>different</b> key. Nothing else on it (passkeys, authenticator codes) is touched.</div>
       <div class="warn" style="font-size:13px"><b>This key signs for ${uses.length === 1 ? 'one vault' : sats(uses.length) + ' vaults'}, and each loses this cosigner for good:</b><ul style="margin:6px 0 0 18px;padding:0">${uses.map(v => `<li>${esc(v.name)} \u2014 ${v.network === 'mainnet' ? 'mainnet' : esc(v.network)} \u00b7 any ${v.threshold} of ${v.keys.length} keys \u00b7 ${amount(v)}</li>`).join('')}</ul>${uses.some(v => v.keys.length === 1) ? '<div style="margin-top:6px"><b>A vault of one key is lost outright.</b></div>' : '<div style="margin-top:6px">A vault of several keys still spends with the others, but has one fewer to lose; move its coins to a new vault with a replacement key.</div>'}${!here ? '<div style="margin-top:6px">Plug the key in to go on.</div>' : ''}</div>

@@ -11,12 +11,16 @@ pub trait Wire {
     /// command and sends it to the card; this computer never sees a digit. `None` when the reader has no such keypad.
     /// `p2` is the PIN wanted: 81 / 82 the key PIN, 83 the admin PIN.
     fn pinpad_verify(&self, p2: u8) -> Option<Result<(), CardError>> { let _ = p2; None }
+    /// CHANGE REFERENCE DATA with BOTH PINs typed on the reader's keypad (MODIFY_PIN_DIRECT): the old one, the new one,
+    /// the new one again. Neither ever reaches this computer — the way to replace a PIN that once did.
+    fn pinpad_modify(&self, p2: u8) -> Option<Result<(), CardError>> { let _ = p2; None }
     /// Whether the reader this card sits in has that keypad.
     fn pinpad(&self) -> bool { false }
 }
 impl<T: Wire + ?Sized> Wire for &T {
     fn send(&self, cmd: &[u8]) -> Result<Vec<u8>, CardError> { (**self).send(cmd) }
     fn pinpad_verify(&self, p2: u8) -> Option<Result<(), CardError>> { (**self).pinpad_verify(p2) }
+    fn pinpad_modify(&self, p2: u8) -> Option<Result<(), CardError>> { (**self).pinpad_modify(p2) }
     fn pinpad(&self) -> bool { (**self).pinpad() }
 }
 
@@ -88,11 +92,13 @@ mod imp {
     impl Wire for Card {
         fn send(&self, cmd: &[u8]) -> Result<Vec<u8>, CardError> { transmit(self, cmd) }
         fn pinpad_verify(&self, p2: u8) -> Option<Result<(), CardError>> { pinpad_verify(self, p2) }
+        fn pinpad_modify(&self, p2: u8) -> Option<Result<(), CardError>> { pinpad_modify(self, p2) }
         fn pinpad(&self) -> bool { pinpad_code(self).is_some() }
     }
     impl Wire for Tx<'_> {
         fn send(&self, cmd: &[u8]) -> Result<Vec<u8>, CardError> { transmit(self.0, cmd) }
         fn pinpad_verify(&self, p2: u8) -> Option<Result<(), CardError>> { pinpad_verify(self.0, p2) }
+        fn pinpad_modify(&self, p2: u8) -> Option<Result<(), CardError>> { pinpad_modify(self.0, p2) }
         fn pinpad(&self) -> bool { pinpad_code(self.0).is_some() }
     }
 
@@ -105,6 +111,7 @@ mod imp {
     fn ctl(code: ffi::DWORD) -> ffi::DWORD { if cfg!(windows) { (0x31 << 16) | (code << 2) } else { 0x42000000 + code } }
     const CM_IOCTL_GET_FEATURE_REQUEST: ffi::DWORD = 3400;
     const FEATURE_VERIFY_PIN_DIRECT: u8 = 0x06;
+    const FEATURE_MODIFY_PIN_DIRECT: u8 = 0x07;
     fn control(card: &Card, code: ffi::DWORD, send: &[u8]) -> Result<Vec<u8>, CardError> {
         let mut buf = vec![0u8; 1024];
         let mut got: ffi::DWORD = 0;
@@ -114,16 +121,56 @@ mod imp {
         buf.truncate((got as usize).min(1024));
         Ok(buf)
     }
-    /// The reader's control code for VERIFY_PIN_DIRECT, from its feature list; `None` when it has no keypad.
-    fn pinpad_code(card: &Card) -> Option<ffi::DWORD> {
+    /// The reader's control code for one part-10 feature, from its feature list; `None` when it has not got it.
+    fn feature_code(card: &Card, feature: u8) -> Option<ffi::DWORD> {
         let tlv = control(card, ctl(CM_IOCTL_GET_FEATURE_REQUEST), &[]).ok()?;
         let mut i = 0;
         while i + 6 <= tlv.len() {
             let (tag, len) = (tlv[i], tlv[i + 1] as usize);
-            if tag == FEATURE_VERIFY_PIN_DIRECT && len == 4 { return Some(u32::from_be_bytes([tlv[i + 2], tlv[i + 3], tlv[i + 4], tlv[i + 5]])); }
+            if tag == feature && len == 4 { return Some(u32::from_be_bytes([tlv[i + 2], tlv[i + 3], tlv[i + 4], tlv[i + 5]])); }
             i += 2 + len;
         }
         None
+    }
+    /// The reader's control code for VERIFY_PIN_DIRECT; `None` when it has no keypad.
+    fn pinpad_code(card: &Card) -> Option<ffi::DWORD> { feature_code(card, FEATURE_VERIFY_PIN_DIRECT) }
+    /// What the reader's keypad answered: the card's status word, or one of the reader's own.
+    fn pinpad_answer(r: Result<Vec<u8>, CardError>) -> Result<(), CardError> {
+        match r {
+            Err(e) => Err(e),
+            Ok(r) if r.len() < 2 => Err(CardError::Parse),
+            Ok(r) => match u16::from_be_bytes([r[r.len() - 2], r[r.len() - 1]]) {
+                0x9000 => Ok(()),
+                0x6400 => Err(CardError::Link("no PIN was typed on the reader in time".into())),
+                0x6401 => Err(CardError::Link("cancelled on the reader".into())),
+                0x6402 => Err(CardError::Link("the new PIN was not typed the same way twice on the reader; nothing was changed".into())),
+                0x6403 => Err(CardError::Link("the PIN typed on the reader was too short or too long".into())),
+                0x6B80 => Err(CardError::Link("the reader did not accept the PIN request".into())),
+                0x6985 => Err(CardError::Link("the reader takes a PIN on its keypad only for a card in its slot, not one held to its antenna".into())),
+                sw => Err(CardError::Sw { sw, hint: String::new() }),
+            },
+        }
+    }
+    /// CHANGE REFERENCE DATA built by the reader from three entries on its keypad (old, new, new again).
+    /// PIN_MODIFY_STRUCTURE: the VERIFY shape proven on the cyberJack, plus: old PIN at offset 0 and the new one
+    /// straight after it (variable length, as GnuPG asks a class-3 reader for an OpenPGP card), bConfirmPIN 03 = the
+    /// old PIN is asked for and the new one confirmed, the reader's own three prompts. The firmware refusing the
+    /// request (6B80) spends no try, so a second shape with no PIN-block size is tried before giving up.
+    fn pinpad_modify(card: &Card, p2: u8) -> Option<Result<(), CardError>> {
+        let code = feature_code(card, FEATURE_MODIFY_PIN_DIRECT)?;
+        let (min, max) = if p2 == 0x83 { (8u8, 12u8) } else { (6u8, 12u8) };
+        let apdu = [0x00, 0x24, 0x00, p2, 0x00];
+        let shape = |block: u8| {
+            let mut s = vec![0x00, 0x00, 0x82, block, 0x00, 0x00, 0x00, max, min, 0x03, 0x02, 0xFF, 0x09, 0x04, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00];
+            s.extend_from_slice(&(apdu.len() as u32).to_le_bytes());
+            s.extend_from_slice(&apdu);
+            s
+        };
+        let first = pinpad_answer(control(card, code, &shape(0x0F)));
+        Some(match first {
+            Err(CardError::Link(ref m)) if m.starts_with("the reader did not accept") => pinpad_answer(control(card, code, &shape(0x00))),
+            r => r,
+        })
     }
     fn pinpad_verify(card: &Card, p2: u8) -> Option<Result<(), CardError>> {
         let code = pinpad_code(card)?;
@@ -138,18 +185,7 @@ mod imp {
         let mut s = vec![0x00, 0x00, 0x82, 0x0F, 0x00, max, min, 0x02, 0xFF, 0x09, 0x04, 0x00, 0x00, 0x00, 0x00];
         s.extend_from_slice(&(apdu.len() as u32).to_le_bytes());
         s.extend_from_slice(&apdu);
-        Some(match control(card, code, &s) {
-            Err(e) => Err(e),
-            Ok(r) if r.len() < 2 => Err(CardError::Parse),
-            Ok(r) => match u16::from_be_bytes([r[r.len() - 2], r[r.len() - 1]]) {
-                0x9000 => Ok(()),
-                0x6400 => Err(CardError::Link("no PIN was typed on the reader in time".into())),
-                0x6401 => Err(CardError::Link("cancelled on the reader".into())),
-                0x6403 => Err(CardError::Link("the PIN typed on the reader was too short or too long".into())),
-                0x6B80 => Err(CardError::Link("the reader did not accept the PIN request".into())),
-                sw => Err(CardError::Sw { sw, hint: String::new() }),
-            },
-        })
+        Some(pinpad_answer(control(card, code, &s)))
     }
     impl Drop for Card {
         fn drop(&mut self) {
