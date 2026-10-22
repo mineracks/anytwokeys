@@ -892,3 +892,30 @@ dd .mkt-n{display:block}
 
 /* Vault settings names the field once; the chip row's own "Owner" word is for places it stands alone */
 #vs-owner .row > .label:first-child{display:none}
+
+/* ---------- the finder: one search over everything, a layer over whatever screen is open ---------- */
+.finder-btn{width:36px;flex:0 0 36px;min-height:36px;height:36px;border-color:var(--line);color:var(--muted)} .finder-btn:hover{color:var(--ink)}
+#finder{position:fixed;inset:0;z-index:40;background:rgba(23,33,31,.28);display:flex;align-items:flex-start;justify-content:center;padding:8vh 16px 16px}
+#finder[hidden]{display:none}
+.fd-card{width:min(720px,100%);max-height:84vh;display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--gold);border-radius:12px;box-shadow:0 24px 60px rgba(0,0,0,.22);overflow:hidden}
+.fd-head{display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid var(--line);color:var(--muted)}
+.fd-head input{flex:1;min-width:0;border:0;background:transparent;color:var(--ink);font-family:var(--serif);font-size:17px;padding:6px 0;outline:none}
+.fd-head input::placeholder{color:var(--muted);opacity:.8}
+.fd-read{padding:8px 16px 0;font-size:12.5px;min-height:0} .fd-read:empty{display:none}
+.fd-list{overflow:auto;padding:6px 8px 8px;overscroll-behavior:contain}
+.fd-kind{font-family:var(--display);font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:12px 8px 4px}
+.fd-hit{display:flex;gap:12px;align-items:center;padding:8px 8px;border-radius:8px;cursor:pointer;min-width:0}
+.fd-hit[aria-selected="true"],.fd-hit:hover{background:var(--gold-soft)}
+.fd-hit .tp-art{flex:0 0 32px;width:32px;color:var(--gold)} .fd-hit .tp-art svg{width:20px;height:20px}
+.fd-hit .fd-what{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.fd-hit b{font-family:var(--display);font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fd-hit b.mono{font-family:var(--mono);font-weight:400;font-size:12.5px}
+.fd-hit small{color:var(--muted);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fd-hit .fd-amt{flex:0 0 auto;font-variant-numeric:tabular-nums;font-size:13px;text-align:right;display:flex;flex-direction:column;gap:2px;align-items:flex-end} .fd-amt small{font-size:11.5px}
+.fd-hit .fd-amt .in{color:var(--signal)}
+.fd-empty{padding:28px 16px;text-align:center;color:var(--muted);font-size:13.5px;line-height:1.5}
+.fd-more{padding:4px 8px 8px;font-size:12px;color:var(--muted)}
+.fd-foot{display:flex;justify-content:space-between;gap:12px;padding:8px 16px;border-top:1px solid var(--line);font-size:12px}
+.fd-foot kbd{display:inline-block;font-family:var(--display);font-size:10.5px;padding:0 5px;border:1px solid var(--line);border-radius:4px;margin-right:3px;line-height:16px}
+.discreet .fd-list{filter:blur(7px)} .discreet.peek .fd-list{filter:none}
+@media (max-width:700px){ #finder{padding:calc(8px + env(safe-area-inset-top)) 8px 8px;align-items:stretch} .fd-card{max-height:none;border-radius:10px} .fd-head input{font-size:16px} .fd-foot span:first-child{display:none} }

@@ -28,6 +28,8 @@ pub struct Activity { #[serde(default, skip_serializing_if = "Vec::is_empty")] p
     /// txid → this person's other vaults the same transaction belongs to (transfers between vaults)
     #[serde(default)] pub transfers: HashMap<String, Vec<String>> }
 
+/// Every block time kept, by `net:height` — read once for a search over the whole fleet.
+pub(crate) fn cached_times() -> HashMap<String, u32> { load_cache().times }
 /// A price already kept, by its cache key (`USD:2024-01-04` for a day, `USD:2024-01-04T09` for an hour).
 pub(crate) fn cached_price(key: &str) -> Option<Quote> { load_cache().prices.get(key).cloned() }
 

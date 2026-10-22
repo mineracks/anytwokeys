@@ -940,6 +940,23 @@ pub fn scan(v: &Vault, servers: &Servers, gap: u32) -> Result<Scanned, String> {
     Ok(Scanned { coins, history, next, scan_max, next_change, scan_max_change })
 }
 
+/// Every address of a vault in the range the scan covers (the same range `ours_table` tables), with its index —
+/// what a search over the fleet matches a typed fragment against. Derived once per run, like everything else here.
+pub fn all_addresses(v: &Vault) -> Vec<(u32, String)> {
+    let net = network_of(&v.network);
+    let addr = |i: u32| script_at(v, i).ok().and_then(|s| Address::from_script(&s, net).ok()).map(|a| (i, a.to_string()));
+    if v.spark.is_some() { return Vec::new(); }
+    if !rotates(v) { return addr(0).into_iter().collect(); }
+    let (recv, chg) = (v.scan_max.max(v.next) + GAP, v.scan_max_change.max(v.next_change) + GAP);
+    let mut out = Vec::new();
+    for base in (0..schemes(v) as u32).map(|s| s << SCHEME_SHIFT) {
+        for i in 0..=recv { out.extend(addr(base | i)); }
+        for i in 0..=chg { out.extend(addr(base | CHANGE | i)); }
+    }
+    for i in 0..v.watch.as_ref().and_then(|w| w.sp.as_ref()).map(|sp| sp.found.len() as u32).unwrap_or(0) { out.extend(addr(SP_SCHEME | i)); }
+    out
+}
+
 /// "Is this script ours, and at which index?" for a loop over many outputs: the range is derived once and the answer
 /// is one lookup in a table taken once, instead of a lock and a range check per output.
 pub fn ours_table(v: &Vault) -> Result<impl Fn(&ScriptBuf) -> Option<u32>, String> {
