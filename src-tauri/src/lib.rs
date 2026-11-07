@@ -1409,8 +1409,37 @@ async fn node_add(name: String, kind: String, url: String, cred: String, pin: St
         Ok(v)
     }).await
 }
+/// Where the money went, from the chain itself: for every row that left on the chain or closed a channel and does not
+/// yet say where, the transaction is fetched (and kept in the chain cache) and its outputs listed — address and sats.
+/// A close the node never saw gets its time from the block it named. Failures leave the row as it was: this is
+/// evidence added when the chain answers, never a reason to lose a row.
+fn node_destinations(events: &mut [node::Event], servers: &chain::Servers, network: &str) {
+    use std::str::FromStr;
+    let net = wallet::network_of(network);
+    let want: Vec<usize> = events.iter().enumerate().filter(|(_, e)| !e.txid.is_empty() && e.to.is_empty() && (e.net < 0 || e.kind == "close")).map(|(i, _)| i).collect();
+    if want.is_empty() { return; }
+    let ids: Vec<bitcoin::Txid> = want.iter().filter_map(|&i| bitcoin::Txid::from_str(&events[i].txid).ok()).collect();
+    let Ok(txs) = chain::transactions_kept(servers, network, &ids, &|_| true) else { return };
+    let by_id: std::collections::HashMap<bitcoin::Txid, &bitcoin::Transaction> = txs.iter().map(|t| (t.compute_txid(), t)).collect();
+    for &i in &want {
+        let Ok(id) = bitcoin::Txid::from_str(&events[i].txid) else { continue };
+        if let Some(t) = by_id.get(&id) {
+            events[i].to = t.output.iter().map(|o| (bitcoin::Address::from_script(&o.script_pubkey, net).map(|a| a.to_string()).unwrap_or_else(|_| format!("script {}", hex::encode(o.script_pubkey.as_bytes()))), o.value.to_sat())).collect();
+        }
+    }
+    let heights: Vec<u32> = events.iter().filter(|e| e.time == 0 && e.height > 0).map(|e| e.height).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    if heights.is_empty() { return; }
+    if let Ok(times) = chain::header_times(servers, &heights) {
+        let at: std::collections::HashMap<u32, u32> = heights.iter().copied().zip(times).collect();
+        for e in events.iter_mut() { if e.time == 0 && e.height > 0 { if let Some(t) = at.get(&e.height) { e.time = *t; } } }
+    }
+    events.sort_by_key(|e| (e.time, e.id.clone()));
+}
+
+/// The memo on a row the node's balance forces into its ledger (node.rs reconcile).
+const UNACCOUNTED: &str = "Unaccounted: the node holds less (or more) than its ledger explains. Money can leave a node without a row here — a channel closed with the funds delivered to another address, a payment made from another copy of its keys. Booked so the ledger sums to what the node holds.";
 /// A fresh read of a node already here, with its sealed credential and its pinned certificate.
-fn node_read(n: &node::Node) -> R<node::Node> {
+fn node_read(n: &node::Node, servers: &chain::Servers, network: &str) -> R<node::Node> {
     let cred = node::cred(&node::id_of(&n.url, &n.pubkey))?;
     let mut fresh = n.clone();
     match n.kind.as_str() {
@@ -1423,6 +1452,8 @@ fn node_read(n: &node::Node) -> R<node::Node> {
             let (new, marks) = c.events_since(&n.marks)?;
             fresh.events = node::merge_events(&n.events, new); fresh.marks = marks;
             fresh.onchain = onchain; fresh.channels = channels; fresh.pending = pending; fresh.version = version; fresh.read_at = now();
+            node_destinations(&mut fresh.events, servers, network);
+            fresh.events = node::reconcile(fresh.events, node::Held { onchain, channels, pending }.total(), now() as u32, UNACCOUNTED);
         }
         _ => {
             // the bookkeeper's income view is one call, whole: read it, fold it, keep it
@@ -1431,6 +1462,8 @@ fn node_read(n: &node::Node) -> R<node::Node> {
             if pubkey != n.pubkey { return Err(format!("the node at {} is not the one this vault watches (a different identity answered)", n.url)); }
             let (onchain, channels, pending, _) = c.funds()?;
             fresh.events = node::keep_and_replace(&n.events, c.events()?); fresh.onchain = onchain; fresh.channels = channels; fresh.pending = pending; fresh.version = version; fresh.read_at = now();
+            node_destinations(&mut fresh.events, servers, network);
+            fresh.events = node::reconcile(fresh.events, node::Held { onchain, channels, pending }.total(), now() as u32, UNACCOUNTED);
         }
     }
     Ok(fresh)
@@ -1679,9 +1712,16 @@ fn vault_forget(name: String) -> R<Store> {
 /// so a node that comes back under the SAME identity resumes where it left off; one rebuilt under a new identity is
 /// a new vault, and this one stays as the record of the old.
 #[tauri::command]
-fn node_retire(name: String, retired: bool, why: String) -> R<Store> {
+fn node_retire(name: String, retired: bool, why: String, empty: Option<bool>) -> R<Store> {
     let why: String = why.trim().chars().take(200).collect();
-    wallet::update(|s| { if let Some(n) = s.vaults.iter_mut().find(|v| v.name == name).and_then(|v| v.node.as_mut()) { n.retired = retired; n.retired_why = if retired { why.clone() } else { String::new() }; } })
+    wallet::update(|s| { if let Some(n) = s.vaults.iter_mut().find(|v| v.name == name).and_then(|v| v.node.as_mut()) {
+        n.retired = retired; n.retired_why = if retired { why.clone() } else { String::new() };
+        // "it holds nothing now": the person's word is the node's last report — the balance becomes zero and the ledger
+        // is made to sum to zero, the gap booked today with the reason given
+        if retired && empty == Some(true) { n.onchain = 0; n.channels = 0; n.pending = 0; n.read_at = now();
+            let memo = if why.is_empty() { UNACCOUNTED.to_string() } else { format!("{why} — {UNACCOUNTED}") };
+            n.events = node::reconcile(std::mem::take(&mut n.events), 0, now() as u32, &memo); }
+    } })
 }
 
 /// A ledger file into a node vault (node.rs ledger_from_file): rows read again replace their earlier reading, rows
@@ -1694,9 +1734,11 @@ fn node_import_pick() -> R<String> {
 }
 #[tauri::command]
 fn node_import(name: String, text: String) -> R<(Store, usize, usize)> {
-    let (kind, pubkey, ev) = node::ledger_from_file(&text)?;
+    let (kind, pubkey, ev, held) = node::ledger_from_file(&text)?;
     let mut s = wallet::load()?;
+    let s_ro = s.clone();
     let v = s.vaults.iter_mut().find(|v| v.name == name).ok_or("no such vault")?;
+    let net_ro = v.network.clone();
     let n = v.node.as_mut().ok_or("this vault is not a node")?;
     if n.kind != kind { return Err(format!("this file is from {} and the vault watches {}", if kind == "cln" { "Core Lightning" } else { "LND" }, if n.kind == "cln" { "Core Lightning" } else { "LND" })); }
     if !pubkey.is_empty() && pubkey != n.pubkey.to_lowercase() { return Err("this file names a different node: its identity is not this vault's".into()); }
@@ -1704,6 +1746,14 @@ fn node_import(name: String, text: String) -> R<(Store, usize, usize)> {
     let have: std::collections::HashSet<String> = n.events.iter().map(|e| e.id.clone()).collect();
     let new = ev.iter().filter(|e| !have.contains(&e.id)).count();
     n.events = node::keep_and_replace(&n.events, ev);
+    { let (servers, network) = (wallet::servers_for(&s_ro, &net_ro), net_ro.clone()); node_destinations(&mut n.events, &servers, &network); }
+    if let Some(h) = held {
+        // the file says what the node held when it was asked: that becomes the balance, and the ledger is made to sum
+        // to it, the gap dated at the newest row (when the money last moved), not at the import
+        n.onchain = h.onchain; n.channels = h.channels; n.pending = h.pending; n.read_at = now();
+        let at = n.events.iter().map(|e| e.time).max().unwrap_or(now() as u32);
+        n.events = node::reconcile(std::mem::take(&mut n.events), h.total(), at, UNACCOUNTED);
+    }
     let total = n.events.len(); debug_assert!(total >= before);
     let txs: std::collections::HashMap<String, i32> = n.events.iter().filter(|e| !e.txid.is_empty()).map(|e| (e.txid.clone(), 0)).collect();
     let e = s.seen.entry(name).or_default(); e.txs = txs; e.primed = true;
@@ -1889,7 +1939,7 @@ async fn vault_sync(name: String) -> R<Snapshot> {
                 Ok(Snapshot { stale: why, coins: Vec::new(), balance: n.onchain + n.channels, height: 0, history, servers: servers.clone(), receive: String::new(), receive_index: 0, rotating: false, next_change: 0, gap: 0 })
             };
             if n.retired { return from_ledger(if n.retired_why.is_empty() { "retired".into() } else { format!("retired: {}", n.retired_why) }); }
-            let fresh = match node_read(n) { Ok(f) => f, Err(e) if !n.events.is_empty() => return from_ledger(e), Err(e) => return Err(e) };
+            let fresh = match node_read(n, &servers, &v.network) { Ok(f) => f, Err(e) if !n.events.is_empty() => return from_ledger(e), Err(e) => return Err(e) };
             let txs: std::collections::HashMap<String, i32> = fresh.events.iter().filter(|e| !e.txid.is_empty()).map(|e| (e.txid.clone(), 0)).collect();
             wallet::update(|s| { if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == name) { vm.node = Some(fresh.clone()); } let e = s.seen.entry(name.clone()).or_default(); e.txs = txs; e.primed = true; })?;
             // oldest first, as Electrum's history is: the window turns every history newest-first itself
@@ -2907,8 +2957,8 @@ async fn place_search(q: String) -> R<Vec<places::Hit>> {
 /// accountant needs and what this app cannot infer from the chain.
 #[tauri::command]
 async fn disposal_set(name: String, txid: String, kind: String) -> R<Store> {
-    const KINDS: [&str; 5] = ["sold", "spent", "gift", "self", ""];
-    if !KINDS.contains(&kind.as_str()) { return Err(format!("a disposal is one of {}", KINDS[..4].join(", "))); }
+    const KINDS: [&str; 7] = ["sold", "spent", "gift", "self", "stolen", "lost", ""];
+    if !KINDS.contains(&kind.as_str()) { return Err(format!("a disposal is one of {}", KINDS[..6].join(", "))); }
     let t = now();
     let (nm, id, k) = (name.clone(), txid.clone(), kind.clone());
     wallet::update(move |s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) {

@@ -584,13 +584,17 @@ async function renderTx() {
   const offchain = !!(vault.spark || vault.statement || vault.exchange || (vault.node && !(nodeRow(txid) || {}).txid));
   $('#tx-explorer').hidden = offchain; $('#tx-pdf').hidden = !!(vault.spark || vault.statement || vault.node || vault.exchange); $('#tx-chain').hidden = offchain;
   if (vault.node) {
-    const e = nodeRow(txid), st = $('#tx-status'); st.className = 'state ok'; st.querySelector('span').textContent = e ? `${e.layer === 'chain' ? 'on-chain' : e.layer === 'fee' ? 'fee' : 'Lightning'} \u00b7 ${e.kind} \u00b7 from the node` : 'from the node';
+    const e = nodeRow(txid), st = $('#tx-status'); st.className = 'state ok'; st.querySelector('span').textContent = e ? `${nodeLayer(e)} \u00b7 ${e.kind} \u00b7 from the node` : 'from the node';
     $('#tx-dl').innerHTML = [['Transfer', transferText(facts, txid) || 'Outside the watched vaults'], ['Source', `${esc(vault.node.alias)}\u2019s bookkeeper \u2014 the node\u2019s own ledger`],
-      e ? ['Kind', e.kind === 'routed' ? 'routed \u2014 a routing fee earned, income' : e.kind === 'received' ? 'received \u2014 a cost only if it was a purchase' : e.kind] : null,
+      e ? ['Kind', NODE_KIND_WORDS[e.kind] || e.kind] : null,
       e ? ['Amount', `${sats(Math.abs(e.net))} sats${e.fee ? ` (fee ${sats(e.fee)} sats)` : ''}`] : null,
       e && e.txid ? ['Transaction', `<a href="#" class="mono" data-go-tx="${esc(e.txid)}" style="font-size:12px;word-break:break-all">${esc(e.txid)}</a>`] : null,
+      // where the money went, read from the transaction itself: the evidence for the books and for a report
+      e && (e.to || []).length ? ['To', e.to.map(([a, v]) => `<div><span class="mono" style="font-size:12px;word-break:break-all">${esc(a)}</span><small>${sats(v)} sats</small></div>`).join('') + `<small>every output of the transaction, as the chain holds it \u00b7 copy these into any report of where the coins went</small>`] : null,
       e && e.hash ? ['Payment hash', `<span class="mono" style="font-size:12px;word-break:break-all">${esc(e.hash)}</span>`] : null,
-      e && e.memo ? ['Memo', esc(e.memo)] : null].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+      e && e.memo ? ['Memo', esc(e.memo)] : null,
+      e && e.net < 0 ? (() => { const rl = realisedRow(name, txid); return rl ? ['Realised', rl] : null; })() : null,
+      e && e.net < 0 ? ['What was this?', disposalPick(name, txid)] : null].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
     $('#tx-proof').textContent = ''; $('#tx-chain-body').innerHTML = ''; return;
   }
   if (vault.exchange) {
@@ -642,6 +646,7 @@ async function renderTx() {
     rows.push(['Fee', d.fee !== null ? `${sats(d.fee)} sats<small>${d.fee_rate.toFixed(2)} sat/vB · ${sats(d.vsize)} vB</small>` : 'not known']);
     rows.push(['Signed by', signers.length ? signers.map(esc).join(' and ') + `<small>read from the signatures on the transaction</small>` : 'could not be read from the witness']);
     const rl = realisedRow(name, txid); if (rl) rows.push(['Realised', rl]);
+    rows.push(['What was this?', disposalPick(name, txid)]);
     const mr = marketRow(name, txid); if (mr) rows.push(['Market context', mr]);
   } else {                        // a deposit
     const fromPeer = [...new Set(d.inputs.filter(i => i.peer).map(i => i.peer[0]))];
@@ -758,6 +763,7 @@ function realisedRow(name, txid) {
   const L = vaultLedger(name), r = L && L.realised[txid], ccy = (txFacts[name] || {}).ccy;
   if (!r || !ccy) return '';
   const held = heldFor(r.from, r.to, r.t);
+  if (r.kind === 'stolen' || r.kind === 'lost') return `<span class="warn">\u25bc \u2212${r.cost === null ? 'unknown' : money(r.cost, ccy)}</span><small>a capital loss: ${sats(Math.round(r.sats))} sats ${r.kind} \u00b7 nothing was received for them, so the loss is their whole cost${r.cost === null ? ' (not known for some of them)' : ''} \u00b7 ${held} \u00b7 by ${esc(COST_METHODS[r.method].short)} \u00b7 in Australia a CGT event C1 (loss or destruction of an asset), claimed in the year the loss is discovered, with the evidence kept: this record, the transaction, the addresses the coins went to, and the report made</small>`;
   if (r.moved) return `<span class="muted">not a disposal</span><small>you said these ${sats(Math.round(r.sats))} sats went to a wallet of your own \u00b7 their cost of ${r.cost === null ? 'an unknown amount' : money(r.cost, ccy)} left the books with them \u00b7 ${held}</small>`;
   if (r.gain === null) return `unknown<small>${r.cost === null ? 'some of the coins that left have no known cost' : 'no price for the day they left'} \u00b7 ${held} \u00b7 by ${esc(COST_METHODS[r.method].short)}</small>`;
   return `<span class="${r.gain >= 0 ? 'ok' : 'warn'}">${r.gain >= 0 ? '\u25b2 +' : '\u25bc \u2212'}${money(Math.abs(r.gain), ccy)}</span><small>worth ${money(r.proceeds, ccy)} as ${sats(Math.round(r.sats))} sats left \u00b7 they had cost ${money(r.cost, ccy)} \u00b7 ${held} \u00b7 by ${esc(COST_METHODS[r.method].short)}</small>`;
@@ -1273,7 +1279,7 @@ document.addEventListener('click', (e) => { const a = e.target.closest('[data-tx
 const HOME_ACT = 10, ACT_PAGE = 60;
 function actRowHtml(h) {
   if (vault?.node) {
-    const e = nodeRow(h.txid), how = e ? `${e.layer === 'chain' ? 'on-chain' : e.layer === 'fee' ? 'fee' : 'Lightning'} \u00b7 ${e.kind}` : 'from the node';
+    const e = nodeRow(h.txid), how = e ? `${nodeLayer(e)} \u00b7 ${e.kind}` : 'from the node';
     return `<td class="when muted">…</td><td class="mono">${esc(h.txid.slice(0, 10))}…</td><td>${lblHtml('tx:' + h.txid)}<span class="xfer" data-xfer="${esc(h.txid)}"></span></td><td class="r amt muted">…</td><td class="r">${esc(how)}</td>`;
   }
   if (vault?.exchange) {
@@ -1340,7 +1346,7 @@ const ACT_CTL = [
 const actNeedsFacts = () => listPref('act', 'show', 'all') !== 'all' || listPref('act', 'sort', 'new') !== 'new' || listPref('act', 'group', 'none') !== 'none';
 // what kind of row this is, in the words its Status column uses
 function actKind(h, f) {
-  if (vault?.node) { const e = nodeRow(h.txid); return e ? `${e.layer === 'chain' ? 'On-chain' : e.layer === 'fee' ? 'Fee' : 'Lightning'} \u00b7 ${e.kind}` : 'From the node'; }
+  if (vault?.node) { const e = nodeRow(h.txid); return e ? `${nodeLayer(e, true)} \u00b7 ${e.kind}` : 'From the node'; }
   if (vault?.exchange) { const r = exRow(h.txid); return r ? (EX_WORDS[r.kind] || r.kind).replace(/^./, c => c.toUpperCase()) : 'From the statement'; }
   if (vault?.statement) { const r = stmtRow(h.txid); return r ? `${r.layer === 'chain' ? 'On-chain' : 'Lightning'} \u00b7 ${r.kind === 'income' ? (r.pos ? 'sale' : 'reward') : r.kind}` : 'From the statement'; }
   if (vault?.spark) { const t = f?.spark?.[h.txid]; return sparkTransferStatus(t?.status) || 'Spark'; }
@@ -1947,6 +1953,8 @@ function buildLedger(inputs, method, kinds, scope) {
       realised[e.txid] = { sats: left, cost, proceeds, gain: cost !== null && proceeds !== null ? proceeds - cost : null, t: e.t,
         from: dated.length ? Math.min(...dated.map(l => l.t)) : null, to: dated.length ? Math.max(...dated.map(l => l.t)) : null, lots: pool, method, kind: kinds[e.txid] || '' };
       if (kinds[e.txid] === 'self') { realised[e.txid].moved = true; realised[e.txid].gain = null; realised[e.txid].proceeds = null; }
+      // stolen or lost: a disposal for nothing. Proceeds nil, the loss is the whole cost (AU: CGT event C1; US: no deduction for most theft losses since 2018 — the arithmetic is the same, what can be claimed differs)
+      if (kinds[e.txid] === 'stolen' || kinds[e.txid] === 'lost') { realised[e.txid].proceeds = 0; realised[e.txid].gain = cost !== null ? -cost : null; }
     }
     if (realised[e.txid]) for (const l of e.legs) if (l.net < 0) realised[l.id] = realised[e.txid];
     timeline.push({ t: e.t, txid: e.txid, price: e.price, before, sats: Object.entries(sats).filter(([n]) => inScope(n)).reduce((a, [,x]) => a + x, 0), basis: basisNow(), internal: isInternal });
@@ -2284,6 +2292,11 @@ function renderOverview() {
 }
 
 // ---------- a Lightning node the person runs ----------
+// the layer a node row sits on, in words: on the chain, inside a channel, on Lightning, or booked from the node's own balance
+const nodeLayer = (e, cap) => { const w = e.layer === 'chain' ? 'on-chain' : e.layer === 'fee' ? 'fee' : e.layer === 'channel' ? 'channel' : e.layer === 'node' ? 'the node\u2019s balance' : 'Lightning'; return cap ? w[0].toUpperCase() + w.slice(1) : w; };
+const NODE_KIND_WORDS = { routed: 'routed \u2014 a routing fee earned, income', received: 'received \u2014 a cost only if it was a purchase',
+  unaccounted: 'unaccounted \u2014 the node holds less than its ledger explains. Money that left without this node\u2019s bookkeeper seeing it go: channels closed by someone else holding the keys, coins swept by another instance of the wallet. Say below what it was; stolen coins are a capital loss.',
+  close: 'channel closed \u2014 the closing transaction and where its outputs went are below; whatever did not come back to this node\u2019s wallet is counted in the unaccounted row' };
 function nodeRow(id) { if (!vault || !vault.node) return null; if (!vault._node) vault._node = Object.fromEntries((vault.node.events || []).map(e => [e.id, e])); return vault._node[id] || null; }
 let nodeChecked = null;
 const nodeKind = () => ($('#node-kind [aria-checked=true]') || {}).dataset?.kind || 'cln';
@@ -2660,7 +2673,21 @@ $('#send-all').onchange = () => { $('#send-amount').disabled = $('#send-all').ch
 // The same choice `build` makes (wallet::select answers both), so what is shown here and what gets signed cannot
 // drift apart. Two questions matter and only one of them is on the chain: where the money goes, and what it cost.
 let sendPrev = null, sendPrevErr = '', disposalKind = '', sendSeq = 0;
-const DISPOSALS = [['sold', 'Sold or converted'], ['spent', 'Spent on something'], ['gift', 'Gift'], ['self', 'My own wallet elsewhere'], ['', 'Not decided yet']];
+const DISPOSALS = [['sold', 'Sold or converted'], ['spent', 'Spent on something'], ['gift', 'Gift'], ['self', 'My own wallet elsewhere'], ['stolen', 'Stolen'], ['lost', 'Lost'], ['', 'Not decided yet']];
+const DISPOSAL_NOTES = { self: 'Not a disposal: no gain is realised and the cost goes with the coins. Their holding period is not carried, because this app cannot see the other wallet.',
+  stolen: 'Taken without your consent. A disposal for nothing: the loss is the whole cost of the coins. Keep the evidence with it — this row, the transaction, the addresses the coins went to, and any report to police or an exchange. In Australia this is CGT event C1.',
+  lost: 'Gone for good — keys destroyed, no one can spend them. A disposal for nothing: the loss is the whole cost. In Australia this is CGT event C1, claimed in the year the loss is discovered; the ATO expects evidence that the coins existed, were yours, and cannot be recovered.' };
+/// The "what was this?" picker on a row that left a vault, in the transaction sheet. The choice is kept with the
+/// transaction (disposal_set) and the ledger is rebuilt from it.
+function disposalPick(name, txid) {
+  const L = vaultLedger(name), kind = (L && L.realised[txid] && L.realised[txid].kind) || '';
+  return `<div class="pick tight" data-disposal-of="${esc(txid)}">${DISPOSALS.map(([v, n]) => `<div class="opt${v === kind ? ' on' : ''}" data-kind="${v}">${n}</div>`).join('')}</div><small>${DISPOSAL_NOTES[kind] || (kind ? 'A disposal: the gain or loss above is realised. The reason is kept with the transaction.' : 'Say what this was and the books follow: a sale realises a gain, a move to your own wallet realises nothing, stolen or lost coins are a loss.')}</small>`;
+}
+document.addEventListener('click', async (ev) => {
+  const o = ev.target.closest('[data-disposal-of] .opt'); if (!o || !vault) return;
+  const txid = o.closest('[data-disposal-of]').dataset.disposalOf;
+  try { store = await invoke('disposal_set', { name: vault.name, txid, kind: o.dataset.kind }); vault = store.vaults.find(v => v.name === vault.name) || vault; vaultLedger.memo = {}; renderTx(); } catch (e) { fail(e); }
+});
 
 function sendFields() {
   const to = $('#send-to').value.trim(), all = $('#send-all').checked;
@@ -2732,7 +2759,7 @@ function paintReview() {
   out += `<div class="muted" style="border-top:1px solid var(--line);padding-top:10px;font-size:13px">${built ? `Next: sign with ${vault.keys.length === 1 ? 'the key' : 'any ' + vault.threshold + ' of your ' + vault.keys.length + ' keys'}. Nothing is sent until you confirm after the last signature.` : 'Nothing is built yet: this is what it would do.'}</div></div>`;
   box.innerHTML = out;
   const note = $('#disposal-note');
-  if (note) note.textContent = disposalKind === 'self' ? 'Not a disposal: no gain is realised and the cost goes with the coins. Their holding period is not carried, because this app cannot see the other wallet.'
+  if (note) note.textContent = DISPOSAL_NOTES[disposalKind] ? DISPOSAL_NOTES[disposalKind]
     : disposalKind ? 'A disposal. The gain above is realised when this confirms; the reason is kept with the transaction.'
     : 'Kept with the transaction for your records. You can set or change it later on the transaction itself.';
 }
@@ -4797,16 +4824,17 @@ function renderNodeCard() {
     ? 'This node is not asked any more. Its ledger stays exactly as it was last read, and every link it made to the other vaults stays with it. If the same node comes back under the same identity, read it again and it carries on from where it left off.'
     : 'A node that is gone \u2014 rebuilt under a new identity, wiped, shut down \u2014 is still a record of money that moved. Retiring it keeps that record read-only and stops the refresh asking a node that cannot answer. A node rebuilt under a NEW identity is added as a new vault; this one stays as the record of the old.';
   $('#vs-node-why-row').hidden = !!n.retired; $('#vs-node-why').value = '';
+  $('#vs-node-empty-row').hidden = !!n.retired; $('#vs-node-empty').checked = false;
   const b = $('#vs-node-retire'); b.textContent = n.retired ? 'Read it again' : 'Retire this node \u2014 keep its ledger'; b._label = b.textContent;
   $('#vs-node-note').textContent = '';
 }
 $('#vs-node-retire').onclick = async () => {
   if (!vault || !vault.node) return;
-  const retired = !vault.node.retired, why = $('#vs-node-why').value.trim();
+  const retired = !vault.node.retired, why = $('#vs-node-why').value.trim(), empty = retired && $('#vs-node-empty').checked;
   try {
-    store = await invoke('node_retire', { name: vault.name, retired, why });
+    store = await invoke('node_retire', { name: vault.name, retired, why, empty });
     vault = store.vaults.find(v => v.name === vault.name) || vault; vault._snap = null; vault._node = null;
-    $('#vs-node-note').textContent = retired ? 'Retired. Its ledger is kept as last read.' : 'It will be read again on the next refresh.';
+    $('#vs-node-note').textContent = retired ? (empty ? 'Retired, holding nothing. Its ledger is kept, and what it could not explain is booked as an unaccounted row dated today.' : 'Retired. Its ledger is kept as last read.') : 'It will be read again on the next refresh.';
     renderVaultSettings(); paintVaultCard(); sync().catch(() => {});
   } catch (e) { $('#vs-node-note').textContent = String(e); }
 };

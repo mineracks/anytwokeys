@@ -228,6 +228,7 @@
             <dl class="tx-dl" id="vs-node-facts"></dl>
             <div class="muted" style="font-size:13px" id="vs-node-text"></div>
             <div class="field" id="vs-node-why-row"><label class="cap" for="vs-node-why">Why (kept with the record)</label><input id="vs-node-why" maxlength="200" placeholder="e.g. rebuilt under a new identity after the October incident"></div>
+            <label class="row" id="vs-node-empty-row" style="gap:8px;align-items:flex-start;font-size:13px"><input type="checkbox" id="vs-node-empty" style="margin-top:3px"><span>It holds nothing now. Its balance becomes zero and whatever its ledger cannot explain is booked as one unaccounted row, dated today, with the reason above — for a node that was emptied by someone else holding its keys.</span></label>
             <div class="row" style="gap:10px;align-items:flex-end;flex-wrap:wrap"><button class="btn small" id="vs-node-retire">Retire this node — keep its ledger</button><button class="btn small" id="vs-node-import">Add its ledger from a file…</button></div>
             <details class="muted" style="font-size:13px"><summary>Making the file</summary>
               <p>On a machine that can reach the node — a restored backup kept off the network, say — save the node’s own answers as one JSON object. Rows already here are replaced by the file’s reading of them; rows the file does not hold are kept. The file must be from this node: one that names another identity is refused.</p>

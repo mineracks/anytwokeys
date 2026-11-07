@@ -21,6 +21,42 @@ What a node once said about money that moved is evidence. So:
 - A node that answers under a **different identity** is refused ("a different identity answered"): a rebuilt node is a
   new vault, and the old vault stays as the record of the old node.
 
+## The node's balance is the authority; the gap is booked
+
+A ledger built from what the node's bookkeeper saw cannot see money that left **without** it: channels closed by someone
+else holding the keys, coins swept by another instance of the wallet, a database rolled back so the node forgets a spend.
+So on every read, and on every import that carries a balance (`listfunds`, `walletbalance`, `listchannels`), the node's
+reported balance — on-chain + channels + pending — is taken as the truth and the ledger is **reconciled** to it
+(`node::reconcile`): if the rows do not sum to what the node holds, one row of kind **unaccounted** (layer `node`) is
+booked for the difference, dated at the read (or at the newest event of an import), with a memo saying why. A later read
+that explains the gap removes the row; a wider gap books a wider row. Nothing the node said is altered to fit.
+
+Retiring a node with **"It holds nothing now"** does the same by the person's word: the balance becomes zero and the gap
+is booked today with the reason given. That is the close-out for a node that was emptied by an attacker.
+
+## Where the money went
+
+Every row that left on the chain or closed a channel carries the transaction's outputs — address and sats — read from
+the transaction itself (`node_destinations`, through the chain cache; LND's `output_details` when it gives them). For a
+channel the node's wallet never saw closed (a cooperative close signed by someone else), a **close** row is made from
+`closedchannels` with the closing transaction, its outputs and the block's time, and a memo saying none of the outputs
+paid this node's wallet. The transaction sheet shows them under **To**: that is the evidence for the books and for a
+report to police or an exchange.
+
+What this cannot give: the per-channel balance the moment before a close that happened after the backup was taken. The
+backup knows the channel's state at backup time; the closing transaction knows where the money went; the difference
+between them is what left. If a reading of the channel just before the close is wanted, the backup has to be restored
+and `listchannels` read **before** it syncs.
+
+## Stolen and lost coins in the books
+
+A row that left a vault has a **What was this?** picker in its transaction sheet (also asked at Send). Two kinds are for
+incidents: **Stolen** and **Lost**. Both are a disposal for nothing — proceeds nil, the loss is the whole cost of the
+coins under the vault's cost method — and are shown as a capital loss. In Australia that is CGT event C1 (loss or
+destruction of a CGT asset), claimed in the year the loss is discovered, with the evidence kept: the row, the
+transaction, the addresses the coins went to, the report made. The unaccounted row of a drained node takes the same
+picker, so a whole incident can be booked as one loss once the node is retired as empty.
+
 ## Retiring a node
 
 Vault settings → *The node* → **Retire this node — keep its ledger**, with a reason that is kept with the record. A retired
@@ -50,8 +86,12 @@ base64):
 { "getinfo": $(lncli getinfo), "listchaintxns": $(lncli listchaintxns),
   "listinvoices": $(lncli listinvoices --max_invoices 100000), "listpayments": $(lncli listpayments --max_payments 100000),
   "fwdinghistory": $(lncli fwdinghistory --start_time 1 --max_events 50000),
-  "listchannels": $(lncli listchannels), "closedchannels": $(lncli closedchannels), "pendingchannels": $(lncli pendingchannels) }
+  "listchannels": $(lncli listchannels), "closedchannels": $(lncli closedchannels), "pendingchannels": $(lncli pendingchannels),
+  "walletbalance": $(lncli walletbalance), "channelbalance": $(lncli channelbalance) }
 ```
+
+Include the balance keys (`walletbalance` / `channelbalance` for LND, `listfunds` for Core Lightning) when the file is a
+read of a node **after** an incident: they are what the ledger is reconciled against.
 
 **Restoring a node from a backup to read it: keep it off the network.** An old channel state that reaches a peer is
 penalised. Give the restored machine no route except to its bitcoind (the daemons need the chain to start), read it
