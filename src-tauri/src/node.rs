@@ -553,6 +553,17 @@ mod tests {
         let hashed = ln.iter().filter(|e| e.hash.len() == 64).count();
         assert!(hashed * 20 >= ln.len() * 19, "{hashed} of {} Lightning events name their payment hash (a channel push has none)", ln.len());
     }
+    /// A real ledger file, when one is named: A2K_LEDGER_FILE=path cargo test --lib node::a_real_ledger_file -- --ignored --nocapture
+    #[test] #[ignore]
+    fn a_real_ledger_file_parses_and_its_rows_are_counted() {
+        let p = std::env::var("A2K_LEDGER_FILE").expect("A2K_LEDGER_FILE");
+        let (kind, pk, ev) = ledger_from_file(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        let mut kinds: std::collections::BTreeMap<String, (usize, i64)> = Default::default();
+        for e in &ev { let k = kinds.entry(format!("{}/{}", e.layer, e.kind)).or_default(); k.0 += 1; k.1 += e.net; }
+        println!("{kind} {pk} rows {} first {} last {}", ev.len(), ev.first().map(|e| e.time).unwrap_or(0), ev.last().map(|e| e.time).unwrap_or(0));
+        for (k, (n, net)) in kinds { println!("  {k:22} {n:6} rows  net {net:>12} sats"); }
+    }
+
     #[test]
     fn a_ledger_file_is_read_as_the_node_would_be_read() {
         // Core Lightning: bkpr-listincome saved as-is, with getinfo beside it
