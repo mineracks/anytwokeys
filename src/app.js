@@ -1638,36 +1638,77 @@ async function vaultReport() {
     toast('Saved ' + path, 5000);
   } catch (e) { if (!/cancelled/.test(String(e))) fail(e); }
 }
-document.addEventListener('click', (e) => { if (e.target.closest('[data-vault-report]')) vaultReport(); if (e.target.closest('[data-loss-report]')) lossReport(); });
-/// Financial years in which this vault disposed of coins, newest first: Australian years (1 July to 30 June) when the
-/// vault is priced in AUD, calendar years otherwise. Each is [label, from, to] in seconds.
-function fiscalYears(name) {
-  const L = vaultLedger(name), f = txFacts[name]; if (!L || !f) return [];
-  const au = f.ccy === 'AUD';
-  const yearOf = (t) => { const d = new Date(t * 1000); const y = d.getFullYear(); return au ? (d.getMonth() >= 6 ? y + 1 : y) : y; };   // AU: the year it ENDS in
-  const span = (y) => au ? [`${y - 1}\u2013${String(y).slice(2)}`, Date.UTC(y - 1, 6, 1) / 1000 - 10 * 3600, Date.UTC(y, 6, 1) / 1000 - 10 * 3600 - 1] : [String(y), Date.UTC(y, 0, 1) / 1000, Date.UTC(y + 1, 0, 1) / 1000 - 1];
-  const years = [...new Set(Object.values(L.realised).filter(r => r.t).map(r => yearOf(r.t)))].sort((a, b) => b - a);
-  return years.map(span);
-}
-/// The capital-gains report of one vault for one financial year: every disposal in the year — what left, what it
-/// fetched, what it had cost, the gain or loss, and whether the coins had been held over twelve months — with the
-/// year's totals split the way a return wants them. Figures for the accountant, not advice: the method is named, the
-/// unknowns are listed, and the discount is explained rather than applied.
-async function cgtReport(name, [label, from, to]) {
-  const f = txFacts[name], L = vaultLedger(name), ccy = f.ccy, m = methodFor(vault);
-  if (!ccy) { toast('This vault has no currency: set one in App settings first.'); return; }
-  const dateOf = (t) => new Date(t * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
-  const seen = new Set(), rows = [];
-  for (const [id, r] of Object.entries(L.realised)) {
-    if (!r.t || r.t < from || r.t > to || r.moved || seen.has(r)) continue; seen.add(r);   // one disposal can sit under several ids (its legs)
-    const row = f.rows[id] || {};
-    // per lot: the gain on the part of the disposal that came from that lot, and whether that lot was over twelve months old
-    const lots = (r.lots || []).map(l => { const share = r.sats > 0 ? l.sats / r.sats : 0, proceeds = r.proceeds === null ? null : r.proceeds * share;
-      return { sats: l.sats, cost: l.cost, proceeds, gain: l.cost === null || proceeds === null ? null : proceeds - l.cost, long: l.t === null ? null : (r.t - l.t) >= 365 * 86400 }; });
-    rows.push({ id, r, row, lots, txid: row.txid || id });
+document.addEventListener('click', (e) => { if (e.target.closest('[data-vault-report]')) vaultReport(); });
+
+// ---------- reports across vaults: one vault, an entity's vaults, or every vault ----------
+// A return is about one entity, and the treatment differs by what it is: a person or a trust gets the 50% CGT
+// discount, a super fund one third, a company none. So a report takes a SCOPE — which vaults, and for whom.
+const TAX_NOTES = {
+  person: 'For an individual: capital losses (this year’s, then those carried forward) are set against capital gains first, in the order the taxpayer chooses; the 50% CGT discount then applies to what remains of gains on coins held over twelve months. A net capital loss carries forward and never offsets ordinary income.',
+  trust:  'For a trust: the trust works out the net capital gain the same way as an individual — losses first, then the 50% discount on gains from coins held over twelve months — and the discounted gain is distributed to beneficiaries, who gross it up and apply their own discount.',
+  company: 'For a company: there is NO CGT discount. Capital losses offset capital gains (and carry forward subject to the continuity-of-ownership or business-continuity tests); the net capital gain is taxed at the company rate. The "over 12 months" split below is kept for the record only.',
+  smsf:   'For a self-managed super fund: losses first, then a one-third discount on gains from assets held over twelve months; the net gain is taxed at 15% in accumulation phase and is exempt to the extent the assets support retirement-phase pensions. The trustee’s actuary or accountant decides the split.',
+  other:  'Losses are set against gains first; any discount depends on who the taxpayer is. Give these figures to the entity’s accountant with the method named below.',
+};
+const taxNote = (ent) => TAX_NOTES[(ent && ent.kind) || 'other'] || TAX_NOTES.other;
+/// Activity for vaults that are not the open one: the same calls the Home page makes, without switching to each. A
+/// vault already loaded (same owner) is left alone; a reader-locked Spark vault or a node that will not answer is
+/// reported back, not fatal. Transfer links are refreshed once at the end so moves between the loaded vaults count.
+async function loadFacts(names, say) {
+  const failed = [];
+  for (const [i, name] of names.entries()) {
+    const v = store.vaults.find(x => x.name === name); if (!v) { failed.push([name, 'no such vault']); continue; }
+    if (txFacts[name] && txFacts[name].owner === factOwner(v)) continue;
+    if (say) say(`Reading ${name}… (${i + 1} of ${names.length})`);
+    try {
+      const s = v._snap && v._snapFor === liveKey(v) ? v._snap : await invoke('vault_sync', { name });
+      v._snap = s; v._snapFor = liveKey(v);
+      const a = await invoke('vault_activity', { name, history: s.history.map(h => [h.txid, h.height]), ccy: s.servers && v.network === 'mainnet' ? fiatCcy() : '' });
+      keepActivity(name, a); txFacts[name].history = s.history.map(h => [h.txid, h.height]);
+    } catch (e) { failed.push([name, String(e)]); }
   }
-  rows.sort((a, b) => a.r.t - b.r.t);
-  if (!rows.length) { toast(`No disposals in ${label} for this vault.`); return; }
+  await refreshTransferLinks();
+  return failed;
+}
+/// The scope of a report: its title, the vault names, and the entity (if one) it is for.
+const scopeOfVault = (v) => ({ title: v.name, names: [v.name], entity: entityOf(v.entity), one: v });
+const scopeOfEntity = (e) => ({ title: e.name, names: vaultsOf(e.id).map(v => v.name), entity: e });
+const scopeOfAll = () => ({ title: 'All vaults', names: store.vaults.filter(v => v.network === 'mainnet').map(v => v.name), entity: null });
+const scopeWords = (sc) => sc.one ? `${sc.one.name} · ${sc.one.node ? `a ${sc.one.node.kind === 'cln' ? 'Core Lightning' : 'LND'} node` : sc.one.network}${sc.entity ? ` · owned by ${sc.entity.name} (${kindWord(sc.entity.kind)})` : ''}` : sc.entity ? `${sc.entity.name} · ${kindWord(sc.entity.kind)} · ${sats(sc.names.length)} vault${sc.names.length === 1 ? '' : 's'}: ${sc.names.join(', ')}` : `${sats(sc.names.length)} vaults: ${sc.names.join(', ')}`;
+/// Financial years in which the scope disposed of coins, newest first: Australian years (1 July to 30 June) when
+/// priced in AUD, calendar years otherwise. Each is [label, from, to] in seconds.
+function fiscalYears(sc) {
+  const au = fiatCcy() === 'AUD';
+  const yearOf = (t) => { const d = new Date(t * 1000); const y = d.getFullYear(); return au ? (d.getMonth() >= 6 ? y + 1 : y) : y; };   // AU: the year it ENDS in
+  const span = (y) => au ? [`${y - 1}–${String(y).slice(2)}`, Date.UTC(y - 1, 6, 1) / 1000 - 10 * 3600, Date.UTC(y, 6, 1) / 1000 - 10 * 3600 - 1] : [String(y), Date.UTC(y, 0, 1) / 1000, Date.UTC(y + 1, 0, 1) / 1000 - 1];
+  const ys = new Set();
+  for (const n of sc.names) { const L = vaultLedger(n); if (L) for (const r of Object.values(L.realised)) if (r.t && !r.moved) ys.add(yearOf(r.t)); }
+  return [...ys].sort((a, b) => b - a).map(span);
+}
+/// Every disposal in the scope between `from` and `to`, each once (a disposal sits under several ids — its legs — and
+/// the same transaction can be seen from two vaults of the scope: it is counted from the vault it LEFT).
+function disposalsIn(sc, from, to) {
+  const seen = new Set(), out = [];
+  for (const name of sc.names) {
+    const f = txFacts[name], L = vaultLedger(name); if (!f || !L) continue;
+    for (const [id, r] of Object.entries(L.realised)) {
+      if (!r.t || r.t < from || r.t > to || r.moved || seen.has(r)) continue; seen.add(r);
+      const row = f.rows[id] || {};
+      const lots = (r.lots || []).map(l => { const share = r.sats > 0 ? l.sats / r.sats : 0, proceeds = r.proceeds === null ? null : r.proceeds * share;
+        return { sats: l.sats, cost: l.cost, proceeds, gain: l.cost === null || proceeds === null ? null : proceeds - l.cost, long: l.t === null ? null : (r.t - l.t) >= 365 * 86400 }; });
+      out.push({ id, r, row, lots, txid: row.txid || id, vault: name });
+    }
+  }
+  return out.sort((a, b) => a.r.t - b.r.t);
+}
+/// The capital-gains report for one financial year: every disposal in the scope — what left, what it fetched, what it
+/// had cost, the gain or loss, and whether the coins had been held over twelve months — with the year's totals split
+/// the way a return wants them and the treatment for THIS entity stated. Figures for the accountant, not advice.
+async function cgtReport(sc, [label, from, to]) {
+  const ccy = fiatCcy(); if (!ccy) { toast('No currency is set: choose one in App settings first.'); return; }
+  const dateOf = (t) => new Date(t * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+  const rows = disposalsIn(sc, from, to);
+  if (!rows.length) { toast(`No disposals in ${label} for ${sc.title}.`); return; }
   const sum = (xs, k) => xs.reduce((a, x) => a + (x[k] || 0), 0);
   const known = rows.filter(x => x.r.gain !== null), unknown = rows.filter(x => x.r.gain === null);
   const allLots = known.flatMap(x => x.lots.filter(l => l.gain !== null));
@@ -1675,95 +1716,117 @@ async function cgtReport(name, [label, from, to]) {
   const losses = -sum(allLots.filter(l => l.gain < 0), 'gain');
   const stolen = known.filter(x => x.r.kind === 'stolen' || x.r.kind === 'lost'), stolenLoss = sum(stolen.map(x => ({ v: -x.r.gain })), 'v');
   const net = sum(known.map(x => ({ v: x.r.gain })), 'v');
-  const au = ccy === 'AUD';
+  const au = ccy === 'AUD', kind = (sc.entity && sc.entity.kind) || '';
+  const discount = kind === 'company' ? 'no discount for a company' : kind === 'smsf' ? 'one-third discount for a super fund, after losses' : 'eligible for the 50% CGT discount, after losses';
+  const methods = [...new Set(sc.names.map(n => methodFor(store.vaults.find(v => v.name === n))))];
   const blocks = [{ kind: 'facts', rows: [
-    ['Vault', `${name} · ${vault.node ? `a ${vault.node.kind === 'cln' ? 'Core Lightning' : 'LND'} node` : vault.network}`],
+    ['For', scopeWords(sc)],
     ['Year', `${au ? 'Australian financial year ' : 'Calendar year '}${label} · ${dateOf(from)} to ${dateOf(to)}`],
-    ['Method', `${COST_METHODS[m].name} — ${COST_METHODS[m].short}`],
+    ['Method', methods.map(m => `${COST_METHODS[m].name} — ${COST_METHODS[m].short}`).join('; ')],
     ['Disposals', `${sats(rows.length)} · ${sats(Math.round(sum(rows.map(x => ({ v: x.r.sats })), 'v')))} sats left${unknown.length ? ` · ${sats(unknown.length)} of unknown cost, listed apart` : ''}`],
     ['Proceeds', money(sum(known.map(x => ({ v: x.r.proceeds })), 'v'), ccy)],
     ['Cost of the coins', money(sum(known.map(x => ({ v: x.r.cost })), 'v'), ccy)],
-    ['Gains, coins held over 12 months', `${money(longGain, ccy)}${au ? ' — eligible for the 50% CGT discount for an individual or a trust (not a company), applied after losses' : ''}`],
+    ['Gains, coins held over 12 months', `${money(longGain, ccy)}${au ? ' — ' + discount : ''}`],
     ['Gains, coins held 12 months or less', money(shortGain, ccy)],
     ['Capital losses', `${money(losses, ccy)}${stolen.length ? ` — of which ${money(stolenLoss, ccy)} stolen or lost (${sats(stolen.length)} row${stolen.length === 1 ? '' : 's'}, CGT event C1)` : ''}`],
     ['Net, before any discount', `${net >= 0 ? '+' : '−'}${money(Math.abs(net), ccy)}`],
   ] }];
-  blocks.push({ kind: 'para', text: `${au ? 'How a return reads this: capital losses are set against capital gains first (the taxpayer chooses which); the 50% discount then applies to what remains of gains on assets held over twelve months, for an individual or a trust. A net loss carries forward to later years and never offsets ordinary income. ' : ''}Each disposal is dated by its block; proceeds are the market price that day applied to the coins that left (a sale\u2019s own price, if the exchange statement gives one, is on that row); cost is what those coins were worth when received, by the method named. "Over 12 months" is judged lot by lot, from the day each lot of coins was received.` });
+  blocks.push({ kind: 'para', text: `${au ? taxNote(sc.entity) + ' ' : ''}Each disposal is dated by its block; proceeds are the market price that day applied to the coins that left (a sale’s own price, if an exchange statement gives one, is on that row); cost is what those coins were worth when received, by the method named. "Over 12 months" is judged lot by lot, from the day each lot of coins was received. Moves between the vaults of this report are not disposals and are left out.` });
   blocks.push({ kind: 'heading', text: `Disposals (${rows.length})` });
-  blocks.push({ kind: 'facts', rows: rows.map(x => { const r = x.r, kind = r.kind === 'stolen' || r.kind === 'lost' ? r.kind : r.kind === 'sold' ? 'sold' : r.kind === 'spent' ? 'spent' : r.kind === 'gift' ? 'gift' : 'disposal';
+  blocks.push({ kind: 'facts', rows: rows.map(x => { const r = x.r, what = ['stolen', 'lost', 'sold', 'spent', 'gift'].includes(r.kind) ? r.kind : 'disposal';
     const longs = x.lots.filter(l => l.long === true).reduce((a, l) => a + l.sats, 0), hold = r.from ? (longs >= r.sats - 1 ? 'all over 12 months' : longs > 0 ? `${sats(Math.round(longs))} sats over 12 months` : '12 months or less') : 'holding period not known';
-    return [dateOf(r.t), `${sats(Math.round(r.sats))} sats ${kind} · ${x.txid.length === 64 ? x.txid : x.txid.slice(0, 24)}${r.gain === null ? ` · ${r.cost === null ? 'cost not known for some of the coins' : 'no price for the day'}` : ` · proceeds ${money(r.proceeds, ccy)} · cost ${money(r.cost, ccy)} · ${r.gain >= 0 ? 'gain +' : 'loss −'}${money(Math.abs(r.gain), ccy)}`} · ${hold}`]; }) });
+    return [dateOf(r.t), `${sc.names.length > 1 ? x.vault + ' · ' : ''}${sats(Math.round(r.sats))} sats ${what} · ${x.txid.length === 64 ? x.txid : x.txid.slice(0, 24)}${r.gain === null ? ` · ${r.cost === null ? 'cost not known for some of the coins' : 'no price for the day'}` : ` · proceeds ${money(r.proceeds, ccy)} · cost ${money(r.cost, ccy)} · ${r.gain >= 0 ? 'gain +' : 'loss −'}${money(Math.abs(r.gain), ccy)}`} · ${hold}`]; }) });
   if (unknown.length) blocks.push({ kind: 'para', text: `${sats(unknown.length)} disposal${unknown.length === 1 ? '' : 's'} above ${unknown.length === 1 ? 'has' : 'have'} no gain figure: the coins came from a deposit whose cost this app does not know (received before the vault was watched, or from a wallet it cannot see), or there is no price for the day. Give those a cost on the row that received them, and this report settles.` });
-  blocks.push({ kind: 'para', text: `This is a record drawn from the chain and the vault\u2019s ledger, for an accountant or a return; it is not tax advice. ${COST_METHODS[m].note}` });
-  const path = await invoke('report_pdf', { title: `${name} \u2014 capital gains ${label}`, subtitle: `${sats(rows.length)} disposal${rows.length === 1 ? '' : 's'} · net ${net >= 0 ? '+' : '−'}${money(Math.abs(net), ccy)} before discount · printed ${new Date().toLocaleDateString()}`, blocks, file: `${name}-cgt-${label.replace('\u2013', '-')}` });
+  blocks.push({ kind: 'para', text: `This is a record drawn from the chain and the vaults’ ledgers, for an accountant or a return; it is not tax advice. ${methods.map(m => COST_METHODS[m].note).join(' ')}` });
+  const file = `${sc.title}-cgt-${label.replace('–', '-')}`;
+  const path = await invoke('report_pdf', { title: `${sc.title} — capital gains ${label}`, subtitle: `${sats(rows.length)} disposal${rows.length === 1 ? '' : 's'} · net ${net >= 0 ? '+' : '−'}${money(Math.abs(net), ccy)} before discount · printed ${new Date().toLocaleDateString()}`, blocks, file });
   toast('Saved ' + path, 6000);
 }
-// the CGT button shows the years to choose from; a year makes the report
-document.addEventListener('click', async (e) => {
-  const b = e.target.closest('[data-cgt-report]'); const o = e.target.closest('#cgt-years .opt');
-  if (b && vault) {
-    try { if (!vault._snap) await sync(); if (!txFacts[vault.name]) await fillActivity(vault.name, vault._snap); } catch (err) { fail(err); return; }
-    const ys = fiscalYears(vault.name), box = $('#cgt-years');
-    if (!ys.length) { toast('Nothing has left this vault yet, so there is no gain or loss to report.'); return; }
-    box.innerHTML = ys.map(y => `<div class="opt" data-y="${y[1]}">${y[0]}</div>`).join(''); box.hidden = !box.hidden; return;
+/// Rows in the scope marked stolen or lost, oldest first, with what each ledger knows of them.
+function lossRows(sc) {
+  const out = [], seen = new Set();
+  for (const name of sc.names) {
+    const L = vaultLedger(name), f = txFacts[name]; if (!L || !f) continue;
+    for (const [id, r] of Object.entries(L.realised)) if ((r.kind === 'stolen' || r.kind === 'lost') && f.rows[id] && r.sats > 0 && !seen.has(r)) { seen.add(r); out.push({ id, r, row: f.rows[id], vault: name }); }
   }
-  if (o && vault) { const y = fiscalYears(vault.name).find(x => String(x[1]) === o.dataset.y); $('#cgt-years').hidden = true; if (y) { try { await cgtReport(vault.name, y); } catch (err) { if (!/cancelled/.test(String(err))) fail(err); } } }
-});
-/// Rows of this vault marked stolen or lost, oldest first, with what the ledger knows of each.
-function lossRows(name) {
-  const L = vaultLedger(name), f = txFacts[name]; if (!L || !f) return [];
-  return Object.entries(L.realised).filter(([id, r]) => (r.kind === 'stolen' || r.kind === 'lost') && f.rows[id] && r.sats > 0)
-    .map(([id, r]) => ({ id, r, row: f.rows[id] })).sort((a, b) => (a.row.time || 0) - (b.row.time || 0));
+  return out.sort((a, b) => (a.row.time || 0) - (b.row.time || 0));
 }
-/// The stolen-and-lost report of one vault: every row marked stolen or lost, with its transaction, where the coins
+/// The stolen-and-lost report: every row marked stolen or lost in the scope, with its transaction, where the coins
 /// went (from the transaction itself), what they were worth as they left, what they had cost, and the loss — laid out
-/// for a report to police or an exchange and for the capital-loss claim. Evidence, not opinion: nothing here is
-/// inferred that the chain or the node's ledger does not say.
-async function lossReport() {
-  if (!vault) return;
-  const name = vault.name;
-  try {
-    if (!vault._snap) await sync();
-    if (!txFacts[name]) await fillActivity(name, vault._snap);
-    const f = txFacts[name], L = vaultLedger(name), ccy = f.ccy, m = methodFor(vault), rows = lossRows(name);
-    if (!rows.length) { toast('Nothing in this vault is marked stolen or lost. Open a row that left and say what it was.', 6000); return; }
-    const dateOf = (t) => new Date(t * 1000).toLocaleString(undefined, { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' });
-    const totalSats = rows.reduce((a, x) => a + x.r.sats, 0), known = rows.filter(x => x.r.cost !== null), totalCost = known.reduce((a, x) => a + x.r.cost, 0);
-    const worthThen = rows.reduce((a, x) => a + (x.row.quote ? x.r.sats / 1e8 * x.row.quote.price : 0), 0), anyQuote = rows.some(x => x.row.quote);
-    const blocks = [{ kind: 'facts', rows: [
-      ['Vault', `${esc(name)} · ${vault.node ? `a ${vault.node.kind === 'cln' ? 'Core Lightning' : 'LND'} node, identity ${vault.node.pubkey}` : vault.network}`],
-      ['Prepared', dateOf(Math.floor(Date.now() / 1000))],
-      ['Rows', `${sats(rows.length)} — ${sats(rows.filter(x => x.r.kind === 'stolen').length)} stolen, ${sats(rows.filter(x => x.r.kind === 'lost').length)} lost`],
-      ['Coins gone', `${sats(Math.round(totalSats))} sats${anyQuote && ccy ? ` · worth ${money(worthThen, ccy)} as they left` : ''}`],
-      ccy ? ['Their cost', `${money(totalCost, ccy)}${known.length < rows.length ? ` for ${sats(known.length)} of the ${sats(rows.length)} rows; the rest have coins of unknown cost` : ''} · by ${COST_METHODS[m].name.toLowerCase()}`] : null,
-      ccy ? ['Capital loss', `${money(totalCost, ccy)}${known.length < rows.length ? ' at least' : ''} — nothing was received for the coins, so the loss is their whole cost`] : null,
-    ].filter(Boolean) }];
-    blocks.push({ kind: 'para', text: 'Each row below is a transaction in which coins left this vault without the owner\u2019s consent (stolen) or beyond anyone\u2019s reach (lost). The transaction id, the block and the addresses the coins went to are read from the Bitcoin chain and can be checked by anyone with a block explorer. The amounts in ' + (ccy || 'fiat') + ' are the market price on the day, applied to the coins; the cost is what those coins were worth when they were received, as the vault\u2019s ledger records.' });
-    for (const x of rows) {
-      const e = vault.node ? nodeRow(x.id) : null;
-      let to = e ? (e.to || []) : [];
-      if (!e && x.row.txid) { try { const d = await invoke('tx_detail', { name, txid: x.row.txid, height: (f.history || []).find(h => h[0] === x.row.txid)?.[1] || 0 }); to = (d.outputs || []).filter(o => o.ours === null).map(o => [o.address || o.kind, o.sats]); } catch {} }
-      blocks.push({ kind: 'heading', text: `${x.row.time ? dateOf(x.row.time) : 'not in a block'} \u2014 ${sats(Math.round(x.r.sats))} sats ${x.r.kind}` });
-      const facts = [
-        ['Transaction', e && !e.txid ? (e.kind === 'unaccounted' ? 'none: this row is the difference between what the node holds and what its ledger explains — money that left without the node\u2019s bookkeeper seeing it go (channels closed by someone else holding the keys, coins swept by another copy of the wallet)' : `Lightning · payment hash ${e.hash || '—'}`) : (x.row.txid || x.id)],
-        e ? ['Layer', `${nodeLayer(e)} · ${e.kind}`] : null,
-        to.length ? ['Where the coins went', to.map(([a, v]) => `${a}  ${sats(v)} sats`).join('\n')] : (e && e.txid ? ['Where the coins went', 'not read from the chain yet: refresh this vault and save the report again'] : null),
-        x.row.quote && ccy ? ['Worth as they left', `${money(x.r.sats / 1e8 * x.row.quote.price, ccy)} at ${money(x.row.quote.price, ccy)} per BTC`] : null,
-        ccy ? ['Cost of the coins', x.r.cost === null ? 'not known for some of them' : `${money(x.r.cost, ccy)}${x.r.from ? ` · received ${x.r.from === x.r.to ? 'on ' + new Date(x.r.from * 1000).toLocaleDateString() : 'between ' + new Date(x.r.from * 1000).toLocaleDateString() + ' and ' + new Date(x.r.to * 1000).toLocaleDateString()}` : ''}`] : null,
-        ccy ? ['Loss', x.r.cost === null ? 'at least the part of known cost' : `${money(x.r.cost, ccy)} — proceeds nil`] : null,
-        e && e.memo ? ['Memo', e.memo] : null,
-        labelOf('tx:' + x.id) ? ['Label', labelOf('tx:' + x.id)] : null,
-        (vault.notes || {})['tx:' + x.id] ? ['Note', (vault.notes || {})['tx:' + x.id]] : null,
-      ].filter(Boolean);
-      blocks.push({ kind: 'facts', rows: facts });
-    }
-    blocks.push({ kind: 'heading', text: 'For the tax return' });
-    blocks.push({ kind: 'para', text: `In Australia, coins stolen or lost are CGT event C1 (loss or destruction of a CGT asset). The capital proceeds are nil, so the capital loss is the cost base of the coins — ${ccy ? money(totalCost, ccy) : 'as above'}${known.length < rows.length ? ' at least' : ''} here — claimed in the income year the loss is discovered, and only against capital gains. The ATO asks for evidence that the coins existed and were yours (this vault\u2019s ledger and the transactions above), that they are gone (the addresses they went to, which you do not control), and that you took steps to recover them (the police or exchange report; keep its reference with this document). In the United States a theft loss on personal-use property is not deductible for 2018 to 2025 under TCJA; the figures above still give the basis that leaves the books.` });
-    blocks.push({ kind: 'para', text: `Cost by ${COST_METHODS[m].name.toLowerCase()}: ${COST_METHODS[m].note}` });
-    const path = await invoke('report_pdf', { title: `${name} \u2014 stolen and lost`, subtitle: `${sats(rows.length)} row${rows.length === 1 ? '' : 's'} · ${sats(Math.round(totalSats))} sats · printed ${new Date().toLocaleDateString()}`, blocks, file: `${name}-stolen-and-lost` });
-    toast('Saved ' + path, 6000);
-  } catch (e) { if (!/cancelled/.test(String(e))) fail(e); }
+/// for a report to police or an exchange and for the capital-loss claim. Evidence, not opinion.
+async function lossReport(sc) {
+  const ccy = fiatCcy(), rows = lossRows(sc);
+  if (!rows.length) { toast(`Nothing in ${sc.title} is marked stolen or lost. Open a row that left and say what it was.`, 6000); return; }
+  const dateOf = (t) => new Date(t * 1000).toLocaleString(undefined, { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' });
+  const totalSats = rows.reduce((a, x) => a + x.r.sats, 0), known = rows.filter(x => x.r.cost !== null), totalCost = known.reduce((a, x) => a + x.r.cost, 0);
+  const worthThen = rows.reduce((a, x) => a + (x.row.quote ? x.r.sats / 1e8 * x.row.quote.price : 0), 0), anyQuote = rows.some(x => x.row.quote);
+  const blocks = [{ kind: 'facts', rows: [
+    ['For', scopeWords(sc)],
+    ['Prepared', dateOf(Math.floor(Date.now() / 1000))],
+    ['Rows', `${sats(rows.length)} — ${sats(rows.filter(x => x.r.kind === 'stolen').length)} stolen, ${sats(rows.filter(x => x.r.kind === 'lost').length)} lost`],
+    ['Coins gone', `${sats(Math.round(totalSats))} sats${anyQuote && ccy ? ` · worth ${money(worthThen, ccy)} as they left` : ''}`],
+    ccy ? ['Their cost', `${money(totalCost, ccy)}${known.length < rows.length ? ` for ${sats(known.length)} of the ${sats(rows.length)} rows; the rest have coins of unknown cost` : ''}`] : null,
+    ccy ? ['Capital loss', `${money(totalCost, ccy)}${known.length < rows.length ? ' at least' : ''} — nothing was received for the coins, so the loss is their whole cost`] : null,
+  ].filter(Boolean) }];
+  blocks.push({ kind: 'para', text: 'Each row below is a transaction in which coins left without the owner’s consent (stolen) or beyond anyone’s reach (lost). The transaction id, the block and the addresses the coins went to are read from the Bitcoin chain and can be checked by anyone with a block explorer. The amounts in ' + (ccy || 'fiat') + ' are the market price on the day, applied to the coins; the cost is what those coins were worth when they were received, as the vault’s ledger records.' });
+  for (const x of rows) {
+    const v = store.vaults.find(y => y.name === x.vault), f = txFacts[x.vault];
+    const e = v && v.node ? ((v.node.events || []).find(ev => ev.id === x.id) || null) : null;
+    let to = e ? (e.to || []) : [];
+    if (!e && x.row.txid) { try { const d = await invoke('tx_detail', { name: x.vault, txid: x.row.txid, height: (f.history || []).find(h => h[0] === x.row.txid)?.[1] || 0 }); to = (d.outputs || []).filter(o => o.ours === null).map(o => [o.address || o.kind, o.sats]); } catch {} }
+    blocks.push({ kind: 'heading', text: `${x.row.time ? dateOf(x.row.time) : 'not in a block'} — ${sats(Math.round(x.r.sats))} sats ${x.r.kind}${sc.names.length > 1 ? ` — ${x.vault}` : ''}` });
+    const lab = (v && v.labels || {})['tx:' + x.id] || '', note = (v && v.notes || {})['tx:' + x.id] || '';
+    blocks.push({ kind: 'facts', rows: [
+      ['Transaction', e && !e.txid ? (e.kind === 'unaccounted' ? 'none: this row is the difference between what the node holds and what its ledger explains — money that left without the node’s bookkeeper seeing it go (channels closed by someone else holding the keys, coins swept by another copy of the wallet)' : `Lightning · payment hash ${e.hash || '—'}`) : (x.row.txid || x.id)],
+      e ? ['Layer', `${nodeLayer(e)} · ${e.kind}`] : null,
+      to.length ? ['Where the coins went', to.map(([a, s_]) => `${a}  ${sats(s_)} sats`).join('\n')] : (e && e.txid ? ['Where the coins went', 'not read from the chain yet: refresh this vault and save the report again'] : null),
+      x.row.quote && ccy ? ['Worth as they left', `${money(x.r.sats / 1e8 * x.row.quote.price, ccy)} at ${money(x.row.quote.price, ccy)} per BTC`] : null,
+      ccy ? ['Cost of the coins', x.r.cost === null ? 'not known for some of them' : `${money(x.r.cost, ccy)}${x.r.from ? ` · received ${x.r.from === x.r.to ? 'on ' + new Date(x.r.from * 1000).toLocaleDateString() : 'between ' + new Date(x.r.from * 1000).toLocaleDateString() + ' and ' + new Date(x.r.to * 1000).toLocaleDateString()}` : ''}`] : null,
+      ccy ? ['Loss', x.r.cost === null ? 'at least the part of known cost' : `${money(x.r.cost, ccy)} — proceeds nil`] : null,
+      e && e.memo ? ['Memo', e.memo] : null,
+      lab ? ['Label', lab] : null, note ? ['Note', note] : null,
+    ].filter(Boolean) });
+  }
+  blocks.push({ kind: 'heading', text: 'For the tax return' });
+  blocks.push({ kind: 'para', text: `In Australia, coins stolen or lost are CGT event C1 (loss or destruction of a CGT asset). The capital proceeds are nil, so the capital loss is the cost base of the coins — ${ccy ? money(totalCost, ccy) : 'as above'}${known.length < rows.length ? ' at least' : ''} here — claimed in the income year the loss is discovered, and only against capital gains. ${taxNote(sc.entity)} The ATO asks for evidence that the coins existed and were the entity’s (the ledgers and the transactions above), that they are gone (the addresses they went to, which the entity does not control), and that steps were taken to recover them (the police or exchange report; keep its reference with this document). In the United States a theft loss on personal-use property is not deductible for 2018 to 2025 under TCJA; the figures above still give the basis that leaves the books.` });
+  const path = await invoke('report_pdf', { title: `${sc.title} — stolen and lost`, subtitle: `${sats(rows.length)} row${rows.length === 1 ? '' : 's'} · ${sats(Math.round(totalSats))} sats · printed ${new Date().toLocaleDateString()}`, blocks, file: `${sc.title}-stolen-and-lost` });
+  toast('Saved ' + path, 6000);
 }
+/// The report buttons, wherever they sit: Home (this vault), an entity's page (its vaults), the entities page (all).
+/// Loading the scope's vaults first; the CGT button then shows the years to pick from under itself.
+function scopeFromButton(b) {
+  if (b.dataset.scope === 'entity') { const e = entityOf(b.dataset.id); return e ? scopeOfEntity(e) : null; }
+  if (b.dataset.scope === 'all') return scopeOfAll();
+  return vault ? scopeOfVault(vault) : null;
+}
+async function withScope(b, run) {
+  const sc = scopeFromButton(b); if (!sc) return;
+  if (!sc.names.length) { toast(`${sc.title} has no vaults yet.`); return; }
+  const was = b.textContent; b.disabled = true;
+  try {
+    const failed = await loadFacts(sc.names, (t) => { b.textContent = t; });
+    if (failed.length) toast(`Could not read ${failed.map(x => x[0]).join(', ')} — ${failed[0][1]}. The report covers the rest.`, 8000);
+    sc.names = sc.names.filter(n => txFacts[n]);
+    await run(sc);
+  } catch (e) { if (!/cancelled/.test(String(e))) fail(e); }
+  finally { b.disabled = false; b.textContent = was; }
+}
+document.addEventListener('click', async (e) => {
+  const loss = e.target.closest('[data-loss-report]'); if (loss) { withScope(loss, lossReport); return; }
+  const cgt = e.target.closest('[data-cgt-report]');
+  if (cgt) {
+    withScope(cgt, async (sc) => {
+      const ys = fiscalYears(sc); let box = cgt.parentElement.querySelector('.cgt-years');
+      if (!ys.length) { toast(`Nothing has left ${sc.title} yet, so there is no gain or loss to report.`); return; }
+      if (!box) { box = document.createElement('div'); box.className = 'pick tight cgt-years'; box.style.cssText = 'margin-top:8px;flex-basis:100%'; cgt.parentElement.appendChild(box); }
+      box.innerHTML = `<span class="label" style="align-self:center;margin-right:6px">Year</span>` + ys.map(y => `<div class="opt" data-y="${y[1]}">${y[0]}</div>`).join('');
+      box.hidden = false; box._scope = sc; box._years = ys;
+    });
+    return;
+  }
+  const o = e.target.closest('.cgt-years .opt');
+  if (o) { const box = o.closest('.cgt-years'), y = (box._years || []).find(x => String(x[1]) === o.dataset.y); box.hidden = true; if (y && box._scope) { try { await cgtReport(box._scope, y); } catch (err) { if (!/cancelled/.test(String(err))) fail(err); } } }
+});
 
 // ---------- one coin, or one address, as a page: vault › Coins › this coin ----------
 // The list steps aside for the page; ‹ › and the arrow keys walk the list in its order; the strip at the top is what
@@ -2391,7 +2454,7 @@ async function renderSummary(box, names, opts = {}) {
   box.append(tg, tw);
 }
 function renderHomeSummary() {
-  { const b = $('[data-loss-report]'); if (b) b.hidden = !(vault && txFacts[vault.name] && lossRows(vault.name).length); } if (vault && $('#s-home').classList.contains('on')) renderSummary($('#home-summary'), [vault.name]); }
+  { const b = $('#s-home [data-loss-report]'); if (b) b.hidden = !(vault && txFacts[vault.name] && lossRows(scopeOfVault(vault)).length); } if (vault && $('#s-home').classList.contains('on')) renderSummary($('#home-summary'), [vault.name]); }
 
 // ---------- all vaults: the same view, of everything that has a price ----------
 // why a vault's history could not be read just now, in the words the person needs
@@ -4022,6 +4085,8 @@ function renderEntity() {
       <div class="tp-list" style="margin-top:0">${vs.length ? vs.map(v => `<div class="tp rowpick" data-go-vault="${esc(v.name)}" role="link" tabindex="0"><div class="tp-what"><div class="tp-head"><b>${esc(v.name)}</b> <span class="muted">· ${esc(kindOfVault(v))}${v.network !== 'mainnet' ? ' · ' + esc(v.network) : ''}</span></div></div><div class="tp-act"><button type="button" class="linkish" data-disown="${esc(v.name)}">Not its owner</button></div></div>`).join('') : '<div class="muted" style="font-size:13px">No vault yet. Claim one from the list below, or from its Vault settings.</div>'}</div>
       ${(() => { const un = store.vaults.filter(v => !v.entity || !entityOf(v.entity)); return `<details class="adv" id="ent-unowned" style="margin-top:8px"${vs.length ? '' : ' open'}><summary>Vaults with no owner yet · ${sats(un.length)}</summary><div class="tp-list" style="margin-top:8px">${un.length ? un.map(v => `<div class="tp"><div class="tp-what"><div class="tp-head"><b>${esc(v.name)}</b> <span class="muted">· ${esc(kindOfVault(v))}${v.network !== 'mainnet' ? ' · ' + esc(v.network) : ''}</span></div></div><div class="tp-act"><button type="button" class="btn small" data-claim="${esc(v.name)}">Its owner</button></div></div>`).join('') : '<div class="muted" style="font-size:13px">Every vault has an owner.</div>'}</div></details>`; })()}
       ${keys.size ? `<div class="label" style="margin-top:6px">Its keys</div><div class="muted" style="font-size:13px">${[...keys.values()].map(k => `<b>${esc(k.name)}</b>${placeOf(k.pubkey) ? ' at ' + esc(placeOf(k.pubkey).name) : ''}`).join(' · ')} — <button type="button" class="linkish" data-go="allkeys">every key</button></div>` : ''}
+      <div class="label" style="margin-top:6px">Its reports</div>
+      <div class="row" style="gap:8px;flex-wrap:wrap"><button class="btn small" type="button" data-cgt-report data-scope="entity" data-id="${esc(e.id)}" title="Every disposal across this entity's vaults in a financial year, with the treatment for a ${esc(kindWord(e.kind).toLowerCase())}">CGT report</button><button class="btn small" type="button" data-loss-report data-scope="entity" data-id="${esc(e.id)}" title="Every row marked stolen or lost across this entity's vaults">Stolen and lost report</button></div>
       <div class="row" style="gap:8px;margin-top:6px"><button class="btn small" type="button" id="ent-edit">Edit</button><button class="btn small" type="button" id="ent-del">Forget this entity</button></div>
     </div></div><div id="ent-form"></div>`;
   paintIcons(card);
