@@ -1729,11 +1729,19 @@ fn node_retire(name: String, retired: bool, why: String, empty: Option<bool>) ->
 /// names an identity it must be THIS node's. Returns the store, how many rows were new, and the ledger's size.
 #[tauri::command]
 fn node_import_pick() -> R<String> {
+    // the path, not the text: a node's export can run to tens of megabytes, more than the window's message bridge
+    // carries; the file is read in node_import, on this side
     let p = files::FileDialog::new().set_title("Choose the ledger file (JSON)").add_filter("JSON", &["json", "txt"]).pick_file().ok_or("cancelled")?;
-    std::fs::read_to_string(&p).map_err(|e| format!("the file could not be read: {e}"))
+    Ok(p.to_string_lossy().into_owned())
 }
 #[tauri::command]
-fn node_import(name: String, text: String) -> R<(Store, usize, usize)> {
+async fn node_import(name: String, path: String) -> R<(Store, usize, usize)> {
+    block(move || node_import_at(name, path)).await
+}
+/// Reads the file, parses it, merges it into the vault's ledger, fetches where the money went, reconciles to the
+/// balance the file carries. Off the window's thread: the chain is asked for every outgoing transaction.
+fn node_import_at(name: String, path: String) -> R<(Store, usize, usize)> {
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("the file could not be read: {e}"))?;
     let (kind, pubkey, ev, held) = node::ledger_from_file(&text)?;
     let mut s = wallet::load()?;
     let s_ro = s.clone();

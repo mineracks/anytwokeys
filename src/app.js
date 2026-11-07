@@ -4843,8 +4843,9 @@ $('#vs-node-import').onclick = async () => {
   if (!vault || !vault.node) return;
   const b = $('#vs-node-import'); b.disabled = true; $('#vs-node-note').textContent = '';
   try {
-    const text = await invoke('node_import_pick');
-    const [st, added, total] = await invoke('node_import', { name: vault.name, text });
+    const path = await invoke('node_import_pick');
+    $('#vs-node-note').textContent = 'Reading the file, then asking the chain where every outgoing transaction went\u2026';
+    const [st, added, total] = await invoke('node_import', { name: vault.name, path });
     store = st; vault = store.vaults.find(v => v.name === vault.name) || vault; vault._snap = null; vault._node = null;
     $('#vs-node-note').textContent = `${sats(added)} new row${added === 1 ? '' : 's'} · the ledger now holds ${sats(total)}.`;
     renderVaultSettings(); paintVaultCard(); sync().catch(() => {});
