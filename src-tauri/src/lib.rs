@@ -1478,6 +1478,12 @@ fn node_read(n: &node::Node, servers: &chain::Servers, network: &str) -> R<node:
             if pubkey != n.pubkey { return Err(format!("the node at {} is not the one this vault watches (a different identity answered)", n.url)); }
             let (onchain, channels, pending, _) = c.funds()?;
             fresh.events = node::keep_and_replace(&n.events, c.events()?); fresh.onchain = onchain; fresh.channels = channels; fresh.pending = pending; fresh.version = version; fresh.read_at = now();
+            // the chain over the node's word (node.rs cln_chain_truth): outputs it lists but the chain shows spent, closes it never booked
+            if let (Ok(funds), Ok(closed)) = (c.call("listfunds", serde_json::json!({})), c.call("listclosedchannels", serde_json::json!({}))) {
+                let (found, gone) = node::cln_chain_truth(&serde_json::json!({ "listfunds": funds, "listclosedchannels": closed }), &fresh.events, servers, network);
+                if !found.is_empty() { fresh.events = node::prefer_chain_rows(std::mem::take(&mut fresh.events), found); }
+                let off = gone.min(fresh.onchain); fresh.onchain -= off; fresh.pending = fresh.pending.saturating_sub(gone - off);
+            }
             node_destinations(&mut fresh.events, servers, network);
             fresh.events = node::reconcile(fresh.events, node::Held { onchain, channels, pending }.total(), now() as u32, UNACCOUNTED);
         }
@@ -1762,7 +1768,8 @@ pub struct ImportReport { pub read: usize, pub new: usize, pub total: usize, pub
 /// balance the file carries. Off the window's thread: the chain is asked for every outgoing transaction.
 fn node_import_at(name: String, path: String) -> R<(Store, ImportReport)> {
     let text = std::fs::read_to_string(&path).map_err(|e| format!("the file could not be read: {e}"))?;
-    let (kind, pubkey, ev, held) = node::ledger_from_file(&text)?;
+    let (kind, pubkey, ev, mut held) = node::ledger_from_file(&text)?;
+    let claims = if kind == "cln" { node::cln_claims_from_file(&text) } else { serde_json::Value::Null };
     let mut s = wallet::load()?;
     let s_ro = s.clone();
     let v = s.vaults.iter_mut().find(|v| v.name == name).ok_or("no such vault")?;
@@ -1774,6 +1781,12 @@ fn node_import_at(name: String, path: String) -> R<(Store, ImportReport)> {
     let have: std::collections::HashSet<String> = n.events.iter().map(|e| e.id.clone()).collect();
     let read = ev.len(); let new = ev.iter().filter(|e| !have.contains(&e.id)).count();
     n.events = node::keep_and_replace(&n.events, ev);
+    // the chain over the node's word: outputs it still lists but the chain shows spent, closes it never booked
+    if !claims.is_null() { let (servers, network) = (wallet::servers_for(&s_ro, &net_ro), net_ro.clone());
+        let (found, gone) = node::cln_chain_truth(&claims, &n.events, &servers, &network);
+        if !found.is_empty() { n.events = node::prefer_chain_rows(std::mem::take(&mut n.events), found); }
+        // a spent output the node still counts as unspent, or as pending, comes off what it claims to hold
+        if let Some(h) = held.as_mut() { let off = gone.min(h.onchain); h.onchain -= off; h.pending = h.pending.saturating_sub(gone - off); } }
     let to_before = n.events.iter().filter(|e| !e.to.is_empty()).count();
     { let (servers, network) = (wallet::servers_for(&s_ro, &net_ro), net_ro.clone()); node_destinations(&mut n.events, &servers, &network); }
     let to_filled = n.events.iter().filter(|e| !e.to.is_empty()).count() - to_before;

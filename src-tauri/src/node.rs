@@ -519,7 +519,7 @@ pub fn reconcile(mut events: Vec<Event>, held: i64, at: u32, why: &str) -> Vec<E
     let was = events.iter().filter(|e| e.kind == "unaccounted").map(|e| (e.time, e.memo.clone())).min_by_key(|x| x.0);
     events.retain(|e| e.kind != "unaccounted");
     if diff == 0 { return events; }
-    let (time, memo) = match was { Some((t, m)) if t > 0 => (t, if why.is_empty() { m } else { why.to_string() }), _ => (at, why.to_string()) };
+    let (time, memo) = match was { Some((t, m)) if t > 0 => (t.min(at), if why.is_empty() { m } else { why.to_string() }), _ => (at, why.to_string()) };
     events.push(Event { id: format!("unaccounted:{time}"), time, net: diff, fee: 0, layer: "node".into(), txid: String::new(), hash: String::new(), kind: "unaccounted".into(), memo, to: Vec::new(), height: 0 });
     events.sort_by_key(|e| (e.time, e.id.clone()));
     events
@@ -533,6 +533,91 @@ pub fn reconcile(mut events: Vec<Event>, held: i64, at: u32, why: &str) -> Vec<E
 /// them, on-chain is the sum of listchaintxns, valid only for a complete history, and channels the sum of listchannels).
 /// For Core Lightning, `listfunds` under "listfunds" gives the balances. Returns (kind, identity pubkey if the file
 /// names one, events, what the node holds if the file can say).
+/// What a Core Lightning file gives beyond its ledger: `listfunds` and `listclosedchannels` as the node answered them,
+/// for the chain to check (cln_chain_truth). Taken from the file after ledger_from_file; empty when absent.
+pub fn cln_claims_from_file(text: &str) -> serde_json::Value {
+    let v: serde_json::Value = serde_json::from_str(text.trim()).unwrap_or(serde_json::Value::Null);
+    serde_json::json!({ "listfunds": v.get("listfunds").cloned().unwrap_or(serde_json::Value::Null), "listclosedchannels": v.get("listclosedchannels").cloned().unwrap_or(serde_json::Value::Null) })
+}
+
+/// The chain over the node's word. A node whose database was rolled back, or whose keys someone else holds, lists
+/// outputs it no longer has and channels whose closing it never booked. For every output `listfunds` calls unspent
+/// and every channel `listclosedchannels` says ended with money on our side, the chain is asked: was it spent, in
+/// which transaction, in which block, to which addresses? What it answers becomes a dated row with the destination
+/// on it — a withdrawal for a spent output, a close for a channel whose closing transaction the bookkeeper never
+/// saw — and the balance the node claimed is reduced by the outputs the chain shows gone. Returns the rows and how
+/// many sats to take off the claimed on-chain balance. Failures leave things as they were: nothing is invented.
+pub fn cln_chain_truth(claims: &serde_json::Value, events: &[Event], servers: &crate::chain::Servers, network: &str) -> (Vec<Event>, u64) {
+    use std::str::FromStr;
+    use bitcoin::{Txid, OutPoint};
+    let net = crate::wallet::network_of(network);
+    let mut want: Vec<(OutPoint, u64, &'static str, String)> = Vec::new();   // outpoint, sats on our side, what it is, a word about it
+    for o in claims.get("listfunds").and_then(|f| f.get("outputs")).and_then(|x| x.as_array()).map(|a| a.as_slice()).unwrap_or(&[]) {
+        let (Some(txid), Some(n)) = (o.get("txid").and_then(|x| x.as_str()).and_then(|t| Txid::from_str(t).ok()), o.get("output").and_then(|x| x.as_u64())) else { continue };
+        let sats = o.get("amount_msat").and_then(|x| x.as_u64()).unwrap_or(0) / 1000;
+        want.push((OutPoint { txid, vout: n as u32 }, sats, "output", format!("output {}:{n}", &txid.to_string()[..12])));
+    }
+    let booked: std::collections::HashSet<&str> = events.iter().filter(|e| !e.txid.is_empty()).map(|e| e.txid.as_str()).collect();
+    for c in claims.get("listclosedchannels").and_then(|f| f.get("closedchannels")).and_then(|x| x.as_array()).map(|a| a.as_slice()).unwrap_or(&[]) {
+        let ours = c.get("final_to_us_msat").and_then(|x| x.as_u64()).unwrap_or(0) / 1000; if ours == 0 { continue; }
+        let (Some(txid), Some(n)) = (c.get("funding_txid").and_then(|x| x.as_str()).and_then(|t| Txid::from_str(t).ok()), c.get("funding_outnum").and_then(|x| x.as_u64())) else { continue };
+        want.push((OutPoint { txid, vout: n as u32 }, ours, "channel", format!("channel {} ({}, closed {})", &txid.to_string()[..12], c.get("peer_id").and_then(|x| x.as_str()).map(|p| &p[..12.min(p.len())]).unwrap_or("?"), c.get("close_cause").and_then(|x| x.as_str()).unwrap_or("?"))));
+    }
+    if want.is_empty() { return (Vec::new(), 0); }
+    // the scripts those outpoints pay, then each script's history, then the transaction in it that spends the outpoint
+    let ids: Vec<Txid> = want.iter().map(|w| w.0.txid).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    let Ok(txs) = crate::chain::transactions_kept(servers, network, &ids, &|_| true) else { return (Vec::new(), 0) };
+    let by_id: std::collections::HashMap<Txid, &bitcoin::Transaction> = txs.iter().map(|t| (t.compute_txid(), t)).collect();
+    let spks: Vec<bitcoin::ScriptBuf> = want.iter().filter_map(|w| by_id.get(&w.0.txid).and_then(|t| t.output.get(w.0.vout as usize)).map(|o| o.script_pubkey.clone())).collect();
+    if spks.len() != want.len() { return (Vec::new(), 0); }
+    let Ok(hists) = crate::chain::histories(servers, &spks) else { return (Vec::new(), 0) };
+    let cand: Vec<Txid> = hists.iter().flatten().filter_map(|h| Txid::from_str(&h.txid).ok()).filter(|t| !by_id.contains_key(t)).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    let Ok(ctxs) = crate::chain::transactions_kept(servers, network, &cand, &|_| true) else { return (Vec::new(), 0) };
+    let heights: std::collections::HashMap<Txid, i32> = hists.iter().flatten().filter_map(|h| Txid::from_str(&h.txid).ok().map(|t| (t, h.height))).collect();
+    // a close whose money came home: some output of the closing transaction was later spent by a transaction the
+    // bookkeeper knows (the sweep of a timelocked output, a withdrawal). Those closes are not losses. The outputs'
+    // scripts are asked for their history and the spenders compared with the booked transactions.
+    let closes: Vec<&bitcoin::Transaction> = want.iter().filter(|w| w.2 == "channel").filter_map(|w| ctxs.iter().find(|t| t.input.iter().any(|i| i.previous_output == w.0))).collect();
+    let close_spks: Vec<bitcoin::ScriptBuf> = closes.iter().flat_map(|t| t.output.iter().map(|o| o.script_pubkey.clone())).collect();
+    let came_home: std::collections::HashSet<Txid> = if close_spks.is_empty() { Default::default() } else {
+        let hs = crate::chain::histories(servers, &close_spks).unwrap_or_default();
+        // the booked transactions in those histories, fetched, and kept only if an input of theirs spends the close
+        let cands: Vec<Txid> = hs.iter().flatten().filter(|i| booked.contains(i.txid.as_str())).filter_map(|i| Txid::from_str(&i.txid).ok()).filter(|t| !by_id.contains_key(t)).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+        let spenders = crate::chain::transactions_kept(servers, network, &cands, &|_| true).unwrap_or_default();
+        closes.iter().map(|t| t.compute_txid()).filter(|cid| spenders.iter().any(|sp| sp.input.iter().any(|i| i.previous_output.txid == *cid))).collect() };
+    let mut out = Vec::new(); let mut gone = 0u64; let mut need_heights = std::collections::BTreeSet::new();
+    for (w, _) in want.iter().zip(&spks) {
+        let Some(sp) = ctxs.iter().find(|t| t.input.iter().any(|i| i.previous_output == w.0)) else { continue };
+        let sid = sp.compute_txid().to_string();
+        if w.2 == "channel" && came_home.contains(&sp.compute_txid()) { continue; }
+        let h = heights.get(&sp.compute_txid()).copied().unwrap_or(0).max(0) as u32; if h > 0 { need_heights.insert(h); }
+        let to: Vec<(String, u64)> = sp.output.iter().map(|o| (bitcoin::Address::from_script(&o.script_pubkey, net).map(|a| a.to_string()).unwrap_or_else(|_| format!("script {}", hex::encode(o.script_pubkey.as_bytes()))), o.value.to_sat())).collect();
+        if w.2 == "output" {
+            gone += w.1;
+            out.push(Event { id: sid.clone(), time: 0, net: -(w.1 as i64), fee: 0, layer: "chain".into(), txid: sid, hash: String::new(), kind: "withdrawal".into(), memo: format!("the node still lists {} ({} sats) as its own; the chain shows it spent in block {h} by a key held elsewhere — where it went is under To", w.3, w.1), to, height: h });
+        } else if !booked.contains(sid.as_str()) {
+            out.push(Event { id: sid.clone(), time: 0, net: -(w.1 as i64), fee: 0, layer: "channel".into(), txid: sid, hash: String::new(), kind: "close".into(), memo: format!("{} with {} sats on this node's side; the closing transaction is in block {h} and the bookkeeper never booked it — the money was delivered to an address this node does not hold, listed under To", w.3, w.1), to, height: h });
+        }
+    }
+    // dates from the blocks
+    let hs: Vec<u32> = need_heights.into_iter().collect();
+    if let Ok(times) = crate::chain::header_times(servers, &hs) { let at: std::collections::HashMap<u32, u32> = hs.iter().copied().zip(times).collect(); for e in out.iter_mut() { if let Some(t) = at.get(&e.height) { e.time = *t; } } }
+    (out, gone)
+}
+
+/// The rows the chain found replace what the bookkeeper guessed about the same transaction: a "fee" of a channel's
+/// whole balance, or a close row with no date, gives way to the dated row with the destination on it.
+pub fn prefer_chain_rows(mut events: Vec<Event>, found: Vec<Event>) -> Vec<Event> {
+    for f in found {
+        // the same transaction under another id, or a bookkeeper's "fee"/close of exactly this amount with no
+        // destination on it (its guess at the same money leaving): the chain's row stands in for it
+        events.retain(|e| !(e.id != f.id && (e.layer == "fee" || e.layer == "channel") && e.net == f.net && (e.txid == f.txid || (e.to.is_empty() && f.kind == "close"))));
+        match events.iter_mut().find(|e| e.id == f.id) { Some(e) => *e = f, None => events.push(f) }
+    }
+    events.sort_by_key(|e| (e.time, e.id.clone()));
+    events
+}
+
 pub fn ledger_from_file(text: &str) -> R<(String, String, Vec<Event>, Option<Held>)> {
     let v: serde_json::Value = serde_json::from_str(text.trim()).map_err(|_| "this is not a JSON file")?;
     let o = v.as_object().ok_or("the file is JSON, but not one object")?;
@@ -639,6 +724,18 @@ mod tests {
         assert!(hashed * 20 >= ln.len() * 19, "{hashed} of {} Lightning events name their payment hash (a channel push has none)", ln.len());
     }
     /// A real ledger file, when one is named: A2K_LEDGER_FILE=path cargo test --lib node::a_real_ledger_file -- --ignored --nocapture
+    /// A_2K_LEDGER_FILE=<a CLN file with listfunds + listclosedchannels>: the chain is asked about the node's claims.
+    #[test] #[ignore]
+    fn the_chain_corrects_a_real_cln_file() {
+        let Ok(p) = std::env::var("A2K_LEDGER_FILE") else { return };
+        let text = std::fs::read_to_string(&p).unwrap();
+        let (kind, _, ev, held) = ledger_from_file(&text).unwrap(); assert_eq!(kind, "cln");
+        let servers = crate::chain::defaults(bitcoin::Network::Bitcoin);
+        let (found, gone) = cln_chain_truth(&cln_claims_from_file(&text), &ev, &servers, "mainnet");
+        println!("claimed {held:?}; the chain says {gone} sats of the listed outputs are gone; {} rows found", found.len());
+        for e in &found { println!("  {} {}/{} net {} time {} height {} to {:?}\n    {}", &e.txid[..12], e.layer, e.kind, e.net, e.time, e.height, e.to, e.memo); }
+        let all = prefer_chain_rows(ev, found); println!("ledger now {} rows, sums to {}", all.len(), all.iter().map(|e| e.net).sum::<i64>());
+    }
     #[test] #[ignore]
     fn a_real_ledger_file_parses_and_its_rows_are_counted() {
         let p = std::env::var("A2K_LEDGER_FILE").expect("A2K_LEDGER_FILE");
