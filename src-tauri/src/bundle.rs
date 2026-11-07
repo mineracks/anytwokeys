@@ -202,7 +202,7 @@ mod tests {
         let b = crate::profiles::create("B", crate::profiles::Class::Work, None, 1).unwrap();
         crate::profiles::open(&a.id, 2).unwrap();
         let mut v = vault("demo"); v.labels.insert("tx:ab".into(), "lunch".into()); v.entity = Some("e1".into());
-        wallet::update(|s| { s.vaults.push(v.clone()); s.vaults.push(vault("other")); s.entities.push(wallet::Entity { id: "e1".into(), name: "SMSF".into(), kind: "smsf".into(), note: String::new(), added: 1 });
+        wallet::update(|s| { s.vaults.push(v.clone()); s.vaults.push(vault("other")); s.entities.push(wallet::Entity { id: "e1".into(), name: "SMSF".into(), kind: "smsf".into(), note: String::new(), added: 1, members: Vec::new() });
             s.places.push(wallet::Place { id: "p1".into(), name: "Home safe".into(), ..Default::default() }); s.key_place.insert("02aa".into(), "p1".into());
             s.key_fw.insert("02aa".into(), "5.4.3".into()); s.seen.insert("demo".into(), wallet::Seen { txs: [("ab".to_string(), 1)].into_iter().collect(), coins: Default::default(), primed: true }); }).unwrap();
         let st = start("demo", &b.id, false, 10).unwrap();
@@ -213,7 +213,7 @@ mod tests {
         assert!(land(11).unwrap().is_none(), "nothing is addressed to the source while its key is in memory");
         // the destination
         crate::profiles::open(&b.id, 12).unwrap();
-        wallet::update(|s| { s.entities.push(wallet::Entity { id: "e9".into(), name: "smsf".into(), kind: "smsf".into(), note: String::new(), added: 1 }); }).unwrap();
+        wallet::update(|s| { s.entities.push(wallet::Entity { id: "e9".into(), name: "smsf".into(), kind: "smsf".into(), note: String::new(), added: 1, members: Vec::new() }); }).unwrap();
         let l = land(13).unwrap().unwrap();
         assert_eq!((l.vault.as_str(), l.back), ("demo", false));
         let s = wallet::load().unwrap();

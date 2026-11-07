@@ -15,7 +15,7 @@
 //! $197.31). They are not the market's own history; the rows carry their rate, so the app values them from the
 //! rows, as it does a real Amber export. A persona is never a real person: names come from short lists.
 
-use crate::wallet::{self, Entity, Place, Vault};
+use crate::wallet::{self, Entity, Member, Place, Vault};
 use bitcoin::bip32::{DerivationPath, Xpriv, Xpub};
 use bitcoin::secp256k1::Secp256k1;
 use serde::Serialize;
@@ -180,10 +180,11 @@ pub fn generate(seed: &str, now: u64) -> Result<Made, String> {
         *s = wallet::Store::default();
         s.settings.network = "signet".into();
         s.entities = vec![
-            Entity { id: e_self.clone(), name: name.clone(), kind: "person".into(), note: format!("Born 1986. Buys a little every month since 2018; moved to cold storage in 2026. Lives at {home}."), added: created },
-            Entity { id: e_partner.clone(), name: format!("{partner} {last}"), kind: "person".into(), note: "Partner. No holdings of their own yet; the home is in both names.".into(), added: created },
-            Entity { id: e_smsf.clone(), name: format!("{last} Super Fund"), kind: "smsf".into(), note: format!("Self-managed super fund, two members. Corporate trustee: {last} Holdings Pty Ltd. Buys quarterly since 2023."), added: epoch(2023, 7, 1, 0, 0) as u64 },
-            Entity { id: e_co.clone(), name: format!("{last} Holdings Pty Ltd"), kind: "company".into(), note: "Corporate trustee of the fund. Holds nothing of its own.".into(), added: epoch(2023, 6, 20, 0, 0) as u64 },
+            Entity { id: e_self.clone(), name: name.clone(), kind: "person".into(), note: format!("Born 1986. Buys a little every month since 2018; moved to cold storage in 2026. Lives at {home}."), added: created, members: Vec::new() },
+            Entity { id: e_partner.clone(), name: format!("{partner} {last}"), kind: "person".into(), note: "Partner. No holdings of their own yet; the home is in both names.".into(), added: created, members: Vec::new() },
+            Entity { id: e_smsf.clone(), name: format!("{last} Super Fund"), kind: "smsf".into(), note: format!("Self-managed super fund, two members. Corporate trustee: {last} Holdings Pty Ltd. Buys quarterly since 2023."), added: epoch(2023, 7, 1, 0, 0) as u64,
+                members: vec![Member { name: name.clone(), born: "1986-03-14".into(), phase: "accumulation".into(), share: 62.0 }, Member { name: format!("{partner} {last}"), born: "1988-09-02".into(), phase: "accumulation".into(), share: 38.0 }] },
+            Entity { id: e_co.clone(), name: format!("{last} Holdings Pty Ltd"), kind: "company".into(), note: "Corporate trustee of the fund. Holds nothing of its own.".into(), added: epoch(2023, 6, 20, 0, 0) as u64, members: Vec::new() },
         ];
         s.places = vec![
             Place { id: p_home.clone(), name: "Home safe".into(), note: "Fire safe, study cupboard.".into(), place: home.clone(), lat: Some(lat + 0.002 * rng.jitter()), lon: Some(lon + 0.002 * rng.jitter()), added: created },

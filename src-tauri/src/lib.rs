@@ -1326,14 +1326,21 @@ async fn icon_pick(kind: String, id: String) -> R<Store> {
 const ENTITY_KINDS: [&str; 5] = ["person", "company", "trust", "smsf", "other"];
 /// Save an entity: new when `id` is empty, else the one it names.
 #[tauri::command]
-fn entity_save(id: String, name: String, kind: String, note: String) -> R<Store> {
+fn entity_save(id: String, name: String, kind: String, note: String, members: Option<Vec<wallet::Member>>) -> R<Store> {
     let name = name.trim().to_string();
     if name.is_empty() || name.chars().count() > 80 { return Err("give the entity a name of up to 80 characters".into()); }
     let kind = if ENTITY_KINDS.contains(&kind.as_str()) { kind } else { "other".into() };
+    // members belong to a super fund; each needs a name, a phase the app knows, a date (if given) that parses, a share 0–100
+    let members: Vec<wallet::Member> = if kind == "smsf" { members.unwrap_or_default().into_iter().filter(|m| !m.name.trim().is_empty()).map(|m| wallet::Member {
+        name: m.name.trim().chars().take(80).collect(), born: m.born.trim().to_string(),
+        phase: if ["accumulation", "ttr", "retirement"].contains(&m.phase.as_str()) { m.phase } else { "accumulation".into() },
+        share: if m.share.is_finite() { m.share.clamp(0.0, 100.0) } else { 0.0 } }).collect() } else { Vec::new() };
+    for m in &members { if !m.born.is_empty() && !(m.born.len() == 10 && m.born.as_bytes()[4] == b'-' && m.born.as_bytes()[7] == b'-' && m.born.chars().enumerate().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() })) { return Err(format!("{}'s date of birth should be YYYY-MM-DD", m.name)); } }
+    if members.iter().map(|m| m.share).sum::<f64>() > 100.0 + 1e-9 { return Err("the members' shares add up to more than 100%".into()); }
     let t = now();
     wallet::update(|s| {
-        if let Some(e) = s.entities.iter_mut().find(|e| e.id == id) { e.name = name.clone(); e.kind = kind.clone(); e.note = note.chars().take(2000).collect(); }
-        else { s.entities.push(wallet::Entity { id: hex::encode(&lockbox::random::<8>()), name: name.clone(), kind: kind.clone(), note: note.chars().take(2000).collect(), added: t }); }
+        if let Some(e) = s.entities.iter_mut().find(|e| e.id == id) { e.name = name.clone(); e.kind = kind.clone(); e.note = note.chars().take(2000).collect(); e.members = members.clone(); }
+        else { s.entities.push(wallet::Entity { id: hex::encode(&lockbox::random::<8>()), name: name.clone(), kind: kind.clone(), note: note.chars().take(2000).collect(), added: t, members: members.clone() }); }
     })
 }
 /// Forget an entity. Its vaults stay; they are simply unassigned again.

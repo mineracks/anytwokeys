@@ -1731,6 +1731,20 @@ async function cgtReport(sc, [label, from, to]) {
     ['Capital losses', `${money(losses, ccy)}${stolen.length ? ` — of which ${money(stolenLoss, ccy)} stolen or lost (${sats(stolen.length)} row${stolen.length === 1 ? '' : 's'}, CGT event C1)` : ''}`],
     ['Net, before any discount', `${net >= 0 ? '+' : '−'}${money(Math.abs(net), ccy)}`],
   ] }];
+  if (kind === 'smsf') {
+    const ff = fundFacts(sc.entity), ms = ff.ms;
+    const rows2 = [['Members', ms.length ? ms.map(m => { const a = ageOf(m.born); return `${m.name}${a !== null ? `, ${a}` : ''} · ${PHASE_WORDS[m.phase] || m.phase}${m.share ? ` · ${m.share}%` : ''}`; }).join('\n') : 'none recorded — add them on the entity\u2019s page']];
+    if (net > 0 && ms.length) {
+      // the estimate, step by step: losses are already inside `net`; the discount is one third of the long part; the exempt share comes off; 15% on the rest
+      const longAfter = Math.max(0, longGain - Math.max(0, losses - shortGain)), shortAfter = Math.max(0, shortGain - losses);   // losses against short gains first (the usual choice), then long
+      const discounted = shortAfter + longAfter * 2 / 3, taxable = discounted * (1 - ff.exempt / 100);
+      rows2.push(['Net gain after the one-third discount', `${money(discounted, ccy)} — losses set against the 12-months-or-less gains first, then the long gains; a third off what remains of the long gains`]);
+      rows2.push(['Exempt, retirement phase', `${ff.exempt}% · ${money(discounted * ff.exempt / 100, ccy)}${ff.mixed ? ' — estimate from the members\u2019 shares; the actuarial certificate\u2019s percentage governs' : ''}`]);
+      rows2.push(['Taxable net capital gain', `${money(taxable, ccy)} · tax at 15%: ${money(taxable * 0.15, ccy)} (accumulation phase)`]);
+    } else if (net <= 0) rows2.push(['Taxable net capital gain', 'none: a net capital loss, carried forward to later years']);
+    if (ff.flags.length) rows2.push(['Ages', ff.flags.join('\n')]);
+    blocks.push({ kind: 'heading', text: 'The fund' }); blocks.push({ kind: 'facts', rows: rows2 });
+  }
   blocks.push({ kind: 'para', text: `${au ? taxNote(sc.entity) + ' ' : ''}Each disposal is dated by its block; proceeds are the market price that day applied to the coins that left (a sale’s own price, if an exchange statement gives one, is on that row); cost is what those coins were worth when received, by the method named. "Over 12 months" is judged lot by lot, from the day each lot of coins was received. Moves between the vaults of this report are not disposals and are left out.` });
   blocks.push({ kind: 'heading', text: `Disposals (${rows.length})` });
   blocks.push({ kind: 'facts', rows: rows.map(x => { const r = x.r, what = ['stolen', 'lost', 'sold', 'spent', 'gift'].includes(r.kind) ? r.kind : 'disposal';
@@ -4040,16 +4054,31 @@ function entityForm(slot, e, done) {
       <div class="field"><div class="label">Name</div><input id="ef-name" maxlength="80" placeholder="the company, the trust, your own name" value="${esc(e ? e.name : '')}"></div>
       <div class="field"><div class="label">Kind</div><div class="seg" role="radiogroup" id="ef-kind">${ENTITY_KINDS.map(([k, w]) => `<button type="button" role="radio" aria-checked="${(e ? e.kind : 'person') === k ? 'true' : 'false'}" data-kind="${k}">${w}</button>`).join('')}</div></div>
       <div class="field"><div class="label">Note</div><textarea id="ef-note" rows="2" style="min-height:64px" placeholder="ABN, trustee, who does its books">${esc(e ? e.note : '')}</textarea></div>
+      <div class="field" id="ef-members" hidden><div class="label">Members</div>
+        <div class="muted" style="font-size:13px">A fund\u2019s capital gain is exempt in the proportion its assets support retirement-phase pensions, so the report needs who is in which phase and how much of the fund is theirs. A transition-to-retirement pension is not retirement phase. Shares are of the fund\u2019s balance; the actuary\u2019s percentage replaces them when the fund is unsegregated with members in both phases.</div>
+        <div id="ef-member-rows" class="stack tight" style="margin-top:6px"></div>
+        <div class="row" style="margin-top:6px"><button class="btn small" type="button" id="ef-member-add">Add a member</button></div></div>
       <div class="row" style="gap:8px"><button class="btn small primary" type="submit">${e ? 'Save' : 'Add this entity'}</button><button class="btn small" type="button" id="ef-cancel">Cancel</button></div>
       <div class="muted" id="ef-note-line" aria-live="polite"></div></form>`;
   let kind = e ? e.kind : 'person';
-  $$('#ef-kind [data-kind]').forEach(b => b.onclick = () => { kind = b.dataset.kind; $$('#ef-kind [data-kind]').forEach(x => x.setAttribute('aria-checked', x === b ? 'true' : 'false')); });
+  const memberRow = (m) => { const d = document.createElement('div'); d.className = 'row'; d.style.cssText = 'gap:6px;flex-wrap:wrap;align-items:center';
+    d.innerHTML = `<input class="m-name" maxlength="80" placeholder="name" value="${esc(m.name || '')}" style="flex:1 1 140px"><input class="m-born" placeholder="born YYYY-MM-DD" value="${esc(m.born || '')}" style="flex:0 1 150px" maxlength="10">
+      <select class="m-phase" style="flex:0 1 190px"><option value="accumulation">accumulation</option><option value="ttr">transition to retirement</option><option value="retirement">retirement phase</option></select>
+      <input class="m-share" type="number" min="0" max="100" step="0.1" placeholder="share %" value="${m.share ? m.share : ''}" style="flex:0 1 100px"><button type="button" class="btn small m-del" title="Remove">\u00d7</button>`;
+    d.querySelector('.m-phase').value = m.phase || 'accumulation'; d.querySelector('.m-del').onclick = () => d.remove(); return d; };
+  const membersBox = $('#ef-members'), rowsBox = $('#ef-member-rows');
+  for (const m of (e && e.members) || []) rowsBox.appendChild(memberRow(m));
+  const showMembers = () => { membersBox.hidden = kind !== 'smsf'; if (kind === 'smsf' && !rowsBox.children.length) rowsBox.appendChild(memberRow({})); };
+  showMembers();
+  $('#ef-member-add').onclick = () => rowsBox.appendChild(memberRow({}));
+  const readMembers = () => [...rowsBox.children].map(d => ({ name: d.querySelector('.m-name').value.trim(), born: d.querySelector('.m-born').value.trim(), phase: d.querySelector('.m-phase').value, share: parseFloat(d.querySelector('.m-share').value) || 0 })).filter(m => m.name);
+  $$('#ef-kind [data-kind]').forEach(b => b.onclick = () => { kind = b.dataset.kind; $$('#ef-kind [data-kind]').forEach(x => x.setAttribute('aria-checked', x === b ? 'true' : 'false')); showMembers(); });
   $('#ef-cancel').onclick = () => { slot.innerHTML = ''; };
   $('#ent-form').onsubmit = async (ev) => {
     ev.preventDefault(); const name = $('#ef-name').value.trim(); if (!name) return toast('Give the entity a name');
     try {
       const before = new Set((store.entities || []).map(x => x.id));
-      store = await invoke('entity_save', { id, name, kind, note: $('#ef-note').value });
+      store = await invoke('entity_save', { id, name, kind, note: $('#ef-note').value, members: kind === 'smsf' ? readMembers() : null });
       if (vault) vault = store.vaults.find(x => x.name === vault.name) || vault;
       const saved = id ? store.entities.find(x => x.id === id) : store.entities.find(x => !before.has(x.id));
       slot.innerHTML = ''; if (done) await done(saved);
@@ -4073,6 +4102,26 @@ function renderEntities() {
   $('#ent-new').onclick = () => entityForm($('#ent-form-slot'), null, (saved) => { if (saved) openEntity(saved.id); else renderEntities(); });
 }
 function openEntity(id) { entPage = id; show('entity'); }
+// a member's age today, from a YYYY-MM-DD date of birth; null if not given
+const ageOf = (born) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(born || ''); if (!m) return null; const d = new Date(+m[1], +m[2] - 1, +m[3]), n = new Date(); let a = n.getFullYear() - d.getFullYear(); if (n < new Date(n.getFullYear(), d.getMonth(), d.getDate())) a--; return a; };
+const PHASE_WORDS = { accumulation: 'accumulation', ttr: 'transition to retirement (not retirement phase)', retirement: 'retirement phase' };
+/// What the fund's members mean for its tax: the share of the fund in retirement phase (that share of the net capital
+/// gain is exempt), and anything the ages say about what each member can be. Said, not decided: the actuary decides.
+function fundFacts(e) {
+  const ms = e.members || [], exempt = ms.filter(m => m.phase === 'retirement').reduce((a, m) => a + (m.share || 0), 0), shared = ms.reduce((a, m) => a + (m.share || 0), 0);
+  const flags = [];
+  for (const m of ms) { const a = ageOf(m.born);
+    if (a !== null && a < 60 && m.phase === 'retirement') flags.push(`${m.name} is ${a}: retirement phase before 60 needs a condition of release other than age (permanent incapacity, terminal illness)`);
+    if (a !== null && a >= 65 && m.phase !== 'retirement') flags.push(`${m.name} is ${a}: at 65 a retirement-phase pension can start without retiring, which would make their ${Math.round(m.share || 0)}% exempt`);
+    if (a !== null && a >= 60 && a < 65 && m.phase === 'ttr') flags.push(`${m.name} is ${a}: a transition-to-retirement pension becomes retirement phase once they retire or turn 65`); }
+  const mixed = ms.some(m => m.phase === 'retirement') && ms.some(m => m.phase !== 'retirement');
+  return { ms, exempt, shared, flags, mixed };
+}
+function fundWords(e) {
+  const f = fundFacts(e); if (!f.ms.length) return 'No members recorded yet — Edit, and add them with their phase and share of the fund.';
+  const who = f.ms.map(m => { const a = ageOf(m.born); return `<b>${esc(m.name)}</b>${a !== null ? `, ${a}` : ''} · ${PHASE_WORDS[m.phase] || m.phase}${m.share ? ` · ${m.share}% of the fund` : ''}`; }).join('<br>');
+  return `${who}<br><span style="display:block;margin-top:4px">Retirement-phase share: <b>${f.exempt}%</b>${f.shared && Math.abs(f.shared - 100) > 0.5 ? ` (shares add to ${f.shared}%, not 100)` : ''} — that share of the fund\u2019s net capital gain is exempt${f.mixed ? '; with members in both phases an unsegregated fund needs an actuarial certificate, and its percentage governs' : ''}.</span>${f.flags.length ? `<span style="display:block;margin-top:4px">${f.flags.map(esc).join('<br>')}</span>` : ''}`;
+}
 function renderEntity() {
   const card = $('#entity-card'), e = entityOf(entPage);
   if (!e) { card.innerHTML = '<div class="muted">That entity is no longer here.</div><div class="row"><button class="btn small" type="button" data-go="entities">All entities</button></div>'; $('#ent-summary').innerHTML = ''; return; }
@@ -4081,6 +4130,7 @@ function renderEntity() {
   card.innerHTML = `<div class="txnav"><button class="btn small" type="button" data-go="entities">‹ All entities</button><span class="muted">${esc(e.name)}</span><span></span></div>
     <div class="guide-row"><div class="guide" style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:140px;flex-basis:200px">${iconHtml('entity', e.id, 72, entGlyph(e), true)}</div><div class="guide-body">
       <div class="cer-act-title">${esc(e.name)}</div><div class="ent-kind">${esc(kindWord(e.kind))}</div>${e.note ? `<div style="font-size:13.5px;white-space:pre-wrap">${esc(e.note)}</div>` : ''}
+      ${e.kind === 'smsf' ? `<div class="label" style="margin-top:6px">Its members</div><div class="muted" style="font-size:13px">${fundWords(e)}</div>` : ''}
       <div class="label" style="margin-top:6px">Its vaults</div>
       <div class="tp-list" style="margin-top:0">${vs.length ? vs.map(v => `<div class="tp rowpick" data-go-vault="${esc(v.name)}" role="link" tabindex="0"><div class="tp-what"><div class="tp-head"><b>${esc(v.name)}</b> <span class="muted">· ${esc(kindOfVault(v))}${v.network !== 'mainnet' ? ' · ' + esc(v.network) : ''}</span></div></div><div class="tp-act"><button type="button" class="linkish" data-disown="${esc(v.name)}">Not its owner</button></div></div>`).join('') : '<div class="muted" style="font-size:13px">No vault yet. Claim one from the list below, or from its Vault settings.</div>'}</div>
       ${(() => { const un = store.vaults.filter(v => !v.entity || !entityOf(v.entity)); return `<details class="adv" id="ent-unowned" style="margin-top:8px"${vs.length ? '' : ' open'}><summary>Vaults with no owner yet · ${sats(un.length)}</summary><div class="tp-list" style="margin-top:8px">${un.length ? un.map(v => `<div class="tp"><div class="tp-what"><div class="tp-head"><b>${esc(v.name)}</b> <span class="muted">· ${esc(kindOfVault(v))}${v.network !== 'mainnet' ? ' · ' + esc(v.network) : ''}</span></div></div><div class="tp-act"><button type="button" class="btn small" data-claim="${esc(v.name)}">Its owner</button></div></div>`).join('') : '<div class="muted" style="font-size:13px">Every vault has an owner.</div>'}</div></details>`; })()}

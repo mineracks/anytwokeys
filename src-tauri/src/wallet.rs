@@ -376,6 +376,21 @@ pub struct Entity {
     #[serde(default)] pub kind: String,
     #[serde(default)] pub note: String,
     #[serde(default)] pub added: u64,
+    /// a super fund's members: a fund's capital gain is exempt in the proportion its assets support retirement-phase
+    /// pensions, so the report needs who is in which phase and how much of the fund is theirs
+    #[serde(default)] pub members: Vec<Member>,
+}
+
+/// One member of a self-managed super fund.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Member {
+    pub name: String,
+    /// date of birth, YYYY-MM-DD (empty if not given) — age decides what phase a member CAN be in
+    #[serde(default)] pub born: String,
+    /// accumulation | ttr (transition-to-retirement, not retirement phase) | retirement
+    #[serde(default)] pub phase: String,
+    /// this member's share of the fund's balance, per cent (0 if not given)
+    #[serde(default)] pub share: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
