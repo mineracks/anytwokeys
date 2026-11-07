@@ -362,7 +362,8 @@ pub fn doc(title: &str, subtitle: &str, blocks: &[Block]) -> Result<Vec<u8>, Str
             }
             Block::Heading(h) => { need!(30.0); y -= 4.0; page!().text(2, 9.0, M, y, &h.to_uppercase()); y -= 15.0; }
             Block::Facts(kv) => for (k, v) in kv {
-                let lines = wrap(v, 78); need!(14.0 * lines.len() as f32 + 3.0);
+                // a newline in a value is a hard break: one address per line
+                let lines: Vec<String> = v.split('\n').flat_map(|p| wrap(p, 78)).collect(); need!(14.0 * lines.len() as f32 + 3.0);
                 page!().text(2, 8.5, M, y, &k.to_uppercase());
                 for (i, l) in lines.iter().enumerate() { page!().text(1, 10.5, M + 110.0, y, l); if i + 1 < lines.len() { y -= 13.0; } }
                 y -= 16.0;

@@ -1638,7 +1638,62 @@ async function vaultReport() {
     toast('Saved ' + path, 5000);
   } catch (e) { if (!/cancelled/.test(String(e))) fail(e); }
 }
-document.addEventListener('click', (e) => { if (e.target.closest('[data-vault-report]')) vaultReport(); });
+document.addEventListener('click', (e) => { if (e.target.closest('[data-vault-report]')) vaultReport(); if (e.target.closest('[data-loss-report]')) lossReport(); });
+/// Rows of this vault marked stolen or lost, oldest first, with what the ledger knows of each.
+function lossRows(name) {
+  const L = vaultLedger(name), f = txFacts[name]; if (!L || !f) return [];
+  return Object.entries(L.realised).filter(([id, r]) => (r.kind === 'stolen' || r.kind === 'lost') && f.rows[id] && r.sats > 0)
+    .map(([id, r]) => ({ id, r, row: f.rows[id] })).sort((a, b) => (a.row.time || 0) - (b.row.time || 0));
+}
+/// The stolen-and-lost report of one vault: every row marked stolen or lost, with its transaction, where the coins
+/// went (from the transaction itself), what they were worth as they left, what they had cost, and the loss — laid out
+/// for a report to police or an exchange and for the capital-loss claim. Evidence, not opinion: nothing here is
+/// inferred that the chain or the node's ledger does not say.
+async function lossReport() {
+  if (!vault) return;
+  const name = vault.name;
+  try {
+    if (!vault._snap) await sync();
+    if (!txFacts[name]) await fillActivity(name, vault._snap);
+    const f = txFacts[name], L = vaultLedger(name), ccy = f.ccy, m = methodFor(vault), rows = lossRows(name);
+    if (!rows.length) { toast('Nothing in this vault is marked stolen or lost. Open a row that left and say what it was.', 6000); return; }
+    const dateOf = (t) => new Date(t * 1000).toLocaleString(undefined, { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' });
+    const totalSats = rows.reduce((a, x) => a + x.r.sats, 0), known = rows.filter(x => x.r.cost !== null), totalCost = known.reduce((a, x) => a + x.r.cost, 0);
+    const worthThen = rows.reduce((a, x) => a + (x.row.quote ? x.r.sats / 1e8 * x.row.quote.price : 0), 0), anyQuote = rows.some(x => x.row.quote);
+    const blocks = [{ kind: 'facts', rows: [
+      ['Vault', `${esc(name)} · ${vault.node ? `a ${vault.node.kind === 'cln' ? 'Core Lightning' : 'LND'} node, identity ${vault.node.pubkey}` : vault.network}`],
+      ['Prepared', dateOf(Math.floor(Date.now() / 1000))],
+      ['Rows', `${sats(rows.length)} — ${sats(rows.filter(x => x.r.kind === 'stolen').length)} stolen, ${sats(rows.filter(x => x.r.kind === 'lost').length)} lost`],
+      ['Coins gone', `${sats(Math.round(totalSats))} sats${anyQuote && ccy ? ` · worth ${money(worthThen, ccy)} as they left` : ''}`],
+      ccy ? ['Their cost', `${money(totalCost, ccy)}${known.length < rows.length ? ` for ${sats(known.length)} of the ${sats(rows.length)} rows; the rest have coins of unknown cost` : ''} · by ${COST_METHODS[m].name.toLowerCase()}`] : null,
+      ccy ? ['Capital loss', `${money(totalCost, ccy)}${known.length < rows.length ? ' at least' : ''} — nothing was received for the coins, so the loss is their whole cost`] : null,
+    ].filter(Boolean) }];
+    blocks.push({ kind: 'para', text: 'Each row below is a transaction in which coins left this vault without the owner\u2019s consent (stolen) or beyond anyone\u2019s reach (lost). The transaction id, the block and the addresses the coins went to are read from the Bitcoin chain and can be checked by anyone with a block explorer. The amounts in ' + (ccy || 'fiat') + ' are the market price on the day, applied to the coins; the cost is what those coins were worth when they were received, as the vault\u2019s ledger records.' });
+    for (const x of rows) {
+      const e = vault.node ? nodeRow(x.id) : null;
+      let to = e ? (e.to || []) : [];
+      if (!e && x.row.txid) { try { const d = await invoke('tx_detail', { name, txid: x.row.txid, height: (f.history || []).find(h => h[0] === x.row.txid)?.[1] || 0 }); to = (d.outputs || []).filter(o => o.ours === null).map(o => [o.address || o.kind, o.sats]); } catch {} }
+      blocks.push({ kind: 'heading', text: `${x.row.time ? dateOf(x.row.time) : 'not in a block'} \u2014 ${sats(Math.round(x.r.sats))} sats ${x.r.kind}` });
+      const facts = [
+        ['Transaction', e && !e.txid ? (e.kind === 'unaccounted' ? 'none: this row is the difference between what the node holds and what its ledger explains — money that left without the node\u2019s bookkeeper seeing it go (channels closed by someone else holding the keys, coins swept by another copy of the wallet)' : `Lightning · payment hash ${e.hash || '—'}`) : (x.row.txid || x.id)],
+        e ? ['Layer', `${nodeLayer(e)} · ${e.kind}`] : null,
+        to.length ? ['Where the coins went', to.map(([a, v]) => `${a}  ${sats(v)} sats`).join('\n')] : (e && e.txid ? ['Where the coins went', 'not read from the chain yet: refresh this vault and save the report again'] : null),
+        x.row.quote && ccy ? ['Worth as they left', `${money(x.r.sats / 1e8 * x.row.quote.price, ccy)} at ${money(x.row.quote.price, ccy)} per BTC`] : null,
+        ccy ? ['Cost of the coins', x.r.cost === null ? 'not known for some of them' : `${money(x.r.cost, ccy)}${x.r.from ? ` · received ${x.r.from === x.r.to ? 'on ' + new Date(x.r.from * 1000).toLocaleDateString() : 'between ' + new Date(x.r.from * 1000).toLocaleDateString() + ' and ' + new Date(x.r.to * 1000).toLocaleDateString()}` : ''}`] : null,
+        ccy ? ['Loss', x.r.cost === null ? 'at least the part of known cost' : `${money(x.r.cost, ccy)} — proceeds nil`] : null,
+        e && e.memo ? ['Memo', e.memo] : null,
+        labelOf('tx:' + x.id) ? ['Label', labelOf('tx:' + x.id)] : null,
+        (vault.notes || {})['tx:' + x.id] ? ['Note', (vault.notes || {})['tx:' + x.id]] : null,
+      ].filter(Boolean);
+      blocks.push({ kind: 'facts', rows: facts });
+    }
+    blocks.push({ kind: 'heading', text: 'For the tax return' });
+    blocks.push({ kind: 'para', text: `In Australia, coins stolen or lost are CGT event C1 (loss or destruction of a CGT asset). The capital proceeds are nil, so the capital loss is the cost base of the coins — ${ccy ? money(totalCost, ccy) : 'as above'}${known.length < rows.length ? ' at least' : ''} here — claimed in the income year the loss is discovered, and only against capital gains. The ATO asks for evidence that the coins existed and were yours (this vault\u2019s ledger and the transactions above), that they are gone (the addresses they went to, which you do not control), and that you took steps to recover them (the police or exchange report; keep its reference with this document). In the United States a theft loss on personal-use property is not deductible for 2018 to 2025 under TCJA; the figures above still give the basis that leaves the books.` });
+    blocks.push({ kind: 'para', text: `Cost by ${COST_METHODS[m].name.toLowerCase()}: ${COST_METHODS[m].note}` });
+    const path = await invoke('report_pdf', { title: `${name} \u2014 stolen and lost`, subtitle: `${sats(rows.length)} row${rows.length === 1 ? '' : 's'} · ${sats(Math.round(totalSats))} sats · printed ${new Date().toLocaleDateString()}`, blocks, file: `${name}-stolen-and-lost` });
+    toast('Saved ' + path, 6000);
+  } catch (e) { if (!/cancelled/.test(String(e))) fail(e); }
+}
 
 // ---------- one coin, or one address, as a page: vault › Coins › this coin ----------
 // The list steps aside for the page; ‹ › and the arrow keys walk the list in its order; the strip at the top is what
@@ -2265,7 +2320,8 @@ async function renderSummary(box, names, opts = {}) {
   };
   box.append(tg, tw);
 }
-function renderHomeSummary() { if (vault && $('#s-home').classList.contains('on')) renderSummary($('#home-summary'), [vault.name]); }
+function renderHomeSummary() {
+  { const b = $('[data-loss-report]'); if (b) b.hidden = !(vault && txFacts[vault.name] && lossRows(vault.name).length); } if (vault && $('#s-home').classList.contains('on')) renderSummary($('#home-summary'), [vault.name]); }
 
 // ---------- all vaults: the same view, of everything that has a price ----------
 // why a vault's history could not be read just now, in the words the person needs
