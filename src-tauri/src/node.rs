@@ -199,6 +199,11 @@ pub fn cln_income_events(v: &serde_json::Value) -> Vec<Event> {
             let (layer, kind, net, fee): (&str, &str, i64, u64) = match tag.as_str() {
                 "deposit" => ("chain", "deposit", credit as i64, 0),
                 "withdrawal" => ("chain", "withdrawal", -(debit as i64), 0),
+                // the bookkeeper calls everything that leaves a channel to no output of this node's an "onchain_fee"; a
+                // fee of tens of thousands of sats on a channel account is not a fee, it is the channel's balance delivered
+                // elsewhere — a close with the money sent to an address this node does not hold. Said so, and the
+                // transaction kept so the chain can show where it went.
+                "onchain_fee" if debit >= 50_000 && s("account") != "wallet" => ("channel", "close", -(debit as i64), 0),
                 "onchain_fee" => ("fee", "fee", -(debit as i64), debit),
                 "invoice" => if credit > 0 { ("lightning", "received", credit as i64, 0) } else { ("lightning", "paid", -(debit as i64), 0) },
                 "invoice_fee" => ("fee", "fee", -(debit as i64), debit),
@@ -212,8 +217,9 @@ pub fn cln_income_events(v: &serde_json::Value) -> Vec<Event> {
                 else if !outpoint.is_empty() && layer != "lightning" { outpoint.split(':').next().unwrap_or("").to_lowercase() }
                 else if !hash.is_empty() { format!("{}{}", hash, if kind == "paid" { ":out" } else if kind == "routed" { ":routed" } else { "" }) }
                 else { hex::encode(&Sha256::digest(format!("{tag}|{time}|{credit}|{debit}|{}", s("account")).as_bytes())[..16]) };
-            let txid_of = if layer == "chain" || layer == "fee" { if !txid.is_empty() { txid } else { outpoint.split(':').next().unwrap_or("").to_lowercase() } } else { String::new() };
-            out.push(Event { id, time, net, fee, layer: layer.into(), txid: txid_of, hash: if layer == "lightning" { hash } else { String::new() }, kind: kind.into(), memo: s("description"), to: Vec::new(), height: 0 });
+            let txid_of = if layer == "chain" || layer == "fee" || layer == "channel" { if !txid.is_empty() { txid } else { outpoint.split(':').next().unwrap_or("").to_lowercase() } } else { String::new() };
+            let memo = if layer == "channel" && kind == "close" { format!("channel {} closed with {} sats of this node's delivered to no address it holds — the bookkeeper booked it as an on-chain fee; the outputs are under To, and the date is when the bookkeeper saw it, not the block", s("account").chars().take(12).collect::<String>(), debit) } else { s("description") };
+            out.push(Event { id, time, net, fee, layer: layer.into(), txid: txid_of, hash: if layer == "lightning" { hash } else { String::new() }, kind: kind.into(), memo, to: Vec::new(), height: 0 });
         }
         // several bookkeeper events can belong to one transaction (a deposit that also paid change, a fee in parts):
         // the ledger keeps one row per id, its amounts summed, its fee summed
