@@ -2407,7 +2407,11 @@ async function renderSummary(box, names, opts = {}) {
   const now = priced ? (inputs.find(i => i.now) || {}).now : null;
   const methods = [...new Set(inputs.map(i => methodFor(store.vaults.find(v => v.name === i.name))))];
   const method = methods.length === 1 ? methods[0] : methodFor(null);
-  const ledgerInputs = linkedNames(names).map(n => ({name:n, network:store.vaults.find(v=>v.name===n)?.network, rows:Object.values(txFacts[n]?.rows || {}), now:txFacts[n]?.now, links:txFacts[n]?.links}));
+  // a node's rows are summed exactly: the millisatoshi each row carries, not the whole sats it is shown as, or the
+  // running balance of a node that holds nothing shows the rounding as a holding
+  const exactRows = (n) => { const ev = store.vaults.find(v => v.name === n)?.node?.events; const by = ev ? Object.fromEntries(ev.map(e => [e.id, e])) : null;
+    return Object.values(txFacts[n]?.rows || {}).map(r => { const e = by && by[r.txid]; return e && e.msat && r.net !== null ? { ...r, net: e.msat / 1000 } : r; }); };
+  const ledgerInputs = linkedNames(names).map(n => ({name:n, network:store.vaults.find(v=>v.name===n)?.network, rows:exactRows(n), now:txFacts[n]?.now, links:txFacts[n]?.links}));
   const L = buildLedger(ledgerInputs, method, {}, names);
   const rangeKey = sumPref('range', 'all'), R = SUM_RANGES.find(r => r[0] === rangeKey) || SUM_RANGES[3];
   const to = Math.floor(Date.now() / 1000), first = L.timeline.length ? L.timeline[0].t : to;
@@ -2434,7 +2438,7 @@ async function renderSummary(box, names, opts = {}) {
   // stat tiles first: the numbers a reader came for, before any picture
   const k = document.createElement('div'); k.className = 'kpis';
   const tile = (key, v, sub, cls) => { const d = document.createElement('div'); d.className = 'kpi'; d.innerHTML = `<div class="k"></div><div class="v"></div><div class="s"></div>`; d.querySelector('.k').textContent = key; d.querySelector('.v').textContent = v; const sEl = d.querySelector('.s'); sEl.textContent = sub || ''; if (cls) sEl.classList.add(cls); return d; };
-  k.appendChild(tile('Holding', sats(nowState.sats) + ' sats', inputs.length > 1 ? `across ${inputs.length} vaults` : ''));
+  k.appendChild(tile('Holding', sats(Math.round(nowState.sats)) + ' sats', inputs.length > 1 ? `across ${inputs.length} vaults` : ''));
   if (priced && value !== null) {
     k.appendChild(tile('Worth now', money(value, ccy), '1 BTC = ' + money(now.price, ccy)));
     k.appendChild(tile('Cost basis', money(nowState.basis, ccy), loading ? `incomplete \u00b7 ${loading} past price${loadingS} still loading` : 'what it was worth as it arrived'));
