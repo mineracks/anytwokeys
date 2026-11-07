@@ -2,7 +2,7 @@
 const { invoke } = window.__TAURI__.core;
 const $ = (s) => document.querySelector(s);
 const $$ = (s, root) => Array.from((root || document).querySelectorAll(s));
-const sats = (n) => Number(n).toLocaleString('en-AU');
+const sats = (n) => (Number(n) || 0).toLocaleString('en-AU');   // || 0: a rounded -0.0004 is 0, never “-0”
 let otherDevices = [];
 // `vault` is the vault on screen. What the window learned about it from the chain (coins, balance, history, the
 // recovery line…) lives in fields starting with "_". The store is re-read after most edits, which hands back a FRESH

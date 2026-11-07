@@ -242,6 +242,13 @@ table.act td{vertical-align:top}
 table.act .when{white-space:nowrap;font-variant-numeric:tabular-nums}
 table.act .when small,table.act .amt small{display:block;color:var(--muted);font-size:12px;font-family:var(--serif,inherit)}
 table.act .amt{white-space:nowrap;font-family:var(--display);font-weight:600;font-variant-numeric:tabular-nums}
+/* the amount itself never breaks; the line under it (worth then, fee, realised) wraps, so the table fits the card at any window width */
+table.act .amt small{white-space:normal}
+table.act td:last-child{white-space:normal}
+@media (max-width:1280px){
+  #activity td:nth-child(2),#act-all td:nth-child(2){width:110px}
+  table.act .tag{white-space:normal}
+}
 table.act .amt.in{color:var(--signal)}
 .fiat{font-family:var(--display);font-size:15px;color:var(--muted);font-variant-numeric:tabular-nums}
 .big.switch{cursor:pointer;border-radius:6px}
@@ -359,6 +366,9 @@ details.card.quiet > *:not(summary){margin-top:12px}
 .netmenu .muted{font-size:12px;line-height:1.35}
 .netmenu .btn{width:100%;justify-content:center}
 .actfoot{border-top:1px solid var(--line);padding-top:12px;gap:10px}
+/* the note takes what is left and wraps; the buttons stay together as one group, on their own line when the window is narrow */
+.actfoot > span:first-child{flex:1 1 320px;min-width:0}
+.actfoot .btns{display:flex;gap:10px;flex-wrap:wrap;margin-left:auto}
 @media (prefers-reduced-motion: reduce){.node[data-state="checking"] i{animation:none} .node[data-busy] i::after{animation-duration:.01ms}}
 
 /* Keys: one row per key, carrying everything about it — what it is, whether it is plugged in, whether it is sealed */
