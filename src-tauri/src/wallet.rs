@@ -381,15 +381,18 @@ pub struct Entity {
     #[serde(default)] pub members: Vec<Member>,
 }
 
-/// One member of a self-managed super fund.
+/// One member of a self-managed super fund, or one beneficiary of a trust.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Member {
     pub name: String,
-    /// date of birth, YYYY-MM-DD (empty if not given) — age decides what phase a member CAN be in
+    /// date of birth, YYYY-MM-DD (empty if not given) — age decides what phase a fund member CAN be in, and whether a
+    /// trust beneficiary is a minor
     #[serde(default)] pub born: String,
-    /// accumulation | ttr (transition-to-retirement, not retirement phase) | retirement
+    /// a fund member: accumulation | ttr (transition-to-retirement, not retirement phase) | retirement
     #[serde(default)] pub phase: String,
-    /// this member's share of the fund's balance, per cent (0 if not given)
+    /// a trust beneficiary: person | company | trust | smsf — what they are decides the discount they get
+    #[serde(default)] pub kind: String,
+    /// a member's share of the fund's balance, or a beneficiary's share of the net capital gain, per cent (0 if not given)
     #[serde(default)] pub share: f64,
 }
 

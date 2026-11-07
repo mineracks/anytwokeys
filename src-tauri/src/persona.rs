@@ -183,7 +183,7 @@ pub fn generate(seed: &str, now: u64) -> Result<Made, String> {
             Entity { id: e_self.clone(), name: name.clone(), kind: "person".into(), note: format!("Born 1986. Buys a little every month since 2018; moved to cold storage in 2026. Lives at {home}."), added: created, members: Vec::new() },
             Entity { id: e_partner.clone(), name: format!("{partner} {last}"), kind: "person".into(), note: "Partner. No holdings of their own yet; the home is in both names.".into(), added: created, members: Vec::new() },
             Entity { id: e_smsf.clone(), name: format!("{last} Super Fund"), kind: "smsf".into(), note: format!("Self-managed super fund, two members. Corporate trustee: {last} Holdings Pty Ltd. Buys quarterly since 2023."), added: epoch(2023, 7, 1, 0, 0) as u64,
-                members: vec![Member { name: name.clone(), born: "1986-03-14".into(), phase: "accumulation".into(), share: 62.0 }, Member { name: format!("{partner} {last}"), born: "1988-09-02".into(), phase: "accumulation".into(), share: 38.0 }] },
+                members: vec![Member { name: name.clone(), born: "1986-03-14".into(), phase: "accumulation".into(), kind: String::new(), share: 62.0 }, Member { name: format!("{partner} {last}"), born: "1988-09-02".into(), phase: "accumulation".into(), kind: String::new(), share: 38.0 }] },
             Entity { id: e_co.clone(), name: format!("{last} Holdings Pty Ltd"), kind: "company".into(), note: "Corporate trustee of the fund. Holds nothing of its own.".into(), added: epoch(2023, 6, 20, 0, 0) as u64, members: Vec::new() },
         ];
         s.places = vec![

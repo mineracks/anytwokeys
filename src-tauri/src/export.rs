@@ -210,6 +210,9 @@ fn winansi(s: &str) -> Vec<u8> {
     let mut out = Vec::new();
     for c in s.chars() {
         let b = match c { '(' | ')' | '\\' => { out.push(b'\\'); c as u8 } ' '..='~' => c as u8, '\u{b7}' => 0xB7, '\u{2026}' => 0x85, '\u{2014}' => 0x97, '\u{2013}' => 0x96, '\u{203a}' => 0x9B, '\u{2019}' => 0x92,
+            '\u{2018}' => 0x91, '\u{201c}' => 0x93, '\u{201d}' => 0x94, '\u{2022}' => 0x95, '\u{2030}' => 0x89, '\u{20ac}' => 0x80,
+            // not in WinAnsi: the nearest ASCII, never a question mark on a figure
+            '\u{2212}' => b'-', '\u{2192}' => b'>', '\u{21c4}' => b'=', '\u{25b2}' | '\u{25bc}' => b' ', '\u{2265}' => b'>', '\u{2264}' => b'<', '\u{2248}' => b'~', '\u{a0}' => b' ',
             c if (0xA0..=0xFF).contains(&(c as u32)) => c as u32 as u8, _ => b'?' };
         out.push(b);
     }
@@ -362,11 +365,12 @@ pub fn doc(title: &str, subtitle: &str, blocks: &[Block]) -> Result<Vec<u8>, Str
             }
             Block::Heading(h) => { need!(30.0); y -= 4.0; page!().text(2, 9.0, M, y, &h.to_uppercase()); y -= 15.0; }
             Block::Facts(kv) => for (k, v) in kv {
-                // a newline in a value is a hard break: one address per line
-                let lines: Vec<String> = v.split('\n').flat_map(|p| wrap(p, 78)).collect(); need!(14.0 * lines.len() as f32 + 3.0);
-                page!().text(2, 8.5, M, y, &k.to_uppercase());
-                for (i, l) in lines.iter().enumerate() { page!().text(1, 10.5, M + 110.0, y, l); if i + 1 < lines.len() { y -= 13.0; } }
-                y -= 16.0;
+                // a newline in a value is a hard break: one address per line; a long key wraps in its own column
+                let lines: Vec<String> = v.split('\n').flat_map(|p| wrap(p, 78)).collect();
+                let keys = wrap(&k.to_uppercase(), 22); let n = lines.len().max(keys.len()); need!(14.0 * n as f32 + 3.0);
+                for (i, kl) in keys.iter().enumerate() { page!().text(2, 8.5, M, y - 13.0 * i as f32, kl); }
+                for (i, l) in lines.iter().enumerate() { page!().text(1, 10.5, M + 110.0, y - 13.0 * i as f32, l); }
+                y -= 13.0 * (n as f32 - 1.0) + 16.0;
             },
             Block::Para(t) => { for para in t.split('\n') { let lines = wrap(para, 96); if lines.len() == 1 && lines[0].is_empty() { y -= 6.0; continue; } for l in lines { need!(13.0); page!().text(1, 10.0, M, y, &l); y -= 13.0; } } y -= 4.0; }
             Block::Mono(t) => { for l in t.as_bytes().chunks(104).map(|c| std::str::from_utf8(c).unwrap_or("")) { need!(10.0); page!().text(3, 7.5, M, y, l); y -= 10.0; } y -= 6.0; }

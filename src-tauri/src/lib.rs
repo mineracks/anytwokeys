@@ -1331,9 +1331,10 @@ fn entity_save(id: String, name: String, kind: String, note: String, members: Op
     if name.is_empty() || name.chars().count() > 80 { return Err("give the entity a name of up to 80 characters".into()); }
     let kind = if ENTITY_KINDS.contains(&kind.as_str()) { kind } else { "other".into() };
     // members belong to a super fund; each needs a name, a phase the app knows, a date (if given) that parses, a share 0–100
-    let members: Vec<wallet::Member> = if kind == "smsf" { members.unwrap_or_default().into_iter().filter(|m| !m.name.trim().is_empty()).map(|m| wallet::Member {
+    let members: Vec<wallet::Member> = if kind == "smsf" || kind == "trust" { members.unwrap_or_default().into_iter().filter(|m| !m.name.trim().is_empty()).map(|m| wallet::Member {
         name: m.name.trim().chars().take(80).collect(), born: m.born.trim().to_string(),
-        phase: if ["accumulation", "ttr", "retirement"].contains(&m.phase.as_str()) { m.phase } else { "accumulation".into() },
+        phase: if kind == "smsf" { if ["accumulation", "ttr", "retirement"].contains(&m.phase.as_str()) { m.phase } else { "accumulation".into() } } else { String::new() },
+        kind: if kind == "trust" { if ["person", "company", "trust", "smsf"].contains(&m.kind.as_str()) { m.kind } else { "person".into() } } else { String::new() },
         share: if m.share.is_finite() { m.share.clamp(0.0, 100.0) } else { 0.0 } }).collect() } else { Vec::new() };
     for m in &members { if !m.born.is_empty() && !(m.born.len() == 10 && m.born.as_bytes()[4] == b'-' && m.born.as_bytes()[7] == b'-' && m.born.chars().enumerate().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() })) { return Err(format!("{}'s date of birth should be YYYY-MM-DD", m.name)); } }
     if members.iter().map(|m| m.share).sum::<f64>() > 100.0 + 1e-9 { return Err("the members' shares add up to more than 100%".into()); }

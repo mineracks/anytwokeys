@@ -1745,6 +1745,21 @@ async function cgtReport(sc, [label, from, to]) {
     if (ff.flags.length) rows2.push(['Ages', ff.flags.join('\n')]);
     blocks.push({ kind: 'heading', text: 'The fund' }); blocks.push({ kind: 'facts', rows: rows2 });
   }
+  if (kind === 'trust') {
+    const tf = trustFacts(sc.entity), rows2 = [];
+    if (!tf.bs.length) rows2.push(['Beneficiaries', 'none recorded — add them on the entity\u2019s page, with their intended share of the gain']);
+    else if (net > 0) {
+      // each beneficiary takes their share of the gain as the trust made it — losses already inside `net`, the discount applied by THEM according to what they are
+      const longShare = longGain + shortGain > 0 ? Math.max(0, net) * (longGain / (longGain + shortGain)) : 0;
+      for (const b of tf.bs) { const part = net * (b.share || 0) / 100, longPart = longShare * (b.share || 0) / 100;
+        const disc = b.kind === 'company' ? 0 : b.kind === 'smsf' ? 1 / 3 : 0.5, after = part - longPart * disc;
+        rows2.push([b.name, `${b.share || 0}% · ${money(part, ccy)} of the net gain, ${money(longPart, ccy)} of it from coins held over 12 months · ${kindWord(b.kind || 'person').toLowerCase()}, ${BENEFICIARY_DISCOUNT[b.kind] || BENEFICIARY_DISCOUNT.person} · taxable to them ${money(after, ccy)} at their own rate`]); }
+      if (tf.undistributed > 0.5) rows2.push(['Not distributed', `${tf.undistributed}% · ${money(net * tf.undistributed / 100, ccy)} — taxed to the trustee at the top marginal rate (section 99A) unless a resolution by 30 June gives it to a beneficiary`]);
+      rows2.push(['How it is read', 'Each beneficiary\u2019s share of the net capital gain is grossed up by the trust\u2019s discount, then the beneficiary applies their own: the figures above are the same thing from the beneficiary\u2019s side. The trustee\u2019s resolution, not these shares, decides the split.']);
+    } else rows2.push(['Distribution', 'none: a net capital loss stays in the trust and carries forward; it cannot be passed to beneficiaries']);
+    if (tf.flags.length) rows2.push(['Minors', tf.flags.join('\n')]);
+    blocks.push({ kind: 'heading', text: 'The trust\u2019s beneficiaries' }); blocks.push({ kind: 'facts', rows: rows2 });
+  }
   blocks.push({ kind: 'para', text: `${au ? taxNote(sc.entity) + ' ' : ''}Each disposal is dated by its block; proceeds are the market price that day applied to the coins that left (a sale’s own price, if an exchange statement gives one, is on that row); cost is what those coins were worth when received, by the method named. "Over 12 months" is judged lot by lot, from the day each lot of coins was received. Moves between the vaults of this report are not disposals and are left out.` });
   blocks.push({ kind: 'heading', text: `Disposals (${rows.length})` });
   blocks.push({ kind: 'facts', rows: rows.map(x => { const r = x.r, what = ['stolen', 'lost', 'sold', 'spent', 'gift'].includes(r.kind) ? r.kind : 'disposal';
@@ -4054,31 +4069,40 @@ function entityForm(slot, e, done) {
       <div class="field"><div class="label">Name</div><input id="ef-name" maxlength="80" placeholder="the company, the trust, your own name" value="${esc(e ? e.name : '')}"></div>
       <div class="field"><div class="label">Kind</div><div class="seg" role="radiogroup" id="ef-kind">${ENTITY_KINDS.map(([k, w]) => `<button type="button" role="radio" aria-checked="${(e ? e.kind : 'person') === k ? 'true' : 'false'}" data-kind="${k}">${w}</button>`).join('')}</div></div>
       <div class="field"><div class="label">Note</div><textarea id="ef-note" rows="2" style="min-height:64px" placeholder="ABN, trustee, who does its books">${esc(e ? e.note : '')}</textarea></div>
-      <div class="field" id="ef-members" hidden><div class="label">Members</div>
-        <div class="muted" style="font-size:13px">A fund\u2019s capital gain is exempt in the proportion its assets support retirement-phase pensions, so the report needs who is in which phase and how much of the fund is theirs. A transition-to-retirement pension is not retirement phase. Shares are of the fund\u2019s balance; the actuary\u2019s percentage replaces them when the fund is unsegregated with members in both phases.</div>
+      <div class="field" id="ef-members" hidden><div class="label" id="ef-members-label">Members</div>
+        <div class="muted" style="font-size:13px" id="ef-members-note"></div>
         <div id="ef-member-rows" class="stack tight" style="margin-top:6px"></div>
         <div class="row" style="margin-top:6px"><button class="btn small" type="button" id="ef-member-add">Add a member</button></div></div>
       <div class="row" style="gap:8px"><button class="btn small primary" type="submit">${e ? 'Save' : 'Add this entity'}</button><button class="btn small" type="button" id="ef-cancel">Cancel</button></div>
       <div class="muted" id="ef-note-line" aria-live="polite"></div></form>`;
   let kind = e ? e.kind : 'person';
+  // a fund's members or a trust's beneficiaries: the same row, with a phase for a fund and a kind for a trust
   const memberRow = (m) => { const d = document.createElement('div'); d.className = 'row'; d.style.cssText = 'gap:6px;flex-wrap:wrap;align-items:center';
     d.innerHTML = `<input class="m-name" maxlength="80" placeholder="name" value="${esc(m.name || '')}" style="flex:1 1 140px"><input class="m-born" placeholder="born YYYY-MM-DD" value="${esc(m.born || '')}" style="flex:0 1 150px" maxlength="10">
       <select class="m-phase" style="flex:0 1 190px"><option value="accumulation">accumulation</option><option value="ttr">transition to retirement</option><option value="retirement">retirement phase</option></select>
+      <select class="m-kind" style="flex:0 1 150px"><option value="person">a person</option><option value="company">a company</option><option value="trust">a trust</option><option value="smsf">a super fund</option></select>
       <input class="m-share" type="number" min="0" max="100" step="0.1" placeholder="share %" value="${m.share ? m.share : ''}" style="flex:0 1 100px"><button type="button" class="btn small m-del" title="Remove">\u00d7</button>`;
-    d.querySelector('.m-phase').value = m.phase || 'accumulation'; d.querySelector('.m-del').onclick = () => d.remove(); return d; };
+    d.querySelector('.m-phase').value = m.phase || 'accumulation'; d.querySelector('.m-kind').value = m.kind || 'person'; d.querySelector('.m-del').onclick = () => d.remove(); return d; };
   const membersBox = $('#ef-members'), rowsBox = $('#ef-member-rows');
   for (const m of (e && e.members) || []) rowsBox.appendChild(memberRow(m));
-  const showMembers = () => { membersBox.hidden = kind !== 'smsf'; if (kind === 'smsf' && !rowsBox.children.length) rowsBox.appendChild(memberRow({})); };
+  const showMembers = () => {
+    membersBox.hidden = kind !== 'smsf' && kind !== 'trust';
+    if (membersBox.hidden) return;
+    $('#ef-members-label').textContent = kind === 'smsf' ? 'Members' : 'Beneficiaries';
+    $('#ef-members-note').textContent = kind === 'smsf' ? 'A fund\u2019s capital gain is exempt in the proportion its assets support retirement-phase pensions, so the report needs who is in which phase and how much of the fund is theirs. A transition-to-retirement pension is not retirement phase. Shares are of the fund\u2019s balance; the actuary\u2019s percentage replaces them when the fund is unsegregated with members in both phases.'
+      : 'A trust\u2019s net capital gain is distributed under the trustee\u2019s resolution, and each beneficiary is taxed on their share as if they made the gain: a person or a trust with the 50% discount, a super fund with one third, a company with none; a minor at penalty rates. The share here is the intended split of the capital gain; what is not distributed by 30 June is taxed to the trustee at the top rate.';
+    $$('.m-phase', rowsBox).forEach(x => x.hidden = kind !== 'smsf'); $$('.m-kind', rowsBox).forEach(x => x.hidden = kind !== 'trust');
+    if (!rowsBox.children.length) { rowsBox.appendChild(memberRow({})); $$('.m-phase', rowsBox).forEach(x => x.hidden = kind !== 'smsf'); $$('.m-kind', rowsBox).forEach(x => x.hidden = kind !== 'trust'); } };
   showMembers();
-  $('#ef-member-add').onclick = () => rowsBox.appendChild(memberRow({}));
-  const readMembers = () => [...rowsBox.children].map(d => ({ name: d.querySelector('.m-name').value.trim(), born: d.querySelector('.m-born').value.trim(), phase: d.querySelector('.m-phase').value, share: parseFloat(d.querySelector('.m-share').value) || 0 })).filter(m => m.name);
+  $('#ef-member-add').onclick = () => { rowsBox.appendChild(memberRow({})); $$('.m-phase', rowsBox).forEach(x => x.hidden = kind !== 'smsf'); $$('.m-kind', rowsBox).forEach(x => x.hidden = kind !== 'trust'); };
+  const readMembers = () => [...rowsBox.children].map(d => ({ name: d.querySelector('.m-name').value.trim(), born: d.querySelector('.m-born').value.trim(), phase: d.querySelector('.m-phase').value, kind: d.querySelector('.m-kind').value, share: parseFloat(d.querySelector('.m-share').value) || 0 })).filter(m => m.name);
   $$('#ef-kind [data-kind]').forEach(b => b.onclick = () => { kind = b.dataset.kind; $$('#ef-kind [data-kind]').forEach(x => x.setAttribute('aria-checked', x === b ? 'true' : 'false')); showMembers(); });
   $('#ef-cancel').onclick = () => { slot.innerHTML = ''; };
   $('#ent-form').onsubmit = async (ev) => {
     ev.preventDefault(); const name = $('#ef-name').value.trim(); if (!name) return toast('Give the entity a name');
     try {
       const before = new Set((store.entities || []).map(x => x.id));
-      store = await invoke('entity_save', { id, name, kind, note: $('#ef-note').value, members: kind === 'smsf' ? readMembers() : null });
+      store = await invoke('entity_save', { id, name, kind, note: $('#ef-note').value, members: kind === 'smsf' || kind === 'trust' ? readMembers() : null });
       if (vault) vault = store.vaults.find(x => x.name === vault.name) || vault;
       const saved = id ? store.entities.find(x => x.id === id) : store.entities.find(x => !before.has(x.id));
       slot.innerHTML = ''; if (done) await done(saved);
@@ -4117,6 +4141,19 @@ function fundFacts(e) {
   const mixed = ms.some(m => m.phase === 'retirement') && ms.some(m => m.phase !== 'retirement');
   return { ms, exempt, shared, flags, mixed };
 }
+/// What a trust's beneficiaries mean for its gain: each one's share, the discount their kind gets, a minor flagged,
+/// and the part no one is to receive (taxed to the trustee).
+const BENEFICIARY_DISCOUNT = { person: '50% discount', trust: '50% discount, then on to its own beneficiaries', company: 'no discount', smsf: 'one-third discount' };
+function trustFacts(e) {
+  const bs = e.members || [], shared = bs.reduce((a, b) => a + (b.share || 0), 0), flags = [];
+  for (const b of bs) { const a = ageOf(b.born); if (b.kind === 'person' && a !== null && a < 18) flags.push(`${b.name} is ${a}: a minor — a distribution from a discretionary trust is taxed at the top marginal rate above a small threshold (Division 6AA), unless it is excepted income`); }
+  return { bs, shared, undistributed: Math.max(0, 100 - shared), flags };
+}
+function trustWords(e) {
+  const t = trustFacts(e); if (!t.bs.length) return 'No beneficiaries recorded yet — Edit, and add them with what they are and their intended share of the capital gain.';
+  const who = t.bs.map(b => { const a = ageOf(b.born); return `<b>${esc(b.name)}</b>${a !== null ? `, ${a}` : ''} · ${kindWord(b.kind || 'person').toLowerCase()} · ${BENEFICIARY_DISCOUNT[b.kind] || BENEFICIARY_DISCOUNT.person}${b.share ? ` · ${b.share}% of the gain` : ''}`; }).join('<br>');
+  return `${who}<br><span style="display:block;margin-top:4px">${t.undistributed > 0.5 ? `<b>${t.undistributed}%</b> of the gain has no beneficiary named: if it is not distributed by 30 June it is taxed to the trustee at the top marginal rate (section 99A), with no discount.` : 'The whole gain is spoken for; the trustee\u2019s resolution by 30 June makes it so.'}</span>${t.flags.length ? `<span style="display:block;margin-top:4px">${t.flags.map(esc).join('<br>')}</span>` : ''}`;
+}
 function fundWords(e) {
   const f = fundFacts(e); if (!f.ms.length) return 'No members recorded yet — Edit, and add them with their phase and share of the fund.';
   const who = f.ms.map(m => { const a = ageOf(m.born); return `<b>${esc(m.name)}</b>${a !== null ? `, ${a}` : ''} · ${PHASE_WORDS[m.phase] || m.phase}${m.share ? ` · ${m.share}% of the fund` : ''}`; }).join('<br>');
@@ -4130,7 +4167,7 @@ function renderEntity() {
   card.innerHTML = `<div class="txnav"><button class="btn small" type="button" data-go="entities">‹ All entities</button><span class="muted">${esc(e.name)}</span><span></span></div>
     <div class="guide-row"><div class="guide" style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:140px;flex-basis:200px">${iconHtml('entity', e.id, 72, entGlyph(e), true)}</div><div class="guide-body">
       <div class="cer-act-title">${esc(e.name)}</div><div class="ent-kind">${esc(kindWord(e.kind))}</div>${e.note ? `<div style="font-size:13.5px;white-space:pre-wrap">${esc(e.note)}</div>` : ''}
-      ${e.kind === 'smsf' ? `<div class="label" style="margin-top:6px">Its members</div><div class="muted" style="font-size:13px">${fundWords(e)}</div>` : ''}
+      ${e.kind === 'smsf' ? `<div class="label" style="margin-top:6px">Its members</div><div class="muted" style="font-size:13px">${fundWords(e)}</div>` : e.kind === 'trust' ? `<div class="label" style="margin-top:6px">Its beneficiaries</div><div class="muted" style="font-size:13px">${trustWords(e)}</div>` : ''}
       <div class="label" style="margin-top:6px">Its vaults</div>
       <div class="tp-list" style="margin-top:0">${vs.length ? vs.map(v => `<div class="tp rowpick" data-go-vault="${esc(v.name)}" role="link" tabindex="0"><div class="tp-what"><div class="tp-head"><b>${esc(v.name)}</b> <span class="muted">· ${esc(kindOfVault(v))}${v.network !== 'mainnet' ? ' · ' + esc(v.network) : ''}</span></div></div><div class="tp-act"><button type="button" class="linkish" data-disown="${esc(v.name)}">Not its owner</button></div></div>`).join('') : '<div class="muted" style="font-size:13px">No vault yet. Claim one from the list below, or from its Vault settings.</div>'}</div>
       ${(() => { const un = store.vaults.filter(v => !v.entity || !entityOf(v.entity)); return `<details class="adv" id="ent-unowned" style="margin-top:8px"${vs.length ? '' : ' open'}><summary>Vaults with no owner yet · ${sats(un.length)}</summary><div class="tp-list" style="margin-top:8px">${un.length ? un.map(v => `<div class="tp"><div class="tp-what"><div class="tp-head"><b>${esc(v.name)}</b> <span class="muted">· ${esc(kindOfVault(v))}${v.network !== 'mainnet' ? ' · ' + esc(v.network) : ''}</span></div></div><div class="tp-act"><button type="button" class="btn small" data-claim="${esc(v.name)}">Its owner</button></div></div>`).join('') : '<div class="muted" style="font-size:13px">Every vault has an owner.</div>'}</div></details>`; })()}
