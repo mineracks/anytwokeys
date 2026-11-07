@@ -2681,8 +2681,24 @@ const DISPOSAL_NOTES = { self: 'Not a disposal: no gain is realised and the cost
 /// transaction (disposal_set) and the ledger is rebuilt from it.
 function disposalPick(name, txid) {
   const L = vaultLedger(name), kind = (L && L.realised[txid] && L.realised[txid].kind) || '';
-  return `<div class="pick tight" data-disposal-of="${esc(txid)}">${DISPOSALS.map(([v, n]) => `<div class="opt${v === kind ? ' on' : ''}" data-kind="${v}">${n}</div>`).join('')}</div><small>${DISPOSAL_NOTES[kind] || (kind ? 'A disposal: the gain or loss above is realised. The reason is kept with the transaction.' : 'Say what this was and the books follow: a sale realises a gain, a move to your own wallet realises nothing, stolen or lost coins are a loss.')}</small>`;
+  // a theft rarely takes one transaction: once a row is stolen, the other rows that left the same day can be marked in one go
+  const same = kind === 'stolen' && L ? sameDayOut(name, txid).filter(id => (L.realised[id] || {}).kind !== 'stolen') : [];
+  const more = same.length ? `<div style="margin-top:6px"><a href="#" data-stolen-too="${esc(txid)}">Mark the ${same.length} other row${same.length === 1 ? '' : 's'} that left this vault the same day as stolen too \u203a</a></div>` : '';
+  return `<div class="pick tight" data-disposal-of="${esc(txid)}">${DISPOSALS.map(([v, n]) => `<div class="opt${v === kind ? ' on' : ''}" data-kind="${v}">${n}</div>`).join('')}</div><small>${DISPOSAL_NOTES[kind] || (kind ? 'A disposal: the gain or loss above is realised. The reason is kept with the transaction.' : 'Say what this was and the books follow: a sale realises a gain, a move to your own wallet realises nothing, stolen or lost coins are a loss.')}</small>${more}`;
 }
+// the other rows that left this vault on the same local day as `txid`, excluding transfers to the person's own vaults
+function sameDayOut(name, txid) {
+  const f = txFacts[name]; if (!f) return [];
+  const me = f.rows[txid]; if (!me || !me.time) return [];
+  const day = (t) => new Date(t * 1000).toDateString();
+  return Object.values(f.rows).filter(r => r.txid !== txid && r.net < 0 && r.time && day(r.time) === day(me.time) && !transferText(f, r.txid)).map(r => r.txid);
+}
+document.addEventListener('click', async (ev) => {
+  const a = ev.target.closest('[data-stolen-too]'); if (!a || !vault) return;
+  ev.preventDefault();
+  const ids = sameDayOut(vault.name, a.dataset.stolenToo);
+  try { for (const id of ids) store = await invoke('disposal_set', { name: vault.name, txid: id, kind: 'stolen' }); vault = store.vaults.find(v => v.name === vault.name) || vault; vaultLedger.memo = {}; renderTx(); toast(`${sats(ids.length)} row${ids.length === 1 ? '' : 's'} marked stolen`); } catch (e) { fail(e); }
+});
 document.addEventListener('click', async (ev) => {
   const o = ev.target.closest('[data-disposal-of] .opt'); if (!o || !vault) return;
   const txid = o.closest('[data-disposal-of]').dataset.disposalOf;
