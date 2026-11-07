@@ -4841,16 +4841,23 @@ $('#vs-node-retire').onclick = async () => {
 
 $('#vs-node-import').onclick = async () => {
   if (!vault || !vault.node) return;
-  const b = $('#vs-node-import'); b.disabled = true; $('#vs-node-note').textContent = '';
+  const b = $('#vs-node-import'); b.disabled = true; $('#vs-node-retire').disabled = true; $('#vs-node-note').textContent = '';
   try {
     const path = await invoke('node_import_pick');
     $('#vs-node-note').textContent = 'Reading the file, then asking the chain where every outgoing transaction went\u2026';
-    const [st, added, total] = await invoke('node_import', { name: vault.name, path });
+    const [st, r] = await invoke('node_import', { name: vault.name, path });
     store = st; vault = store.vaults.find(v => v.name === vault.name) || vault; vault._snap = null; vault._node = null;
-    $('#vs-node-note').textContent = `${sats(added)} new row${added === 1 ? '' : 's'} · the ledger now holds ${sats(total)}.`;
+    const day = (t) => new Date(t * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' });
+    const parts = [`Imported. ${sats(r.read)} rows read from the file, ${sats(r.new)} of them new; the ledger now holds ${sats(r.total)} rows.`];
+    if (r.to_filled) parts.push(`Where the money went was read from the chain for ${sats(r.to_filled)} outgoing transaction${r.to_filled === 1 ? '' : 's'}.`);
+    if (r.held !== null) parts.push(`The file says the node holds ${sats(r.held)} sats; that is now its balance.`);
+    if (r.gap) parts.push(`${sats(Math.abs(r.gap))} sats ${r.gap < 0 ? 'left without the node seeing them go' : 'are held beyond what the ledger explains'}: booked as one unaccounted row dated ${day(r.gap_at)}. Open it in Activity and say what it was.`);
+    else if (r.held !== null) parts.push('The ledger explains the balance exactly; nothing is unaccounted.');
+    $('#vs-node-note').textContent = parts.join(' ');
+    toast(`Ledger imported \u2014 ${sats(r.new)} new row${r.new === 1 ? '' : 's'}${r.gap ? ` \u00b7 ${sats(Math.abs(r.gap))} sats unaccounted` : ''}`, 8000);
     renderVaultSettings(); paintVaultCard(); sync().catch(() => {});
-  } catch (e) { if (String(e) !== 'cancelled') $('#vs-node-note').textContent = String(e); }
-  finally { b.disabled = false; }
+  } catch (e) { if (String(e) !== 'cancelled') { $('#vs-node-note').textContent = `The import did not happen: ${String(e)}`; toast(`Ledger not imported \u2014 ${String(e)}`, 8000); } else $('#vs-node-note').textContent = ''; }
+  finally { b.disabled = false; $('#vs-node-retire').disabled = false; }
 };
 
 // ---------- silent payments on a watched wallet ----------

@@ -1735,12 +1735,16 @@ fn node_import_pick() -> R<String> {
     Ok(p.to_string_lossy().into_owned())
 }
 #[tauri::command]
-async fn node_import(name: String, path: String) -> R<(Store, usize, usize)> {
+async fn node_import(name: String, path: String) -> R<(Store, ImportReport)> {
     block(move || node_import_at(name, path)).await
 }
+/// What an import did, said back to the person: rows, where-the-money-went lookups, the balance the file carried and
+/// the gap booked against it.
+#[derive(Serialize)]
+pub struct ImportReport { pub read: usize, pub new: usize, pub total: usize, pub to_filled: usize, pub held: Option<i64>, pub gap: i64, pub gap_at: u32 }
 /// Reads the file, parses it, merges it into the vault's ledger, fetches where the money went, reconciles to the
 /// balance the file carries. Off the window's thread: the chain is asked for every outgoing transaction.
-fn node_import_at(name: String, path: String) -> R<(Store, usize, usize)> {
+fn node_import_at(name: String, path: String) -> R<(Store, ImportReport)> {
     let text = std::fs::read_to_string(&path).map_err(|e| format!("the file could not be read: {e}"))?;
     let (kind, pubkey, ev, held) = node::ledger_from_file(&text)?;
     let mut s = wallet::load()?;
@@ -1752,9 +1756,11 @@ fn node_import_at(name: String, path: String) -> R<(Store, usize, usize)> {
     if !pubkey.is_empty() && pubkey != n.pubkey.to_lowercase() { return Err("this file names a different node: its identity is not this vault's".into()); }
     let before = n.events.len();
     let have: std::collections::HashSet<String> = n.events.iter().map(|e| e.id.clone()).collect();
-    let new = ev.iter().filter(|e| !have.contains(&e.id)).count();
+    let read = ev.len(); let new = ev.iter().filter(|e| !have.contains(&e.id)).count();
     n.events = node::keep_and_replace(&n.events, ev);
+    let to_before = n.events.iter().filter(|e| !e.to.is_empty()).count();
     { let (servers, network) = (wallet::servers_for(&s_ro, &net_ro), net_ro.clone()); node_destinations(&mut n.events, &servers, &network); }
+    let to_filled = n.events.iter().filter(|e| !e.to.is_empty()).count() - to_before;
     if let Some(h) = held {
         // the file says what the node held when it was asked: that becomes the balance, and the ledger is made to sum
         // to it, the gap dated at the newest row (when the money last moved), not at the import
@@ -1762,11 +1768,13 @@ fn node_import_at(name: String, path: String) -> R<(Store, usize, usize)> {
         let at = n.events.iter().map(|e| e.time).max().unwrap_or(now() as u32);
         n.events = node::reconcile(std::mem::take(&mut n.events), h.total(), at, UNACCOUNTED);
     }
+    let gap = n.events.iter().rev().find(|e| e.kind == "unaccounted").map(|e| (e.net, e.time)).unwrap_or((0, 0));
+    let report = ImportReport { read, new, total: n.events.len(), to_filled, held: held.map(|h| h.total()), gap: gap.0, gap_at: gap.1 };
     let total = n.events.len(); debug_assert!(total >= before);
     let txs: std::collections::HashMap<String, i32> = n.events.iter().filter(|e| !e.txid.is_empty()).map(|e| (e.txid.clone(), 0)).collect();
     let e = s.seen.entry(name).or_default(); e.txs = txs; e.primed = true;
     wallet::save(&s)?;
-    Ok((s, new, total))
+    Ok((s, report))
 }
 
 #[tauri::command]
