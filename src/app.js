@@ -2206,7 +2206,9 @@ function vaultLedger(name) {
   const kinds = {};
   for (const n of names) for (const [k, rec] of Object.entries((store.vaults.find(x => x.name === n) || {}).more || {}))
     if (k.startsWith('tx:') && rec.disposal && rec.disposal.kind) kinds[k.slice(3)] = rec.disposal.kind;
-  const m = methodFor(v), key = m + ':' + inputs.map(i => i.name + ':' + i.rows.length).join(',') + ':' + (f.now ? f.now.price : 0) + ':' + JSON.stringify(kinds);
+  // the key carries how many rows have their past price: a price that arrives in the background changes every cost
+  // downstream of it, and a ledger built before it would otherwise be served until the row count changed
+  const m = methodFor(v), key = m + ':' + inputs.map(i => i.name + ':' + i.rows.length + ':' + i.rows.filter(r => r.quote).length).join(',') + ':' + (f.now ? f.now.price : 0) + ':' + JSON.stringify(kinds);
   if (!vaultLedger.memo[name] || vaultLedger.memo[name].key !== key) vaultLedger.memo[name] = { key, L: buildLedger(inputs, m, kinds, [name]) };
   return vaultLedger.memo[name].L;
 }
