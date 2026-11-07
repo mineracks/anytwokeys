@@ -244,6 +244,7 @@ table.act .when small,table.act .amt small{display:block;color:var(--muted);font
 table.act .amt{white-space:nowrap;font-family:var(--display);font-weight:600;font-variant-numeric:tabular-nums}
 /* the amount itself never breaks; the line under it (worth then, fee, realised) wraps, so the table fits the card at any window width */
 table.act .amt small{white-space:normal}
+.nowrap{white-space:nowrap}
 table.act td:last-child{white-space:normal}
 @media (max-width:1280px){
   #activity td:nth-child(2),#act-all td:nth-child(2){width:110px}

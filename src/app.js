@@ -1415,12 +1415,12 @@ function paintFactRow(txid, r, facts) {
     const q = r.quote || (!r.time ? facts.now : null);
     amt.classList.remove('muted'); amt.classList.toggle('in', r.net > 0);
     const vn = (tr.closest('#act-all, #activity') && vault) ? vault.name : null, L = vn ? vaultLedger(vn) : null, rz = L && L.realised[txid];
-    const rtext = rz && rz.gain !== null ? ` \u00b7 realised ${rz.gain >= 0 ? '+' : '\u2212'}${money(Math.abs(rz.gain), facts.ccy)}` : '';
+    const rtext = rz && rz.gain !== null ? ` \u00b7 <span class="nowrap">realised ${rz.gain >= 0 ? '+' : '\u2212'}${money(Math.abs(rz.gain), facts.ccy)}</span>` : '';
     // a node row under one satoshi (a routing fee, the millisatoshi a close rounds away) is shown exactly, not as 0
     const sub = r.net === 0 ? (nodeRow(txid)?.msat || 0) : 0;
     if (sub) amt.classList.toggle('in', sub > 0);
     amt.innerHTML = sub ? `${sub > 0 ? '+' : '−'}${(Math.abs(sub) / 1000).toFixed(3)} sats<small>exactly ${sats(Math.abs(sub))} msat</small>`
-      : `${r.net > 0 ? '+' : r.net < 0 ? '−' : ''}${sats(Math.abs(r.net))} sats<small>${q ? worth(Math.abs(r.net), q, facts.ccy) + (r.time ? ' then' : ' now') : ''}${r.fee !== null && r.net < 0 ? (q ? ' · ' : '') + 'fee ' + sats(r.fee) : ''}${rtext}</small>`;
+      : `${r.net > 0 ? '+' : r.net < 0 ? '−' : ''}${sats(Math.abs(r.net))} sats<small>${q ? worth(Math.abs(r.net), q, facts.ccy) + (r.time ? ' then' : ' now') : ''}${r.fee !== null && r.net < 0 ? (q ? ' · ' : '') + '<span class="nowrap">fee ' + sats(r.fee) + '</span>' : ''}${rtext}</small>`;
     if (q) amt.title = basisWords(q, facts.ccy);
   }
 }
