@@ -726,7 +726,13 @@ a.tag{text-decoration:none;cursor:pointer} a.tag:hover{text-decoration:underline
 .spark-check input{width:auto;min-height:0;margin-top:5px;flex:none}
 #spark-enrollment,#spark-candidates{overflow-wrap:anywhere}
 #spark-discovery-options .stack{padding-top:12px}
-#spark-unlock-form{max-height:90vh;overflow:auto}
+/* the reader dialog must end inside the window with the PIN field and the Open button in view: it scrolls past
+   what the window cannot show, its picture sits beside the words (not above them, which doubled its height), and
+   on a short screen the picture is left out altogether */
+#spark-unlock-form{max-height:calc(100vh - 48px);overflow:auto;box-sizing:border-box}
+#spark-unlock-form .guide{flex-basis:200px}
+#spark-unlock-form .guide-body{flex-basis:220px}
+@media (max-height:780px){ #spark-unlock-form .guide{display:none} #spark-unlock-form .guide-body{flex:1} }
 .sk-ok{stroke:var(--signal);fill:none}.sk-warn-s{stroke:var(--no)}.sk-warn-t{fill:var(--no)}.sk-warn-b{stroke:var(--no);fill:none}
 
 #spark-enrollment label:not(.spark-check),#spark-discovery-options label,#spark-unlock-form label{display:flex;flex-direction:column;gap:6px}
