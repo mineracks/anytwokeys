@@ -224,6 +224,18 @@
           <div class="card"><div class="label">How what leaves is costed</div>
             <div class="field"><label class="cap" for="vs-method">Cost method</label><select id="vs-method" style="max-width:420px"><option value="">The app's own</option><option value="utxo">The coins actually spent</option><option value="fifo">First in, first out</option><option value="average">Average cost (for reference)</option></select></div>
             <div class="muted" style="font-size:13px" id="vs-method-note"></div></div>
+          <div class="card" id="vs-node-card" hidden><div class="label">The node</div>
+            <dl class="tx-dl" id="vs-node-facts"></dl>
+            <div class="muted" style="font-size:13px" id="vs-node-text"></div>
+            <div class="field" id="vs-node-why-row"><label class="cap" for="vs-node-why">Why (kept with the record)</label><input id="vs-node-why" maxlength="200" placeholder="e.g. rebuilt under a new identity after the October incident"></div>
+            <div class="row" style="gap:10px;align-items:flex-end;flex-wrap:wrap"><button class="btn small" id="vs-node-retire">Retire this node — keep its ledger</button><button class="btn small" id="vs-node-import">Add its ledger from a file…</button></div>
+            <details class="muted" style="font-size:13px"><summary>Making the file</summary>
+              <p>On a machine that can reach the node — a restored backup kept off the network, say — save the node’s own answers as one JSON object. Rows already here are replaced by the file’s reading of them; rows the file does not hold are kept. The file must be from this node: one that names another identity is refused.</p>
+              <p>Core Lightning: <span class="mono">lightning-cli bkpr-listincome consolidate_fees=true</span> saved as it is (add <span class="mono">getinfo</span> under a key <span class="mono">getinfo</span> if you want the identity checked).</p>
+              <p>LND: an object with each lncli answer under its command name — <span class="mono">getinfo, listchaintxns, listinvoices --max_invoices 100000, listpayments --max_payments 100000, fwdinghistory --start_time 1 --max_events 50000, listchannels, closedchannels, pendingchannels</span>.</p>
+            </details>
+            <div class="muted" id="vs-node-note" aria-live="polite"></div>
+          </div>
           <div class="card" id="vs-sp-card" hidden><div class="label">Silent payments</div>
             <div id="vs-sp-on" class="stack" hidden>
               <dl class="tx-dl" id="vs-sp-facts"></dl>

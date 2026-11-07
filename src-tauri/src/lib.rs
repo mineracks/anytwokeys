@@ -1376,7 +1376,7 @@ fn node_check_with(kind: &str, url: &str, cred: &str, pin: &str) -> R<(node::Che
     };
     if network != "bitcoin" && network != "mainnet" { return Err(format!("this node is on {network}, not mainnet")); }
     let marks = if kind == "lnd" { LND_MARKS.with(|m| std::mem::take(&mut *m.borrow_mut())) } else { Default::default() };
-    let n = node::Node { kind: kind.into(), url: url.clone(), pin: if pin.is_empty() { pin_seen.clone() } else { pin.replace(':', "").to_lowercase() }, alias: alias.clone(), pubkey: pubkey.clone(), version: version.clone(), onchain, channels, pending, read_at: now(), events: events.clone(), marks };
+    let n = node::Node { kind: kind.into(), url: url.clone(), pin: if pin.is_empty() { pin_seen.clone() } else { pin.replace(':', "").to_lowercase() }, alias: alias.clone(), pubkey: pubkey.clone(), version: version.clone(), onchain, channels, pending, read_at: now(), events: events.clone(), marks, retired: false, retired_why: String::new() };
     Ok((node::Check { kind: kind.into(), alias, pubkey, version, network, height, onchain, channels, pending, channel_count, refused, pin: pin_seen, events: events.len() }, n))
 }
 #[tauri::command]
@@ -1430,7 +1430,7 @@ fn node_read(n: &node::Node) -> R<node::Node> {
             let (_, pubkey, version, _, _) = c.info()?;
             if pubkey != n.pubkey { return Err(format!("the node at {} is not the one this vault watches (a different identity answered)", n.url)); }
             let (onchain, channels, pending, _) = c.funds()?;
-            fresh.events = c.events()?; fresh.onchain = onchain; fresh.channels = channels; fresh.pending = pending; fresh.version = version; fresh.read_at = now();
+            fresh.events = node::keep_and_replace(&n.events, c.events()?); fresh.onchain = onchain; fresh.channels = channels; fresh.pending = pending; fresh.version = version; fresh.read_at = now();
         }
     }
     Ok(fresh)
@@ -1675,6 +1675,42 @@ fn vault_forget(name: String) -> R<Store> {
     Ok(s)
 }
 
+/// Retire a node — keep its ledger, stop asking it — or resume reading it. Retiring does not touch the sealed credential,
+/// so a node that comes back under the SAME identity resumes where it left off; one rebuilt under a new identity is
+/// a new vault, and this one stays as the record of the old.
+#[tauri::command]
+fn node_retire(name: String, retired: bool, why: String) -> R<Store> {
+    let why: String = why.trim().chars().take(200).collect();
+    wallet::update(|s| { if let Some(n) = s.vaults.iter_mut().find(|v| v.name == name).and_then(|v| v.node.as_mut()) { n.retired = retired; n.retired_why = if retired { why.clone() } else { String::new() }; } })
+}
+
+/// A ledger file into a node vault (node.rs ledger_from_file): rows read again replace their earlier reading, rows
+/// the file does not hold are kept — the ledger never shrinks. The file must be of the same kind of node, and if it
+/// names an identity it must be THIS node's. Returns the store, how many rows were new, and the ledger's size.
+#[tauri::command]
+fn node_import_pick() -> R<String> {
+    let p = files::FileDialog::new().set_title("Choose the ledger file (JSON)").add_filter("JSON", &["json", "txt"]).pick_file().ok_or("cancelled")?;
+    std::fs::read_to_string(&p).map_err(|e| format!("the file could not be read: {e}"))
+}
+#[tauri::command]
+fn node_import(name: String, text: String) -> R<(Store, usize, usize)> {
+    let (kind, pubkey, ev) = node::ledger_from_file(&text)?;
+    let mut s = wallet::load()?;
+    let v = s.vaults.iter_mut().find(|v| v.name == name).ok_or("no such vault")?;
+    let n = v.node.as_mut().ok_or("this vault is not a node")?;
+    if n.kind != kind { return Err(format!("this file is from {} and the vault watches {}", if kind == "cln" { "Core Lightning" } else { "LND" }, if n.kind == "cln" { "Core Lightning" } else { "LND" })); }
+    if !pubkey.is_empty() && pubkey != n.pubkey.to_lowercase() { return Err("this file names a different node: its identity is not this vault's".into()); }
+    let before = n.events.len();
+    let have: std::collections::HashSet<String> = n.events.iter().map(|e| e.id.clone()).collect();
+    let new = ev.iter().filter(|e| !have.contains(&e.id)).count();
+    n.events = node::keep_and_replace(&n.events, ev);
+    let total = n.events.len(); debug_assert!(total >= before);
+    let txs: std::collections::HashMap<String, i32> = n.events.iter().filter(|e| !e.txid.is_empty()).map(|e| (e.txid.clone(), 0)).collect();
+    let e = s.seen.entry(name).or_default(); e.txs = txs; e.primed = true;
+    wallet::save(&s)?;
+    Ok((s, new, total))
+}
+
 #[tauri::command]
 fn settings_set(app: tauri::AppHandle, network: String, custom: bool, electrum: String, explorer: String, gap: Option<u32>, fiat: Option<String>, prices: Option<String>, vss: Option<String>, tiles: Option<String>, geocode: Option<String>, location: Option<bool>, location_exact: Option<bool>, sp_oracle: Option<String>) -> R<Store> {
     let mut s = wallet::load()?;
@@ -1825,7 +1861,8 @@ fn vault_address_kind(name: String, kind: String) -> R<String> {
 #[derive(Serialize)]
 struct HistoryRow { txid: String, height: i32, index: u32 }
 #[derive(Serialize)]
-struct Snapshot { coins: Vec<wallet::CoinAt>, balance: u64, height: u32, history: Vec<HistoryRow>, servers: chain::Servers, receive: String, receive_index: u32, rotating: bool, next_change: u32, gap: u32 }
+struct Snapshot { /// non-empty = the figures are as LAST READ, not fresh: why the source was not asked, or did not answer
+    #[serde(default)] stale: String, coins: Vec<wallet::CoinAt>, balance: u64, height: u32, history: Vec<HistoryRow>, servers: chain::Servers, receive: String, receive_index: u32, rotating: bool, next_change: u32, gap: u32 }
 
 /// One search across the whole profile: vaults, keys, labels, notes, transactions, coins, addresses, the address book,
 /// places and entities — from what is kept on this computer, so it answers as fast as the words are typed.
@@ -1844,22 +1881,30 @@ async fn vault_sync(name: String) -> R<Snapshot> {
         // chain is written into `seen` so that any other vault sharing a transaction with it sees the move
         if let Some(n) = &v.node {
             let name = v.name.clone();
-            let fresh = node_read(n)?;
+            // A node that is retired, or that cannot be read right now — credential revoked, certificate changed, the
+            // box rebuilt or gone — is still a vault with a ledger: what was read is shown as it was read, and said
+            // to be so. Only a node that never gave a ledger has nothing to show, and then the reason is the error.
+            let from_ledger = |why: String| -> R<Snapshot> {
+                let history: Vec<HistoryRow> = n.events.iter().map(|e| HistoryRow { txid: e.id.clone(), height: 0, index: 0 }).collect();
+                Ok(Snapshot { stale: why, coins: Vec::new(), balance: n.onchain + n.channels, height: 0, history, servers: servers.clone(), receive: String::new(), receive_index: 0, rotating: false, next_change: 0, gap: 0 })
+            };
+            if n.retired { return from_ledger(if n.retired_why.is_empty() { "retired".into() } else { format!("retired: {}", n.retired_why) }); }
+            let fresh = match node_read(n) { Ok(f) => f, Err(e) if !n.events.is_empty() => return from_ledger(e), Err(e) => return Err(e) };
             let txs: std::collections::HashMap<String, i32> = fresh.events.iter().filter(|e| !e.txid.is_empty()).map(|e| (e.txid.clone(), 0)).collect();
             wallet::update(|s| { if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == name) { vm.node = Some(fresh.clone()); } let e = s.seen.entry(name.clone()).or_default(); e.txs = txs; e.primed = true; })?;
             // oldest first, as Electrum's history is: the window turns every history newest-first itself
             let history: Vec<HistoryRow> = fresh.events.iter().map(|e| HistoryRow { txid: e.id.clone(), height: 0, index: 0 }).collect();
-            return Ok(Snapshot { coins: Vec::new(), balance: fresh.onchain + fresh.channels, height: 0, history, servers, receive: String::new(), receive_index: 0, rotating: false, next_change: 0, gap: 0 });
+            return Ok(Snapshot { stale: String::new(), coins: Vec::new(), balance: fresh.onchain + fresh.channels, height: 0, history, servers, receive: String::new(), receive_index: 0, rotating: false, next_change: 0, gap: 0 });
         }
         // An exchange account: no chain to ask; the balance is what the newest statement states, or the rows' sum
         if let Some(ex) = &v.exchange {
             let history: Vec<HistoryRow> = ex.rows.iter().map(|r| HistoryRow { txid: r.id.clone(), height: 0, index: 0 }).collect();
-            return Ok(Snapshot { coins: Vec::new(), balance: ex.btc_now.max(0) as u64, height: 0, history, servers, receive: String::new(), receive_index: 0, rotating: false, next_change: 0, gap: 0 });
+            return Ok(Snapshot { stale: String::new(), coins: Vec::new(), balance: ex.btc_now.max(0) as u64, height: 0, history, servers, receive: String::new(), receive_index: 0, rotating: false, next_change: 0, gap: 0 });
         }
         // A closed wallet read from its statement: no chain to ask; the balance is what its rows add up to
         if let Some(st) = &v.statement {
             let history: Vec<HistoryRow> = st.rows.iter().map(|r| HistoryRow { txid: r.id.clone(), height: 0, index: 0 }).collect();
-            return Ok(Snapshot { coins: Vec::new(), balance: st.closes_at.max(0) as u64, height: 0, history, servers, receive: String::new(), receive_index: 0, rotating: false, next_change: 0, gap: 0 });
+            return Ok(Snapshot { stale: String::new(), coins: Vec::new(), balance: st.closes_at.max(0) as u64, height: 0, history, servers, receive: String::new(), receive_index: 0, rotating: false, next_change: 0, gap: 0 });
         }
         // A Spark wallet is not on the chain: its balance comes from an operator, and it has no coins, no addresses
         // and no block height of its own. Everything else on the screen is drawn from this same shape.
@@ -1867,7 +1912,7 @@ async fn vault_sync(name: String) -> R<Snapshot> {
             let id = hex::decode(&sp.identity).map_err(|_| "this vault's Spark key is damaged")?;
             let session = spark_auth::session(sp, &v.network)?;
             let balance = spark_auth::read_result(sp, &v.network, spark::balance_with(&id, &v.network, session.as_deref()))?;
-            return Ok(Snapshot { coins: Vec::new(), balance, height: 0, history: Vec::new(), servers,
+            return Ok(Snapshot { stale: String::new(), coins: Vec::new(), balance, height: 0, history: Vec::new(), servers,
                 receive: sp.address.clone(), receive_index: 0, rotating: false, next_change: 0, gap: 0 });
         }
         let v = sp_discover(&s, v, &servers)?;
@@ -1881,7 +1926,7 @@ async fn vault_sync(name: String) -> R<Snapshot> {
         let mut history: Vec<HistoryRow> = sc.history.into_iter().map(|(txid, height, index)| HistoryRow { txid, height, index }).collect();
         history.sort_by_key(|h| if h.height <= 0 { i32::MAX } else { h.height });
         history.dedup_by(|a, b| a.txid == b.txid);
-        Ok(Snapshot { coins: sc.coins, balance, height, history, servers, receive, receive_index, rotating: wallet::rotates(&v), next_change: sc.next_change, gap: s.settings.gap })
+        Ok(Snapshot { stale: String::new(), coins: sc.coins, balance, height, history, servers, receive, receive_index, rotating: wallet::rotates(&v), next_change: sc.next_change, gap: s.settings.gap })
     }).await
 }
 
@@ -3677,7 +3722,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![search_all, profiles_list, profile_open, profile_close, profile_create, profile_update, profile_delete, profile_picture_pick, guard_displays, guard_sharing, guard_override, vault_move_start, move_land, persona_generate, persona_defaults, transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, cycle_curve, cycle_now, cycle_marks, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, icon_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
-            cards_list, card_generate, attach_view, profiles_refresh, sync_face_refresh, sync_status, sync_enable, sync_rotate, sync_remove_card, sync_now, sync_tick, sync_disable, sync_find, sync_adopt, card_survey, card_tap, nk_firmware, nk_firmware_update, secret_preview, card_init_key_from, card_import, card_init_resume_check, key_setup_restart, card_reset, card_pin_change_pad, platform, ui_note, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
+            cards_list, card_generate, attach_view, profiles_refresh, sync_face_refresh, sync_status, sync_enable, sync_rotate, sync_remove_card, sync_now, sync_tick, sync_disable, sync_find, sync_adopt, card_survey, card_tap, nk_firmware, nk_firmware_update, secret_preview, card_init_key_from, card_import, card_init_resume_check, key_setup_restart, card_reset, card_pin_change_pad, platform, ui_note, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, node_retire, node_import_pick, node_import, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard,
             engraver_find, engraver_jog, engraver_run, engraver_cancel, vault_shares_plates, share_rewrap
         ])

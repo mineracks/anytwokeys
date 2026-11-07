@@ -1246,7 +1246,17 @@ function paintSnap(s) {
     const unconf = s.coins.filter(c => c.height === 0).reduce((a, c) => a + c.value, 0);
     $('#balance-sub').textContent = `${s.coins.length} coin${s.coins.length === 1 ? '' : 's'}` + (unconf ? ` · ${sats(unconf)} unconfirmed` : ' · all confirmed');
     $('#conn').textContent = `Connected to ${s.servers.electrum.replace(/^\w+:\/\//, '')} · block ${sats(s.height)}`;
-    if (vault.node) { $('#balance-sub').textContent = `on-chain ${sats(vault.node.onchain)} + in channels ${sats(vault.node.channels)}${vault.node.pending ? ` \u00b7 ${sats(vault.node.pending)} pending` : ''} \u2014 as the node reports them`; $('#conn').textContent = `Read from ${esc(vault.node.alias)} with a read-only credential`; }
+    if (vault.node) {
+      const n = vault.node, held = `on-chain ${sats(n.onchain)} + in channels ${sats(n.channels)}${n.pending ? ` \u00b7 ${sats(n.pending)} pending` : ''}`;
+      if (s.stale) {
+        // The node was not asked, or did not answer: the ledger is drawn as it was last read, and the screen says so
+        // rather than going blank. Money that moved is still money that moved.
+        const when = n.read_at ? new Date(n.read_at * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' }) : 'an earlier read';
+        const retired = s.stale.startsWith('retired');
+        $('#balance-sub').textContent = `${held} \u2014 as the node reported them on ${when}`;
+        $('#conn').textContent = retired ? `${esc(n.alias)} is retired \u00b7 its ledger as last read, ${when}${s.stale.length > 8 ? ` \u00b7 ${s.stale.slice(9)}` : ''}` : `${esc(n.alias)} did not answer \u00b7 showing its ledger as last read, ${when} \u00b7 ${s.stale}`;
+      } else { $('#balance-sub').textContent = `${held} \u2014 as the node reports them`; $('#conn').textContent = `Read from ${esc(n.alias)} with a read-only credential`; }
+    }
     if (vault.exchange) { const ex = vault.exchange; $('#balance-sub').textContent = `held at ${ex.provider}, ${ex.stated ? 'as its newest statement states' : 'as the rows add up'} \u2014 with ${moneyExact(ex.fiat_now / 100, ex.ccy)} in cash beside it${ex.agrees === false ? ' \u00b7 the running balance did not chain in every file' : ''}`; $('#conn').textContent = 'Off-chain \u00b7 the exchange\u2019s own statements, nothing on the chain to check them against'; }
     if (vault.statement) { $('#balance-sub').textContent = `closed wallet \u2014 the statement leaves ${sats(vault.statement.closes_at)} sats; its history is kept for the coins that left it`; $('#conn').textContent = 'Off-chain \u00b7 figures from the custodian\u2019s statement, nothing on the chain to check them against'; }
     if (vault.spark) { $('#balance-sub').textContent = vault.spark.authenticated ? 'Spark reports this balance · key reader' : 'Spark reports this balance · anonymous read'; $('#conn').textContent = 'Off-chain · figures supplied by Spark, not verified against the chain'; }
@@ -4711,6 +4721,7 @@ function renderVaultSettings() {
   $('#vs-desc-wrap').dataset.hidden = shown ? '0' : '1'; $('#vs-desc-reveal').hidden = shown;
   $('#vs-rewrite').hidden = !vault.ext;
   renderSpCard();
+  renderNodeCard();
   paintBackupKeys();
   const ds = drillState(vault);
   $('#vs-drill-when').innerHTML = ds.never
@@ -4770,6 +4781,48 @@ async function runDrill() {
     try { store = await invoke('note_set', { name: vault.name, key: 'vault:drill', note: when }); vault = store.vaults.find(v => v.name === vault.name) || vault; paintDrillNudge.hidden = null; renderVaultSettings(); paintDrillNudge(); drillSay(html); } catch {} }
 }
 $('#vs-drill').onclick = () => { drillFound = []; runDrill(); };
+
+// ---------- a node vault: retire it (keep the ledger) or read it again ----------
+function renderNodeCard() {
+  const card = $('#vs-node-card'); card.hidden = !(vault && vault.node);
+  if (card.hidden) return;
+  const n = vault.node, when = n.read_at ? new Date(n.read_at * 1000).toLocaleString(undefined, { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '\u2014';
+  $('#vs-node-facts').innerHTML = [
+    ['Node', `${esc(n.alias)} \u00b7 ${n.kind === 'cln' ? 'Core Lightning' : 'LND'}${n.version ? ' ' + esc(n.version) : ''}`],
+    ['Identity', `<span class="mono" style="font-size:12px;word-break:break-all">${esc(n.pubkey)}</span>`],
+    ['Ledger', `${sats((n.events || []).length)} rows \u00b7 last read ${when}`],
+    ['State', n.retired ? `retired${n.retired_why ? ' \u2014 ' + esc(n.retired_why) : ''}` : 'read on every refresh'],
+  ].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+  $('#vs-node-text').textContent = n.retired
+    ? 'This node is not asked any more. Its ledger stays exactly as it was last read, and every link it made to the other vaults stays with it. If the same node comes back under the same identity, read it again and it carries on from where it left off.'
+    : 'A node that is gone \u2014 rebuilt under a new identity, wiped, shut down \u2014 is still a record of money that moved. Retiring it keeps that record read-only and stops the refresh asking a node that cannot answer. A node rebuilt under a NEW identity is added as a new vault; this one stays as the record of the old.';
+  $('#vs-node-why-row').hidden = !!n.retired; $('#vs-node-why').value = '';
+  const b = $('#vs-node-retire'); b.textContent = n.retired ? 'Read it again' : 'Retire this node \u2014 keep its ledger'; b._label = b.textContent;
+  $('#vs-node-note').textContent = '';
+}
+$('#vs-node-retire').onclick = async () => {
+  if (!vault || !vault.node) return;
+  const retired = !vault.node.retired, why = $('#vs-node-why').value.trim();
+  try {
+    store = await invoke('node_retire', { name: vault.name, retired, why });
+    vault = store.vaults.find(v => v.name === vault.name) || vault; vault._snap = null; vault._node = null;
+    $('#vs-node-note').textContent = retired ? 'Retired. Its ledger is kept as last read.' : 'It will be read again on the next refresh.';
+    renderVaultSettings(); paintVaultCard(); sync().catch(() => {});
+  } catch (e) { $('#vs-node-note').textContent = String(e); }
+};
+
+$('#vs-node-import').onclick = async () => {
+  if (!vault || !vault.node) return;
+  const b = $('#vs-node-import'); b.disabled = true; $('#vs-node-note').textContent = '';
+  try {
+    const text = await invoke('node_import_pick');
+    const [st, added, total] = await invoke('node_import', { name: vault.name, text });
+    store = st; vault = store.vaults.find(v => v.name === vault.name) || vault; vault._snap = null; vault._node = null;
+    $('#vs-node-note').textContent = `${sats(added)} new row${added === 1 ? '' : 's'} · the ledger now holds ${sats(total)}.`;
+    renderVaultSettings(); paintVaultCard(); sync().catch(() => {});
+  } catch (e) { if (String(e) !== 'cancelled') $('#vs-node-note').textContent = String(e); }
+  finally { b.disabled = false; }
+};
 
 // ---------- silent payments on a watched wallet ----------
 function renderSpCard() {

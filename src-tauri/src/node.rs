@@ -36,6 +36,10 @@ pub struct Node {
     pub events: Vec<Event>,
     /// where the last read got to, per list, so the next asks only for what is new (LND: heights and indexes)
     #[serde(default)] pub marks: std::collections::BTreeMap<String, u64>,
+    /// A node that is gone — rebuilt under a new identity, wiped, retired — is not asked again: its ledger stays as the
+    /// last read left it, read-only, and the vault keeps every link it ever made. `retired_why` is the person's reason.
+    #[serde(default)] pub retired: bool,
+    #[serde(default)] pub retired_why: String,
 }
 
 /// One accounting event, in the shape the rest of the app reads (activity rows, the transfer index).
@@ -169,10 +173,17 @@ impl Cln {
     /// identifier the other end of it also knows. Fees are their own events, tied to what they paid for.
     pub fn events(&self) -> R<Vec<Event>> {
         let v = self.call("bkpr-listincome", serde_json::json!({ "consolidate_fees": true }))?;
+        Ok(cln_income_events(&v))
+    }
+}
+
+/// The ledger out of a `bkpr-listincome` answer — from the node, or from a file of its output (an offline restore).
+pub fn cln_income_events(v: &serde_json::Value) -> Vec<Event> {
+    {
         let mut out = Vec::new();
         for e in v.get("income_events").and_then(|x| x.as_array()).map(|a| a.as_slice()).unwrap_or(&[]) {
             let s = |k: &str| e.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let msat = |k: &str| e.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+            let msat = |k: &str| e.get(k).and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|t| t.trim_end_matches("msat").parse::<u64>().ok()))).unwrap_or(0);
             if s("currency") != "bcrt" && s("currency") != "bc" { /* a non-bitcoin asset is not counted */ }
             let (credit, debit) = (msat("credit_msat") / 1000, msat("debit_msat") / 1000);
             let tag = s("tag");
@@ -204,7 +215,7 @@ impl Cln {
         let mut merged: std::collections::BTreeMap<String, Event> = std::collections::BTreeMap::new();
         for e in out { match merged.get_mut(&e.id) { Some(m) => { m.net += e.net; m.fee += e.fee; if m.time == 0 { m.time = e.time; } if m.memo.is_empty() { m.memo = e.memo; } } None => { merged.insert(e.id.clone(), e); } } }
         let rows: Vec<Event> = merged.into_values().filter(|e| e.net != 0 || e.fee != 0).collect();
-        Ok(fold_routed(rows))
+        fold_routed(rows)
     }
 }
 
@@ -298,44 +309,67 @@ impl Lnd {
     /// The ledger, assembled: on-chain transactions (channel opens and closes recognised by their outpoints and
     /// counted as moves within the node, fee only), settled invoices, succeeded payments, and routing fees earned.
     pub fn events(&self) -> R<Vec<Event>> {
-        use bitcoin::base64::{engine::general_purpose::STANDARD, Engine};
+        let d = LndDump { channels: self.get("/v1/channels")?, closed: self.get("/v1/channels/closed")?, pending: self.get("/v1/channels/pending")?,
+            transactions: self.get("/v1/transactions")?, invoices: self.get("/v1/invoices?num_max_invoices=100000")?,
+            payments: self.get("/v1/payments?include_incomplete=false&max_payments=100000")?,
+            forwards: self.post("/v1/switch", serde_json::json!({ "start_time": "0", "num_max_events": 50000 }))? };
+        Ok(lnd_events_from(&d))
+    }
+}
+
+/// LND's seven answers that make a ledger — read from the node, or from a file of `lncli` output (an offline restore).
+pub struct LndDump { pub channels: serde_json::Value, pub closed: serde_json::Value, pub pending: serde_json::Value, pub transactions: serde_json::Value, pub invoices: serde_json::Value, pub payments: serde_json::Value, pub forwards: serde_json::Value }
+
+/// A payment hash as REST gives it (base64) or as lncli prints it (hex): 32 bytes either way, or nothing.
+fn hash32(text: &str) -> String {
+    use bitcoin::base64::{engine::general_purpose::STANDARD, Engine};
+    if text.len() == 64 { if let Ok(b) = hex::decode(text) { if b.len() == 32 { return hex::encode(b); } } }
+    STANDARD.decode(text).ok().filter(|b| b.len() == 32).map(hex::encode).unwrap_or_default()
+}
+
+/// The ledger, assembled: on-chain transactions (channel opens and closes recognised by their outpoints and counted as
+/// moves within the node, fee only), settled invoices, succeeded payments, and routing fees earned.
+pub fn lnd_events_from(d: &LndDump) -> Vec<Event> {
+    {
         let n = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str().and_then(|s| s.parse::<i64>().ok()).or_else(|| x.as_i64())).unwrap_or(0);
         let s = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
         let arr = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_array()).cloned().unwrap_or_default();
         // which transactions are channels being opened or closed
         let mut opens = std::collections::HashSet::new(); let mut closes = std::collections::HashSet::new();
-        for c in arr(&self.get("/v1/channels")?, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } }
-        for c in arr(&self.get("/v1/channels/closed")?, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } let ct = s(&c, "closing_tx_hash").to_lowercase(); if !ct.is_empty() { closes.insert(ct); } }
-        for c in arr(&self.get("/v1/channels/pending")?, "pending_open_channels") { if let Some(t) = c.get("channel").and_then(|x| x.get("channel_point")).and_then(|x| x.as_str()).and_then(|p| p.split(':').next()) { opens.insert(t.to_lowercase()); } }
+        for c in arr(&d.channels, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } }
+        for c in arr(&d.closed, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } let ct = s(&c, "closing_tx_hash").to_lowercase(); if !ct.is_empty() { closes.insert(ct); } }
+        for c in arr(&d.pending, "pending_open_channels") { if let Some(t) = c.get("channel").and_then(|x| x.get("channel_point")).and_then(|x| x.as_str()).and_then(|p| p.split(':').next()) { opens.insert(t.to_lowercase()); } }
         let mut out = Vec::new();
-        for t in arr(&self.get("/v1/transactions")?, "transactions") {
+        for t in arr(&d.transactions, "transactions") {
             let txid = s(&t, "tx_hash").to_lowercase(); let amount = n(&t, "amount"); let fee = n(&t, "total_fees").max(0) as u64; let time = n(&t, "time_stamp") as u32;
             if txid.is_empty() { continue; }
             let (layer, kind, net) = if opens.contains(&txid) { ("channel", "open", -(fee as i64)) } else if closes.contains(&txid) { ("channel", "close", 0) } else if amount >= 0 { ("chain", "deposit", amount) } else { ("chain", "withdrawal", amount) };
             if net == 0 && fee == 0 && layer != "channel" { continue; }
             out.push(Event { id: txid.clone(), time, net, fee: if amount < 0 || layer == "channel" { fee } else { 0 }, layer: layer.into(), txid, hash: String::new(), kind: kind.into(), memo: s(&t, "label") });
         }
-        for i in arr(&self.get("/v1/invoices?num_max_invoices=100000")?, "invoices") {
+        for i in arr(&d.invoices, "invoices") {
             if s(&i, "state") != "SETTLED" && i.get("settled").and_then(|x| x.as_bool()) != Some(true) { continue; }
-            let hash = STANDARD.decode(s(&i, "r_hash")).map(hex::encode).unwrap_or_default();
+            let hash = hash32(&s(&i, "r_hash"));
             let amt = n(&i, "amt_paid_sat"); if amt <= 0 || hash.is_empty() { continue; }
             out.push(Event { id: hash.clone(), time: n(&i, "settle_date") as u32, net: amt, fee: 0, layer: "lightning".into(), txid: String::new(), hash, kind: "received".into(), memo: s(&i, "memo") });
         }
-        for p in arr(&self.get("/v1/payments?include_incomplete=false&max_payments=100000")?, "payments") {
+        for p in arr(&d.payments, "payments") {
             if s(&p, "status") != "SUCCEEDED" { continue; }
             let hash = s(&p, "payment_hash").to_lowercase(); let amt = n(&p, "value_sat"); let fee = n(&p, "fee_sat").max(0) as u64;
             let time = { let ns = n(&p, "creation_time_ns"); if ns > 0 { (ns / 1_000_000_000) as u32 } else { n(&p, "creation_date") as u32 } };
             if hash.is_empty() { continue; }
             out.push(Event { id: format!("{hash}:out"), time, net: -(amt + fee as i64), fee, layer: "lightning".into(), txid: String::new(), hash, kind: "paid".into(), memo: String::new() });
         }
-        let fw = self.post("/v1/switch", serde_json::json!({ "start_time": "0", "num_max_events": 50000 }))?;
-        for (k, f) in arr(&fw, "forwarding_events").iter().enumerate() {
+        for (k, f) in arr(&d.forwards, "forwarding_events").iter().enumerate() {
             let fee = n(f, "fee"); if fee <= 0 { continue; }
             let time = { let ns = n(f, "timestamp_ns"); if ns > 0 { (ns / 1_000_000_000) as u32 } else { n(f, "timestamp") as u32 } };
             out.push(Event { id: format!("routed:{time}:{k}"), time, net: fee, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "routed".into(), memo: String::new() });
         }
-        Ok(fold_routed(out))
+        fold_routed(out)
     }
+}
+
+impl Lnd {
     /// What is new since the marks: transactions from a little below the last height, invoices and payments past
     /// their indexes, forwards after the last one seen. The marks to keep are returned with the events.
     pub fn events_since(&self, marks: &std::collections::BTreeMap<String, u64>) -> R<(Vec<Event>, std::collections::BTreeMap<String, u64>)> {
@@ -344,7 +378,6 @@ impl Lnd {
         let n = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str().and_then(|s| s.parse::<i64>().ok()).or_else(|| x.as_i64())).unwrap_or(0);
         let s = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
         let arr = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_array()).cloned().unwrap_or_default();
-        use bitcoin::base64::{engine::general_purpose::STANDARD, Engine};
         let mut opens = std::collections::HashSet::new(); let mut closes = std::collections::HashSet::new();
         for c in arr(&self.get("/v1/channels")?, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } }
         for c in arr(&self.get("/v1/channels/closed")?, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } let ct = s(&c, "closing_tx_hash").to_lowercase(); if !ct.is_empty() { closes.insert(ct); } }
@@ -360,7 +393,7 @@ impl Lnd {
         let inv_from = m("invoice").saturating_sub(200);   // an invoice settles after it is added: look a little way back
         for i in arr(&self.get(&format!("/v1/invoices?index_offset={inv_from}&num_max_invoices=100000"))?, "invoices") {
             if s(&i, "state") != "SETTLED" && i.get("settled").and_then(|x| x.as_bool()) != Some(true) { continue; }
-            let hash = STANDARD.decode(s(&i, "r_hash")).map(hex::encode).unwrap_or_default();
+            let hash = hash32(&s(&i, "r_hash"));
             let amt = n(&i, "amt_paid_sat"); if amt <= 0 || hash.is_empty() { continue; }
             out.push(Event { id: hash.clone(), time: n(&i, "settle_date") as u32, net: amt, fee: 0, layer: "lightning".into(), txid: String::new(), hash, kind: "received".into(), memo: s(&i, "memo") });
         }
@@ -412,6 +445,53 @@ pub fn merge_events(have: &[Event], new: Vec<Event>) -> Vec<Event> {
     let mut out: Vec<Event> = by_id.into_values().collect();
     out.sort_by_key(|e| (e.time, e.id.clone()));
     out
+}
+
+/// A ledger re-read WHOLE (Core Lightning's bookkeeper gives everything each time): every row the node reports now
+/// replaces its earlier reading, and a row the node no longer reports — a database rolled back, a history wiped —
+/// is KEPT. The ledger never shrinks: what a node once said about money that moved is evidence, and a node that has
+/// forgotten it is not a reason for this app to.
+pub fn keep_and_replace(have: &[Event], new: Vec<Event>) -> Vec<Event> {
+    let mut by_id: std::collections::BTreeMap<String, Event> = have.iter().map(|e| (e.id.clone(), e.clone())).collect();
+    for e in new { by_id.insert(e.id.clone(), e); }
+    let mut out: Vec<Event> = by_id.into_values().collect();
+    out.sort_by_key(|e| (e.time, e.id.clone()));
+    out
+}
+
+/// A ledger from a FILE: the node's own answers, saved on a machine that could reach it when this one could not — an
+/// offline restore of a backup, a node since rebuilt. One JSON object. For Core Lightning the output of
+/// `bkpr-listincome` (with `getinfo` beside it under "getinfo", if the identity is to be checked). For LND an object
+/// keyed by the lncli commands: listchaintxns, listinvoices, listpayments, fwdinghistory, listchannels,
+/// closedchannels, pendingchannels, getinfo. Returns (kind, identity pubkey if the file names one, events).
+pub fn ledger_from_file(text: &str) -> R<(String, String, Vec<Event>)> {
+    let v: serde_json::Value = serde_json::from_str(text.trim()).map_err(|_| "this is not a JSON file")?;
+    let o = v.as_object().ok_or("the file is JSON, but not one object")?;
+    let take = |keys: &[&str]| -> serde_json::Value { keys.iter().find_map(|k| o.get(*k).cloned()).unwrap_or(serde_json::json!({})) };
+    let s = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_lowercase();
+    if o.contains_key("income_events") || o.contains_key("bkpr-listincome") {
+        let income = if o.contains_key("income_events") { v.clone() } else { take(&["bkpr-listincome"]) };
+        let ev = cln_income_events(&income);
+        if ev.is_empty() { return Err("the file holds no income events".into()); }
+        return Ok(("cln".into(), s(&take(&["getinfo"]), "id"), ev));
+    }
+    let lnd_keys = ["listchaintxns", "transactions", "listinvoices", "invoices", "listpayments", "payments", "fwdinghistory", "forwarding_events"];
+    if lnd_keys.iter().any(|k| o.contains_key(*k)) {
+        // each answer may sit under its command name, or the file may be one bare answer (then the others are empty)
+        let bare = |k: &str| if o.contains_key(k) { v.clone() } else { serde_json::json!({}) };
+        let d = LndDump {
+            channels: if o.contains_key("listchannels") { take(&["listchannels"]) } else { bare("channels") },
+            closed: take(&["closedchannels"]), pending: take(&["pendingchannels"]),
+            transactions: if o.contains_key("listchaintxns") { take(&["listchaintxns"]) } else { bare("transactions") },
+            invoices: if o.contains_key("listinvoices") { take(&["listinvoices"]) } else { bare("invoices") },
+            payments: if o.contains_key("listpayments") { take(&["listpayments"]) } else { bare("payments") },
+            forwards: if o.contains_key("fwdinghistory") { take(&["fwdinghistory"]) } else { bare("forwarding_events") },
+        };
+        let ev = lnd_events_from(&d);
+        if ev.is_empty() { return Err("the file holds no transactions, invoices, payments or forwards".into()); }
+        return Ok(("lnd".into(), s(&take(&["getinfo"]), "identity_pubkey"), ev));
+    }
+    Err("not a ledger this app knows: save bkpr-listincome (Core Lightning) or the lncli answers (LND) as one JSON object".into())
 }
 
 // ---------- the sealed credential ----------
@@ -473,6 +553,40 @@ mod tests {
         let hashed = ln.iter().filter(|e| e.hash.len() == 64).count();
         assert!(hashed * 20 >= ln.len() * 19, "{hashed} of {} Lightning events name their payment hash (a channel push has none)", ln.len());
     }
+    #[test]
+    fn a_ledger_file_is_read_as_the_node_would_be_read() {
+        // Core Lightning: bkpr-listincome saved as-is, with getinfo beside it
+        let cln = serde_json::json!({ "getinfo": { "id": "02AB" }, "income_events": [
+            { "account": "wallet", "tag": "deposit", "credit_msat": 100000000, "debit_msat": 0, "currency": "bc", "timestamp": 1700000000, "txid": "aa", "outpoint": "aa:0" },
+            { "account": "wallet", "tag": "invoice", "credit_msat": 0, "debit_msat": "5000000msat", "currency": "bc", "timestamp": 1700000100, "payment_id": "cc", "description": "coffee" },
+        ] });
+        let (kind, pk, ev) = ledger_from_file(&cln.to_string()).unwrap();
+        assert_eq!((kind.as_str(), pk.as_str(), ev.len()), ("cln", "02ab", 2));
+        assert_eq!(ev.iter().find(|e| e.kind == "paid").unwrap().net, -5000, "an msat string is read like an msat number");
+        // LND: lncli answers under their command names; r_hash as lncli prints it (hex), not as REST sends it (base64)
+        let h = "11".repeat(32);
+        let lnd = serde_json::json!({ "getinfo": { "identity_pubkey": "03CD" },
+            "listchaintxns": { "transactions": [ { "tx_hash": "bb", "amount": "250000", "total_fees": "0", "time_stamp": "1700000000" } ] },
+            "listinvoices": { "invoices": [ { "r_hash": h, "state": "SETTLED", "amt_paid_sat": "1200", "settle_date": "1700000200", "memo": "tip" } ] },
+            "listpayments": { "payments": [] }, "fwdinghistory": { "forwarding_events": [ { "fee": "3", "timestamp": "1700000300" } ] } });
+        let (kind, pk, ev) = ledger_from_file(&lnd.to_string()).unwrap();
+        assert_eq!((kind.as_str(), pk.as_str(), ev.len()), ("lnd", "03cd", 3));
+        assert_eq!(ev.iter().find(|e| e.kind == "received").unwrap().hash, h);
+        assert!(ledger_from_file("{\"hello\": 1}").is_err());
+    }
+
+    #[test]
+    fn a_whole_reread_replaces_rows_and_keeps_what_the_node_forgot() {
+        let ev = |id: &str, net: i64| Event { id: id.into(), time: 10, net, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "received".into(), memo: String::new() };
+        let have = vec![ev("a", 100), ev("routed:0", 7), ev("b", 50)];
+        // the node now reports a (changed) and the day's routing (whole, not an increment); b is gone from it
+        let out = keep_and_replace(&have, vec![ev("a", 120), ev("routed:0", 9)]);
+        assert_eq!(out.len(), 3, "a forgotten row is kept");
+        assert_eq!(out.iter().find(|e| e.id == "a").unwrap().net, 120, "a row read again is replaced");
+        assert_eq!(out.iter().find(|e| e.id == "routed:0").unwrap().net, 9, "a whole re-read replaces the day, it does not add to it");
+        assert_eq!(out.iter().find(|e| e.id == "b").unwrap().net, 50);
+    }
+
     #[test]
     fn routing_fees_fold_into_one_row_per_day_and_merge_adds_to_it() {
         let r = |t: u32, id: &str, net: i64| Event { id: id.into(), time: t, net, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "routed".into(), memo: String::new() };
