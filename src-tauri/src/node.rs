@@ -380,7 +380,7 @@ pub fn lnd_events_from(d: &LndDump) -> Vec<Event> {
         for c in arr(&d.closed, "channels") {
             let ct = s(&c, "closing_tx_hash").to_lowercase(); if ct.is_empty() || known.contains(&ct) { continue; }
             let cap = n(&c, "capacity"); let settled = n(&c, "settled_balance");
-            let memo = format!("channel {} ({} sats capacity) closed: {}; none of the closing transaction's outputs paid this node's wallet{}", s(&c, "channel_point").split(':').next().unwrap_or("").chars().take(12).collect::<String>(), cap, s(&c, "close_type").to_lowercase().replace('_', " "), if settled > 0 { format!("; the node expected {settled} sats back") } else { String::new() });
+            let memo = format!("channel {} ({} sats capacity) closed: {}; the wallet that reported this recognised none of the closing transaction's outputs as its own (a wallet restored from a backup does not know addresses derived after it was taken, so an output may still have been this node's and swept later — the outputs are listed under To){}", s(&c, "channel_point").split(':').next().unwrap_or("").chars().take(12).collect::<String>(), cap, s(&c, "close_type").to_lowercase().replace('_', " "), if settled > 0 { format!("; the node expected {settled} sats back") } else { String::new() });
             out.push(Event { id: ct.clone(), time: 0, net: 0, fee: 0, layer: "channel".into(), txid: ct, hash: String::new(), kind: "close".into(), memo, to: Vec::new(), height: n(&c, "close_height").max(0) as u32 });
         }
         for t in arr(&d.transactions, "transactions") {
