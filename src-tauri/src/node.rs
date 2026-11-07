@@ -332,6 +332,26 @@ fn hash32(text: &str) -> String {
     STANDARD.decode(text).ok().filter(|b| b.len() == 32).map(hex::encode).unwrap_or_default()
 }
 
+/// One wallet transaction as a ledger row. A funding is an open (−fee), a known closing transaction a close (0), else a
+/// deposit or a withdrawal by LND's `amount`. One correction: when the outputs that are not this node's add up to MORE
+/// than LND says left, the transaction spent inputs the wallet had never counted as its own (a channel's close output
+/// swept straight out, as in a rescue), and the row takes the transaction's own figure — the outputs plus what the
+/// wallet did book — with a memo saying so. Otherwise a sweep to safety looks like a 3,200 sat fee.
+fn lnd_chain_row(t: &serde_json::Value, opens: &std::collections::HashSet<String>, closes: &std::collections::HashSet<String>) -> Option<Event> {
+    let s = |k: &str| t.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let n = |k: &str| t.get(k).and_then(|x| x.as_str().and_then(|v| v.parse::<i64>().ok()).or_else(|| x.as_i64())).unwrap_or(0);
+    let txid = s("tx_hash").to_lowercase(); let amount = n("amount"); let fee = n("total_fees").max(0) as u64; let time = n("time_stamp") as u32;
+    if txid.is_empty() { return None; }
+    let (layer, kind, mut net) = if opens.contains(&txid) { ("channel", "open", -(fee as i64)) } else if closes.contains(&txid) { ("channel", "close", 0) } else if amount >= 0 { ("chain", "deposit", amount) } else { ("chain", "withdrawal", amount) };
+    let to = lnd_outs(t); let mut memo = s("label");
+    if kind == "withdrawal" { let paid: i64 = to.iter().map(|(_, v)| *v as i64).sum(); if paid > -amount {
+        net = -(paid + (-amount));
+        memo = format!("{}{}the node's wallet booked only {} sats for this; {} sats of it came from outputs the wallet had not counted as its own (a channel's close being swept), so the amount is taken from the transaction's outputs", memo, if memo.is_empty() { "" } else { " — " }, -amount, paid);
+    } }
+    if net == 0 && fee == 0 && layer != "channel" { return None; }
+    Some(Event { id: txid.clone(), time, net, fee: if amount < 0 || layer == "channel" { fee } else { 0 }, layer: layer.into(), txid, hash: String::new(), kind: kind.into(), memo, to, height: 0 })
+}
+
 /// The outputs of a wallet transaction that are NOT this node's: where money went. LND lists them with the transaction.
 fn lnd_outs(t: &serde_json::Value) -> Vec<(String, u64)> {
     t.get("output_details").and_then(|x| x.as_array()).map(|a| a.iter()
@@ -364,11 +384,7 @@ pub fn lnd_events_from(d: &LndDump) -> Vec<Event> {
             out.push(Event { id: ct.clone(), time: 0, net: 0, fee: 0, layer: "channel".into(), txid: ct, hash: String::new(), kind: "close".into(), memo, to: Vec::new(), height: n(&c, "close_height").max(0) as u32 });
         }
         for t in arr(&d.transactions, "transactions") {
-            let txid = s(&t, "tx_hash").to_lowercase(); let amount = n(&t, "amount"); let fee = n(&t, "total_fees").max(0) as u64; let time = n(&t, "time_stamp") as u32;
-            if txid.is_empty() { continue; }
-            let (layer, kind, net) = if opens.contains(&txid) { ("channel", "open", -(fee as i64)) } else if closes.contains(&txid) { ("channel", "close", 0) } else if amount >= 0 { ("chain", "deposit", amount) } else { ("chain", "withdrawal", amount) };
-            if net == 0 && fee == 0 && layer != "channel" { continue; }
-            out.push(Event { id: txid.clone(), time, net, fee: if amount < 0 || layer == "channel" { fee } else { 0 }, layer: layer.into(), txid, hash: String::new(), kind: kind.into(), memo: s(&t, "label"), to: outs(&t), height: 0 });
+            if let Some(e) = lnd_chain_row(&t, &opens, &closes) { out.push(e); }
         }
         for i in arr(&d.invoices, "invoices") {
             if s(&i, "state") != "SETTLED" && i.get("settled").and_then(|x| x.as_bool()) != Some(true) { continue; }
@@ -408,11 +424,7 @@ impl Lnd {
         let mut out = Vec::new();
         let from_height = m("height").saturating_sub(6);
         for t in arr(&self.get(&format!("/v1/transactions?start_height={from_height}"))?, "transactions") {
-            let txid = s(&t, "tx_hash").to_lowercase(); let amount = n(&t, "amount"); let fee = n(&t, "total_fees").max(0) as u64; let time = n(&t, "time_stamp") as u32;
-            if txid.is_empty() { continue; }
-            let (layer, kind, net) = if opens.contains(&txid) { ("channel", "open", -(fee as i64)) } else if closes.contains(&txid) { ("channel", "close", 0) } else if amount >= 0 { ("chain", "deposit", amount) } else { ("chain", "withdrawal", amount) };
-            if net == 0 && fee == 0 && layer != "channel" { continue; }
-            out.push(Event { id: txid.clone(), time, net, fee: if amount < 0 || layer == "channel" { fee } else { 0 }, layer: layer.into(), txid, hash: String::new(), kind: kind.into(), memo: s(&t, "label"), to: outs(&t), height: 0 });
+            if let Some(e) = lnd_chain_row(&t, &opens, &closes) { out.push(e); }
         }
         let inv_from = m("invoice").saturating_sub(200);   // an invoice settles after it is added: look a little way back
         for i in arr(&self.get(&format!("/v1/invoices?index_offset={inv_from}&num_max_invoices=100000"))?, "invoices") {
@@ -489,19 +501,20 @@ pub struct Held { pub onchain: u64, pub channels: u64, pub pending: u64 }
 impl Held { pub fn total(&self) -> i64 { (self.onchain + self.channels + self.pending) as i64 } }
 
 /// The node's reported balance is the authority; the ledger explains it. When the ledger's rows add up to something
-/// other than what the node holds, the difference is booked as ONE explicit row — "unaccounted" — dated `at`, so the
-/// sum is honest again and the gap is visible, with its reason beside it, instead of a holding chart that disagrees
-/// with the balance card. Money can leave a node without a row here: a channel closed with the funds delivered to
-/// someone else's address, a payment made from another copy of the node's keys. A later read that finds the exact
-/// opposite gap (an incremental read that had not yet seen a row) removes the row it booked rather than booking a second.
+/// other than what the node holds, the difference is booked as ONE explicit row — "unaccounted" — so the sum is honest
+/// again and the gap is visible, with its reason beside it, instead of a holding chart that disagrees with the balance
+/// card. Money can leave a node without a row here: a channel closed with the funds delivered to someone else's
+/// address, a payment made from another copy of the node's keys. There is only ever one such row: each reconciliation
+/// recomputes the gap from the explained rows and rewrites it — keeping the date of the row already there (when the
+/// money was found missing), or dated `at` if it is new — and removes it when the ledger explains the balance again.
 pub fn reconcile(mut events: Vec<Event>, held: i64, at: u32, why: &str) -> Vec<Event> {
-    let sum: i64 = events.iter().map(|e| e.net).sum();
-    let diff = held - sum;
+    let explained: i64 = events.iter().filter(|e| e.kind != "unaccounted").map(|e| e.net).sum();
+    let diff = held - explained;
+    let was = events.iter().filter(|e| e.kind == "unaccounted").map(|e| (e.time, e.memo.clone())).min_by_key(|x| x.0);
+    events.retain(|e| e.kind != "unaccounted");
     if diff == 0 { return events; }
-    if let Some(i) = events.iter().rposition(|e| e.kind == "unaccounted") {
-        if events[i].net == -diff { events.remove(i); return events; }
-    }
-    events.push(Event { id: format!("unaccounted:{at}"), time: at, net: diff, fee: 0, layer: "node".into(), txid: String::new(), hash: String::new(), kind: "unaccounted".into(), memo: why.to_string(), to: Vec::new(), height: 0 });
+    let (time, memo) = match was { Some((t, m)) if t > 0 => (t, if why.is_empty() { m } else { why.to_string() }), _ => (at, why.to_string()) };
+    events.push(Event { id: format!("unaccounted:{time}"), time, net: diff, fee: 0, layer: "node".into(), txid: String::new(), hash: String::new(), kind: "unaccounted".into(), memo, to: Vec::new(), height: 0 });
     events.sort_by_key(|e| (e.time, e.id.clone()));
     events
 }
