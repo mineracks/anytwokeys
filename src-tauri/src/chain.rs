@@ -175,6 +175,16 @@ pub fn transactions(servers: &Servers, ids: &[Txid]) -> Result<Vec<Transaction>,
     Ok(out)
 }
 
+/// Each transaction on its own: Ok(Some) when the chain has it, Ok(None) when NO server has a transaction with that
+/// id (the answer that proves a phantom), Err when the server could not be asked. One request each, after the batch
+/// has failed: the batch fails as a whole on one unknown id, and this tells which.
+pub fn transactions_each(servers: &Servers, ids: &[Txid]) -> Vec<Result<Option<Transaction>, String>> {
+    ids.iter().map(|id| match read(servers, |c| c.transaction_get(id)) {
+        Ok(t) => Ok(Some(t)),
+        Err(e) => { let m = e.to_lowercase(); if m.contains("no such") || m.contains("not found") || m.contains("missing transaction") || m.contains("unknown") { Ok(None) } else { Err(e) } }
+    }).collect()
+}
+
 /// Transactions from the chain cache where kept, the rest in one batched request, in the order asked. Each fetched one
 /// must hash to the id asked for; those `confirmed` says are in a block are kept, and never fetched again.
 pub fn transactions_kept(servers: &Servers, net: &str, ids: &[Txid], confirmed: &dyn Fn(&Txid) -> bool) -> Result<Vec<Transaction>, String> {

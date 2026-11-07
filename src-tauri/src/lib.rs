@@ -1432,15 +1432,26 @@ async fn node_add(name: String, kind: String, url: String, cred: String, pin: St
 fn node_destinations(events: &mut [node::Event], servers: &chain::Servers, network: &str) {
     use std::str::FromStr;
     let net = wallet::network_of(network);
-    let want: Vec<usize> = events.iter().enumerate().filter(|(_, e)| !e.txid.is_empty() && e.to.is_empty() && (e.net < 0 || e.kind == "close")).map(|(i, _)| i).collect();
+    let want: Vec<usize> = events.iter().enumerate().filter(|(_, e)| !e.txid.is_empty() && e.to.is_empty() && !e.phantom && (e.net < 0 || e.kind == "close")).map(|(i, _)| i).collect();
     if want.is_empty() { return; }
-    let ids: Vec<bitcoin::Txid> = want.iter().filter_map(|&i| bitcoin::Txid::from_str(&events[i].txid).ok()).collect();
-    let Ok(txs) = chain::transactions_kept(servers, network, &ids, &|_| true) else { return };
-    let by_id: std::collections::HashMap<bitcoin::Txid, &bitcoin::Transaction> = txs.iter().map(|t| (t.compute_txid(), t)).collect();
+    let ids: Vec<bitcoin::Txid> = want.iter().filter_map(|&i| bitcoin::Txid::from_str(&events[i].txid).ok()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    // the batch, or — when it fails on one unknown id — each on its own, so that a transaction NO server has is told
+    // apart from a server that could not be asked: the first is a phantom row, the second leaves the row as it was
+    let mut by_id: std::collections::HashMap<bitcoin::Txid, bitcoin::Transaction> = std::collections::HashMap::new();
+    let mut phantoms: std::collections::HashSet<bitcoin::Txid> = std::collections::HashSet::new();
+    match chain::transactions_kept(servers, network, &ids, &|_| true) {
+        Ok(txs) => { for t in txs { by_id.insert(t.compute_txid(), t); } }
+        Err(_) => { for (id, r) in ids.iter().zip(chain::transactions_each(servers, &ids)) { match r { Ok(Some(t)) => { by_id.insert(*id, t); } Ok(None) => { phantoms.insert(*id); } Err(_) => {} } } }
+    }
     for &i in &want {
         let Ok(id) = bitcoin::Txid::from_str(&events[i].txid) else { continue };
         if let Some(t) = by_id.get(&id) {
             events[i].to = t.output.iter().map(|o| (bitcoin::Address::from_script(&o.script_pubkey, net).map(|a| a.to_string()).unwrap_or_else(|_| format!("script {}", hex::encode(o.script_pubkey.as_bytes()))), o.value.to_sat())).collect();
+        } else if phantoms.contains(&id) && !events[i].phantom {
+            // a row about a transaction that does not exist: kept as the record of what the bookkeeper said, counted as nothing
+            let e = &mut events[i];
+            e.memo = format!("NOT ON THE CHAIN: no server has a transaction with this id. The node's bookkeeper recorded {} sats leaving{}, but the transaction never happened — a stale view (a copy restored from a backup) or something never broadcast. Counted as zero.{}", -e.net, if e.fee > 0 { format!(" (fee {})", e.fee) } else { String::new() }, if e.memo.is_empty() { String::new() } else { format!(" Its memo was: {}", e.memo) });
+            e.net = 0; e.fee = 0; e.phantom = true;
         }
     }
     let heights: Vec<u32> = events.iter().filter(|e| e.time == 0 && e.height > 0).map(|e| e.height).collect::<std::collections::BTreeSet<_>>().into_iter().collect();

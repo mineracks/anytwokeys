@@ -63,6 +63,9 @@ pub struct Event {
     #[serde(default)] pub to: Vec<(String, u64)>,
     /// the block, when the node gave a height but no time (a close it never saw): the chain fills the time from it
     #[serde(default)] pub height: u32,
+    /// true when the transaction this row names is on no server's chain: the node's bookkeeper recorded something
+    /// that never happened (a restored copy's stale view, a transaction never broadcast). Counted as zero.
+    #[serde(default)] pub phantom: bool,
 }
 
 /// What the person is shown before anything is kept.
@@ -219,7 +222,7 @@ pub fn cln_income_events(v: &serde_json::Value) -> Vec<Event> {
                 else { hex::encode(&Sha256::digest(format!("{tag}|{time}|{credit}|{debit}|{}", s("account")).as_bytes())[..16]) };
             let txid_of = if layer == "chain" || layer == "fee" || layer == "channel" { if !txid.is_empty() { txid } else { outpoint.split(':').next().unwrap_or("").to_lowercase() } } else { String::new() };
             let memo = if layer == "channel" && kind == "close" { format!("channel {} closed with {} sats of this node's delivered to no address it holds — the bookkeeper booked it as an on-chain fee; the outputs are under To, and the date is when the bookkeeper saw it, not the block", s("account").chars().take(12).collect::<String>(), debit) } else { s("description") };
-            out.push(Event { id, time, net, fee, layer: layer.into(), txid: txid_of, hash: if layer == "lightning" { hash } else { String::new() }, kind: kind.into(), memo, to: Vec::new(), height: 0 });
+            out.push(Event { id, time, net, fee, layer: layer.into(), txid: txid_of, hash: if layer == "lightning" { hash } else { String::new() }, kind: kind.into(), memo, to: Vec::new(), height: 0, phantom: false });
         }
         // several bookkeeper events can belong to one transaction (a deposit that also paid change, a fee in parts):
         // the ledger keeps one row per id, its amounts summed, its fee summed
@@ -355,7 +358,7 @@ fn lnd_chain_row(t: &serde_json::Value, opens: &std::collections::HashSet<String
         memo = format!("{}{}the node's wallet booked only {} sats for this; {} sats of it came from outputs the wallet had not counted as its own (a channel's close being swept), so the amount is taken from the transaction's outputs", memo, if memo.is_empty() { "" } else { " — " }, -amount, paid);
     } }
     if net == 0 && fee == 0 && layer != "channel" { return None; }
-    Some(Event { id: txid.clone(), time, net, fee: if amount < 0 || layer == "channel" { fee } else { 0 }, layer: layer.into(), txid, hash: String::new(), kind: kind.into(), memo, to, height: 0 })
+    Some(Event { id: txid.clone(), time, net, fee: if amount < 0 || layer == "channel" { fee } else { 0 }, layer: layer.into(), txid, hash: String::new(), kind: kind.into(), memo, to, height: 0, phantom: false })
 }
 
 /// The outputs of a wallet transaction that are NOT this node's: where money went. LND lists them with the transaction.
@@ -387,7 +390,7 @@ pub fn lnd_events_from(d: &LndDump) -> Vec<Event> {
             let ct = s(&c, "closing_tx_hash").to_lowercase(); if ct.is_empty() || known.contains(&ct) { continue; }
             let cap = n(&c, "capacity"); let settled = n(&c, "settled_balance");
             let memo = format!("channel {} ({} sats capacity) closed: {}; the wallet that reported this recognised none of the closing transaction's outputs as its own (a wallet restored from a backup does not know addresses derived after it was taken, so an output may still have been this node's and swept later — the outputs are listed under To){}", s(&c, "channel_point").split(':').next().unwrap_or("").chars().take(12).collect::<String>(), cap, s(&c, "close_type").to_lowercase().replace('_', " "), if settled > 0 { format!("; the node expected {settled} sats back") } else { String::new() });
-            out.push(Event { id: ct.clone(), time: 0, net: 0, fee: 0, layer: "channel".into(), txid: ct, hash: String::new(), kind: "close".into(), memo, to: Vec::new(), height: n(&c, "close_height").max(0) as u32 });
+            out.push(Event { id: ct.clone(), time: 0, net: 0, fee: 0, layer: "channel".into(), txid: ct, hash: String::new(), kind: "close".into(), memo, to: Vec::new(), height: n(&c, "close_height").max(0) as u32, phantom: false });
         }
         for t in arr(&d.transactions, "transactions") {
             if let Some(e) = lnd_chain_row(&t, &opens, &closes) { out.push(e); }
@@ -396,19 +399,19 @@ pub fn lnd_events_from(d: &LndDump) -> Vec<Event> {
             if s(&i, "state") != "SETTLED" && i.get("settled").and_then(|x| x.as_bool()) != Some(true) { continue; }
             let hash = hash32(&s(&i, "r_hash"));
             let amt = n(&i, "amt_paid_sat"); if amt <= 0 || hash.is_empty() { continue; }
-            out.push(Event { id: hash.clone(), time: n(&i, "settle_date") as u32, net: amt, fee: 0, layer: "lightning".into(), txid: String::new(), hash, kind: "received".into(), memo: s(&i, "memo"), to: Vec::new(), height: 0 });
+            out.push(Event { id: hash.clone(), time: n(&i, "settle_date") as u32, net: amt, fee: 0, layer: "lightning".into(), txid: String::new(), hash, kind: "received".into(), memo: s(&i, "memo"), to: Vec::new(), height: 0, phantom: false });
         }
         for p in arr(&d.payments, "payments") {
             if s(&p, "status") != "SUCCEEDED" { continue; }
             let hash = s(&p, "payment_hash").to_lowercase(); let amt = n(&p, "value_sat"); let fee = n(&p, "fee_sat").max(0) as u64;
             let time = { let ns = n(&p, "creation_time_ns"); if ns > 0 { (ns / 1_000_000_000) as u32 } else { n(&p, "creation_date") as u32 } };
             if hash.is_empty() { continue; }
-            out.push(Event { id: format!("{hash}:out"), time, net: -(amt + fee as i64), fee, layer: "lightning".into(), txid: String::new(), hash, kind: "paid".into(), memo: String::new(), to: Vec::new(), height: 0 });
+            out.push(Event { id: format!("{hash}:out"), time, net: -(amt + fee as i64), fee, layer: "lightning".into(), txid: String::new(), hash, kind: "paid".into(), memo: String::new(), to: Vec::new(), height: 0, phantom: false });
         }
         for (k, f) in arr(&d.forwards, "forwarding_events").iter().enumerate() {
             let fee = n(f, "fee"); if fee <= 0 { continue; }
             let time = { let ns = n(f, "timestamp_ns"); if ns > 0 { (ns / 1_000_000_000) as u32 } else { n(f, "timestamp") as u32 } };
-            out.push(Event { id: format!("routed:{time}:{k}"), time, net: fee, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "routed".into(), memo: String::new(), to: Vec::new(), height: 0 });
+            out.push(Event { id: format!("routed:{time}:{k}"), time, net: fee, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "routed".into(), memo: String::new(), to: Vec::new(), height: 0, phantom: false });
         }
         fold_routed(out)
     }
@@ -437,20 +440,20 @@ impl Lnd {
             if s(&i, "state") != "SETTLED" && i.get("settled").and_then(|x| x.as_bool()) != Some(true) { continue; }
             let hash = hash32(&s(&i, "r_hash"));
             let amt = n(&i, "amt_paid_sat"); if amt <= 0 || hash.is_empty() { continue; }
-            out.push(Event { id: hash.clone(), time: n(&i, "settle_date") as u32, net: amt, fee: 0, layer: "lightning".into(), txid: String::new(), hash, kind: "received".into(), memo: s(&i, "memo"), to: Vec::new(), height: 0 });
+            out.push(Event { id: hash.clone(), time: n(&i, "settle_date") as u32, net: amt, fee: 0, layer: "lightning".into(), txid: String::new(), hash, kind: "received".into(), memo: s(&i, "memo"), to: Vec::new(), height: 0, phantom: false });
         }
         for p in arr(&self.get(&format!("/v1/payments?include_incomplete=false&index_offset={}&max_payments=100000", m("payment")))?, "payments") {
             if s(&p, "status") != "SUCCEEDED" { continue; }
             let hash = s(&p, "payment_hash").to_lowercase(); let amt = n(&p, "value_sat"); let fee = n(&p, "fee_sat").max(0) as u64;
             let time = { let ns = n(&p, "creation_time_ns"); if ns > 0 { (ns / 1_000_000_000) as u32 } else { n(&p, "creation_date") as u32 } };
             if hash.is_empty() { continue; }
-            out.push(Event { id: format!("{hash}:out"), time, net: -(amt + fee as i64), fee, layer: "lightning".into(), txid: String::new(), hash, kind: "paid".into(), memo: String::new(), to: Vec::new(), height: 0 });
+            out.push(Event { id: format!("{hash}:out"), time, net: -(amt + fee as i64), fee, layer: "lightning".into(), txid: String::new(), hash, kind: "paid".into(), memo: String::new(), to: Vec::new(), height: 0, phantom: false });
         }
         let fw = self.post("/v1/switch", serde_json::json!({ "start_time": (m("forward") + 1).to_string(), "num_max_events": 50000 }))?;
         for (k, f) in arr(&fw, "forwarding_events").iter().enumerate() {
             let fee = n(f, "fee"); if fee <= 0 { continue; }
             let time = { let ns = n(f, "timestamp_ns"); if ns > 0 { (ns / 1_000_000_000) as u32 } else { n(f, "timestamp") as u32 } };
-            out.push(Event { id: format!("routed:{time}:{k}"), time, net: fee, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "routed".into(), memo: String::new(), to: Vec::new(), height: 0 });
+            out.push(Event { id: format!("routed:{time}:{k}"), time, net: fee, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "routed".into(), memo: String::new(), to: Vec::new(), height: 0, phantom: false });
         }
         let ev = fold_routed(out);
         let mut marks = self.marks_after(&ev)?;
@@ -474,7 +477,7 @@ impl Lnd {
 pub fn fold_routed(mut ev: Vec<Event>) -> Vec<Event> {
     let mut days: std::collections::BTreeMap<u32, (i64, u32)> = std::collections::BTreeMap::new();
     ev.retain(|e| { if e.kind == "routed" { let d = days.entry(e.time / 86400).or_insert((0, 0)); d.0 += e.net; d.1 = d.1.max(e.time); false } else { true } });
-    for (day, (net, time)) in days { if net != 0 { ev.push(Event { id: format!("routed:{day}"), time, net, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "routed".into(), memo: String::new(), to: Vec::new(), height: 0 }); } }
+    for (day, (net, time)) in days { if net != 0 { ev.push(Event { id: format!("routed:{day}"), time, net, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "routed".into(), memo: String::new(), to: Vec::new(), height: 0, phantom: false }); } }
     ev.sort_by_key(|e| (e.time, e.id.clone()));
     ev
 }
@@ -520,7 +523,7 @@ pub fn reconcile(mut events: Vec<Event>, held: i64, at: u32, why: &str) -> Vec<E
     events.retain(|e| e.kind != "unaccounted");
     if diff == 0 { return events; }
     let (time, memo) = match was { Some((t, m)) if t > 0 => (t.min(at), if why.is_empty() { m } else { why.to_string() }), _ => (at, why.to_string()) };
-    events.push(Event { id: format!("unaccounted:{time}"), time, net: diff, fee: 0, layer: "node".into(), txid: String::new(), hash: String::new(), kind: "unaccounted".into(), memo, to: Vec::new(), height: 0 });
+    events.push(Event { id: format!("unaccounted:{time}"), time, net: diff, fee: 0, layer: "node".into(), txid: String::new(), hash: String::new(), kind: "unaccounted".into(), memo, to: Vec::new(), height: 0, phantom: false });
     events.sort_by_key(|e| (e.time, e.id.clone()));
     events
 }
@@ -594,9 +597,9 @@ pub fn cln_chain_truth(claims: &serde_json::Value, events: &[Event], servers: &c
         let to: Vec<(String, u64)> = sp.output.iter().map(|o| (bitcoin::Address::from_script(&o.script_pubkey, net).map(|a| a.to_string()).unwrap_or_else(|_| format!("script {}", hex::encode(o.script_pubkey.as_bytes()))), o.value.to_sat())).collect();
         if w.2 == "output" {
             gone += w.1;
-            out.push(Event { id: sid.clone(), time: 0, net: -(w.1 as i64), fee: 0, layer: "chain".into(), txid: sid, hash: String::new(), kind: "withdrawal".into(), memo: format!("the node still lists {} ({} sats) as its own; the chain shows it spent in block {h} by a key held elsewhere — where it went is under To", w.3, w.1), to, height: h });
+            out.push(Event { id: sid.clone(), time: 0, net: -(w.1 as i64), fee: 0, layer: "chain".into(), txid: sid, hash: String::new(), kind: "withdrawal".into(), memo: format!("the node still lists {} ({} sats) as its own; the chain shows it spent in block {h} by a key held elsewhere — where it went is under To", w.3, w.1), to, height: h, phantom: false });
         } else if !booked.contains(sid.as_str()) {
-            out.push(Event { id: sid.clone(), time: 0, net: -(w.1 as i64), fee: 0, layer: "channel".into(), txid: sid, hash: String::new(), kind: "close".into(), memo: format!("{} with {} sats on this node's side; the closing transaction is in block {h} and the bookkeeper never booked it — the money was delivered to an address this node does not hold, listed under To", w.3, w.1), to, height: h });
+            out.push(Event { id: sid.clone(), time: 0, net: -(w.1 as i64), fee: 0, layer: "channel".into(), txid: sid, hash: String::new(), kind: "close".into(), memo: format!("{} with {} sats on this node's side; the closing transaction is in block {h} and the bookkeeper never booked it — the money was delivered to an address this node does not hold, listed under To", w.3, w.1), to, height: h, phantom: false });
         }
     }
     // dates from the blocks
@@ -772,7 +775,7 @@ mod tests {
 
     #[test]
     fn the_node_is_the_authority_and_the_ledger_books_what_it_cannot_explain() {
-        let ev = |id: &str, t: u32, net: i64| Event { id: id.into(), time: t, net, fee: 0, layer: "chain".into(), txid: String::new(), hash: String::new(), kind: "deposit".into(), memo: String::new(), to: Vec::new(), height: 0 };
+        let ev = |id: &str, t: u32, net: i64| Event { id: id.into(), time: t, net, fee: 0, layer: "chain".into(), txid: String::new(), hash: String::new(), kind: "deposit".into(), memo: String::new(), to: Vec::new(), height: 0, phantom: false };
         let led = vec![ev("a", 10, 1_000_000), ev("b", 20, 500_000)];
         // the node holds 400k: 1.1M left without a row — booked, dated, named
         let r = reconcile(led.clone(), 400_000, 30, "left without a record");
@@ -789,7 +792,7 @@ mod tests {
 
     #[test]
     fn a_whole_reread_replaces_rows_and_keeps_what_the_node_forgot() {
-        let ev = |id: &str, net: i64| Event { id: id.into(), time: 10, net, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "received".into(), memo: String::new(), to: Vec::new(), height: 0 };
+        let ev = |id: &str, net: i64| Event { id: id.into(), time: 10, net, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "received".into(), memo: String::new(), to: Vec::new(), height: 0, phantom: false };
         let have = vec![ev("a", 100), ev("routed:0", 7), ev("b", 50)];
         // the node now reports a (changed) and the day's routing (whole, not an increment); b is gone from it
         let out = keep_and_replace(&have, vec![ev("a", 120), ev("routed:0", 9)]);
@@ -801,13 +804,13 @@ mod tests {
 
     #[test]
     fn routing_fees_fold_into_one_row_per_day_and_merge_adds_to_it() {
-        let r = |t: u32, id: &str, net: i64| Event { id: id.into(), time: t, net, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "routed".into(), memo: String::new(), to: Vec::new(), height: 0 };
+        let r = |t: u32, id: &str, net: i64| Event { id: id.into(), time: t, net, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "routed".into(), memo: String::new(), to: Vec::new(), height: 0, phantom: false };
         let ev = fold_routed(vec![r(86400 * 100 + 10, "a", 3), r(86400 * 100 + 50, "b", 4), r(86400 * 101 + 1, "c", 5)]);
         assert_eq!(ev.iter().map(|e| (e.id.as_str(), e.net, e.time)).collect::<Vec<_>>(), vec![("routed:100", 7, 86400 * 100 + 50), ("routed:101", 5, 86400 * 101 + 1)]);
         let later = fold_routed(vec![r(86400 * 101 + 900, "d", 2)]);
         let all = merge_events(&ev, later);
         assert_eq!(all.iter().map(|e| (e.id.as_str(), e.net)).collect::<Vec<_>>(), vec![("routed:100", 7), ("routed:101", 7)], "a day's row grows; nothing is counted twice");
-        let paid = Event { id: "h:out".into(), time: 5, net: -70, fee: 1, layer: "lightning".into(), txid: String::new(), hash: "h".into(), kind: "paid".into(), memo: String::new(), to: Vec::new(), height: 0 };
+        let paid = Event { id: "h:out".into(), time: 5, net: -70, fee: 1, layer: "lightning".into(), txid: String::new(), hash: "h".into(), kind: "paid".into(), memo: String::new(), to: Vec::new(), height: 0, phantom: false };
         let again = merge_events(&[paid.clone()], vec![Event { net: -71, ..paid.clone() }]);
         assert_eq!(again.len(), 1); assert_eq!(again[0].net, -71, "a row seen again is replaced, not added");
     }
