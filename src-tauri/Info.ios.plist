@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>NFCReaderUsageDescription</key>
-  <string>Any Two Keys reads your YubiKey when you hold it to the phone, to sign with it or set it up.</string>
+  <string>Any Two Keys reads your security key or smart card when you hold it to the phone, to sign with it or set it up.</string>
   <!-- the parts of a YubiKey the app may select over NFC: OpenPGP (signing), management, one-time codes, authenticator, PIV. The last three are only ever read. -->
   <key>com.apple.developer.nfc.readersession.iso7816.select-identifiers</key>
   <array>
