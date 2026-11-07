@@ -34,6 +34,33 @@ that explains the gap removes the row; a wider gap books a wider row. Nothing th
 Retiring a node with **"It holds nothing now"** does the same by the person's word: the balance becomes zero and the gap
 is booked today with the reason given. That is the close-out for a node that was emptied by an attacker.
 
+### Exact to the millisatoshi
+
+Lightning amounts are millisatoshi. A ledger of rows each rounded to whole sats is out by up to a satoshi a row, and
+on a node with hundreds of routing fees that rounding would show up as "unaccounted" money. So every row carries the
+exact figure where the source gave it (`Event.msat`: invoices, payments, forwards, bookkeeper events, a channel's
+`final_to_us_msat`), and sums — a day's routing, a merged fee, the reconciliation itself — are taken in msat and rounded
+once. A row under one satoshi (a routing fee of 313 msat; the fraction a closing transaction cannot pay and rounds away)
+is shown as 0.313 sats, not dropped and not shown as 0. A gap with a sub-satoshi part says the exact msat in its memo.
+A ledger that says 0 msat unaccounted is exactly reconciled; any other figure is money whose path is not yet understood.
+
+### The chain over the node's word
+
+A restored Core Lightning copy lists outputs it no longer has and channels whose closing it never booked. On every read
+and every import of a file that carries `listfunds` and `listclosedchannels`, the chain is asked about each output the
+node calls unspent and each closed channel with money on our side (`node::cln_chain_truth`): spent? by which
+transaction, in which block, to which addresses? A spent output becomes a **withdrawal** row named by the spending
+transaction; a close the bookkeeper never saw becomes a **close** row for our side's final balance, with the outputs
+under **To**. A close whose money came home — some output of it spent by a transaction this wallet made, even one the
+bookkeeper booked only by its fee (a sweep is an internal move, not income) — is not a loss and gets no row. A close
+counts as already booked only by a deposit or withdrawal; a fee row naming the same transaction is the node's view of
+it, not the chain's. A transaction the bookkeeper named that is on no server's chain is a **phantom**: kept, counted as
+zero, said so.
+
+Bookkeeper fee rows are named by their transaction (`onchain_fee|txid|account`), never by the time of the read: a
+restored copy and the live node must give the same row the same id, and equal fee or close rows of one transaction
+collapse to one after every merge (`node::dedupe_fee_rows`, earliest kept, destinations taken from either).
+
 ## Where the money went
 
 Every row that left on the chain or closed a channel carries the transaction's outputs — address and sats — read from
