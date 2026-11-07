@@ -6,3 +6,4 @@ src-tauri/gen/schemas/
 icon.svg.png
 .DS_Store
 __pycache__/
+src-tauri/gen/android/buildSrc/.kotlin/
