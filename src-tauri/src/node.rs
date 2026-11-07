@@ -574,11 +574,11 @@ pub fn cln_chain_truth(claims: &serde_json::Value, events: &[Event], servers: &c
     use std::str::FromStr;
     use bitcoin::{Txid, OutPoint};
     let net = crate::wallet::network_of(network);
-    let mut want: Vec<(OutPoint, u64, &'static str, String, u64)> = Vec::new();   // outpoint, sats on our side, what it is, a word about it, the exact msat
+    let mut want: Vec<(OutPoint, u64, &'static str, String, u64, u64)> = Vec::new();   // outpoint, sats on our side, what it is, a word about it, the exact msat, the peer's side in sats (a channel)
     for o in claims.get("listfunds").and_then(|f| f.get("outputs")).and_then(|x| x.as_array()).map(|a| a.as_slice()).unwrap_or(&[]) {
         let (Some(txid), Some(n)) = (o.get("txid").and_then(|x| x.as_str()).and_then(|t| Txid::from_str(t).ok()), o.get("output").and_then(|x| x.as_u64())) else { continue };
         let sats = o.get("amount_msat").and_then(|x| x.as_u64()).unwrap_or(0) / 1000;
-        want.push((OutPoint { txid, vout: n as u32 }, sats, "output", format!("output {}:{n}", &txid.to_string()[..12]), sats * 1000));
+        want.push((OutPoint { txid, vout: n as u32 }, sats, "output", format!("output {}:{n}", &txid.to_string()[..12]), sats * 1000, 0));
     }
     // a close is booked only when the wallet saw the money arrive or leave as its own (a deposit or a withdrawal); a fee
     // row or the bookkeeper's own "close" row naming the same transaction is the node's word about it, not the chain's
@@ -588,8 +588,9 @@ pub fn cln_chain_truth(claims: &serde_json::Value, events: &[Event], servers: &c
     let made: std::collections::HashSet<&str> = events.iter().filter(|e| !e.txid.is_empty()).map(|e| e.txid.as_str()).collect();
     for c in claims.get("listclosedchannels").and_then(|f| f.get("closedchannels")).and_then(|x| x.as_array()).map(|a| a.as_slice()).unwrap_or(&[]) {
         let ours_msat = c.get("final_to_us_msat").and_then(|x| x.as_u64()).unwrap_or(0); let ours = ours_msat / 1000; if ours_msat == 0 { continue; }
+        let them = c.get("total_msat").and_then(|x| x.as_u64()).unwrap_or(0).saturating_sub(ours_msat) / 1000;
         let (Some(txid), Some(n)) = (c.get("funding_txid").and_then(|x| x.as_str()).and_then(|t| Txid::from_str(t).ok()), c.get("funding_outnum").and_then(|x| x.as_u64())) else { continue };
-        want.push((OutPoint { txid, vout: n as u32 }, ours, "channel", format!("channel {} ({}, closed {})", &txid.to_string()[..12], c.get("peer_id").and_then(|x| x.as_str()).map(|p| &p[..12.min(p.len())]).unwrap_or("?"), c.get("close_cause").and_then(|x| x.as_str()).unwrap_or("?")), ours_msat));
+        want.push((OutPoint { txid, vout: n as u32 }, ours, "channel", format!("channel {} ({}, closed {})", &txid.to_string()[..12], c.get("peer_id").and_then(|x| x.as_str()).map(|p| &p[..12.min(p.len())]).unwrap_or("?"), c.get("close_cause").and_then(|x| x.as_str()).unwrap_or("?")), ours_msat, them));
     }
     if want.is_empty() { return (Vec::new(), 0); }
     // the scripts those outpoints pay, then each script's history, then the transaction in it that spends the outpoint
@@ -624,7 +625,7 @@ pub fn cln_chain_truth(claims: &serde_json::Value, events: &[Event], servers: &c
             gone += w.1;
             out.push(Event { id: sid.clone(), time: 0, net: -(w.1 as i64), fee: 0, layer: "chain".into(), txid: sid, hash: String::new(), kind: "withdrawal".into(), memo: format!("the node still lists {} ({} sats) as its own; the chain shows it spent in block {h} by a key held elsewhere — where it went is under To", w.3, w.1), to, height: h, phantom: false, msat: 0 });
         } else if !booked.contains(sid.as_str()) {
-            out.push(Event { id: sid.clone(), time: 0, net: -(w.1 as i64), fee: 0, layer: "channel".into(), txid: sid, hash: String::new(), kind: "close".into(), memo: format!("{} with {} sats on this node's side; the closing transaction is in block {h} and the bookkeeper never booked it — the money was delivered to an address this node does not hold, listed under To{}", w.3, w.1, if w.4 % 1000 != 0 { format!("; {} msat of the balance was below one satoshi, which a closing transaction cannot pay, and was rounded away", w.4 % 1000) } else { String::new() }), to, height: h, phantom: false, msat: -(w.4 as i64) });
+            out.push(Event { id: sid.clone(), time: 0, net: -(w.1 as i64), fee: 0, layer: "channel".into(), txid: sid, hash: String::new(), kind: "close".into(), memo: format!("{} with {} sats on this node's side; the closing transaction is in block {h} and the bookkeeper never booked it — the money was delivered to an address this node does not hold, listed under To{}{}", w.3, w.1, if w.5 > 0 && to.iter().any(|d| d.1 == w.5) { format!("; the peer's own {} sats went to its address and are not counted here", w.5) } else { String::new() }, if w.4 % 1000 != 0 { format!("; {} msat of the balance was below one satoshi, which a closing transaction cannot pay, and was rounded away", w.4 % 1000) } else { String::new() }), to: to.into_iter().filter(|d| !(w.5 > 0 && d.1 == w.5)).collect(), height: h, phantom: false, msat: -(w.4 as i64) });
         }
     }
     // dates from the blocks
