@@ -1494,8 +1494,9 @@ fn node_read(n: &node::Node, servers: &chain::Servers, network: &str) -> R<node:
                 let (found, gone) = node::cln_chain_truth(&serde_json::json!({ "listfunds": funds, "listclosedchannels": closed }), &fresh.events, servers, network);
                 if !found.is_empty() { fresh.events = node::prefer_chain_rows(std::mem::take(&mut fresh.events), found); }
                 let off = gone.min(fresh.onchain); fresh.onchain -= off; fresh.pending = fresh.pending.saturating_sub(gone - off);
-            }
-            node_destinations(&mut fresh.events, servers, network);
+                node_destinations(&mut fresh.events, servers, network);
+                node::strip_own_destinations(&mut fresh.events, &node::cln_own_outputs(&serde_json::json!({ "listfunds": funds }), servers, network));
+            } else { node_destinations(&mut fresh.events, servers, network); }
             fresh.events = node::reconcile(fresh.events, node::Held { onchain, channels, pending }.total(), now() as u32, UNACCOUNTED);
         }
     }
@@ -1799,7 +1800,8 @@ fn node_import_at(name: String, path: String) -> R<(Store, ImportReport)> {
         // a spent output the node still counts as unspent, or as pending, comes off what it claims to hold
         if let Some(h) = held.as_mut() { let off = gone.min(h.onchain); h.onchain -= off; h.pending = h.pending.saturating_sub(gone - off); } }
     let to_before = n.events.iter().filter(|e| !e.to.is_empty()).count();
-    { let (servers, network) = (wallet::servers_for(&s_ro, &net_ro), net_ro.clone()); node_destinations(&mut n.events, &servers, &network); }
+    { let (servers, network) = (wallet::servers_for(&s_ro, &net_ro), net_ro.clone()); node_destinations(&mut n.events, &servers, &network);
+      if !claims.is_null() { node::strip_own_destinations(&mut n.events, &node::cln_own_outputs(&claims, &servers, &network)); } }
     let to_filled = n.events.iter().filter(|e| !e.to.is_empty()).count() - to_before;
     if let Some(h) = held {
         // the file says what the node held when it was asked: that becomes the balance, and the ledger is made to sum

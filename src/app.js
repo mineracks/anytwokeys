@@ -1650,7 +1650,7 @@ document.addEventListener('click', (e) => { if (e.target.closest('[data-vault-re
 const TAX_NOTES = {
   person: 'For an individual: capital losses (this year’s, then those carried forward) are set against capital gains first, in the order the taxpayer chooses; the 50% CGT discount then applies to what remains of gains on coins held over twelve months. A net capital loss carries forward and never offsets ordinary income.',
   trust:  'For a trust: the trust works out the net capital gain the same way as an individual — losses first, then the 50% discount on gains from coins held over twelve months — and the discounted gain is distributed to beneficiaries, who gross it up and apply their own discount.',
-  company: 'For a company: there is NO CGT discount. Capital losses offset capital gains (and carry forward subject to the continuity-of-ownership or business-continuity tests); the net capital gain is taxed at the company rate. The "over 12 months" split below is kept for the record only.',
+  company: 'For a company: there is NO CGT discount. Capital losses offset capital gains (and carry forward subject to the continuity-of-ownership or business-continuity tests); the net capital gain is taxed at the company rate. Where a report splits coins held over 12 months, the split is kept for the record only.',
   smsf:   'For a self-managed super fund: losses first, then a one-third discount on gains from assets held over twelve months; the net gain is taxed at 15% in accumulation phase and is exempt to the extent the assets support retirement-phase pensions. The trustee’s actuary or accountant decides the split.',
   other:  'Losses are set against gains first; any discount depends on who the taxpayer is. Give these figures to the entity’s accountant with the method named below.',
 };
@@ -1810,7 +1810,7 @@ async function lossReport(sc) {
     blocks.push({ kind: 'heading', text: `${x.row.time ? dateOf(x.row.time) : 'not in a block'} — ${sats(Math.round(x.r.sats))} sats ${x.r.kind}${sc.names.length > 1 ? ` — ${x.vault}` : ''}` });
     const lab = (v && v.labels || {})['tx:' + x.id] || '', note = (v && v.notes || {})['tx:' + x.id] || '';
     blocks.push({ kind: 'facts', rows: [
-      ['Transaction', e && !e.txid ? (e.kind === 'unaccounted' ? 'none: this row is the difference between what the node holds and what its ledger explains — money that left without the node’s bookkeeper seeing it go (channels closed by someone else holding the keys, coins swept by another copy of the wallet)' : `Lightning · payment hash ${e.hash || '—'}`) : (x.row.txid || x.id)],
+      ['Transaction', e && !e.txid ? (e.kind === 'unaccounted' ? 'none: this row is the difference between what the node holds and what its ledger explains — money that left without the node’s bookkeeper seeing it go (channels closed by someone else holding the keys, coins swept by another copy of the wallet)' : `Lightning · payment hash ${e.hash || '—'}`) : (e && e.txid ? e.txid : (x.row.txid || x.id))],
       e ? ['Layer', `${nodeLayer(e)} · ${e.kind}`] : null,
       to.length ? ['Where the coins went', to.map(([a, s_]) => `${a}  ${sats(s_)} sats`).join('\n')] : (e && e.txid ? ['Where the coins went', 'not read from the chain yet: refresh this vault and save the report again'] : null),
       x.row.quote && ccy ? ['Worth as they left', `${money(x.r.sats / 1e8 * x.row.quote.price, ccy)} at ${money(x.row.quote.price, ccy)} per BTC`] : null,

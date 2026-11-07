@@ -655,6 +655,26 @@ pub fn dedupe_fee_rows(mut events: Vec<Event>) -> Vec<Event> {
     keep
 }
 
+/// The outputs a Core Lightning node lists as its own (`listfunds`), as (address, sats): a destination list must not
+/// name the node's own change as somewhere the money went. Read from the transactions themselves, through the cache.
+pub fn cln_own_outputs(claims: &serde_json::Value, servers: &crate::chain::Servers, network: &str) -> Vec<(String, u64)> {
+    use std::str::FromStr; use bitcoin::Txid;
+    let net = crate::wallet::network_of(network);
+    let want: Vec<(Txid, u32)> = claims.get("listfunds").and_then(|f| f.get("outputs")).and_then(|x| x.as_array()).map(|a| a.as_slice()).unwrap_or(&[]).iter()
+        .filter_map(|o| Some((o.get("txid").and_then(|x| x.as_str()).and_then(|t| Txid::from_str(t).ok())?, o.get("output").and_then(|x| x.as_u64())? as u32))).collect();
+    if want.is_empty() { return Vec::new(); }
+    let ids: Vec<Txid> = want.iter().map(|w| w.0).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    let Ok(txs) = crate::chain::transactions_kept(servers, network, &ids, &|_| true) else { return Vec::new() };
+    let by_id: std::collections::HashMap<Txid, &bitcoin::Transaction> = txs.iter().map(|t| (t.compute_txid(), t)).collect();
+    want.iter().filter_map(|(t, n)| by_id.get(t).and_then(|tx| tx.output.get(*n as usize)).and_then(|o| bitcoin::Address::from_script(&o.script_pubkey, net).ok().map(|a| (a.to_string(), o.value.to_sat())))).collect()
+}
+
+/// Destinations with the node's own outputs taken out: what left, not what came back as change.
+pub fn strip_own_destinations(events: &mut [Event], own: &[(String, u64)]) {
+    if own.is_empty() { return; }
+    for e in events.iter_mut() { e.to.retain(|d| !own.contains(d)); }
+}
+
 pub fn prefer_chain_rows(mut events: Vec<Event>, found: Vec<Event>) -> Vec<Event> {
     for f in found {
         // the same transaction under another id, or a bookkeeper's "fee"/close of exactly this amount with no
@@ -782,6 +802,7 @@ mod tests {
         let (found, gone) = cln_chain_truth(&cln_claims_from_file(&text), &ev, &servers, "mainnet");
         println!("claimed {held:?}; the chain says {gone} sats of the listed outputs are gone; {} rows found", found.len());
         for e in &found { println!("  {} {}/{} net {} time {} height {} to {:?}\n    {}", &e.txid[..12], e.layer, e.kind, e.net, e.time, e.height, e.to, e.memo); }
+        println!("the node's own outputs: {:?}", cln_own_outputs(&cln_claims_from_file(&text), &servers, "mainnet"));
         let all = prefer_chain_rows(dedupe_fee_rows(ev), found); println!("ledger now {} rows, sums to {} sats in rounded rows, exactly {} msat", all.len(), all.iter().map(|e| e.net).sum::<i64>(), all.iter().map(msat_of).sum::<i64>());
         for e in all.iter().filter(|e| e.layer != "lightning") { println!("  {:10} {:8}/{:10} {:>10} t {} tx {}", &e.id[..10.min(e.id.len())], e.layer, e.kind, e.net, e.time, &e.txid[..12.min(e.txid.len())]); }
     }
