@@ -376,6 +376,8 @@ pub struct Entity {
     #[serde(default)] pub kind: String,
     #[serde(default)] pub note: String,
     #[serde(default)] pub added: u64,
+    /// a person's date of birth, YYYY-MM-DD (empty if not given): age matters when they are a fund's member or a trust's beneficiary
+    #[serde(default)] pub born: String,
     /// a super fund's members: a fund's capital gain is exempt in the proportion its assets support retirement-phase
     /// pensions, so the report needs who is in which phase and how much of the fund is theirs
     #[serde(default)] pub members: Vec<Member>,
@@ -385,6 +387,8 @@ pub struct Entity {
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Member {
     pub name: String,
+    /// the entity this is, when they are in the entities list (its id); their name and date of birth then come from it
+    #[serde(default)] pub entity: String,
     /// date of birth, YYYY-MM-DD (empty if not given) — age decides what phase a fund member CAN be in, and whether a
     /// trust beneficiary is a minor
     #[serde(default)] pub born: String,

@@ -4068,6 +4068,7 @@ function entityForm(slot, e, done) {
       <div class="label">${e ? 'This entity' : 'A new entity'}</div>
       <div class="field"><div class="label">Name</div><input id="ef-name" maxlength="80" placeholder="the company, the trust, your own name" value="${esc(e ? e.name : '')}"></div>
       <div class="field"><div class="label">Kind</div><div class="seg" role="radiogroup" id="ef-kind">${ENTITY_KINDS.map(([k, w]) => `<button type="button" role="radio" aria-checked="${(e ? e.kind : 'person') === k ? 'true' : 'false'}" data-kind="${k}">${w}</button>`).join('')}</div></div>
+      <div class="field" id="ef-born-row" hidden><div class="label">Date of birth</div><input id="ef-born" maxlength="10" placeholder="YYYY-MM-DD" value="${esc(e ? e.born || '' : '')}" style="max-width:160px"><div class="muted" style="font-size:13px">Age matters when this person is a fund\u2019s member or a trust\u2019s beneficiary.</div></div>
       <div class="field"><div class="label">Note</div><textarea id="ef-note" rows="2" style="min-height:64px" placeholder="ABN, trustee, who does its books">${esc(e ? e.note : '')}</textarea></div>
       <div class="field" id="ef-members" hidden><div class="label" id="ef-members-label">Members</div>
         <div class="muted" style="font-size:13px" id="ef-members-note"></div>
@@ -4077,15 +4078,23 @@ function entityForm(slot, e, done) {
       <div class="muted" id="ef-note-line" aria-live="polite"></div></form>`;
   let kind = e ? e.kind : 'person';
   // a fund's members or a trust's beneficiaries: the same row, with a phase for a fund and a kind for a trust
+  const others = (store.entities || []).filter(x => x.id !== id).sort((a, b) => a.name.localeCompare(b.name));
   const memberRow = (m) => { const d = document.createElement('div'); d.className = 'row'; d.style.cssText = 'gap:6px;flex-wrap:wrap;align-items:center';
-    d.innerHTML = `<input class="m-name" maxlength="80" placeholder="name" value="${esc(m.name || '')}" style="flex:1 1 140px"><input class="m-born" placeholder="born YYYY-MM-DD" value="${esc(m.born || '')}" style="flex:0 1 150px" maxlength="10">
+    d.innerHTML = `<select class="m-ent" style="flex:0 1 170px" title="Someone already in the entities list: their name and date of birth come from there"><option value="">not in the list</option>${others.map(x => `<option value="${esc(x.id)}">${esc(x.name)} \u00b7 ${esc(kindWord(x.kind).toLowerCase())}</option>`).join('')}</select>
+      <input class="m-name" maxlength="80" placeholder="name" value="${esc(m.name || '')}" style="flex:1 1 140px"><input class="m-born" placeholder="born YYYY-MM-DD" value="${esc(m.born || '')}" style="flex:0 1 150px" maxlength="10">
       <select class="m-phase" style="flex:0 1 190px"><option value="accumulation">accumulation</option><option value="ttr">transition to retirement</option><option value="retirement">retirement phase</option></select>
       <select class="m-kind" style="flex:0 1 150px"><option value="person">a person</option><option value="company">a company</option><option value="trust">a trust</option><option value="smsf">a super fund</option></select>
       <input class="m-share" type="number" min="0" max="100" step="0.1" placeholder="share %" value="${m.share ? m.share : ''}" style="flex:0 1 100px"><button type="button" class="btn small m-del" title="Remove">\u00d7</button>`;
-    d.querySelector('.m-phase').value = m.phase || 'accumulation'; d.querySelector('.m-kind').value = m.kind || 'person'; d.querySelector('.m-del').onclick = () => d.remove(); return d; };
+    d.querySelector('.m-phase').value = m.phase || 'accumulation'; d.querySelector('.m-kind').value = m.kind || 'person'; d.querySelector('.m-del').onclick = () => d.remove();
+    // linked to an entity: name and date of birth are theirs, and a beneficiary's kind is what that entity is
+    const ent = d.querySelector('.m-ent'), nm = d.querySelector('.m-name'), bn = d.querySelector('.m-born'), kd = d.querySelector('.m-kind');
+    const follow = () => { const x = others.find(o => o.id === ent.value); nm.disabled = bn.disabled = !!x; if (x) { nm.value = x.name; bn.value = x.born || ''; if (['person', 'company', 'trust', 'smsf'].includes(x.kind)) kd.value = x.kind; kd.disabled = true; } else kd.disabled = false; };
+    ent.value = m.entity && others.some(o => o.id === m.entity) ? m.entity : ''; follow(); ent.onchange = follow;
+    return d; };
   const membersBox = $('#ef-members'), rowsBox = $('#ef-member-rows');
   for (const m of (e && e.members) || []) rowsBox.appendChild(memberRow(m));
   const showMembers = () => {
+    $('#ef-born-row').hidden = kind !== 'person';
     membersBox.hidden = kind !== 'smsf' && kind !== 'trust';
     if (membersBox.hidden) return;
     $('#ef-members-label').textContent = kind === 'smsf' ? 'Members' : 'Beneficiaries';
@@ -4095,14 +4104,14 @@ function entityForm(slot, e, done) {
     if (!rowsBox.children.length) { rowsBox.appendChild(memberRow({})); $$('.m-phase', rowsBox).forEach(x => x.hidden = kind !== 'smsf'); $$('.m-kind', rowsBox).forEach(x => x.hidden = kind !== 'trust'); } };
   showMembers();
   $('#ef-member-add').onclick = () => { rowsBox.appendChild(memberRow({})); $$('.m-phase', rowsBox).forEach(x => x.hidden = kind !== 'smsf'); $$('.m-kind', rowsBox).forEach(x => x.hidden = kind !== 'trust'); };
-  const readMembers = () => [...rowsBox.children].map(d => ({ name: d.querySelector('.m-name').value.trim(), born: d.querySelector('.m-born').value.trim(), phase: d.querySelector('.m-phase').value, kind: d.querySelector('.m-kind').value, share: parseFloat(d.querySelector('.m-share').value) || 0 })).filter(m => m.name);
+  const readMembers = () => [...rowsBox.children].map(d => ({ entity: d.querySelector('.m-ent').value, name: d.querySelector('.m-name').value.trim(), born: d.querySelector('.m-born').value.trim(), phase: d.querySelector('.m-phase').value, kind: d.querySelector('.m-kind').value, share: parseFloat(d.querySelector('.m-share').value) || 0 })).filter(m => m.name);
   $$('#ef-kind [data-kind]').forEach(b => b.onclick = () => { kind = b.dataset.kind; $$('#ef-kind [data-kind]').forEach(x => x.setAttribute('aria-checked', x === b ? 'true' : 'false')); showMembers(); });
   $('#ef-cancel').onclick = () => { slot.innerHTML = ''; };
   $('#ent-form').onsubmit = async (ev) => {
     ev.preventDefault(); const name = $('#ef-name').value.trim(); if (!name) return toast('Give the entity a name');
     try {
       const before = new Set((store.entities || []).map(x => x.id));
-      store = await invoke('entity_save', { id, name, kind, note: $('#ef-note').value, members: kind === 'smsf' || kind === 'trust' ? readMembers() : null });
+      store = await invoke('entity_save', { id, name, kind, note: $('#ef-note').value, members: kind === 'smsf' || kind === 'trust' ? readMembers() : null, born: kind === 'person' ? $('#ef-born').value.trim() : null });
       if (vault) vault = store.vaults.find(x => x.name === vault.name) || vault;
       const saved = id ? store.entities.find(x => x.id === id) : store.entities.find(x => !before.has(x.id));
       slot.innerHTML = ''; if (done) await done(saved);
@@ -4128,6 +4137,9 @@ function renderEntities() {
 function openEntity(id) { entPage = id; show('entity'); }
 // a member's age today, from a YYYY-MM-DD date of birth; null if not given
 const ageOf = (born) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(born || ''); if (!m) return null; const d = new Date(+m[1], +m[2] - 1, +m[3]), n = new Date(); let a = n.getFullYear() - d.getFullYear(); if (n < new Date(n.getFullYear(), d.getMonth(), d.getDate())) a--; return a; };
+// a member's name: a link to their own page when they are an entity here
+const memberName = (m) => m.entity && entityOf(m.entity) ? `<a href="#" data-go-entity="${esc(m.entity)}"><b>${esc(m.name)}</b> \u203a</a>` : `<b>${esc(m.name)}</b>`;
+document.addEventListener('click', (e) => { const a = e.target.closest('[data-go-entity]'); if (a) { e.preventDefault(); openEntity(a.dataset.goEntity); } });
 const PHASE_WORDS = { accumulation: 'accumulation', ttr: 'transition to retirement (not retirement phase)', retirement: 'retirement phase' };
 /// What the fund's members mean for its tax: the share of the fund in retirement phase (that share of the net capital
 /// gain is exempt), and anything the ages say about what each member can be. Said, not decided: the actuary decides.
@@ -4151,12 +4163,12 @@ function trustFacts(e) {
 }
 function trustWords(e) {
   const t = trustFacts(e); if (!t.bs.length) return 'No beneficiaries recorded yet — Edit, and add them with what they are and their intended share of the capital gain.';
-  const who = t.bs.map(b => { const a = ageOf(b.born); return `<b>${esc(b.name)}</b>${a !== null ? `, ${a}` : ''} · ${kindWord(b.kind || 'person').toLowerCase()} · ${BENEFICIARY_DISCOUNT[b.kind] || BENEFICIARY_DISCOUNT.person}${b.share ? ` · ${b.share}% of the gain` : ''}`; }).join('<br>');
+  const who = t.bs.map(b => { const a = ageOf(b.born); return `${memberName(b)}${a !== null ? `, ${a}` : ''} · ${kindWord(b.kind || 'person').toLowerCase()} · ${BENEFICIARY_DISCOUNT[b.kind] || BENEFICIARY_DISCOUNT.person}${b.share ? ` · ${b.share}% of the gain` : ''}`; }).join('<br>');
   return `${who}<br><span style="display:block;margin-top:4px">${t.undistributed > 0.5 ? `<b>${t.undistributed}%</b> of the gain has no beneficiary named: if it is not distributed by 30 June it is taxed to the trustee at the top marginal rate (section 99A), with no discount.` : 'The whole gain is spoken for; the trustee\u2019s resolution by 30 June makes it so.'}</span>${t.flags.length ? `<span style="display:block;margin-top:4px">${t.flags.map(esc).join('<br>')}</span>` : ''}`;
 }
 function fundWords(e) {
   const f = fundFacts(e); if (!f.ms.length) return 'No members recorded yet — Edit, and add them with their phase and share of the fund.';
-  const who = f.ms.map(m => { const a = ageOf(m.born); return `<b>${esc(m.name)}</b>${a !== null ? `, ${a}` : ''} · ${PHASE_WORDS[m.phase] || m.phase}${m.share ? ` · ${m.share}% of the fund` : ''}`; }).join('<br>');
+  const who = f.ms.map(m => { const a = ageOf(m.born); return `${memberName(m)}${a !== null ? `, ${a}` : ''} · ${PHASE_WORDS[m.phase] || m.phase}${m.share ? ` · ${m.share}% of the fund` : ''}`; }).join('<br>');
   return `${who}<br><span style="display:block;margin-top:4px">Retirement-phase share: <b>${f.exempt}%</b>${f.shared && Math.abs(f.shared - 100) > 0.5 ? ` (shares add to ${f.shared}%, not 100)` : ''} — that share of the fund\u2019s net capital gain is exempt${f.mixed ? '; with members in both phases an unsegregated fund needs an actuarial certificate, and its percentage governs' : ''}.</span>${f.flags.length ? `<span style="display:block;margin-top:4px">${f.flags.map(esc).join('<br>')}</span>` : ''}`;
 }
 function renderEntity() {
@@ -4166,7 +4178,7 @@ function renderEntity() {
   for (const v of vs) for (const k of v.keys) if (k.pubkey && !keys.has(k.pubkey)) keys.set(k.pubkey, k);
   card.innerHTML = `<div class="txnav"><button class="btn small" type="button" data-go="entities">‹ All entities</button><span class="muted">${esc(e.name)}</span><span></span></div>
     <div class="guide-row"><div class="guide" style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:140px;flex-basis:200px">${iconHtml('entity', e.id, 72, entGlyph(e), true)}</div><div class="guide-body">
-      <div class="cer-act-title">${esc(e.name)}</div><div class="ent-kind">${esc(kindWord(e.kind))}</div>${e.note ? `<div style="font-size:13.5px;white-space:pre-wrap">${esc(e.note)}</div>` : ''}
+      <div class="cer-act-title">${esc(e.name)}</div><div class="ent-kind">${esc(kindWord(e.kind))}${e.kind === 'person' && ageOf(e.born) !== null ? ` · ${ageOf(e.born)}` : ''}</div>${e.note ? `<div style="font-size:13.5px;white-space:pre-wrap">${esc(e.note)}</div>` : ''}
       ${e.kind === 'smsf' ? `<div class="label" style="margin-top:6px">Its members</div><div class="muted" style="font-size:13px">${fundWords(e)}</div>` : e.kind === 'trust' ? `<div class="label" style="margin-top:6px">Its beneficiaries</div><div class="muted" style="font-size:13px">${trustWords(e)}</div>` : ''}
       <div class="label" style="margin-top:6px">Its vaults</div>
       <div class="tp-list" style="margin-top:0">${vs.length ? vs.map(v => `<div class="tp rowpick" data-go-vault="${esc(v.name)}" role="link" tabindex="0"><div class="tp-what"><div class="tp-head"><b>${esc(v.name)}</b> <span class="muted">· ${esc(kindOfVault(v))}${v.network !== 'mainnet' ? ' · ' + esc(v.network) : ''}</span></div></div><div class="tp-act"><button type="button" class="linkish" data-disown="${esc(v.name)}">Not its owner</button></div></div>`).join('') : '<div class="muted" style="font-size:13px">No vault yet. Claim one from the list below, or from its Vault settings.</div>'}</div>

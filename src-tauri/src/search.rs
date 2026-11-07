@@ -512,7 +512,7 @@ mod tests {
         s.seen.insert(v.name.clone(), wallet::Seen { txs: [(txid.clone(), 100)].into(), coins: [(format!("{txid}:0"), 50_000u64), (format!("{txid}:1"), 7_000u64)].into(), primed: true });
         s.contacts.push(wallet::Contact { name: "Alice Vendor".into(), address: "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx".into(), network: "signet".into(), added: 1, used: 2, last_used: 1 });
         s.places.push(wallet::Place { id: "p1".into(), name: "Office safe".into(), note: String::new(), place: "12 Example St".into(), lat: None, lon: None, added: 1 });
-        s.entities.push(wallet::Entity { id: "e1".into(), name: "Mineracks Pty Ltd".into(), kind: "company".into(), note: String::new(), added: 1, members: Vec::new() });
+        s.entities.push(wallet::Entity { id: "e1".into(), name: "Mineracks Pty Ltd".into(), kind: "company".into(), note: String::new(), added: 1, born: String::new(), members: Vec::new() });
         s.vaults[0].entity = Some("e1".into());
         let find = |q: &str| run(&s, q, "", NOW, -600);
         let kinds = |f: &Found| f.hits.iter().map(|h| (h.kind, h.title.clone())).collect::<Vec<_>>();

@@ -1326,22 +1326,30 @@ async fn icon_pick(kind: String, id: String) -> R<Store> {
 const ENTITY_KINDS: [&str; 5] = ["person", "company", "trust", "smsf", "other"];
 /// Save an entity: new when `id` is empty, else the one it names.
 #[tauri::command]
-fn entity_save(id: String, name: String, kind: String, note: String, members: Option<Vec<wallet::Member>>) -> R<Store> {
+fn entity_save(id: String, name: String, kind: String, note: String, members: Option<Vec<wallet::Member>>, born: Option<String>) -> R<Store> {
     let name = name.trim().to_string();
     if name.is_empty() || name.chars().count() > 80 { return Err("give the entity a name of up to 80 characters".into()); }
     let kind = if ENTITY_KINDS.contains(&kind.as_str()) { kind } else { "other".into() };
+    let ymd = |d: &str| d.is_empty() || (d.len() == 10 && d.chars().enumerate().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() }));
+    let born: String = if kind == "person" { born.unwrap_or_default().trim().to_string() } else { String::new() };
+    if !ymd(&born) { return Err("the date of birth should be YYYY-MM-DD".into()); }
+    let known: std::collections::HashMap<String, (String, String)> = wallet::load()?.entities.iter().map(|e| (e.id.clone(), (e.name.clone(), e.born.clone()))).collect();
     // members belong to a super fund; each needs a name, a phase the app knows, a date (if given) that parses, a share 0–100
-    let members: Vec<wallet::Member> = if kind == "smsf" || kind == "trust" { members.unwrap_or_default().into_iter().filter(|m| !m.name.trim().is_empty()).map(|m| wallet::Member {
-        name: m.name.trim().chars().take(80).collect(), born: m.born.trim().to_string(),
+    // a member linked to an entity takes that entity's name and date of birth (a link to itself, or to nothing known, is dropped)
+    let members: Vec<wallet::Member> = if kind == "smsf" || kind == "trust" { members.unwrap_or_default().into_iter().map(|m| { let ent = if m.entity != id { known.get(&m.entity).cloned() } else { None }; wallet::Member { entity: if ent.is_some() { m.entity.clone() } else { String::new() }, name: ent.as_ref().map(|e| e.0.clone()).unwrap_or(m.name), born: ent.as_ref().map(|e| e.1.clone()).unwrap_or(m.born), ..m } }).filter(|m| !m.name.trim().is_empty()).map(|m| wallet::Member {
+        entity: m.entity, name: m.name.trim().chars().take(80).collect(), born: m.born.trim().to_string(),
         phase: if kind == "smsf" { if ["accumulation", "ttr", "retirement"].contains(&m.phase.as_str()) { m.phase } else { "accumulation".into() } } else { String::new() },
         kind: if kind == "trust" { if ["person", "company", "trust", "smsf"].contains(&m.kind.as_str()) { m.kind } else { "person".into() } } else { String::new() },
         share: if m.share.is_finite() { m.share.clamp(0.0, 100.0) } else { 0.0 } }).collect() } else { Vec::new() };
-    for m in &members { if !m.born.is_empty() && !(m.born.len() == 10 && m.born.as_bytes()[4] == b'-' && m.born.as_bytes()[7] == b'-' && m.born.chars().enumerate().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() })) { return Err(format!("{}'s date of birth should be YYYY-MM-DD", m.name)); } }
+    for m in &members { if !ymd(&m.born) { return Err(format!("{}'s date of birth should be YYYY-MM-DD", m.name)); } }
     if members.iter().map(|m| m.share).sum::<f64>() > 100.0 + 1e-9 { return Err("the members' shares add up to more than 100%".into()); }
     let t = now();
     wallet::update(|s| {
-        if let Some(e) = s.entities.iter_mut().find(|e| e.id == id) { e.name = name.clone(); e.kind = kind.clone(); e.note = note.chars().take(2000).collect(); e.members = members.clone(); }
-        else { s.entities.push(wallet::Entity { id: hex::encode(&lockbox::random::<8>()), name: name.clone(), kind: kind.clone(), note: note.chars().take(2000).collect(), added: t, members: members.clone() }); }
+        if let Some(e) = s.entities.iter_mut().find(|e| e.id == id) { e.name = name.clone(); e.kind = kind.clone(); e.note = note.chars().take(2000).collect(); e.members = members.clone(); e.born = born.clone(); }
+        else { s.entities.push(wallet::Entity { id: hex::encode(&lockbox::random::<8>()), name: name.clone(), kind: kind.clone(), note: note.chars().take(2000).collect(), added: t, born: born.clone(), members: members.clone() }); }
+        // a person's name or date of birth changed: every fund or trust that links to them follows
+        let me = (id.clone(), name.clone(), born.clone());
+        for e in s.entities.iter_mut() { for m in e.members.iter_mut() { if !m.entity.is_empty() && m.entity == me.0 { m.name = me.1.clone(); m.born = me.2.clone(); } } }
     })
 }
 /// Forget an entity. Its vaults stay; they are simply unassigned again.
