@@ -32,8 +32,6 @@
   <!-- The app ships its own XChaCha20-Poly1305/AES/ECDSA: non-exempt, standard algorithms. Once App Store Connect
        issues the encryption documentation code (after the French declaration is accepted), add
        ITSEncryptionExportComplianceCode here so builds inherit it. -->
-  <key>ITSAppUsesNonExemptEncryption</key>
-  <true/>
   <key>UIFileSharingEnabled</key>
   <true/>
   <key>LSSupportsOpeningDocumentsInPlace</key>
