@@ -587,7 +587,7 @@ async function renderTx() {
     const e = nodeRow(txid), st = $('#tx-status'); st.className = 'state ok'; st.querySelector('span').textContent = e ? `${nodeLayer(e)} \u00b7 ${e.kind} \u00b7 from the node` : 'from the node';
     $('#tx-dl').innerHTML = [['Transfer', transferText(facts, txid) || 'Outside the watched vaults'], ['Source', `${esc(vault.node.alias)}\u2019s bookkeeper \u2014 the node\u2019s own ledger`],
       e ? ['Kind', e.phantom ? `${e.kind} \u2014 phantom: the transaction this row names is on no server\u2019s chain, so it is counted as zero` : (NODE_KIND_WORDS[e.kind] || e.kind)] : null,
-      e ? ['Amount', `${sats(Math.abs(e.net))} sats${e.fee ? ` (fee ${sats(e.fee)} sats)` : ''}`] : null,
+      e ? ['Amount', `${sats(Math.abs(e.net))} sats${e.fee ? ` (fee ${sats(e.fee)} sats)` : ''}${e.msat && e.msat % 1000 ? ` — exactly ${sats(Math.abs(e.msat))} msat` : ''}`] : null,
       e && e.txid ? ['Transaction', `<a href="#" class="mono" data-go-tx="${esc(e.txid)}" style="font-size:12px;word-break:break-all">${esc(e.txid)}</a>`] : null,
       // where the money went, read from the transaction itself: the evidence for the books and for a report
       e && (e.to || []).length ? ['To', e.to.map(([a, v]) => `<div><span class="mono" style="font-size:12px;word-break:break-all">${esc(a)}</span><small>${sats(v)} sats</small></div>`).join('') + `<small>every output of the transaction, as the chain holds it \u00b7 copy these into any report of where the coins went</small>`] : null,
@@ -1416,7 +1416,11 @@ function paintFactRow(txid, r, facts) {
     amt.classList.remove('muted'); amt.classList.toggle('in', r.net > 0);
     const vn = (tr.closest('#act-all, #activity') && vault) ? vault.name : null, L = vn ? vaultLedger(vn) : null, rz = L && L.realised[txid];
     const rtext = rz && rz.gain !== null ? ` \u00b7 realised ${rz.gain >= 0 ? '+' : '\u2212'}${money(Math.abs(rz.gain), facts.ccy)}` : '';
-    amt.innerHTML = `${r.net > 0 ? '+' : r.net < 0 ? '−' : ''}${sats(Math.abs(r.net))} sats<small>${q ? worth(Math.abs(r.net), q, facts.ccy) + (r.time ? ' then' : ' now') : ''}${r.fee !== null && r.net < 0 ? (q ? ' · ' : '') + 'fee ' + sats(r.fee) : ''}${rtext}</small>`;
+    // a node row under one satoshi (a routing fee, the millisatoshi a close rounds away) is shown exactly, not as 0
+    const sub = r.net === 0 ? (nodeRow(txid)?.msat || 0) : 0;
+    if (sub) amt.classList.toggle('in', sub > 0);
+    amt.innerHTML = sub ? `${sub > 0 ? '+' : '−'}${(Math.abs(sub) / 1000).toFixed(3)} sats<small>exactly ${sats(Math.abs(sub))} msat</small>`
+      : `${r.net > 0 ? '+' : r.net < 0 ? '−' : ''}${sats(Math.abs(r.net))} sats<small>${q ? worth(Math.abs(r.net), q, facts.ccy) + (r.time ? ' then' : ' now') : ''}${r.fee !== null && r.net < 0 ? (q ? ' · ' : '') + 'fee ' + sats(r.fee) : ''}${rtext}</small>`;
     if (q) amt.title = basisWords(q, facts.ccy);
   }
 }

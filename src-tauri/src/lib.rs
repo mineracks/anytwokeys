@@ -1488,7 +1488,7 @@ fn node_read(n: &node::Node, servers: &chain::Servers, network: &str) -> R<node:
             let (_, pubkey, version, _, _) = c.info()?;
             if pubkey != n.pubkey { return Err(format!("the node at {} is not the one this vault watches (a different identity answered)", n.url)); }
             let (onchain, channels, pending, _) = c.funds()?;
-            fresh.events = node::keep_and_replace(&n.events, c.events()?); fresh.onchain = onchain; fresh.channels = channels; fresh.pending = pending; fresh.version = version; fresh.read_at = now();
+            fresh.events = node::dedupe_fee_rows(node::keep_and_replace(&n.events, c.events()?)); fresh.onchain = onchain; fresh.channels = channels; fresh.pending = pending; fresh.version = version; fresh.read_at = now();
             // the chain over the node's word (node.rs cln_chain_truth): outputs it lists but the chain shows spent, closes it never booked
             if let (Ok(funds), Ok(closed)) = (c.call("listfunds", serde_json::json!({})), c.call("listclosedchannels", serde_json::json!({}))) {
                 let (found, gone) = node::cln_chain_truth(&serde_json::json!({ "listfunds": funds, "listclosedchannels": closed }), &fresh.events, servers, network);
@@ -1791,7 +1791,7 @@ fn node_import_at(name: String, path: String) -> R<(Store, ImportReport)> {
     let before = n.events.len();
     let have: std::collections::HashSet<String> = n.events.iter().map(|e| e.id.clone()).collect();
     let read = ev.len(); let new = ev.iter().filter(|e| !have.contains(&e.id)).count();
-    n.events = node::keep_and_replace(&n.events, ev);
+    n.events = node::dedupe_fee_rows(node::keep_and_replace(&n.events, ev));
     // the chain over the node's word: outputs it still lists but the chain shows spent, closes it never booked
     if !claims.is_null() { let (servers, network) = (wallet::servers_for(&s_ro, &net_ro), net_ro.clone());
         let (found, gone) = node::cln_chain_truth(&claims, &n.events, &servers, &network);
