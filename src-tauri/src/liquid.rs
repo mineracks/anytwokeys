@@ -16,7 +16,7 @@ use elements::encode::deserialize;
 use hmac::{Hmac, Mac};
 use sha2::{Sha256, Sha512};
 use elements::secp256k1_zkp as zkp;
-use elements::{Address, AddressParams, AssetId, OutPoint, Script, Transaction};
+use elements::{Address, AddressParams, AssetId, Script, Transaction};
 use electrum_client::ElectrumApi;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -81,6 +81,8 @@ pub struct Tx {
     pub moves: BTreeMap<String, i64>,
     /// this wallet's own outputs: vout, asset id, units — what a later transaction may spend
     pub outs: Vec<(u32, String, u64)>,
+    /// every input's outpoint (txid, vout): which of this wallet's outputs it spent is decided once all are known
+    #[serde(default)] pub ins: Vec<(String, u32)>,
     /// how many inputs and outputs the transaction has in all: more than ours alone says it was shared (a swap)
     #[serde(default)] pub ins_all: u32,
     #[serde(default)] pub outs_all: u32,
@@ -201,8 +203,9 @@ pub fn sync(l: &mut Liquid, gap: u32) -> Result<(), String> {
         }
         if chain == 0 { l.next = last_used.map(|u| u + 1).unwrap_or(0); } else { l.next_change = last_used.map(|u| u + 1).unwrap_or(0); }
     }
-    // 2. the raw transactions: those never read, and those read while unconfirmed
-    let want: Vec<(String, i32)> = listed.iter().filter(|(id, h)| l.txs.get(*id).map(|t| t.height == 0 && **h > 0).unwrap_or(true)).map(|(id, h)| (id.clone(), *h)).collect();
+    // 2. the raw transactions: those never read, those read while unconfirmed, and those read by a build that did
+    // not keep their inputs (before 8 Nov 2026, evening)
+    let want: Vec<(String, i32)> = listed.iter().filter(|(id, h)| l.txs.get(*id).map(|t| (t.height == 0 && **h > 0) || (t.ins.is_empty() && t.ins_all > 0)).unwrap_or(true)).map(|(id, h)| (id.clone(), *h)).collect();
     let secp = zkp::Secp256k1::new();
     let mut times: HashMap<u32, u32> = HashMap::new();
     for (id, height) in want {
@@ -216,7 +219,7 @@ pub fn sync(l: &mut Liquid, gap: u32) -> Result<(), String> {
                 let h: elements::BlockHeader = deserialize(&hdr).map_err(|e| format!("block {height}: {e}"))?;
                 times.insert(height, h.time); h.time } }
         } else { 0 };
-        let mut t = Tx { id: id.clone(), height, time, fee: 0, paid_fee: false, moves: Default::default(), outs: Vec::new(), ins_all: tx.input.len() as u32, outs_all: tx.output.len() as u32 };
+        let mut t = Tx { id: id.clone(), height, time, fee: 0, paid_fee: false, moves: Default::default(), outs: Vec::new(), ins: tx.input.iter().map(|i| (i.previous_output.txid.to_string(), i.previous_output.vout)).collect(), ins_all: tx.input.len() as u32, outs_all: tx.output.len() as u32 };
         for (vout, o) in tx.output.iter().enumerate() {
             if o.is_fee() { if let elements::confidential::Value::Explicit(v) = o.value { t.fee += v; } continue; }
             if !ours.contains_key(o.script_pubkey.as_bytes()) { continue; }
@@ -226,25 +229,15 @@ pub fn sync(l: &mut Liquid, gap: u32) -> Result<(), String> {
             };
             t.outs.push((vout as u32, asset.to_string(), value));
         }
-        // kept now so the inputs of a later transaction in this same pass can find these outputs
         l.txs.insert(id.clone(), t);
-        // 3. the inputs: each outpoint that is one of this wallet's own outputs
-        let mut moves: BTreeMap<String, i64> = BTreeMap::new();
-        let mut paid = false;
-        for i in &tx.input {
-            let OutPoint { txid: ptx, vout } = i.previous_output;
-            if let Some(p) = l.txs.get(&ptx.to_string()) {
-                if let Some((_, asset, value)) = p.outs.iter().find(|(v, _, _)| *v == vout) { *moves.entry(asset.clone()).or_insert(0) -= *value as i64; paid = true; }
-            }
-        }
-        let t = l.txs.get_mut(&id).ok_or("lost the transaction just read")?;
-        for (_, asset, value) in &t.outs { *moves.entry(asset.clone()).or_insert(0) += *value as i64; }
-        moves.retain(|_, v| *v != 0);
-        t.paid_fee = paid;
-        t.moves = moves;
     }
     // a transaction the server no longer lists (replaced, or dropped from the mempool) goes, unless it was confirmed
     l.txs.retain(|id, t| t.height > 0 || listed.contains_key(id));
+    // 3. the movements, for every transaction, now that every output of ours is known: each input that spends one
+    // of this wallet's outputs takes that asset away, each output of ours brings it in. Done over the whole set and
+    // not just the new ones — the order the server handed them over must not decide what a send looks like (the
+    // first build booked sends as receives of their change, because a spend was looked up before its coin was read).
+    book(&mut l.txs);
     // 4. balances: the sum of every movement is what is held
     let mut bal: BTreeMap<String, i64> = BTreeMap::new();
     for t in l.txs.values() { for (a, v) in &t.moves { *bal.entry(a.clone()).or_insert(0) += v; } }
@@ -255,6 +248,23 @@ pub fn sync(l: &mut Liquid, gap: u32) -> Result<(), String> {
     l.server = sv.electrum.clone();
     l.read_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     Ok(())
+}
+
+/// Every transaction's movements from the whole set's inputs and outputs — the same answer whatever order the
+/// transactions were read in.
+pub fn book(txs: &mut BTreeMap<String, Tx>) {
+    let outs: HashMap<(String, u32), (String, u64)> = txs.values().flat_map(|t| t.outs.iter().map(move |(v, a, n)| ((t.id.clone(), *v), (a.clone(), *n)))).collect();
+    for t in txs.values_mut() {
+        let mut moves: BTreeMap<String, i64> = BTreeMap::new();
+        let mut paid = false;
+        for (ptx, vout) in &t.ins {
+            if let Some((asset, value)) = outs.get(&(ptx.clone(), *vout)) { *moves.entry(asset.clone()).or_insert(0) -= *value as i64; paid = true; }
+        }
+        for (_, asset, value) in &t.outs { *moves.entry(asset.clone()).or_insert(0) += *value as i64; }
+        moves.retain(|_, v| *v != 0);
+        t.paid_fee = paid;
+        t.moves = moves;
+    }
 }
 
 /// Blockstream's asset registry: ticker, name and precision for an asset id. Tether is known without asking.
@@ -343,6 +353,29 @@ mod tests {
         assert_eq!(amount(&l, LBTC, 100_000_000), "1");
         assert_eq!(ticker(&l, USDT), "USDt");
         assert_eq!(ticker(&l, "abcdef0123456789"), "abcdef01");
+    }
+
+    /// The bug of the first build: a send read before the coin it spent was booked as a receive of its change.
+    #[test]
+    fn a_send_is_a_send_whatever_order_the_transactions_were_read_in() {
+        let mut txs = BTreeMap::new();
+        // "b…" sorts before "a…"? No — BTreeMap orders by id, so put the spend FIRST by id to be sure order cannot help
+        txs.insert("0spend".into(), Tx { id: "0spend".into(), height: 2, time: 2, fee: 10, outs: vec![(1, LBTC.into(), 400)], ins: vec![("1coin".into(), 0)], ins_all: 1, outs_all: 3, ..Default::default() });
+        txs.insert("1coin".into(), Tx { id: "1coin".into(), height: 1, time: 1, fee: 0, outs: vec![(0, LBTC.into(), 1000)], ins: vec![("other".into(), 3)], ins_all: 1, outs_all: 2, ..Default::default() });
+        book(&mut txs);
+        assert_eq!(txs["1coin"].moves[LBTC], 1000); assert!(!txs["1coin"].paid_fee);
+        assert_eq!(txs["0spend"].moves[LBTC], -600, "sent 590 and paid 10: the change of 400 came back"); assert!(txs["0spend"].paid_fee);
+        let l = Liquid { xpub: String::new(), fingerprint: String::new(), path: String::new(), wrapped: false, blinding: String::new(), next: 0, next_change: 0, txs, assets: Default::default(), balances: Default::default(), read_at: 0, server: String::new() };
+        let rs = rows(&l);
+        assert_eq!(rs.iter().find(|r| r.id == "0spend").unwrap().kind, "send");
+        assert_eq!(rs.iter().find(|r| r.id == "1coin").unwrap().kind, "receive");
+        // a swap: L-BTC out, USDt in, in the one transaction
+        let mut txs = BTreeMap::new();
+        txs.insert("coin".into(), Tx { id: "coin".into(), height: 1, time: 1, outs: vec![(0, LBTC.into(), 2_500_000)], ..Default::default() });
+        txs.insert("swap".into(), Tx { id: "swap".into(), height: 2, time: 2, fee: 635, outs: vec![(0, USDT.into(), 258_766_109_69)], ins: vec![("coin".into(), 0), ("theirs".into(), 0)], ins_all: 2, outs_all: 4, ..Default::default() });
+        book(&mut txs);
+        let l = Liquid { txs, ..l };
+        assert_eq!(rows(&l).iter().find(|r| r.id == "swap").unwrap().kind, "swap");
     }
 
     /// Throwaway words, derived and scanned against the live server: proves the derivation, the server and the
