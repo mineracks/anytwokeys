@@ -617,7 +617,7 @@ async function renderTx() {
     $('#tx-proof').textContent = ''; $('#tx-chain-body').innerHTML = ''; return;
   }
   if (vault.spark) {
-    const t = facts.spark?.[txid], st = $('#tx-status'); st.className = 'state ' + (t?.status === 5 ? 'ok' : 'here'); st.querySelector('span').textContent = sparkTransferStatus(t?.status);
+    const t = facts.spark?.[txid], st = $('#tx-status'); st.className = 'state ' + (t?.status === 5 ? 'ok' : 'here'); st.querySelector('span').textContent = sparkTransferStatus(t);
     $('#tx-dl').innerHTML = [['Transfer', transferText(facts, txid) || 'Outside the watched vaults'], ['Source', "Spark's word — not verified against the chain"], ['Transfer id', txid], ['From identity', t?.sender || 'unknown'], ['To identity', t?.receiver || 'unknown'], ['Amount', t ? sats(t.sats) + ' sats' : 'unknown'], ['Accounting', t?.status === 5 ? 'Completed transfer included' : 'Not completed; excluded from cost basis']].map(([k,v]) => `<dt>${esc(k)}</dt><dd class="mono">${esc(v)}</dd>`).join('');
     $('#tx-proof').textContent = ''; $('#tx-chain-body').innerHTML = ''; return;
   }
@@ -1292,7 +1292,7 @@ function actRowHtml(h) {
   }
   if (vault?.spark) {
     const t = txFacts[vault.name]?.spark?.[h.txid];
-    return `<td class="when muted">…</td><td class="mono">${esc(h.txid.slice(0, 10))}…</td><td>${lblHtml('tx:' + h.txid)}<span class="xfer" data-xfer="${esc(h.txid)}"></span></td><td class="r amt muted">…</td><td class="r">${esc(sparkTransferStatus(t?.status))}</td>`;
+    return `<td class="when muted">…</td><td class="mono">${esc(h.txid.slice(0, 10))}…</td><td>${lblHtml('tx:' + h.txid)}<span class="xfer" data-xfer="${esc(h.txid)}"></span></td><td class="r amt muted">…</td><td class="r">${esc(sparkTransferStatus(t))}</td>`;
   }
   return `<td class="when muted">${h.height > 0 ? '…' : 'pending'}</td><td><span class="mono">${h.txid.slice(0, 10)}…${h.txid.slice(-6)}</span>${vault._rotating ? ' <span class="muted">· ' + fmtIndex(h.index) + '</span>' : ''}</td><td>${lblHtml('tx:' + h.txid)}<span class="xfer" data-xfer="${h.txid}"></span></td><td class="r amt muted">…</td><td class="r ${h.height > 0 ? 'ok' : 'muted'}">${h.height > 0 ? 'confirmed · ' + sats(h.height) : 'unconfirmed'}</td>`;
 }
@@ -1349,7 +1349,7 @@ function actKind(h, f) {
   if (vault?.node) { const e = nodeRow(h.txid); return e ? `${nodeLayer(e, true)} \u00b7 ${e.kind}` : 'From the node'; }
   if (vault?.exchange) { const r = exRow(h.txid); return r ? (EX_WORDS[r.kind] || r.kind).replace(/^./, c => c.toUpperCase()) : 'From the statement'; }
   if (vault?.statement) { const r = stmtRow(h.txid); return r ? `${r.layer === 'chain' ? 'On-chain' : 'Lightning'} \u00b7 ${r.kind === 'income' ? (r.pos ? 'sale' : 'reward') : r.kind}` : 'From the statement'; }
-  if (vault?.spark) { const t = f?.spark?.[h.txid]; return sparkTransferStatus(t?.status) || 'Spark'; }
+  if (vault?.spark) { const t = f?.spark?.[h.txid]; return sparkTransferStatus(t); }
   const r = f?.rows?.[h.txid];
   if (f?.transfers?.[h.txid]) return 'Transfers between your vaults';
   if (!r || r.net === null) return h.height > 0 ? 'Confirmed' : 'Unconfirmed';
@@ -5644,4 +5644,12 @@ document.addEventListener('keydown', e => {
   }
 });
 
-function sparkTransferStatus(status) { return status === 5 ? "completed · Spark" : status === 6 ? "expired · Spark" : status === 7 ? "returned · Spark" : "not completed · Spark"; }
+// Spark's own words for a transfer's state and kind (their TransferStatus and TransferType tables), so a row that is
+// not counted says exactly where it stopped rather than "not completed"; an unknown code is shown as its number.
+const SPARK_STATUS = ['sender initiated', 'sender key tweak pending', 'sender key tweaked', 'receiver key tweaked', 'receiver refund signed', 'completed', 'expired', 'returned', 'sender initiated at the coordinator', 'receiver key tweak locked', 'receiver key tweak applied'];
+const SPARK_KIND = ['Lightning receive', 'cooperative exit', 'transfer', 'coin swap', 'swap', 'counter swap'];
+function sparkTransferStatus(t) {
+  if (!t) return 'Spark';
+  const st = SPARK_STATUS[t.status] || `status ${t.status}`, kind = SPARK_KIND[t.kind] || `kind ${t.kind}`;
+  return `${st} · ${kind} · Spark`;
+}

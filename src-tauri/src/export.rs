@@ -367,7 +367,7 @@ pub fn doc(title: &str, subtitle: &str, blocks: &[Block]) -> Result<Vec<u8>, Str
             Block::Facts(kv) => for (k, v) in kv {
                 // a newline in a value is a hard break: one address per line; a long key wraps in its own column
                 let lines: Vec<String> = v.split('\n').flat_map(|p| wrap(p, 78)).collect();
-                let keys = wrap(&k.to_uppercase(), 18); // bold capitals at 8.5 pt: 18 fit the 110 pt label column, 22 ran into the value let n = lines.len().max(keys.len()); need!(14.0 * n as f32 + 3.0);
+                let keys = wrap(&k.to_uppercase(), 18); /* bold capitals at 8.5 pt: 18 fit the 110 pt label column, 22 ran into the value */ let n = lines.len().max(keys.len()); need!(14.0 * n as f32 + 3.0);
                 for (i, kl) in keys.iter().enumerate() { page!().text(2, 8.5, M, y - 13.0 * i as f32, kl); }
                 for (i, l) in lines.iter().enumerate() { page!().text(1, 10.5, M + 110.0, y - 13.0 * i as f32, l); }
                 y -= 13.0 * (n as f32 - 1.0) + 16.0;
