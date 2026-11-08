@@ -729,12 +729,14 @@ async fn vault_activity(name: String, history: Vec<(String, i32)>, ccy: String) 
         // A Liquid wallet's history is what the last sync read and unblinded: L-BTC on the sats row, priced like
         // every other row; the other assets ride beside it in their own units, shown, not priced.
         if let Some(l) = &v.liquid {
-            let rows: Vec<activity::Row> = l.txs.values().map(|t| activity::Row {
+            // this vault's asset alone on the sats row: L-BTC in sats (priced), another asset in its own units
+            // (not priced — the row count and the figures are in that asset, and the price feed is bitcoin's)
+            let rows: Vec<activity::Row> = l.txs.values().filter(|t| t.moves.contains_key(&l.asset) || (l.is_lbtc() && t.paid_fee)).map(|t| activity::Row {
                 txid: t.id.clone(), time: if t.time > 0 { Some(t.time) } else { None },
-                net: Some(t.moves.get(liquid::LBTC).copied().unwrap_or(0)), fee: if t.paid_fee && t.fee > 0 { Some(t.fee) } else { None },
+                net: Some(t.moves.get(&l.asset).copied().unwrap_or(0)), fee: if l.is_lbtc() && t.paid_fee && t.fee > 0 { Some(t.fee) } else { None },
                 quote: None, ins: Vec::new(), outs: Vec::new(),
             }).collect();
-            let mut a = activity::priced(&v, rows, &ccy, &prices)?;
+            let mut a = activity::priced(&v, rows, if l.is_lbtc() { &ccy } else { "" }, &prices)?;
             a.liquid = liquid::rows(l);
             if !l.server.is_empty() && l.server != liquid::servers().electrum { a.note = Some(format!("Read from {} because our own Liquid node did not answer.", l.server.trim_start_matches("ssl://"))); }
             transfers::record(&v, &mut a, &s);
@@ -1684,15 +1686,24 @@ async fn liquid_restore(name: String, words: String) -> R<Vault> {
         let l = liquid::from_words(words, s.settings.gap)?;
         if let Some(v) = s.vaults.iter().find(|v| v.liquid.as_ref().map(|x| x.xpub == l.xpub).unwrap_or(false)) { return Err(format!("this Liquid wallet is already watched as ‘{}’", v.name)); }
         let address = liquid::address_at(&l, 0, l.next)?;
-        let v = Vault { watch: None, spark: None, muun: None, liquid: Some(l), statement: None, node: None,
-            name, network: "mainnet".into(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address,
-            created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
-            labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
-            more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: Some("fifo".into()), entity: None, exchange: None };
+        // one vault per asset the account has moved, L-BTC first and named as asked; the others carry the ticker
         let mut s = wallet::load()?;
-        s.vaults.push(v.clone());
+        let mut first = None;
+        let mut assets = l.assets_moved(); if assets.is_empty() { assets.push(liquid::LBTC.into()); }
+        for asset in assets {
+            let sib = l.for_asset(&asset);
+            let mut vname = if sib.is_lbtc() { name.clone() } else { format!("{name} \u{b7} {}", sib.ticker()) };
+            while s.vaults.iter().any(|v| v.name == vname) { vname.push('\u{2032}'); }
+            let v = Vault { watch: None, spark: None, muun: None, liquid: Some(sib), statement: None, node: None,
+                name: vname, network: "mainnet".into(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address: address.clone(),
+                created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
+                labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
+                more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: Some("fifo".into()), entity: None, exchange: None };
+            if first.is_none() { first = Some(v.clone()); }
+            s.vaults.push(v);
+        }
         wallet::save(&s)?;
-        Ok(v)
+        first.ok_or_else(|| "no vault made".to_string())
     }).await
 }
 
@@ -2137,10 +2148,24 @@ async fn vault_sync(name: String) -> R<Snapshot> {
             let height = l.txs.values().map(|t| t.height).max().unwrap_or(0);
             let mut history: Vec<HistoryRow> = l.txs.values().map(|t| HistoryRow { txid: t.id.clone(), height: t.height as i32, index: 0 }).collect();
             history.sort_by_key(|h| if h.height <= 0 { i32::MAX } else { h.height });
-            let balance = l.balances.get(liquid::LBTC).copied().unwrap_or(0);
+            let balance = l.held();
             let servers = if l.server.is_empty() || l.server == liquid::servers().electrum { liquid::servers() } else { liquid::fallback() };
+            // the one read serves every vault of the account: each sibling gets the same record under its own asset,
+            // and an asset the account has moved that no vault shows yet gets a vault of its own, beside this one
             let (name, l2, recv2) = (v.name.clone(), l.clone(), receive.clone());
-            wallet::update(move |s| if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == name) { vm.liquid = Some(l2); vm.address = recv2; })?;
+            wallet::update(move |s| {
+                for vm in s.vaults.iter_mut() { if let Some(x) = vm.liquid.as_mut() { if x.xpub == l2.xpub { let asset = x.asset.clone(); *x = l2.for_asset(&asset); vm.address = recv2.clone(); } } }
+                let base = s.vaults.iter().find(|x| x.name == name).map(|x| x.name.trim_end_matches(" \u{b7} L-BTC").to_string()).unwrap_or(name.clone());
+                for asset in l2.assets_moved() {
+                    if s.vaults.iter().any(|x| x.liquid.as_ref().map(|y| y.xpub == l2.xpub && y.asset == asset).unwrap_or(false)) { continue; }
+                    let sib = l2.for_asset(&asset);
+                    let mut sname = format!("{base} \u{b7} {}", sib.ticker());
+                    while s.vaults.iter().any(|x| x.name == sname) { sname.push('\u{2032}'); }
+                    let at = s.vaults.iter().position(|x| x.name == name).map(|i| i + 1).unwrap_or(s.vaults.len());
+                    let v = s.vaults.iter().find(|x| x.name == name).cloned();
+                    if let Some(v) = v { s.vaults.insert(at.min(s.vaults.len()), Vault { name: sname, liquid: Some(sib), labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, created: now(), ..v }); }
+                }
+            })?;
             return Ok(Snapshot { stale: String::new(), coins: Vec::new(), balance, height, history, servers, receive, receive_index: l.next, rotating: true, next_change: l.next_change, gap: s.settings.gap });
         }
         // A Spark wallet is not on the chain: its balance comes from an operator, and it has no coins, no addresses

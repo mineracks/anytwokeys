@@ -219,7 +219,7 @@ function renderTabs() {
   const tabs = $('#vault-tabs'); tabs.innerHTML = '';
   for (const v of store.vaults) {
     const d = document.createElement('div'); d.className = 'nav' + (vault && v.name === vault.name ? ' on' : ''); d.style.fontWeight = '600'; d.dataset.vault = v.name;
-    d.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${v.network === 'mainnet' ? 'var(--gold)' : 'var(--signal)'};display:inline-block;flex:0 0 8px"></span><span style="flex-grow:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v.name)}">${esc(v.name)}</span><span class="muted" style="font-size:11px;font-weight:400">${v.node ? 'Node' : v.statement ? 'Statement' : v.exchange ? 'Exchange' : v.spark ? (v.spark.authenticated ? 'key reader' : 'Watched \u00b7 Spark') : v.liquid ? 'Liquid' : v.muun || v.watch ? 'Watched' : v.keys.length === 1 ? '1 key' : v.threshold + ' of ' + v.keys.length}</span>`;
+    d.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${v.network === 'mainnet' ? 'var(--gold)' : 'var(--signal)'};display:inline-block;flex:0 0 8px"></span><span style="flex-grow:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v.name)}">${esc(v.name)}</span><span class="muted" style="font-size:11px;font-weight:400">${v.node ? 'Node' : v.statement ? 'Statement' : v.exchange ? 'Exchange' : v.spark ? (v.spark.authenticated ? 'key reader' : 'Watched \u00b7 Spark') : v.liquid ? (inSats(v) ? 'L-BTC' : assetTicker(v)) : v.muun || v.watch ? 'Watched' : v.keys.length === 1 ? '1 key' : v.threshold + ' of ' + v.keys.length}</span>`;
     d.onclick = () => { if (d.dataset.dragged) return; vault = v; rememberVault(v); paintNet(); show('home'); };
     // drag to reorder — by pointer, not HTML5 drag-and-drop: the window's file-drop handling (attachments) takes
     // every drag session on macOS, so a dragover never reaches the page. The drop goes before or after the row
@@ -544,6 +544,7 @@ let balUnit = 'sats'; try { balUnit = localStorage.getItem('a2k-balance-unit') |
 function paintBalance() {
   if (!vault || vault._balance === undefined) return;
   const n = vault._now, big = $('#balance'), small = $('#balance-fiat');
+  if (!inSats(vault)) { big.classList.remove('switch'); big.title = ''; big.innerHTML = `${esc(unitAmount(vault, vault._balance).replace(/ [^ ]+$/, ''))} <small>${esc(assetTicker(vault))}</small>`; small.hidden = true; return; }
   big.classList.toggle('switch', !!n); big.title = n ? 'Click to lead with ' + (balUnit === 'fiat' ? 'sats' : n.ccy) : '';
   if (n && balUnit === 'fiat') { big.innerHTML = `${worth(vault._balance, n.q, n.ccy)} <small>${n.ccy}</small>`; small.textContent = `${sats(vault._balance)} sats`; }
   else { big.innerHTML = `${sats(vault._balance)} <small>sats</small>`; small.textContent = n ? `≈ ${worth(vault._balance, n.q, n.ccy)}` : ''; }
@@ -1236,7 +1237,7 @@ async function sync() {
 function paintVaultCard() {
   if (!vault) return;
   // a watched wallet has no keys HERE, so the card must not read as though it had ("2 of 0 keys sign")
-  $('#vault-kind').textContent = vault.node ? `Node \u00b7 ${vault.node.kind === 'cln' ? 'Core Lightning' : 'LND'}` : vault.exchange ? `Exchange \u00b7 ${vault.exchange.provider}` : vault.statement ? 'Closed wallet \u00b7 from its statement' : vault.spark ? (vault.spark.authenticated ? 'Watched \u00b7 key reader' : 'Watched \u00b7 Spark') : vault.liquid ? 'Watched \u00b7 Liquid' : vault.muun ? 'Watched' : vault.watch ? 'Watched \u00b7 one key' : vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
+  $('#vault-kind').textContent = vault.node ? `Node \u00b7 ${vault.node.kind === 'cln' ? 'Core Lightning' : 'LND'}` : vault.exchange ? `Exchange \u00b7 ${vault.exchange.provider}` : vault.statement ? 'Closed wallet \u00b7 from its statement' : vault.spark ? (vault.spark.authenticated ? 'Watched \u00b7 key reader' : 'Watched \u00b7 Spark') : vault.liquid ? `Watched \u00b7 Liquid ${inSats(vault) ? 'L-BTC' : assetTicker(vault)}` : vault.muun ? 'Watched' : vault.watch ? 'Watched \u00b7 one key' : vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
   $('#vault-keys').textContent = vault.node ? `${esc(vault.node.alias)} \u00b7 on-chain ${sats(vault.node.onchain)} \u00b7 in channels ${sats(vault.node.channels)}${vault.node.pending ? ' \u00b7 pending ' + sats(vault.node.pending) : ''} \u00b7 read only` : vault.exchange ? `Read from ${vault.exchange.provider}\u2019s statements \u00b7 ${sats(vault.exchange.rows.length)} rows \u00b7 ${moneyExact(vault.exchange.fiat_now / 100, vault.exchange.ccy)} in cash there \u00b7 nothing here can be spent` : vault.statement ? `Read from the statement ${vault.statement.source} gave \u00b7 ${sats(vault.statement.rows.length)} rows \u00b7 nothing here can be spent` : vault.watch ? `From one exported key \u00b7 ${vault.watch.kinds.length > 1 ? 'every kind of address watched' : vault.watch.kinds[0]}` : vault.spark ? 'Told to us by Spark \u2014 these figures are not checked against the chain' : vault.liquid ? liquidKeysLine(vault.liquid) : vault.muun ? 'Its keys stay in Muun; this vault only reads the chain' : vault.keys.map(k => k.name).join(' · ');
 }
 function paintSnap(s) {
@@ -1270,7 +1271,7 @@ function paintSnap(s) {
     }
     if (vault.exchange) { const ex = vault.exchange; $('#balance-sub').textContent = `held at ${ex.provider}, ${ex.stated ? 'as its newest statement states' : 'as the rows add up'} \u2014 with ${moneyExact(ex.fiat_now / 100, ex.ccy)} in cash beside it${ex.agrees === false ? ' \u00b7 the running balance did not chain in every file' : ''}`; $('#conn').textContent = 'Off-chain \u00b7 the exchange\u2019s own statements, nothing on the chain to check them against'; }
     if (vault.statement) { $('#balance-sub').textContent = `closed wallet \u2014 the statement leaves ${sats(vault.statement.closes_at)} sats; its history is kept for the coins that left it`; $('#conn').textContent = 'Off-chain \u00b7 figures from the custodian\u2019s statement, nothing on the chain to check them against'; }
-    if (vault.liquid) { $('#balance-sub').textContent = 'L-BTC on the Liquid sidechain, unblinded here' + liquidOthers(vault.liquid); $('#conn').textContent = vault.liquid.server && !vault.liquid.server.includes('mineracks') ? `Liquid \u00b7 read from ${vault.liquid.server.replace('ssl://', '')} because our own node did not answer` : 'Liquid \u00b7 read from our own Liquid node'; }
+    if (vault.liquid) { $('#balance-sub').textContent = inSats(vault) ? 'L-BTC on the Liquid sidechain, unblinded here' + liquidSiblings(vault) : `${assetTicker(vault)} on the Liquid sidechain, unblinded here \u00b7 not priced yet` + liquidSiblings(vault); $('#conn').textContent = vault.liquid.server && !vault.liquid.server.includes('mineracks') ? `Liquid \u00b7 read from ${vault.liquid.server.replace('ssl://', '')} because our own node did not answer` : 'Liquid \u00b7 read from our own Liquid node'; }
     if (vault.spark) { $('#balance-sub').textContent = vault.spark.authenticated ? 'Spark reports this balance · key reader' : 'Spark reports this balance · anonymous read'; $('#conn').textContent = 'Off-chain · figures supplied by Spark, not verified against the chain'; }
     $('#activity-note').hidden = true;
     txList[vault.name] = s.history.slice().reverse();
@@ -1297,7 +1298,7 @@ function actRowHtml(h) {
     return `<td class="when muted">…</td><td class="mono">${esc(h.txid.slice(0, 10))}…</td><td>${lblHtml('tx:' + h.txid)}<span class="xfer" data-xfer="${esc(h.txid)}"></span></td><td class="r amt muted">…</td><td class="r">${esc(how)}</td>`;
   }
   if (vault?.liquid) {
-    const t = txFacts[vault.name]?.liquid?.[h.txid], memo = t ? `<small class="muted memo">${esc(t.moves.filter(m => m.asset !== LIQUID_LBTC).map(m => `${m.amount} ${m.ticker}`).join(' \u00b7 '))}</small>` : '';
+    const t = txFacts[vault.name]?.liquid?.[h.txid], memo = t ? `<small class="muted memo">${esc(t.moves.filter(m => m.asset !== vault.liquid.asset).map(m => `${t.kind === 'swap' ? 'for ' : ''}${m.amount} ${m.ticker}`).join(' \u00b7 '))}</small>` : '';
     return `<td class="when muted">…</td><td class="mono">${esc(h.txid.slice(0, 10))}…</td><td>${lblHtml('tx:' + h.txid)}${memo}<span class="xfer" data-xfer="${esc(h.txid)}"></span></td><td class="r amt muted">…</td><td class="r">${esc(liquidRowStatus(t))}</td>`;
   }
   if (vault?.spark) {
@@ -1430,6 +1431,8 @@ function paintFactRow(txid, r, facts) {
     // a node row under one satoshi (a routing fee, the millisatoshi a close rounds away) is shown exactly, not as 0
     const sub = r.net === 0 ? (nodeRow(txid)?.msat || 0) : 0;
     if (sub) amt.classList.toggle('in', sub > 0);
+    const uv = vn ? store.vaults.find(x => x.name === vn) : null;
+    if (uv && !inSats(uv)) { amt.innerHTML = `${r.net > 0 ? '+' : r.net < 0 ? '\u2212' : ''}${esc(unitAmount(uv, r.net))}<small>not priced</small>`; continue; }
     amt.innerHTML = sub ? `${sub > 0 ? '+' : '−'}${(Math.abs(sub) / 1000).toFixed(3)} sats<small>exactly ${sats(Math.abs(sub))} msat</small>`
       : `${r.net > 0 ? '+' : r.net < 0 ? '−' : ''}${sats(Math.abs(r.net))} sats<small>${q ? worth(Math.abs(r.net), q, facts.ccy) + (r.time ? ' then' : ' now') : ''}${r.fee !== null && r.net < 0 ? (q ? ' · ' : '') + '<span class="nowrap">fee ' + sats(r.fee) + '</span>' : ''}${rtext}</small>`;
     if (q) amt.title = basisWords(q, facts.ccy);
@@ -1687,8 +1690,8 @@ async function loadFacts(names, say) {
 }
 /// The scope of a report: its title, the vault names, and the entity (if one) it is for.
 const scopeOfVault = (v) => ({ title: v.name, names: [v.name], entity: entityOf(v.entity), one: v });
-const scopeOfEntity = (e) => ({ title: e.name, names: vaultsOf(e.id).map(v => v.name), entity: e });
-const scopeOfAll = () => ({ title: 'All vaults', names: store.vaults.filter(v => v.network === 'mainnet').map(v => v.name), entity: null });
+const scopeOfEntity = (e) => ({ title: e.name, names: vaultsOf(e.id).filter(inSats).map(v => v.name), entity: e });
+const scopeOfAll = () => ({ title: 'All vaults', names: store.vaults.filter(v => v.network === 'mainnet' && inSats(v)).map(v => v.name), entity: null });
 const scopeWords = (sc) => sc.one ? `${sc.one.name} · ${sc.one.node ? `a ${sc.one.node.kind === 'cln' ? 'Core Lightning' : 'LND'} node` : sc.one.network}${sc.entity ? ` · owned by ${sc.entity.name} (${kindWord(sc.entity.kind)})` : ''}` : sc.entity ? `${sc.entity.name} · ${kindWord(sc.entity.kind)} · ${sats(sc.names.length)} vault${sc.names.length === 1 ? '' : 's'}: ${sc.names.join(', ')}` : `${sats(sc.names.length)} vaults: ${sc.names.join(', ')}`;
 /// Financial years in which the scope disposed of coins, newest first: Australian years (1 July to 30 June) when
 /// priced in AUD, calendar years otherwise. Each is [label, from, to] in seconds.
@@ -2504,7 +2507,7 @@ async function renderSummary(box, names, opts = {}) {
   box.append(tg, tw);
 }
 function renderHomeSummary() {
-  { const b = $('#s-home [data-loss-report]'); if (b) b.hidden = !(vault && txFacts[vault.name] && lossRows(scopeOfVault(vault)).length); } if (vault && $('#s-home').classList.contains('on')) renderSummary($('#home-summary'), [vault.name]); }
+  { const b = $('#s-home [data-loss-report]'); if (b) b.hidden = !(vault && txFacts[vault.name] && lossRows(scopeOfVault(vault)).length); } $('#home-summary').hidden = !!(vault && !inSats(vault)); $$('#s-home [data-vault-report], #s-home [data-cgt-report]').forEach(b => { b.hidden = !!(vault && !inSats(vault)); }); if (vault && inSats(vault) && $('#s-home').classList.contains('on')) renderSummary($('#home-summary'), [vault.name]); }
 
 // ---------- all vaults: the same view, of everything that has a price ----------
 // why a vault's history could not be read just now, in the words the person needs
@@ -2512,7 +2515,7 @@ function lockedWhy(e) { const s = String(e); if (s.startsWith('SPARK_UNLOCK:')) 
 function renderOverview() {
   // in a fiction profile the made-up person's world is the real one: its signet vaults count as their holdings
   const fiction = !!(profile && profile.class === 'fiction');
-  const main = store.vaults.filter(v => fiction || v.network === 'mainnet'), test = fiction ? [] : store.vaults.filter(v => v.network !== 'mainnet');
+  const main = store.vaults.filter(v => (fiction || v.network === 'mainnet') && inSats(v)), test = fiction ? [] : store.vaults.filter(v => v.network !== 'mainnet' && inSats(v));
   let off = []; try { off = JSON.parse(sumPref('off', '[]')); } catch {}
   const names = main.map(v => v.name).filter(n => !off.includes(n));
   const chips = document.createElement('div'); chips.style.cssText = 'display:flex;gap:var(--s2) 14px;flex-wrap:wrap;align-items:center';
@@ -4072,7 +4075,7 @@ const ENTITY_KINDS = [['person', 'Person'], ['company', 'Company'], ['trust', 'T
 const kindWord = (k) => (ENTITY_KINDS.find(x => x[0] === k) || ['', 'Other'])[1];
 const entGlyph = (e) => e.kind === 'company' ? 'building' : e.kind === 'trust' ? 'shield' : e.kind === 'smsf' ? 'bank' : 'entity';
 const vaultsOf = (id) => store.vaults.filter(v => v.entity === id);
-const kindOfVault = (v) => v.node ? 'Lightning node' : v.statement ? 'closed wallet' : v.exchange ? 'exchange account' : v.spark ? 'Spark wallet' : v.liquid ? 'Liquid wallet' : v.muun ? 'Muun wallet' : v.watch ? 'watched' : v.keys.length === 1 ? 'one key' : `${v.threshold} of ${v.keys.length}`;
+const kindOfVault = (v) => v.node ? 'Lightning node' : v.statement ? 'closed wallet' : v.exchange ? 'exchange account' : v.spark ? 'Spark wallet' : v.liquid ? (inSats(v) ? 'Liquid wallet' : `Liquid ${assetTicker(v)} account`) : v.muun ? 'Muun wallet' : v.watch ? 'watched' : v.keys.length === 1 ? 'one key' : `${v.threshold} of ${v.keys.length}`;
 // the chips: every entity, the current one pressed; New entity opens the form in `slot`; `pick(id)` records it
 function entityChips(current, slot, pick) {
   const wrap = document.createElement('div'); wrap.className = 'row'; wrap.style.cssText = 'gap:8px;align-items:center;flex-wrap:wrap';
@@ -4875,6 +4878,12 @@ $('#liquid-read') && ($('#liquid-read').onclick = async () => {
   $('#liquid-read').disabled = false;
 });
 const LIQUID_LBTC = '6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d';
+// A vault whose figures are sats: every vault but a Liquid vault of another asset (Tether), whose balance and rows
+// are in that asset's own units and cannot be added to anyone's sats, priced from bitcoin's feed, or charted with it.
+const inSats = v => !(v && v.liquid && v.liquid.asset && v.liquid.asset !== LIQUID_LBTC);
+const assetTicker = v => v.liquid.assets?.[v.liquid.asset]?.ticker || v.liquid.asset.slice(0, 8);
+// an amount of THIS vault's unit, in words: '12,345 sats' or '190.74 USDt'
+const unitAmount = (v, n) => inSats(v) ? `${sats(Math.abs(n))} sats` : liquidAmount(v.liquid, v.liquid.asset, Math.abs(n)).replace(/^\u2212/, '');
 // an asset's units in its own precision, with its ticker: 19074000000 of Tether → "190.74 USDt"
 function liquidAmount(l, asset, units) {
   const info = l.assets?.[asset], p = asset === LIQUID_LBTC ? 8 : (info?.precision || 0), t = asset === LIQUID_LBTC ? 'L-BTC' : (info?.ticker || asset.slice(0, 8));
@@ -5767,11 +5776,13 @@ document.addEventListener('keydown', e => {
 // sends the sats in as a transfer, so it is money arriving, with the provider's fee already off.
 const SPARK_STATUS = ['sender initiated', 'sender key tweak pending', 'sender key tweaked', 'receiver key tweaked', 'receiver refund signed', 'completed', 'expired', 'returned', 'sender initiated at the coordinator', 'receiver key tweak locked', 'receiver key tweak applied'];
 // A Liquid row's own words: what kind of transaction it was, and the status column text
-const LIQUID_KIND = { receive: 'receive', send: 'send', swap: 'swap', self: 'to itself' };
+const LIQUID_KIND = { receive: 'receive', send: 'send', swap: 'swap', self: 'to itself', fee: 'fee for another asset' };
 function liquidRowStatus(t) { if (!t) return 'Liquid'; return `${t.height > 0 ? 'confirmed' : 'unconfirmed'} \u00b7 ${LIQUID_KIND[t.kind] || t.kind} \u00b7 Liquid`; }
 // the other assets held, for the balance line: ' · 190.74 USDt'
-function liquidOthers(l) { return Object.entries(l.balances || {}).filter(([a]) => a !== LIQUID_LBTC).map(([a, u]) => ' \u00b7 ' + liquidAmount(l, a, u)).join(''); }
-function liquidKeysLine(l) { const n = Object.keys(l.txs || {}).length; return `Account ${l.path} \u00b7 ${sats(n)} transaction${n === 1 ? '' : 's'}${liquidOthers(l)} \u00b7 nothing here can be spent`; }
+function liquidOthers(l) { return Object.entries(l.balances || {}).filter(([a]) => a !== l.asset).map(([a, u]) => ' \u00b7 ' + liquidAmount(l, a, u)).join(''); }
+// the account's other vaults: ' · USDt in ‘Aqua · USDt’'
+function liquidSiblings(v) { return store.vaults.filter(x => x !== v && x.liquid && x.liquid.xpub === v.liquid.xpub).map(x => ` \u00b7 ${inSats(x) ? 'L-BTC' : assetTicker(x)} in \u2018${x.name}\u2019`).join(''); }
+function liquidKeysLine(l) { const n = Object.values(l.txs || {}).filter(t => t.moves[l.asset] !== undefined || (l.asset === LIQUID_LBTC && t.paid_fee)).length; return `Account ${l.path} \u00b7 ${sats(n)} transaction${n === 1 ? '' : 's'} \u00b7 nothing here can be spent`; }
 const SPARK_KIND = { 0: 'Lightning receive', 1: 'exit to the chain', 2: 'transfer', 3: 'deposit from the chain', 4: 'swap', 5: 'counter swap', 30: 'swap', 40: 'counter swap' };
 function sparkTransferStatus(t) {
   if (!t) return 'Spark';

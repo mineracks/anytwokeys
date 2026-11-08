@@ -63,6 +63,26 @@ pub struct Liquid {
     #[serde(default)] pub read_at: u64,
     /// which Electrum server answered the last read: ours, or Blockstream's as the fallback
     #[serde(default)] pub server: String,
+    /// the ONE asset this vault shows. The account record (keys, transactions) is the same on every sibling vault
+    /// of the account; each projects its own asset — L-BTC in sats, Tether in USDt — because they are different
+    /// classes of asset with different accounting, and a swap between them is a disposal of one for the other.
+    /// Absent in stores written before 8 Nov 2026, evening: L-BTC.
+    #[serde(default = "lbtc_id")] pub asset: String,
+}
+pub fn lbtc_id() -> String { LBTC.into() }
+impl Liquid {
+    /// this vault's asset in its own units: the sats row for L-BTC, Tether's hundred-millionths for USDt
+    pub fn held(&self) -> u64 { self.balances.get(&self.asset).copied().unwrap_or(0) }
+    pub fn ticker(&self) -> String { ticker(self, &self.asset) }
+    pub fn is_lbtc(&self) -> bool { self.asset == LBTC }
+    /// the same account record, projected onto another of its assets
+    pub fn for_asset(&self, asset: &str) -> Liquid { Liquid { asset: asset.into(), ..self.clone() } }
+    /// every asset the account has ever moved, L-BTC first
+    pub fn assets_moved(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.txs.values().flat_map(|t| t.moves.keys().cloned()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+        v.sort_by_key(|a| a != LBTC);
+        v
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -157,7 +177,7 @@ pub fn from_words(words: zeroize::Zeroizing<String>, gap: u32) -> Result<Liquid,
         let path = DerivationPath::from_str(&format!("m/{purpose}'/{COIN}'/{account}'")).map_err(|e| e.to_string())?;
         let xpub = Xpub::from_priv(&secp, &master.derive_priv(&secp, &path).map_err(|e| e.to_string())?);
         let mut l = Liquid { xpub: xpub.to_string(), fingerprint: fingerprint.clone(), path: format!("{purpose}'/{COIN}'/{account}'"), wrapped: purpose == 49,
-            blinding: hex::encode(blinding), next: 0, next_change: 0, txs: Default::default(), assets: Default::default(), balances: Default::default(), read_at: 0, server: String::new() };
+            blinding: hex::encode(blinding), next: 0, next_change: 0, txs: Default::default(), assets: Default::default(), balances: Default::default(), read_at: 0, server: String::new(), asset: LBTC.into() };
         let (c, sv) = connect()?;
         let scripts: Vec<Script> = (0..gap.max(20)).map(|i| script_at(&l, &xpub, 0, i)).collect::<Result<_, _>>()?;
         let bscripts: Vec<bitcoin::ScriptBuf> = scripts.iter().map(|s| bitcoin::ScriptBuf::from_bytes(s.as_bytes().to_vec())).collect();
@@ -300,16 +320,20 @@ pub struct RowDetail { pub id: String, pub kind: String, pub height: u32, pub ti
 #[derive(Serialize, Clone, Debug)]
 pub struct Move { pub asset: String, pub ticker: String, pub units: i64, pub amount: String }
 
-/// What kind of transaction each was, from the movements alone: something in and nothing out is a receive, out and
-/// nothing in a send, one asset out and another in a swap (a SideSwap trade is one transaction), and only the fee
-/// gone — the wallet paying itself — a transfer to self. The fee is set aside first so a send of USDt with its
-/// L-BTC fee reads as a send, not a swap.
+/// What kind of transaction each was, as THIS vault's asset saw it: the asset in and another out (or the reverse)
+/// is a swap — a SideSwap trade is one transaction, a disposal of one asset for the other; in alone a receive; out
+/// alone a send; nothing of this asset moved but the fee paid while another asset moved is, on the L-BTC vault, the
+/// fee of that other asset's send; only the fee gone with nothing else is the wallet paying itself. The fee is set
+/// aside first so a send of USDt with its L-BTC fee reads as a send, not a swap. Transactions that touched neither
+/// this asset nor (for L-BTC) the fee are not this vault's rows.
 pub fn rows(l: &Liquid) -> Vec<RowDetail> {
-    let mut out: Vec<RowDetail> = l.txs.values().map(|t| {
+    let mut out: Vec<RowDetail> = l.txs.values().filter(|t| t.moves.contains_key(&l.asset) || (l.is_lbtc() && t.paid_fee)).map(|t| {
         let mut moves: Vec<(String, i64)> = t.moves.iter().map(|(a, v)| (a.clone(), *v)).collect();
         if t.paid_fee { if let Some(m) = moves.iter_mut().find(|(a, _)| a == LBTC) { m.1 += t.fee as i64; } else { moves.push((LBTC.into(), t.fee as i64)); } }
-        let (up, down) = (moves.iter().any(|(_, v)| *v > 0), moves.iter().any(|(_, v)| *v < 0));
-        let kind = match (up, down) { (true, true) => "swap", (true, false) => "receive", (false, true) => "send", (false, false) => "self" };
+        let mine = moves.iter().find(|(a, _)| a == &l.asset).map(|m| m.1).unwrap_or(0);
+        let (other_up, other_down) = (moves.iter().any(|(a, v)| a != &l.asset && *v > 0), moves.iter().any(|(a, v)| a != &l.asset && *v < 0));
+        let kind = if (mine > 0 && other_down) || (mine < 0 && other_up) { "swap" } else if mine > 0 { "receive" } else if mine < 0 { "send" }
+            else if t.paid_fee && (other_up || other_down) { "fee" } else { "self" };
         let shown: Vec<Move> = t.moves.iter().map(|(a, v)| Move { asset: a.clone(), ticker: ticker(l, a), units: *v, amount: amount(l, a, *v) }).collect();
         RowDetail { id: t.id.clone(), kind: kind.into(), height: t.height, time: t.time, fee: t.fee, paid_fee: t.paid_fee, moves: shown }
     }).collect();
@@ -345,7 +369,7 @@ mod tests {
 
     #[test]
     fn amounts_are_shown_in_the_assets_own_precision() {
-        let mut l = Liquid { xpub: String::new(), fingerprint: String::new(), path: String::new(), wrapped: false, blinding: String::new(), next: 0, next_change: 0, txs: Default::default(), assets: Default::default(), balances: Default::default(), read_at: 0, server: String::new() };
+        let mut l = Liquid { xpub: String::new(), fingerprint: String::new(), path: String::new(), wrapped: false, blinding: String::new(), next: 0, next_change: 0, txs: Default::default(), assets: Default::default(), balances: Default::default(), read_at: 0, server: String::new(), asset: LBTC.into() };
         l.assets.insert(USDT.into(), AssetInfo { ticker: "USDt".into(), name: "Tether USD".into(), precision: 8 });
         assert_eq!(amount(&l, USDT, 19_074_000_000), "190.74");
         assert_eq!(amount(&l, USDT, -5_000_000), "−0.05");
@@ -365,7 +389,7 @@ mod tests {
         book(&mut txs);
         assert_eq!(txs["1coin"].moves[LBTC], 1000); assert!(!txs["1coin"].paid_fee);
         assert_eq!(txs["0spend"].moves[LBTC], -600, "sent 590 and paid 10: the change of 400 came back"); assert!(txs["0spend"].paid_fee);
-        let l = Liquid { xpub: String::new(), fingerprint: String::new(), path: String::new(), wrapped: false, blinding: String::new(), next: 0, next_change: 0, txs, assets: Default::default(), balances: Default::default(), read_at: 0, server: String::new() };
+        let l = Liquid { xpub: String::new(), fingerprint: String::new(), path: String::new(), wrapped: false, blinding: String::new(), next: 0, next_change: 0, txs, assets: Default::default(), balances: Default::default(), read_at: 0, server: String::new(), asset: LBTC.into() };
         let rs = rows(&l);
         assert_eq!(rs.iter().find(|r| r.id == "0spend").unwrap().kind, "send");
         assert_eq!(rs.iter().find(|r| r.id == "1coin").unwrap().kind, "receive");
@@ -392,7 +416,7 @@ mod tests {
                 let secp = bitcoin::secp256k1::Secp256k1::new();
                 let master = Xpriv::new_master(bitcoin::Network::Bitcoin, &seed).unwrap();
                 let xpub = Xpub::from_priv(&secp, &master.derive_priv(&secp, &DerivationPath::from_str("m/84'/1776'/0'").unwrap()).unwrap());
-                let l = Liquid { xpub: xpub.to_string(), fingerprint: String::new(), path: "84'/1776'/0'".into(), wrapped: false, blinding: hex::encode(master_blinding_key(&seed)), next: 0, next_change: 0, txs: Default::default(), assets: Default::default(), balances: Default::default(), read_at: 0, server: String::new() };
+                let l = Liquid { xpub: xpub.to_string(), fingerprint: String::new(), path: "84'/1776'/0'".into(), wrapped: false, blinding: hex::encode(master_blinding_key(&seed)), next: 0, next_change: 0, txs: Default::default(), assets: Default::default(), balances: Default::default(), read_at: 0, server: String::new(), asset: LBTC.into() };
                 println!("ADDRESS 0: {}", address_at(&l, 0, 0).unwrap());
             }
         }
