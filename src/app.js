@@ -2434,14 +2434,18 @@ async function pricesRange(ccy, fromT, toT, names = []) {
 // how many past prices the backend is still fetching for this vault — its own count, from its own note
 const pricesPending = note => { const m = /^Fetching (\d+) past price/.exec(note || ''); return m ? Number(m[1]) : 0; };
 // `linksLater`: the caller refreshes the transfer links itself once every vault is in, rather than once per vault
-async function sumInput(name, linksLater = false) {
+// quick: a vault with no facts yet is drawn from what the store holds (its history as last read) and marked stale,
+// so the screen appears at once and the next pass syncs it from its sources
+async function sumInput(name, linksLater = false, quick = false) {
   const v = store.vaults.find(x => x.name === name); if (!v) return null;
   const ccy = v.network === 'mainnet' ? fiatCcy() : '';
   let f = txFacts[name];
   if (!f || (f.stale && name !== vault?.name) || (f.owner && f.owner !== factOwner(v)) || (f.ccy || '') !== ccy) {
-    const s = await invoke('vault_sync', { name });
+    let s = null, fromStore = false;
+    if (quick && !f) { try { s = await invoke('vault_last', { name }); fromStore = true; } catch { s = null; } }
+    if (!s) s = await invoke('vault_sync', { name });
     const a = await invoke('vault_activity', { name, history: s.history.map(h => [h.txid, h.height]), ccy });
-    f = keepActivity(name, a); f.history=s.history.map(h=>[h.txid,h.height]); if (!linksLater) await refreshTransferLinks(); else sumInput.pendingLinks = true;
+    f = keepActivity(name, a); f.history=s.history.map(h=>[h.txid,h.height]); if (fromStore) f.stale = true; if (!linksLater) await refreshTransferLinks(); else sumInput.pendingLinks = true;
   }
   return { name, network: v.network, asset: assetOf(v), links: f.links, rows: Object.values(f.rows), now: f.now, ccy: f.ccy, pending: f.pending || 0 };
 }
@@ -2452,13 +2456,16 @@ async function renderSummary(box, names, opts = {}) {
   const who = names.join('\u0000');
   if (box.dataset.names !== undefined && box.dataset.names !== who) box.innerHTML = '';
   box.dataset.names = who;
-  box.classList.add('sum-loading');   // refetch keeps the frame: the last drawing stays, dimmed, until the new one is ready
+  if (!opts.refresh) box.classList.add('sum-loading');   // refetch keeps the frame: the last drawing stays, dimmed, until the new one is ready
   // one vault that cannot be read (its reader locked, its node away) must not blank the others: draw what came,
   // say what did not, and mark it on its chip
   sumInput.pendingLinks = false;
   const t0 = performance.now(), perf = (phase, t, n) => { if (names.length > 1) invoke('perf_log', { phase, ms: Math.round(performance.now() - t), n }).catch(() => {}); };
-  const settled = await Promise.all(names.map(n => sumInput(n, true).then(v => ({ v }), e => ({ e, n }))));
-  perf('overview inputs', t0, names.length);
+  // many vaults, some not read yet: draw first from what the store holds, then come back for the sources
+  const quick = !opts.refresh && names.length > 1 && names.some(n => !txFacts[n]);
+  const settled = await Promise.all(names.map(n => sumInput(n, true, quick).then(v => ({ v }), e => ({ e, n }))));
+  perf(quick ? 'overview inputs (stored)' : 'overview inputs', t0, names.length);
+  if (quick && me === renderSummary.seq && names.some(n => txFacts[n]?.stale)) setTimeout(() => { if (me === renderSummary.seq) renderSummary(box, names, { ...opts, refresh: true }); }, 50);
   const t1 = performance.now();
   if (sumInput.pendingLinks) { sumInput.pendingLinks = false; await refreshTransferLinks(); }
   perf('overview links', t1, names.length);

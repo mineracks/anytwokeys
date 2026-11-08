@@ -2125,6 +2125,38 @@ async fn search_all(q: String, ccy: String, tz_min: i64) -> R<search::Found> {
     block(move || { let s = wallet::load()?; Ok(search::run(&s, &q, &ccy, now() as u32, tz_min)) }).await
 }
 
+/// The vault as LAST READ, from the store alone — no server is asked. For the first drawing of a screen over many
+/// vaults: the overview used to sync forty vaults, five to thirteen seconds each on six shared connections, before it
+/// drew a line; from the store it draws at once and refreshes from the sources afterwards. `stale` says the figures
+/// are as last read. A vault nothing is kept for (a Spark wallet, a vault never synced) is an error, and the caller
+/// syncs it instead.
+#[tauri::command]
+async fn vault_last(name: String) -> R<Snapshot> {
+    block(move || {
+        let s = wallet::load()?;
+        let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
+        let servers = wallet::servers_for(&s, &v.network);
+        let rows = |ids: Vec<(String, i32)>| -> Vec<HistoryRow> { let mut h: Vec<HistoryRow> = ids.into_iter().map(|(txid, height)| HistoryRow { txid, height, index: 0 }).collect(); h.sort_by_key(|h| if h.height <= 0 { i32::MAX } else { h.height }); h };
+        let snap = |history: Vec<HistoryRow>, balance: u64, receive: String, receive_index: u32, rotating: bool| Snapshot { stale: "as last read".into(), coins: Vec::new(), balance, height: 0, history, servers: servers.clone(), receive, receive_index, rotating, next_change: 0, gap: s.settings.gap };
+        if let Some(n) = &v.node {
+            if n.events.is_empty() { return Err("not yet read".into()); }
+            return Ok(snap(n.events.iter().map(|e| HistoryRow { txid: e.id.clone(), height: 0, index: 0 }).collect(), n.onchain + n.channels, String::new(), 0, false));
+        }
+        if let Some(ex) = &v.exchange { return Ok(snap(ex.rows.iter().map(|r| HistoryRow { txid: r.id.clone(), height: 0, index: 0 }).collect(), ex.btc_now.max(0) as u64, String::new(), 0, false)); }
+        if let Some(st) = &v.statement { return Ok(snap(st.rows.iter().map(|r| HistoryRow { txid: r.id.clone(), height: 0, index: 0 }).collect(), st.closes_at.max(0) as u64, String::new(), 0, false)); }
+        if let Some(l) = &v.liquid {
+            if l.txs.is_empty() { return Err("not yet read".into()); }
+            let receive = liquid::address_at(l, 0, l.next)?;
+            return Ok(snap(rows(liquid::rows(l).iter().map(|t| (t.id.clone(), t.height as i32)).collect()), l.held(), receive, l.next, true));
+        }
+        if v.spark.is_some() { return Err("a Spark wallet keeps no history here".into()); }
+        let seen = s.seen.get(&v.name).filter(|e| e.primed).ok_or("not yet read")?;
+        let receive_index = if wallet::rotates(&v) { v.next } else { 0 };
+        let receive = wallet::address_at(&v, receive_index)?;
+        Ok(snap(rows(seen.txs.iter().map(|(t, h)| (t.clone(), *h)).collect()), seen.coins.values().sum(), receive, receive_index, wallet::rotates(&v)))
+    }).await
+}
+
 #[tauri::command]
 async fn vault_sync(name: String) -> R<Snapshot> {
     block(move || {
@@ -4041,7 +4073,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![search_all, profiles_list, profile_open, profile_close, profile_create, profile_update, profile_delete, profile_picture_pick, guard_displays, guard_sharing, guard_override, vault_move_start, move_land, persona_generate, persona_defaults, transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, perf_log, cycle_curve, cycle_now, cycle_marks, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, icon_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
             cards_list, card_generate, attach_view, profiles_refresh, sync_face_refresh, sync_status, sync_enable, sync_rotate, sync_remove_card, sync_now, sync_tick, sync_disable, sync_find, sync_adopt, card_survey, card_tap, nk_firmware, nk_firmware_update, secret_preview, card_init_key_from, card_import, card_init_resume_check, key_setup_restart, card_reset, card_pin_change_pad, platform, ui_note, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, node_retire, node_import_pick, node_import, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, liquid_restore, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_forget, spark_memos, spark_owner_import, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
-            settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard,
+            settings_set, vault_sync, vault_last, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard,
             engraver_find, engraver_jog, engraver_run, engraver_cancel, vault_shares_plates, share_rewrap
         ])
         .build(tauri::generate_context!())
