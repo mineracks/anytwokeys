@@ -2604,7 +2604,9 @@ function renderOverview() {
 const nodeLayer = (e, cap) => { const w = e.phantom ? 'not on the chain' : e.layer === 'chain' ? 'on-chain' : e.layer === 'fee' ? 'fee' : e.layer === 'channel' ? 'channel' : e.layer === 'node' ? 'the node\u2019s balance' : 'Lightning'; return cap ? w[0].toUpperCase() + w.slice(1) : w; };
 const NODE_KIND_WORDS = { routed: 'routed \u2014 a routing fee earned, income', received: 'received \u2014 a cost only if it was a purchase',
   unaccounted: 'unaccounted \u2014 the node holds less than its ledger explains. Money that left without this node\u2019s bookkeeper seeing it go: channels closed by someone else holding the keys, coins swept by another instance of the wallet. Say below what it was; stolen coins are a capital loss.',
-  close: 'channel closed \u2014 the closing transaction and where its outputs went are below; whatever did not come back to this node\u2019s wallet is counted in the unaccounted row' };
+  close: 'channel closed \u2014 the closing transaction and where its outputs went are below; whatever did not come back to this node\u2019s wallet is counted in the unaccounted row',
+  'peer-side': 'moved to the peer\u2019s side \u2014 sats of this channel the node\u2019s records do not show leaving, yet the node\u2019s own figure for the channel says had gone to the peer: routing that shifted balances, or payments a restored node has no record of. Not a disposal in itself; the memo gives the figures.',
+  'our-side': 'moved to our side \u2014 sats of this channel the node\u2019s records do not show arriving, yet the node\u2019s own figure for the channel says were on its side. The memo gives the figures.' };
 function nodeRow(id) { if (!vault || !vault.node) return null; if (!vault._node) vault._node = Object.fromEntries((vault.node.events || []).map(e => [e.id, e])); return vault._node[id] || null; }
 let nodeChecked = null;
 const nodeKind = () => ($('#node-kind [aria-checked=true]') || {}).dataset?.kind || 'cln';

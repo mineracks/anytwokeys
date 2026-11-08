@@ -428,8 +428,93 @@ pub fn lnd_events_from(d: &LndDump) -> Vec<Event> {
             let time = { let ns = n(f, "timestamp_ns"); if ns > 0 { (ns / 1_000_000_000) as u32 } else { n(f, "timestamp") as u32 } };
             out.push(Event { id: format!("routed:{time}:{k}"), time, net: if msat > 0 { msat / 1000 } else { fee }, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "routed".into(), memo: String::new(), to: Vec::new(), height: 0, phantom: false, msat });
         }
+        let settle = lnd_settlements(d, &out);
+        out.extend(settle);
         fold_routed(out)
     }
+}
+
+/// What the node's records move through one channel, in millisatoshi, signed from this node's side: invoices settled
+/// on it (+), payments sent out over it (−, with the fee), forwards in (+) and out (−). The channel is named by its
+/// `chan_id`, which LND writes on every HTLC.
+fn lnd_channel_flow_msat(d: &LndDump, chan_id: &str) -> i64 {
+    let n = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str().and_then(|s| s.parse::<i64>().ok()).or_else(|| x.as_i64())).unwrap_or(0);
+    let s = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let arr = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_array()).cloned().unwrap_or_default();
+    let mut flow: i64 = 0;
+    for i in arr(&d.invoices, "invoices") {
+        if s(&i, "state") != "SETTLED" && i.get("settled").and_then(|x| x.as_bool()) != Some(true) { continue; }
+        for h in arr(&i, "htlcs") { if s(&h, "chan_id") == chan_id && s(&h, "state") == "SETTLED" { flow += n(&h, "amt_msat"); } }
+    }
+    for p in arr(&d.payments, "payments") {
+        if s(&p, "status") != "SUCCEEDED" { continue; }
+        for h in arr(&p, "htlcs") {
+            if s(&h, "status") != "SUCCEEDED" { continue; }
+            let route = h.get("route").cloned().unwrap_or_default();
+            let first = route.get("hops").and_then(|x| x.as_array()).and_then(|a| a.first()).cloned().unwrap_or_default();
+            if s(&first, "chan_id") == chan_id { flow -= n(&route, "total_amt_msat"); }
+        }
+    }
+    for f in arr(&d.forwards, "forwarding_events") {
+        if s(&f, "chan_id_in") == chan_id { flow += n(&f, "amt_in_msat"); }
+        if s(&f, "chan_id_out") == chan_id { flow -= n(&f, "amt_out_msat"); }
+    }
+    flow
+}
+
+/// Each channel reconciled against the node's own figure for it. This node's side of a channel should be what it put
+/// in (its own funding — the wallet transaction that opened it, less the fee; nothing when the peer opened it) plus
+/// every movement its records show through that channel. The node's figure is `local_balance` for an open channel and
+/// `settled_balance` (or the closing transaction's outputs to its own addresses) for a closed one. Where the two
+/// differ, sats moved to the peer's side — or back — without a record this node holds: a routing node's balances shift
+/// channel by channel, a node restored from a backup has its channels but not every payment, a cooperative close
+/// pays the commitment fee. The difference is booked HERE, as its own row per channel — at the close for a closed
+/// channel, at the node's newest record for an open one — so the balance line shows this node's side, not the sats it
+/// once funded. Before this, the LND node's line sat at the 22 million sats it had funded its channels with until the
+/// day it was retired, with a single "unaccounted" cliff of everything at the end; the sweep had taken about 13
+/// million, the rest had been the peers' side all along.
+fn lnd_settlements(d: &LndDump, rows: &[Event]) -> Vec<Event> {
+    let n = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str().and_then(|s| s.parse::<i64>().ok()).or_else(|| x.as_i64())).unwrap_or(0);
+    let s = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let arr = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_array()).cloned().unwrap_or_default();
+    let txs: std::collections::HashMap<String, serde_json::Value> = arr(&d.transactions, "transactions").into_iter().map(|t| (s(&t, "tx_hash").to_lowercase(), t)).collect();
+    // what this node put into a channel: the funding transaction's debit less its fee, when its own wallet made it
+    let ours_in = |channel_point: &str| -> i64 {
+        let txid = channel_point.split(':').next().unwrap_or("").to_lowercase();
+        match txs.get(&txid) { Some(t) if n(t, "amount") < 0 => (-n(t, "amount") - n(t, "total_fees").max(0)) * 1000, _ => 0 }
+    };
+    let newest = rows.iter().map(|e| e.time).max().unwrap_or(0);
+    let short = |cp: &str| cp.split(':').next().unwrap_or("").chars().take(12).collect::<String>();
+    let mut out = Vec::new();
+    let mut row = |id: String, time: u32, height: u32, txid: String, gap_msat: i64, memo: String| {
+        if gap_msat.abs() < 1000 { return; }
+        out.push(Event { id, time, net: -gap_msat / 1000, fee: 0, layer: "channel".into(), txid, hash: String::new(), kind: if gap_msat > 0 { "peer-side" } else { "our-side" }.into(), memo, to: Vec::new(), height, phantom: false, msat: -gap_msat });
+    };
+    for c in arr(&d.channels, "channels") {
+        let chan_id = s(&c, "chan_id"); let cp = s(&c, "channel_point");
+        if chan_id.is_empty() || chan_id == "0" || cp.is_empty() { continue; }
+        let (put_in, flow) = (ours_in(&cp), lnd_channel_flow_msat(d, &chan_id));
+        let local = { let m = n(&c, "local_balance_msat"); if m > 0 { m } else { n(&c, "local_balance") * 1000 } };
+        let gap = put_in + flow - local;
+        let memo = if gap > 0 { format!("channel {} open: the node reports {} sats on its side, {} sats fewer than its records explain (it put in {} sats and its records move {} sats through the channel). The rest is on the peer's side without a payment this node has a record of; the records do not say when it moved, so it is booked here, at the node's newest record.", short(&cp), local / 1000, gap / 1000, put_in / 1000, flow / 1000) }
+            else { format!("channel {} open: the node reports {} sats on its side, {} sats more than its records explain (it put in {} sats and its records move {} sats through the channel). Booked here, at the node's newest record.", short(&cp), local / 1000, -gap / 1000, put_in / 1000, flow / 1000) };
+        row(format!("{}:side", cp.split(':').next().unwrap_or("").to_lowercase()), newest, 0, String::new(), gap, memo);
+    }
+    for c in arr(&d.closed, "channels") {
+        let chan_id = s(&c, "chan_id"); let cp = s(&c, "channel_point"); let ct = s(&c, "closing_tx_hash").to_lowercase();
+        if chan_id.is_empty() || chan_id == "0" || cp.is_empty() || ct.is_empty() { continue; }
+        let (put_in, flow) = (ours_in(&cp), lnd_channel_flow_msat(d, &chan_id));
+        // what came back: the node's settled figure, or the closing transaction's outputs to its own addresses when it saw them
+        let from_outputs: i64 = txs.get(&ct).map(|t| t.get("output_details").and_then(|x| x.as_array()).map(|a| a.iter().filter(|o| o.get("is_our_address").and_then(|x| x.as_bool()) == Some(true)).map(|o| n(o, "amount")).sum::<i64>()).unwrap_or(0)).unwrap_or(0);
+        let back = n(&c, "settled_balance").max(from_outputs) * 1000;
+        let gap = put_in + flow - back;
+        let seen = txs.contains_key(&ct);
+        let memo = if gap > 0 { format!("channel {} closed ({}): {} sats of this node's side had gone to the peer's over the channel's life without a payment this node has a record of — it put in {} sats, its records move {} sats through the channel, {} sats came back{}. Booked here, at the close, so the balance shows this node's side falling where it did rather than one unaccounted cliff at the end.", short(&cp), s(&c, "close_type").to_lowercase().replace('_', " "), gap / 1000, put_in / 1000, flow / 1000, back / 1000, if seen { "" } else { " as far as this node's wallet knows (it recognised none of the closing transaction's outputs as its own; a wallet restored from a backup does not know addresses derived after it was taken)" }) }
+            else { format!("channel {} closed ({}): {} sats more came back to this node than its records explain — it put in {} sats, its records move {} sats through the channel, {} sats came back. Booked here, at the close.", short(&cp), s(&c, "close_type").to_lowercase().replace('_', " "), -gap / 1000, put_in / 1000, flow / 1000, back / 1000) };
+        let time = txs.get(&ct).map(|t| n(t, "time_stamp") as u32).unwrap_or(0);
+        row(format!("{ct}:side"), time, n(&c, "close_height").max(0) as u32, ct.clone(), gap, memo);
+    }
+    out
 }
 
 impl Lnd {
@@ -853,6 +938,40 @@ mod tests {
         assert_eq!(held, None, "no listchannels, no walletbalance: the file does not say what is held");
         assert_eq!(ev.iter().find(|e| e.kind == "received").unwrap().hash, h);
         assert!(ledger_from_file("{\"hello\": 1}").is_err());
+    }
+
+    #[test]
+    fn each_channel_is_settled_against_the_nodes_own_figure_for_it() {
+        // a routing node funds two channels with 1,000,000 sats each (fee 200). Over their life its records move 100,000
+        // sats out of A by forwards and 100,000 into B; a payment of 50,000 (+10 fee) goes out over A. The node's own
+        // figures: A open with 600,000 on our side — 250,000 fewer than the records explain (an unrecorded shift to the
+        // peer); B closed, 1,099,500 came back — 500 short of the records (the commitment fee).
+        let d = LndDump {
+            channels: serde_json::json!({ "channels": [ { "chan_id": "111", "channel_point": "AA:0", "local_balance": "600000" } ] }),
+            closed: serde_json::json!({ "channels": [ { "chan_id": "222", "channel_point": "BB:1", "closing_tx_hash": "CC", "settled_balance": "1099500", "close_height": "800000", "close_type": "COOPERATIVE_CLOSE" } ] }),
+            pending: serde_json::json!({}),
+            transactions: serde_json::json!({ "transactions": [
+                { "tx_hash": "00", "amount": "3000000", "total_fees": "0", "time_stamp": "1700000000" },
+                { "tx_hash": "aa", "amount": "-1000200", "total_fees": "200", "time_stamp": "1700000100" },
+                { "tx_hash": "bb", "amount": "-1000200", "total_fees": "200", "time_stamp": "1700000200" },
+                { "tx_hash": "cc", "amount": "1099500", "total_fees": "0", "time_stamp": "1700009000", "output_details": [ { "address": "bc1ours", "amount": "1099500", "is_our_address": true } ] } ] }),
+            invoices: serde_json::json!({ "invoices": [] }),
+            payments: serde_json::json!({ "payments": [ { "payment_hash": "dd", "status": "SUCCEEDED", "value_sat": "50000", "fee_sat": "10", "value_msat": "50000000", "fee_msat": "10000", "creation_date": "1700000500",
+                "htlcs": [ { "status": "SUCCEEDED", "route": { "total_amt_msat": "50010000", "hops": [ { "chan_id": "111" } ] } } ] } ] }),
+            forwards: serde_json::json!({ "forwarding_events": [ { "chan_id_in": "222", "chan_id_out": "111", "amt_in_msat": "100001000", "amt_out_msat": "100000000", "fee_msat": "1000", "timestamp": "1700000400" } ] }),
+        };
+        let ev = lnd_events_from(&d);
+        let a = ev.iter().find(|e| e.id == "aa:side").expect("the open channel's drift is booked");
+        assert_eq!((a.net, a.kind.as_str(), a.layer.as_str(), a.time), (-249_990, "peer-side", "channel", 1700009000), "1,000,000 in − 100,000 forwarded out − 50,010 paid = 849,990 explained; the node says 600,000: 249,990 to the peer, dated the newest record");
+        let b = ev.iter().find(|e| e.id == "cc:side").expect("the closed channel is settled at its close");
+        assert_eq!((b.net, b.msat, b.kind.as_str(), b.height, b.txid.as_str()), (-501, -501_000, "peer-side", 800000, "cc"), "1,000,000 + 100,001 explained, 1,099,500 came back: the 501 sat commitment fee, msat-exact");
+        assert!(b.memo.contains("1000000 sats"), "the memo states the figures: {}", b.memo);
+        // the ledger now sums to what the node holds: wallet 3,000,000 − 2,000,400 + 1,099,500 = 2,099,100; channel A 600,000
+        let explained: i64 = ev.iter().map(msat_of).sum();
+        assert_eq!(explained, (2_099_100 + 600_000) * 1000, "to the millisatoshi");
+        // a channel the peer opened puts nothing in: its drift is the records against the node's figure alone
+        let mut d2 = d; d2.channels = serde_json::json!({ "channels": [ { "chan_id": "333", "channel_point": "EE:0", "local_balance": "0" } ] }); d2.closed = serde_json::json!({});
+        assert!(lnd_events_from(&d2).iter().all(|e| !e.id.ends_with(":side")), "nothing put in, nothing recorded through it, nothing on our side: no row");
     }
 
     #[test]

@@ -216,7 +216,7 @@ pub fn load() -> Result<Store, String> {
         match std::fs::metadata(&enc) {
             // the file as it was last parsed is the file: opening and parsing a few megabytes for every command, forty
             // times over when the overview loads every vault at once, was most of what a sync cost
-            Ok(m) => { if let Some(s) = parsed(&enc, &m) { return Ok(s); } }
+            Ok(m) => { if let Some(s) = parsed(&enc, &m, &key) { return Ok(s); } }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(format!("the app's own file could not be read ({}): {e}", enc.display())),
         }
@@ -225,7 +225,7 @@ pub fn load() -> Result<Store, String> {
                 let plain = crate::lockbox::open_with(&key, "store", &blob).map_err(|e| format!("the app's own file was left alone ({}): {e}", enc.display()))?;
                 let mut s: Store = parse_store(&plain).map_err(|e| format!("the app's own file is damaged and was left alone: {e}"))?;
                 if s.settings.network.is_empty() { s.settings.network = "signet".into(); }
-                if let Ok(m) = std::fs::metadata(&enc) { keep_parsed(&enc, &m, &s); }
+                if let Ok(m) = std::fs::metadata(&enc) { keep_parsed(&enc, &m, &key, &s); }
                 return Ok(s);
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -247,18 +247,20 @@ pub fn load() -> Result<Store, String> {
 }
 pub fn parse_store(bytes: &[u8]) -> Result<Store, String> { serde_json::from_slice(bytes).map_err(|e| e.to_string()) }
 
-// The sealed store as last parsed, with the file's identity (path, size, modification time) it came from. A read
-// finds the file unchanged and hands back a copy; any write — ours through `save`, or anyone else's — changes the
-// identity and the next read parses afresh. Never consulted while locked: `load` asks for the key first.
-type Parsed = (std::path::PathBuf, u64, std::time::SystemTime, Store);
+// The sealed store as last parsed, with the file's identity (path, size, modification time) it came from and a
+// fingerprint of the key that opened it. A read with the same key finds the file unchanged and hands back a copy; any
+// write — ours through `save`, or anyone else's — changes the identity and the next read parses afresh. A different
+// key gets no copy: what it could not open, it is not handed. Never consulted while locked: `load` asks for the key first.
+type Parsed = (std::path::PathBuf, u64, std::time::SystemTime, [u8; 32], Store);
 static PARSED: std::sync::Mutex<Option<Parsed>> = std::sync::Mutex::new(None);
-fn parsed(path: &std::path::Path, m: &std::fs::Metadata) -> Option<Store> {
+fn key_tag(key: &[u8; 32]) -> [u8; 32] { use bitcoin::hashes::{sha256, Hash, HashEngine}; let mut e = sha256::Hash::engine(); e.input(b"a2k parsed-store tag"); e.input(key); sha256::Hash::from_engine(e).to_byte_array() }
+fn parsed(path: &std::path::Path, m: &std::fs::Metadata, key: &[u8; 32]) -> Option<Store> {
     let g = PARSED.lock().ok()?;
-    let (p, len, mt, s) = g.as_ref()?;
-    if p == path && *len == m.len() && Some(*mt) == m.modified().ok() { Some(s.clone()) } else { None }
+    let (p, len, mt, tag, s) = g.as_ref()?;
+    if p == path && *len == m.len() && Some(*mt) == m.modified().ok() && *tag == key_tag(key) { Some(s.clone()) } else { None }
 }
-fn keep_parsed(path: &std::path::Path, m: &std::fs::Metadata, s: &Store) {
-    if let (Ok(mt), Ok(mut g)) = (m.modified(), PARSED.lock()) { *g = Some((path.to_path_buf(), m.len(), mt, s.clone())); }
+fn keep_parsed(path: &std::path::Path, m: &std::fs::Metadata, key: &[u8; 32], s: &Store) {
+    if let (Ok(mt), Ok(mut g)) = (m.modified(), PARSED.lock()) { *g = Some((path.to_path_buf(), m.len(), mt, key_tag(key), s.clone())); }
 }
 
 static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

@@ -1513,16 +1513,17 @@ fn node_destinations(events: &mut [node::Event], servers: &chain::Servers, netwo
     use std::str::FromStr;
     let net = wallet::network_of(network);
     let want: Vec<usize> = events.iter().enumerate().filter(|(_, e)| !e.txid.is_empty() && e.to.is_empty() && !e.phantom && (e.net < 0 || e.kind == "close")).map(|(i, _)| i).collect();
-    if want.is_empty() { return; }
+    // nothing to fetch and nothing to date: done (a row with only a block height still gets its time below)
+    if want.is_empty() && !events.iter().any(|e| e.time == 0 && e.height > 0) { return; }
     let ids: Vec<bitcoin::Txid> = want.iter().filter_map(|&i| bitcoin::Txid::from_str(&events[i].txid).ok()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
     // the batch, or — when it fails on one unknown id — each on its own, so that a transaction NO server has is told
     // apart from a server that could not be asked: the first is a phantom row, the second leaves the row as it was
     let mut by_id: std::collections::HashMap<bitcoin::Txid, bitcoin::Transaction> = std::collections::HashMap::new();
     let mut phantoms: std::collections::HashSet<bitcoin::Txid> = std::collections::HashSet::new();
-    match chain::transactions_kept(servers, network, &ids, &|_| true) {
+    if !ids.is_empty() { match chain::transactions_kept(servers, network, &ids, &|_| true) {
         Ok(txs) => { for t in txs { by_id.insert(t.compute_txid(), t); } }
         Err(_) => { for (id, r) in ids.iter().zip(chain::transactions_each(servers, &ids)) { match r { Ok(Some(t)) => { by_id.insert(*id, t); } Ok(None) => { phantoms.insert(*id); } Err(_) => {} } } }
-    }
+    } }
     for &i in &want {
         let Ok(id) = bitcoin::Txid::from_str(&events[i].txid) else { continue };
         if let Some(t) = by_id.get(&id) {
