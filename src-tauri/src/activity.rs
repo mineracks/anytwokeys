@@ -11,7 +11,7 @@ use std::str::FromStr;
 
 pub const PRICES: &str = "https://prices.mineracks.com";
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 struct Cache { #[serde(default)] times: HashMap<String, u32>, #[serde(default)] prices: HashMap<String, Quote> }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -44,19 +44,37 @@ pub struct Activity { #[serde(default, skip_serializing_if = "Vec::is_empty")] p
     #[serde(default)] pub transfers: HashMap<String, Vec<String>> }
 
 /// Every block time kept, by `net:height` — read once for a search over the whole fleet.
-pub(crate) fn cached_times() -> HashMap<String, u32> { load_cache().times }
+pub(crate) fn cached_times() -> HashMap<String, u32> { with_cache(|c| c.times.clone()) }
 /// A price already kept, by its cache key (`USD:2024-01-04` for a day, `USD:2024-01-04T09` for an hour).
-pub(crate) fn cached_price(key: &str) -> Option<Quote> { load_cache().prices.get(key).cloned() }
+pub(crate) fn cached_price(key: &str) -> Option<Quote> { with_cache(|c| c.prices.get(key).cloned()) }
 
 fn cache_path() -> std::path::PathBuf { wallet::store_path().with_file_name("cache.json") }
-// a cache that cannot be read is an empty cache: everything in it can be asked for again
-fn load_cache() -> Cache {
-    let bytes = if crate::lockbox::sealed_mode() { crate::lockbox::read_sealed(&cache_path().with_extension("enc"), "cache").ok().flatten() } else { std::fs::read(cache_path()).ok() };
-    bytes.and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+fn cache_file() -> std::path::PathBuf { if crate::lockbox::sealed_mode() { cache_path().with_extension("enc") } else { cache_path() } }
+// The cache as last parsed, with the identity (path, size, modification time) of the file it came from. The cycle
+// card asked for one cached price per day over years of days, and each ask decrypted and parsed the whole file:
+// a full core for minutes at every opening of the overview. Now a file that has not changed is parsed once.
+type ParsedCache = (std::path::PathBuf, u64, std::time::SystemTime, std::sync::Arc<Cache>);
+static PARSED: std::sync::Mutex<Option<ParsedCache>> = std::sync::Mutex::new(None);
+fn with_cache<T>(f: impl FnOnce(&Cache) -> T) -> T {
+    let path = cache_file();
+    let meta = std::fs::metadata(&path).ok();
+    if let (Some(m), Ok(g)) = (meta.as_ref(), PARSED.lock()) {
+        if let Some((p, len, mt, c)) = g.as_ref() { if p == &path && *len == m.len() && Some(*mt) == m.modified().ok() { return f(c); } }
+    }
+    // a cache that cannot be read is an empty cache: everything in it can be asked for again
+    let bytes = if crate::lockbox::sealed_mode() { crate::lockbox::read_sealed(&path, "cache").ok().flatten() } else { std::fs::read(&path).ok() };
+    let c: Cache = bytes.and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let c = std::sync::Arc::new(c);
+    if let (Some(m), Ok(mt), Ok(mut g)) = (meta.as_ref(), meta.as_ref().map(|m| m.modified()).unwrap_or_else(|| Err(std::io::Error::other("none"))), PARSED.lock()) { *g = Some((path.clone(), m.len(), mt, c.clone())); }
+    f(&c)
 }
+fn load_cache() -> Cache { with_cache(|c| c.clone()) }
 fn save_cache(c: &Cache) {
     let Ok(b) = serde_json::to_vec(c) else { return };
-    if crate::lockbox::sealed_mode() { let _ = crate::lockbox::write_sealed(&cache_path().with_extension("enc"), "cache", &b); } else { let _ = std::fs::write(cache_path(), b); }
+    let path = cache_file();
+    let ok = if crate::lockbox::sealed_mode() { crate::lockbox::write_sealed(&path, "cache", &b).is_ok() } else { std::fs::write(&path, b).is_ok() };
+    // what was just written is what the file now holds: keep it parsed, so the next read is a copy, not a parse
+    if ok { if let (Ok(m), Ok(mut g)) = (std::fs::metadata(&path), PARSED.lock()) { if let Ok(mt) = m.modified() { *g = Some((path, m.len(), mt, std::sync::Arc::new(c.clone()))); } } }
 }
 
 // The cache is one sealed file, read, changed and written whole. The background price fill and a screen building
