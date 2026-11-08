@@ -5720,8 +5720,10 @@ document.addEventListener('keydown', e => {
 
 // Spark's own words for a transfer's state and kind (their TransferStatus and TransferType tables), so a row that is
 // not counted says exactly where it stopped rather than "not completed"; an unknown code is shown as its number.
+// Kind 3 is an on-chain deposit claimed through a static deposit address: the service provider takes the coin and
+// sends the sats in as a transfer, so it is money arriving, with the provider's fee already off.
 const SPARK_STATUS = ['sender initiated', 'sender key tweak pending', 'sender key tweaked', 'receiver key tweaked', 'receiver refund signed', 'completed', 'expired', 'returned', 'sender initiated at the coordinator', 'receiver key tweak locked', 'receiver key tweak applied'];
-const SPARK_KIND = ['Lightning receive', 'cooperative exit', 'transfer', 'coin swap', 'swap', 'counter swap'];
+const SPARK_KIND = { 0: 'Lightning receive', 1: 'exit to the chain', 2: 'transfer', 3: 'deposit from the chain', 4: 'swap', 5: 'counter swap', 30: 'swap', 40: 'counter swap' };
 function sparkTransferStatus(t) {
   if (!t) return 'Spark';
   const st = SPARK_STATUS[t.status] || `status ${t.status}`, kind = SPARK_KIND[t.kind] || `kind ${t.kind}`;

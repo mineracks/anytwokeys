@@ -253,6 +253,16 @@ pub struct Transfer {
     #[serde(default)] pub memo: String,
 }
 
+/// What a person did, not what the wallet did to itself. Spark's transfer kinds (their TransferType table): 0 a
+/// Lightning payment landing (a preimage swap), 1 an exit to the chain, 2 a transfer to or from another Spark wallet,
+/// 3 an on-chain deposit claimed through a static deposit address (the service provider takes the coin and sends the
+/// sats in as a transfer — money arriving, with the provider's fee already off), 4/5 and 30/40 the two halves of a
+/// leaf re-cut against the service provider: a swap out and a swap in of the same sats, seconds apart (seen on the
+/// probe wallet: 512 out, 512 in, kinds 4 and 5). The re-cuts are plumbing, not history. Everything else is kept.
+/// Until 2026-11-08 kind 3 was dropped with the plumbing, and a wallet that had taken an on-chain deposit showed a
+/// history summing below its balance — a holding under zero once it was emptied.
+pub fn history_kind(kind: u64) -> bool { matches!(kind, 0 | 1 | 2 | 3) }
+
 /// Every transfer this wallet was part of, newest page first. An empty page means either an empty wallet or a
 /// wallet withholding its history — see the note at the top of this file; the balance is what tells them apart.
 pub fn transfers(identity: &[u8], network: &str, limit: u64, offset: u64) -> Result<(Vec<Transfer>, i64), String> { transfers_with(identity, network, limit, offset, None) }
@@ -278,11 +288,7 @@ pub fn transfers_with(identity: &[u8], network: &str, limit: u64, offset: u64, s
             }
         }
     }
-    // What a person did, not what the wallet did to itself. A wallet's leaves are re-cut against the service
-    // provider all the time — a swap out and a swap in of the same sats, seconds apart (seen on the probe wallet:
-    // 512 out, 512 in, kinds 4 and 5) — and those are plumbing, not history. Kept: a transfer (2), a Lightning
-    // payment landing (0, a preimage swap), and an exit to the chain (1). Anything not yet completed is marked.
-    list.retain(|t| matches!(t.kind, 0 | 1 | 2));
+    list.retain(|t| history_kind(t.kind));
     list.sort_by(|a, b| b.at.cmp(&a.at));
     Ok((list, next))
 }
@@ -301,7 +307,7 @@ pub fn history_with(identity: &[u8], network: &str, session: Option<&crate::spar
             let (mut r, mut next) = (Reader::new(&out), -1i64);
             while !r.done() {
                 match r.field().ok_or("Spark returned a malformed transfer page")? {
-                    (1, v, _) => { let t = one_transfer(&v, identity); if t.id.is_empty() { return Err("Spark returned a transfer without an id".into()); } if matches!(t.kind, 0 | 1 | 2) { all.insert(t.id.clone(), t); } }
+                    (1, v, _) => { let t = one_transfer(&v, identity); if t.id.is_empty() { return Err("Spark returned a transfer without an id".into()); } if history_kind(t.kind) { all.insert(t.id.clone(), t); } }
                     (2, _, v) => next = v as i64,
                     _ => {},
                 }
@@ -355,6 +361,12 @@ fn try_operators(method: &str, req: Vec<u8>) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn an_on_chain_deposit_claim_is_history_and_a_leaf_recut_is_not() {
+        for k in [0, 1, 2, 3] { assert!(history_kind(k), "kind {k} is something a person did"); }
+        for k in [4, 5, 30, 40, 99] { assert!(!history_kind(k), "kind {k} is plumbing"); }
+    }
+
     #[test]
     fn incomplete_and_refused_grpc_frames_are_never_successful_empty_reads() {
         assert!(decode_frames(&[], None).is_err());

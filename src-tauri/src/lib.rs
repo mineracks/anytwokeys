@@ -768,6 +768,21 @@ async fn vault_activity(name: String, history: Vec<(String, i32)>, ccy: String) 
             }
             a.spark = list.into_iter().map(|mut t| { if let Some(m) = memos.get(&t.id) { t.memo = m.clone(); } t }).collect();
             if a.rows.is_empty() { a.note = Some("Spark returned no transfers. This can mean no history, or that read access is unavailable; an empty response alone does not distinguish them.".into()); }
+            // The rows are what the operator lists; the balance is what it holds. The two must agree, and when they do
+            // not the difference is said as a number to trace — never drawn as a holding below zero, never rounded
+            // away. Sats the operator holds with no transfer bringing them in are most often an on-chain deposit
+            // claimed the older way, as a tree cut straight from the coin, which Spark keeps as leaves but not as a
+            // transfer. Sats gone with no transfer taking them out have no honest story at all, and are said so.
+            else if let Ok(held) = spark::balance_with(&id, &v.network, session.as_deref()) {
+                let listed: i64 = a.rows.iter().filter_map(|r| r.net).sum();
+                let gap = held as i64 - listed;
+                if gap != 0 {
+                    let line = format!("Spark holds {} sats for this wallet; the completed transfers it lists sum to {}{} sats. {} sats {} — a row the operator does not have.",
+                        sats_text(held), if listed < 0 { "\u{2212}" } else { "" }, sats_text(listed.unsigned_abs()), sats_text(gap.unsigned_abs()),
+                        if gap > 0 { "are in the wallet without a transfer that brought them in (most often an on-chain deposit claimed as a new tree, which Spark records as leaves, not as a transfer)" } else { "left the wallet without a transfer that took them out" });
+                    a.note = Some(match a.note.take() { Some(n) => format!("{n} {line}"), None => line });
+                }
+            }
             transfers::record(&v, &mut a, &s);
             return Ok(a);
         }
