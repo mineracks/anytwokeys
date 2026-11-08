@@ -4,6 +4,7 @@ mod statement;
 mod exchange;
 mod node;
 mod spark_auth;
+mod spark_ssp;
 mod sync;
 mod muun;
 mod activity;
@@ -739,7 +740,7 @@ async fn vault_activity(name: String, history: Vec<(String, i32)>, ccy: String) 
             let mut a = activity::priced(&v, rows, &ccy, &prices)?;
             // A wallet that holds sats but shows no transfers is not an empty wallet: it is one whose history Spark
             // is withholding (its owner turned on private mode). Said plainly rather than drawn as "nothing here".
-            a.spark = list;
+            a.spark = list.into_iter().map(|mut t| { if let Some(m) = sp.memos.get(&t.id) { t.memo = m.clone(); } t }).collect();
             if a.rows.is_empty() { a.note = Some("Spark returned no transfers. This can mean no history, or that read access is unavailable; an empty response alone does not distinguish them.".into()); }
             transfers::record(&v, &mut a, &s);
             return Ok(a);
@@ -1098,7 +1099,7 @@ async fn spark_restore(name: String, address: String) -> R<Vault> {
             return Err(if balance > 0 { "Spark will not list this wallet's transfers — its privacy setting is on. The balance can be read but the history cannot, so there is nothing here to account with.".into() }
                 else { "Spark shows nothing under this address: no balance and no transfers. That is what an EMPTY wallet looks like — and also exactly what a wallet with its privacy setting on looks like, since a private wallet answers with nothing rather than with a refusal. If you know this wallet holds sats, its privacy setting is on (Wallet of Satoshi's wallets are), and authenticated reader enrolment can grant access without turning privacy off.".into() });
         }
-        let mut v = Vault { watch: None, spark: Some(wallet::Spark { address: address.trim().to_string(), identity, reader_pubkey: String::new(), reader_card: String::new(), authenticated: false }), muun: None, statement: None, node: None,
+        let mut v = Vault { watch: None, spark: Some(wallet::Spark { address: address.trim().to_string(), identity, reader_pubkey: String::new(), reader_card: String::new(), authenticated: false, memos: Default::default() }), muun: None, statement: None, node: None,
             name, network, threshold: 1, keys: Vec::new(), descriptor: String::new(), address: address.trim().to_string(),
             created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
             labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
@@ -1164,7 +1165,7 @@ fn spark_vault(mut s: Store, name: String, address: String, identity: String, ne
     if let Some(v) = s.vaults.iter().find(|v| v.spark.as_ref().map(|x| x.identity == identity).unwrap_or(false)) {
         return Err(format!("this Spark wallet is already here, as '{}'", v.name));
     }
-    let v = new_spark_vault(name, wallet::Spark { address, identity, reader_pubkey: String::new(), reader_card: String::new(), authenticated: false }, network);
+    let v = new_spark_vault(name, wallet::Spark { address, identity, reader_pubkey: String::new(), reader_card: String::new(), authenticated: false, memos: Default::default() }, network);
     s.vaults.push(v.clone());
     wallet::save(&s)?;
     Ok(v)
@@ -1563,6 +1564,21 @@ fn spark_discovery_cancel() { spark_auth::cancel_discovery(); }
 async fn spark_enroll(candidate_id: String, name: String, reader: String, pubkey: String, pin: String, make_private: bool, replace_reader: bool) -> R<Vault> {
     let pin = zeroize::Zeroizing::new(pin);
     block(move || spark_auth::enroll(candidate_id, name, reader, pubkey, pin, make_private, replace_reader)).await
+}
+#[tauri::command]
+/// The Lightning descriptions of a Spark wallet's transfers, from the service provider, read once with the owner's
+/// words and kept on the vault. Returns how many rows now carry one. The words live for this call only.
+async fn spark_memos(name: String, words: String, ids: Vec<String>) -> R<Vec<spark_ssp::Memo>> {
+    let words = zeroize::Zeroizing::new(words);
+    block(move || {
+        let mut store = wallet::load()?;
+        let v = store.vaults.iter_mut().find(|v| v.name == name).ok_or("no such vault")?;
+        let sp = v.spark.as_mut().ok_or("this is not a Spark wallet")?;
+        let found = spark_ssp::read(words, sp, &ids)?;
+        for m in &found { sp.memos.insert(m.id.clone(), m.text.clone()); }
+        wallet::save(&store)?;
+        Ok(found)
+    }).await
 }
 #[tauri::command]
 async fn spark_unlock(name: String, reader: String, pin: String) -> R<spark_auth::Unlocked> {
@@ -3830,7 +3846,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![search_all, profiles_list, profile_open, profile_close, profile_create, profile_update, profile_delete, profile_picture_pick, guard_displays, guard_sharing, guard_override, vault_move_start, move_land, persona_generate, persona_defaults, transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, cycle_curve, cycle_now, cycle_marks, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, icon_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
-            cards_list, card_generate, attach_view, profiles_refresh, sync_face_refresh, sync_status, sync_enable, sync_rotate, sync_remove_card, sync_now, sync_tick, sync_disable, sync_find, sync_adopt, card_survey, card_tap, nk_firmware, nk_firmware_update, secret_preview, card_init_key_from, card_import, card_init_resume_check, key_setup_restart, card_reset, card_pin_change_pad, platform, ui_note, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, node_retire, node_import_pick, node_import, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
+            cards_list, card_generate, attach_view, profiles_refresh, sync_face_refresh, sync_status, sync_enable, sync_rotate, sync_remove_card, sync_now, sync_tick, sync_disable, sync_find, sync_adopt, card_survey, card_tap, nk_firmware, nk_firmware_update, secret_preview, card_init_key_from, card_import, card_init_resume_check, key_setup_restart, card_reset, card_pin_change_pad, platform, ui_note, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, node_retire, node_import_pick, node_import, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_memos, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard,
             engraver_find, engraver_jog, engraver_run, engraver_cancel, vault_shares_plates, share_rewrap
         ])

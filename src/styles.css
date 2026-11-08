@@ -936,3 +936,6 @@ dd .mkt-n{display:block}
 .fd-foot kbd{display:inline-block;font-family:var(--display);font-size:10.5px;padding:0 5px;border:1px solid var(--line);border-radius:4px;margin-right:3px;line-height:16px}
 .discreet .fd-list{filter:blur(7px)} .discreet.peek .fd-list{filter:none}
 @media (max-width:700px){ #finder{padding:calc(8px + env(safe-area-inset-top)) 8px 8px;align-items:stretch} .fd-card{max-height:none;border-radius:10px} .fd-head input{font-size:16px} .fd-foot span:first-child{display:none} }
+
+/* a Spark row's Lightning description, under its label */
+table.act td .memo{display:block;font-size:12px;line-height:1.3;max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

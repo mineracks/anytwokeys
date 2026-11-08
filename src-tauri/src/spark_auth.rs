@@ -38,7 +38,7 @@ pub struct Identity(SecretKey);
 impl Drop for Identity { fn drop(&mut self) { self.0.non_secure_erase(); } }
 impl Identity {
     pub fn public(&self) -> PublicKey { self.0.public_key(&Secp256k1::new()) }
-    fn sign(&self, digest: &[u8;32]) -> R<Vec<u8>> { Ok(Secp256k1::new().sign_ecdsa(&Message::from_digest(*digest), &self.0).serialize_der().to_vec()) }
+    pub(crate) fn sign(&self, digest: &[u8;32]) -> R<Vec<u8>> { Ok(Secp256k1::new().sign_ecdsa(&Message::from_digest(*digest), &self.0).serialize_der().to_vec()) }
 }
 struct Root(Xpriv);
 impl Drop for Root { fn drop(&mut self) { self.0.private_key.non_secure_erase(); self.0.chain_code = [0u8;32].into(); } }
@@ -280,7 +280,7 @@ pub fn enroll(candidate_id: String, name: String, reader: String, pubkey: String
     verify.map_err(|e: String| format!("{e}. The reader setting was updated, but verification did not complete. Discover again to check and finish enrolment."))?;
     let mut store = wallet::load()?; // fresh store: do not overwrite concurrent edits
     if p.epoch != EPOCH.load(Ordering::SeqCst) || p.discovery != DISCOVERY.load(Ordering::SeqCst) { return Err("the app locked after updating Spark; discover again to finish saving".into()); }
-    let sp = wallet::Spark { address: p.candidate.address.clone(), identity: p.candidate.identity.clone(), reader_pubkey: pubkey, reader_card: c.serial.to_string(), authenticated: true };
+    let sp = wallet::Spark { address: p.candidate.address.clone(), identity: p.candidate.identity.clone(), reader_pubkey: pubkey, reader_card: c.serial.to_string(), authenticated: true, memos: Default::default() };
     let v = if let Some(v) = store.vaults.iter_mut().find(|v| v.network == p.candidate.network && v.spark.as_ref().map(|s| &s.identity) == Some(&sp.identity)) { v.spark = Some(sp.clone()); v.clone() } else {
         if store.vaults.iter().any(|v| v.name == name) { return Err("that vault name was used while enrolling; discover again to save under another name".into()); }
         let v = crate::new_spark_vault(name, sp.clone(), p.candidate.network.clone()); store.vaults.push(v.clone()); v
@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn absent_or_expired_reader_never_becomes_anonymous_and_lock_drops_credentials() {
         clear();
-        let sp = wallet::Spark { identity: hex::encode(identity().public().serialize()), address: "spark1test".into(), reader_pubkey: "reader".into(), reader_card: "123".into(), authenticated: true };
+        let sp = wallet::Spark { identity: hex::encode(identity().public().serialize()), address: "spark1test".into(), reader_pubkey: "reader".into(), reader_card: "123".into(), authenticated: true, memos: Default::default() };
         assert!(session(&sp,"mainnet").is_err());
         let epoch = EPOCH.load(Ordering::SeqCst);
         runtime().lock().unwrap().readers.insert(key_for(&sp, "mainnet"), Cached { session: std::sync::Arc::new(Session { operator: spark::OPERATORS[0].into(), token: Zeroizing::new("not-persisted".into()), until: Instant::now() + Duration::from_secs(30), expires: 1, epoch }), epoch });

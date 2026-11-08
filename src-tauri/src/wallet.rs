@@ -420,6 +420,9 @@ pub struct Spark {
     #[serde(default)] pub reader_pubkey: String,
     #[serde(default)] pub reader_card: String,
     #[serde(default)] pub authenticated: bool,
+    /// what the Lightning service provider held about a transfer — the invoice's description — by transfer id,
+    /// read with the owner's words and kept here so the words are not needed again for these rows
+    #[serde(default)] pub memos: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

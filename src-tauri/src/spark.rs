@@ -249,6 +249,8 @@ pub struct Transfer {
     /// both parties' identity keys, hex — the other party is who a wallet was paid by, or paid
     #[serde(default)] pub sender: String,
     #[serde(default)] pub receiver: String,
+    /// the invoice's description, when the service provider has been asked (see spark_ssp)
+    #[serde(default)] pub memo: String,
 }
 
 /// Every transfer this wallet was part of, newest page first. An empty page means either an empty wallet or a
@@ -418,6 +420,25 @@ mod tests {
     }
     /// A wallet of our own, funded by a real payment: the positive control. Prints what this client sees for it,
     /// including who sent each transfer — which is how a wallet that shows no Spark address gives its identity up.
+
+    /// Which proto fields a live transfer carries beyond the ones read: the SSP's own public transfers as the sample.
+    #[test] #[ignore]
+    fn dump_transfer_fields_from_the_ssp() {
+        let ssp = hex::decode("023e33e2920326f64ea31058d44777442d97d7d5cbfcf54e3060bc1695e5261c93").unwrap();
+        let mut req = Vec::new(); bytes_field(2, &ssp, &mut req); int_field(4, net_id("mainnet"), &mut req); int_field(40, 6, &mut req); int_field(50, 0, &mut req);
+        let out = read_call("query_all_transfers", req, None).unwrap();
+        let mut r = Reader::new(&out);
+        while !r.done() {
+            match r.field() {
+                Some((1, v, _)) => {
+                    let mut f = Reader::new(&v); let mut tags = Vec::new();
+                    while !f.done() { match f.field() { Some((t, b, n)) => tags.push(format!("{t}:{}b/{n}{}", b.len(), if b.len() > 0 && b.len() < 120 && b.iter().all(|c| c.is_ascii_graphic()) { format!("={}", String::from_utf8_lossy(&b)) } else { String::new() })), None => break } }
+                    println!("TRANSFER {}", tags.join("  "));
+                }
+                Some(_) => continue, None => break,
+            }
+        }
+    }
     #[test] #[ignore]
     fn probe_identity_from_env() {
         let id = match std::env::var("SPARK_IDENTITY") { Ok(h) => hex::decode(h).unwrap(), Err(_) => return };

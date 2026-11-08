@@ -618,7 +618,7 @@ async function renderTx() {
   }
   if (vault.spark) {
     const t = facts.spark?.[txid], st = $('#tx-status'); st.className = 'state ' + (t?.status === 5 ? 'ok' : 'here'); st.querySelector('span').textContent = sparkTransferStatus(t);
-    $('#tx-dl').innerHTML = [['Transfer', transferText(facts, txid) || 'Outside the watched vaults'], ['Source', "Spark's word — not verified against the chain"], ['Transfer id', txid], ['From identity', t?.sender || 'unknown'], ['To identity', t?.receiver || 'unknown'], ['Amount', t ? sats(t.sats) + ' sats' : 'unknown'], ['Accounting', t?.status === 5 ? 'Completed transfer included' : 'Not completed; excluded from cost basis']].map(([k,v]) => `<dt>${esc(k)}</dt><dd class="mono">${esc(v)}</dd>`).join('');
+    $('#tx-dl').innerHTML = [['Transfer', transferText(facts, txid) || 'Outside the watched vaults'], ['Source', "Spark's word — not verified against the chain"], ['Transfer id', txid], ['From identity', t?.sender || 'unknown'], ['To identity', t?.receiver || 'unknown'], ['Amount', t ? sats(t.sats) + ' sats' : 'unknown'], t && t.memo ? ['Description', t.memo] : null, ['Accounting', t?.status === 5 ? 'Completed transfer included' : 'Not completed; excluded from cost basis']].filter(Boolean).map(([k,v]) => `<dt>${esc(k)}</dt><dd class="mono">${esc(v)}</dd>`).join('');
     $('#tx-proof').textContent = ''; $('#tx-chain-body').innerHTML = ''; return;
   }
   let d; try { d = await invoke('tx_detail', { name, txid, height: txView.height }); } catch (e) { if (mine === txView.seq) { $('#tx-dl').innerHTML = `<dt>Details</dt><dd class="warn">${esc(e)}</dd>`; $('#tx-proof').textContent = ''; } return; }
@@ -1291,8 +1291,8 @@ function actRowHtml(h) {
     return `<td class="when muted">…</td><td class="mono">${esc(h.txid.slice(0, 10))}…</td><td>${lblHtml('tx:' + h.txid)}<span class="xfer" data-xfer="${esc(h.txid)}"></span></td><td class="r amt muted">…</td><td class="r">${esc(how)}</td>`;
   }
   if (vault?.spark) {
-    const t = txFacts[vault.name]?.spark?.[h.txid];
-    return `<td class="when muted">…</td><td class="mono">${esc(h.txid.slice(0, 10))}…</td><td>${lblHtml('tx:' + h.txid)}<span class="xfer" data-xfer="${esc(h.txid)}"></span></td><td class="r amt muted">…</td><td class="r">${esc(sparkTransferStatus(t))}</td>`;
+    const t = txFacts[vault.name]?.spark?.[h.txid], memo = t && t.memo ? `<small class="muted memo" title="${esc(t.memo)}">${esc(t.memo)}</small>` : '';
+    return `<td class="when muted">…</td><td class="mono">${esc(h.txid.slice(0, 10))}…</td><td>${lblHtml('tx:' + h.txid)}${memo}<span class="xfer" data-xfer="${esc(h.txid)}"></span></td><td class="r amt muted">…</td><td class="r">${esc(sparkTransferStatus(t))}</td>`;
   }
   return `<td class="when muted">${h.height > 0 ? '…' : 'pending'}</td><td><span class="mono">${h.txid.slice(0, 10)}…${h.txid.slice(-6)}</span>${vault._rotating ? ' <span class="muted">· ' + fmtIndex(h.index) + '</span>' : ''}</td><td>${lblHtml('tx:' + h.txid)}<span class="xfer" data-xfer="${h.txid}"></span></td><td class="r amt muted">…</td><td class="r ${h.height > 0 ? 'ok' : 'muted'}">${h.height > 0 ? 'confirmed · ' + sats(h.height) : 'unconfirmed'}</td>`;
 }
@@ -5064,7 +5064,7 @@ function renderVaultSettings() {
   $('#vs-desc-wrap').dataset.hidden = shown ? '0' : '1'; $('#vs-desc-reveal').hidden = shown;
   $('#vs-rewrite').hidden = !vault.ext;
   renderSpCard();
-  renderNodeCard();
+  renderNodeCard(); renderLnCard();
   paintBackupKeys();
   const ds = drillState(vault);
   $('#vs-drill-when').innerHTML = ds.never
@@ -5124,6 +5124,33 @@ async function runDrill() {
     try { store = await invoke('note_set', { name: vault.name, key: 'vault:drill', note: when }); vault = store.vaults.find(v => v.name === vault.name) || vault; paintDrillNudge.hidden = null; renderVaultSettings(); paintDrillNudge(); drillSay(html); } catch {} }
 }
 $('#vs-drill').onclick = () => { drillFound = []; runDrill(); };
+
+// ---------- a Spark wallet: the Lightning descriptions, read once from the service provider with the owner's words ----------
+function renderLnCard() {
+  const card = $('#vs-ln-card'); card.hidden = !(vault && vault.spark);
+  if (card.hidden) return;
+  const have = Object.keys(vault.spark.memos || {}).length, rows = Object.values(txFacts[vault.name]?.spark || {});
+  const ln = rows.filter(t => t.kind === 0).length, missing = rows.filter(t => t.kind === 0 && !t.memo).length;
+  $('#vs-ln-text').textContent = have ? `${sats(have)} transfer${have === 1 ? '' : 's'} carr${have === 1 ? 'ies' : 'y'} the description its invoice was given${missing ? `; ${sats(missing)} Lightning receive${missing === 1 ? '' : 's'} on the list still ${missing === 1 ? 'has' : 'have'} none` : ''}.`
+    : ln ? `${sats(ln)} Lightning receive${ln === 1 ? '' : 's'} on the list; none carries its description yet.` : 'No Lightning receives on the list yet.';
+  const root = $('#vs-ln-words'); if (root.open && !root.querySelector('.seed-grid input')) seedBuild(12, root);
+}
+$('#vs-ln-words').addEventListener('toggle', () => { const root = $('#vs-ln-words'); if (root.open) { if (!root.querySelector('.seed-grid input')) seedBuild(12, root); else seedRoot = root; } else seedClear(); });
+$('#vs-ln-go').onclick = async () => {
+  if (!vault || !vault.spark) return;
+  const root = $('#vs-ln-words'), words = [...root.querySelectorAll('.seed-grid input')].map(i => i.value.trim().toLowerCase()).filter(Boolean).join(' ');
+  if (!words) return toast('Type the wallet\u2019s seed words first');
+  const ids = Object.keys(txFacts[vault.name]?.spark || {}); if (!ids.length) return toast('Sync the wallet first, so there are transfers to ask about.');
+  const b = $('#vs-ln-go'), note = $('#vs-ln-note'), me = vault.name; b.disabled = true; note.textContent = 'Signing in to the Lightning service and reading\u2026';
+  try {
+    const got = await invoke('spark_memos', { name: me, words, ids }); seedClear();
+    for (const m of got) { const t = txFacts[me]?.spark?.[m.id]; if (t) t.memo = m.text; }
+    const st = await invoke('store_get'); store = st; const v = store.vaults.find(x => x.name === me); if (v && vault && vault.name === me) vault = v;
+    note.textContent = got.length ? `${sats(got.length)} description${got.length === 1 ? '' : 's'} read and kept.` : 'The service had no description for any of these transfers.';
+    renderLnCard(); if (vault && vault.name === me) paintActivity();
+  } catch (e) { note.textContent = ''; fail(e); }
+  finally { b.disabled = false; }
+};
 
 // ---------- a node vault: retire it (keep the ledger) or read it again ----------
 function renderNodeCard() {

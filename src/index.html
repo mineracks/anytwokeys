@@ -237,6 +237,19 @@
             </details>
             <div id="vs-node-note" aria-live="polite" style="font-size:14px;line-height:1.45"></div>
           </div>
+          <div class="card" id="vs-ln-card" hidden><div class="label">Lightning descriptions</div>
+            <div class="muted" style="font-size:13px" id="vs-ln-text"></div>
+            <details class="seed-root" id="vs-ln-words"><summary>Read them from the Lightning service</summary>
+              <div class="stack" style="margin-top:12px">
+                <div class="sk-warn"><b>This needs the wallet’s seed words, for this read only.</b> Spark’s operators keep no text about a payment; the service that carried each Lightning payment into Spark keeps the invoice, and answers only the wallet’s owner. The words make the owner key, which signs one login and is forgotten. Nothing is sent to the service but that signature and the transfer ids.</div>
+                <div class="field"><div class="row" style="justify-content:space-between;align-items:center"><div class="label">Seed words</div><div class="pick tight seed-len"><div class="opt on" data-n="12">12</div><div class="opt" data-n="24">24</div></div></div>
+                  <div class="seed-grid"></div>
+                  <div class="row seed-suggest" style="gap:var(--s2);flex-wrap:wrap;min-height:34px" aria-live="polite"></div>
+                  <div class="seed-count" style="font-size:14px" aria-live="polite"></div></div>
+                <div class="row" style="gap:10px;align-items:center;flex-wrap:wrap"><button class="btn primary" type="button" id="vs-ln-go">Read the descriptions</button><span class="muted" id="vs-ln-note" style="font-size:13px" aria-live="polite"></span></div>
+              </div>
+            </details>
+          </div>
           <div class="card" id="vs-sp-card" hidden><div class="label">Silent payments</div>
             <div id="vs-sp-on" class="stack" hidden>
               <dl class="tx-dl" id="vs-sp-facts"></dl>
