@@ -743,6 +743,14 @@ async fn vault_activity(name: String, history: Vec<(String, i32)>, ccy: String) 
             // With the wallet's own key on the card, the session reaches the Lightning service provider too: every
             // transfer still without its description is asked about now, and what comes back is kept with the vault.
             let mut memos = sp.memos.clone();
+            // memos kept by an earlier read may be the provider's base64 form: show the words, and file them so once
+            let fixed: Vec<(String, String)> = memos.iter().filter_map(|(id, m)| { let p = spark_ssp::plain(m); (p != *m).then(|| (id.clone(), p)) }).collect();
+            if !fixed.is_empty() {
+                for (id, p) in &fixed { memos.insert(id.clone(), p.clone()); }
+                if let Ok(mut fresh) = wallet::load() {
+                    if let Some(fsp) = fresh.vaults.iter_mut().find(|x| x.name == v.name).and_then(|x| x.spark.as_mut()) { for (id, p) in &fixed { fsp.memos.insert(id.clone(), p.clone()); } let _ = wallet::save(&fresh); }
+                }
+            }
             if let Some(token) = session.as_ref().and_then(|s| s.lightning.as_ref()) {
                 let want: Vec<String> = list.iter().filter(|t| !memos.contains_key(&t.id)).map(|t| t.id.clone()).collect();
                 if !want.is_empty() {

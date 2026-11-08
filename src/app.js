@@ -5140,11 +5140,16 @@ function renderLnCard() {
 }
 async function lnCards() {
   let cs = []; try { cs = await invoke('cards_list'); } catch {}
-  const spares = cs.filter(c => !c.pubkey), sel = $('#vs-ln-cards'), was = sel.value;
-  sel.innerHTML = spares.length ? spares.map(c => `<option value="${esc(c.reader)}">${esc(modelName(c.form, c.nfc))} \u00b7 serial ${c.serial}</option>`).join('') : '<option value="">plug in a set-up card with an empty signing slot</option>';
-  if (was && spares.some(c => c.reader === was)) sel.value = was;
+  const sp = vault && vault.spark, spares = cs.filter(c => !c.pubkey), sel = $('#vs-ln-cards'), was = sel.value;
+  // every plugged-in key is named; one whose signing slot already holds a key is shown, but cannot be chosen, with why
+  const why = c => sp && c.pubkey === sp.reader_pubkey && String(c.serial) === sp.reader_card ? 'this wallet\u2019s reader: its slot is taken' : sp && c.pubkey === sp.identity ? 'already holds this wallet\u2019s own key' : 'its signing slot already holds a key';
+  sel.innerHTML = cs.length ? cs.map(c => `<option value="${esc(c.reader)}"${c.pubkey ? ' disabled' : ''}>${esc(modelName(c.form, c.nfc))} \u00b7 serial ${c.serial}${c.pubkey ? ` \u2014 ${why(c)}` : ''}</option>`).join('') : '<option value="">plug in a set-up card with an empty signing slot</option>';
+  sel.value = was && spares.some(c => c.reader === was) ? was : (spares[0] ? spares[0].reader : '');
   $('#vs-ln-write').disabled = !spares.length;
+  const sig = cs.map(c => c.serial + ':' + !!c.pubkey).join(','); if (sig !== lnCards.sig) { lnCards.sig = sig; if (cs.length && !spares.length) $('#vs-ln-write-note').textContent = 'Every key plugged in already holds a signing key. This needs a card with an empty signing slot: the wallet\u2019s own key is never written over another.'; else if (spares.length) $('#vs-ln-write-note').textContent = ''; }
 }
+// while the form is on screen, keys are looked for on their own, the way the lock screen does
+setInterval(() => { const root = $('#vs-ln-words'); if (root && root.open && !$('#vs-ln-card-form').hidden && !$('#vs-ln-card').hidden) lnCards().catch(() => {}); }, 2500);
 $('#vs-ln-write').onclick = async () => {
   if (!vault || !vault.spark) return;
   const root = $('#vs-ln-words'), words = [...root.querySelectorAll('.seed-grid input')].map(i => i.value.trim().toLowerCase()).filter(Boolean).join(' ');

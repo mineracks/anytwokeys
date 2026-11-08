@@ -976,3 +976,6 @@ mod tests {
         assert!(passes.load(Ordering::Relaxed) > 0, "the polls never completed a pass");
     }
 }
+
+#[cfg(test)]
+mod live_list { #[test] #[ignore] fn live_list_prints_what_is_plugged_in() { match super::list() { Ok(cs) => for c in cs { println!("LIST serial={} key={} touch={} form={} maker={} reader={}", c.serial, c.pubkey.is_some(), c.touch, c.form, c.maker, c.reader); }, Err(e) => println!("LIST error: {e}") } } }

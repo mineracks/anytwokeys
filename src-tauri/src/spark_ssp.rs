@@ -68,9 +68,10 @@ pub fn memos(token: &str, ids: &[String]) -> R<Vec<Memo>> {
             let kind = ur.get("__typename").and_then(|v| v.as_str()).unwrap_or("");
             let (text, kind) = match kind {
                 "LightningReceiveRequest" => {
-                    let memo = ur.pointer("/invoice/memo").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
-                    let from_invoice = || ur.pointer("/invoice/encoded_invoice").and_then(|v| v.as_str()).and_then(bolt11_description);
-                    (memo.or_else(from_invoice), "Lightning receive")
+                    // the invoice's own words first (what the payer saw); the provider's memo field otherwise
+                    let from_invoice = ur.pointer("/invoice/encoded_invoice").and_then(|v| v.as_str()).and_then(bolt11_description);
+                    let memo = || ur.pointer("/invoice/memo").and_then(|v| v.as_str()).map(plain).filter(|s| !s.is_empty());
+                    (from_invoice.or_else(memo), "Lightning receive")
                 }
                 "LightningSendRequest" => (ur.get("encoded_invoice").and_then(|v| v.as_str()).and_then(bolt11_description), "Lightning send"),
                 _ => (None, kind),
@@ -87,6 +88,23 @@ pub fn read(words: Zeroizing<String>, sp: &wallet::Spark, ids: &[String]) -> R<V
     let token = login(&key.public(), |d| key.sign(d))?;
     drop(key);
     memos(&token, ids)
+}
+
+/// A memo as people wrote it. Wallet of Satoshi's Lightning-address server files its memo base64-encoded
+/// ("TWluaW5nIHJld2FyZCBmb3IgYmxvY2sg…" for "Mining reward for block …"); a memo that is wholly base64 and decodes
+/// to readable text is shown decoded. Anything else is kept as it came, trimmed.
+pub fn plain(memo: &str) -> String {
+    let t = memo.trim();
+    let looks = t.len() >= 8 && t.len() % 4 == 0 && t.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=') && t.bytes().any(|b| b.is_ascii_uppercase()) && t.bytes().any(|b| b.is_ascii_lowercase());
+    if looks {
+        if let Ok(bytes) = B64.decode(t) {
+            if let Ok(text) = String::from_utf8(bytes) {
+                let text = text.trim();
+                if !text.is_empty() && text.chars().all(|c| !c.is_control() || c == '\n' || c == '\t') { return text.to_string(); }
+            }
+        }
+    }
+    t.to_string()
 }
 
 /// The `d` field of a BOLT 11 invoice, which is where a payer's or a wallet's words about the payment are written.
@@ -151,6 +169,15 @@ mod tests {
         assert!(token.len() > 20);
         let got = memos(&token, &["00000000-0000-0000-0000-000000000000".to_string()]).expect("an empty answer");
         assert!(got.is_empty());
+    }
+    #[test]
+    fn a_base64_memo_is_shown_as_its_words() {
+        assert_eq!(plain("TWluaW5nIHJld2FyZCBmb3IgYmxvY2sgMDAwMDAwMDAwMDAwMDAwMA=="), "Mining reward for block 0000000000000000");
+        assert_eq!(plain("  Coffee  "), "Coffee");
+        assert_eq!(plain("Mining reward"), "Mining reward");   // a space: never base64
+        assert_eq!(plain("ABCDEFGH"), "ABCDEFGH");           // no lowercase: left alone
+        assert_eq!(plain("abcdefgh"), "abcdefgh");           // no uppercase: left alone
+        assert_eq!(plain("Zm9v8PDw"), "Zm9v8PDw");           // decodes to bytes that are not text
     }
     #[test]
     fn rubbish_is_not_an_invoice() {
