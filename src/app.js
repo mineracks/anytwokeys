@@ -5131,22 +5131,29 @@ function renderLnCard() {
   if (card.hidden) return;
   const have = Object.keys(vault.spark.memos || {}).length, rows = Object.values(txFacts[vault.name]?.spark || {});
   const ln = rows.filter(t => t.kind === 0).length, missing = rows.filter(t => t.kind === 0 && !t.memo).length;
-  const owner = vault.spark.owner_card ? `The wallet\u2019s own key is on card ${esc(vault.spark.owner_card)}: unlocking with that card reads the descriptions with every sync (two touches: Spark, then the Lightning service). ` : '';
+  const owner = vault.spark.owner_card ? `The wallet\u2019s own key is in the ${slotName(vault.spark.owner_slot)} of card ${esc(vault.spark.owner_card)}: unlocking with that card reads the descriptions with every sync (two touches: Spark, then the Lightning service). ` : '';
   $('#vs-ln-text').innerHTML = owner + esc(have ? `${sats(have)} transfer${have === 1 ? '' : 's'} carr${have === 1 ? 'ies' : 'y'} the description its invoice was given${missing ? `; ${sats(missing)} Lightning receive${missing === 1 ? '' : 's'} on the list still ${missing === 1 ? 'has' : 'have'} none` : ''}.`
     : ln ? `${sats(ln)} Lightning receive${ln === 1 ? '' : 's'} on the list; none carries its description yet.` : 'No Lightning receives on the list yet.');
   $('#vs-ln-words').querySelector('summary').textContent = vault.spark.owner_card ? 'Read them once with the words instead' : 'Read them from the Lightning service';
   $('#vs-ln-card-form').hidden = !!vault.spark.owner_card;
   const root = $('#vs-ln-words'); if (root.open && !root.querySelector('.seed-grid input')) seedBuild(12, root);
 }
+const ownerSlotFor = c => !c.pubkey ? 'sig' : !c.aut_pubkey ? 'aut' : null;
+const slotName = s => s === 'aut' ? 'authentication slot' : 'signature slot';
+const holdsOwner = (c, sp) => !!sp && String(c.serial) === sp.owner_card && (c[(sp.owner_slot || 'sig') === 'aut' ? 'aut_pubkey' : 'pubkey'] === sp.identity);
 async function lnCards() {
   let cs = []; try { cs = await invoke('cards_list'); } catch {}
-  const sp = vault && vault.spark, spares = cs.filter(c => !c.pubkey), sel = $('#vs-ln-cards'), was = sel.value;
-  // every plugged-in key is named; one whose signing slot already holds a key is shown, but cannot be chosen, with why
-  const why = c => sp && c.pubkey === sp.reader_pubkey && String(c.serial) === sp.reader_card ? 'this wallet\u2019s reader: its slot is taken' : sp && c.pubkey === sp.identity ? 'already holds this wallet\u2019s own key' : 'its signing slot already holds a key';
-  sel.innerHTML = cs.length ? cs.map(c => `<option value="${esc(c.reader)}"${c.pubkey ? ' disabled' : ''}>${esc(modelName(c.form, c.nfc))} \u00b7 serial ${c.serial}${c.pubkey ? ` \u2014 ${why(c)}` : ''}</option>`).join('') : '<option value="">plug in a set-up card with an empty signing slot</option>';
+  const sp = vault && vault.spark, sel = $('#vs-ln-cards'), was = sel.value;
+  // A key has two signing slots; the wallet's own key takes whichever is empty, so the reader card itself can hold
+  // it beside the reader key. Every plugged-in key is named; one with no room, or already holding the key, says so.
+  const taken = c => c.pubkey === sp?.identity || c.aut_pubkey === sp?.identity ? 'already holds this wallet\u2019s own key' : 'both of its signing slots hold keys';
+  const usable = c => !taken(c).startsWith('already') && ownerSlotFor(c);
+  const spares = cs.filter(usable);
+  const where = c => { const slot = ownerSlotFor(c); const reader = sp && c.pubkey === sp.reader_pubkey && String(c.serial) === sp.reader_card; return slot === 'sig' ? 'empty signature slot' : reader ? 'this wallet\u2019s reader; its authentication slot is free' : 'signature slot taken; its authentication slot is free'; };
+  sel.innerHTML = cs.length ? cs.map(c => `<option value="${esc(c.reader)}"${usable(c) ? '' : ' disabled'}>${esc(modelName(c.form, c.nfc))} \u00b7 serial ${c.serial} \u2014 ${usable(c) ? where(c) : taken(c)}</option>`).join('') : '<option value="">plug in a set-up key</option>';
   sel.value = was && spares.some(c => c.reader === was) ? was : (spares[0] ? spares[0].reader : '');
   $('#vs-ln-write').disabled = !spares.length;
-  const sig = cs.map(c => c.serial + ':' + !!c.pubkey).join(','); if (sig !== lnCards.sig) { lnCards.sig = sig; if (cs.length && !spares.length) $('#vs-ln-write-note').textContent = 'Every key plugged in already holds a signing key. This needs a card with an empty signing slot: the wallet\u2019s own key is never written over another.'; else if (spares.length) $('#vs-ln-write-note').textContent = ''; }
+  const sig = cs.map(c => c.serial + ':' + !!c.pubkey + ':' + !!c.aut_pubkey).join(','); if (sig !== lnCards.sig) { lnCards.sig = sig; $('#vs-ln-write-note').textContent = cs.length && !spares.length ? 'No key plugged in has a free signing slot for this wallet\u2019s own key. It is never written over another key.' : ''; }
 }
 // while the form is on screen, keys are looked for on their own, the way the lock screen does
 setInterval(() => { const root = $('#vs-ln-words'); if (root && root.open && !$('#vs-ln-card-form').hidden && !$('#vs-ln-card').hidden) lnCards().catch(() => {}); }, 2500);
@@ -5157,9 +5164,9 @@ $('#vs-ln-write').onclick = async () => {
   if (!words) return toast('Type the wallet\u2019s seed words first'); if (!reader) return toast('Plug in a set-up card with an empty signing slot'); if (!admin) return toast('Enter the card\u2019s admin PIN');
   const b = $('#vs-ln-write'), note = $('#vs-ln-write-note'), me = vault.name; b.disabled = true; note.textContent = 'Checking the words against the wallet, then writing the key to the card\u2026';
   try {
-    const serial = await invoke('spark_owner_import', { name: me, reader, adminPin: admin, words }); seedClear(); $('#vs-ln-admin').value = '';
+    const { serial, slot } = await invoke('spark_owner_import', { name: me, reader, adminPin: admin, words }); seedClear(); $('#vs-ln-admin').value = '';
     const st = await invoke('store_get'); store = st; const v = store.vaults.find(x => x.name === me); if (v && vault && vault.name === me) vault = v;
-    note.textContent = `Written. Card ${serial} now opens this wallet and its Lightning descriptions; unlock with it next time.`;
+    note.textContent = `Written to the ${slotName(slot)} of card ${serial}. It now opens this wallet and its Lightning descriptions; unlock with it next time.`;
     renderLnCard();
   } catch (e) { note.textContent = ''; fail(e); }
   finally { b.disabled = false; }
@@ -5655,7 +5662,7 @@ async function sparkUnlockCards() {
   const sp = p.v.spark;
   let cs = []; try { cs = await invoke('cards_list'); } catch {}
   if (!sparkUnlockPending || sparkUnlockPending !== p || p.busy) return;
-  const owner = sp.owner_card ? cs.find(c => c.pubkey === sp.identity && String(c.serial) === sp.owner_card && (c.touch === 'FIXED' || isCard(c.form))) : null;
+  const owner = sp.owner_card ? cs.find(c => holdsOwner(c, sp) && (c[(sp.owner_slot || 'sig') === 'aut' ? 'aut_touch' : 'touch'] === 'FIXED' || isCard(c.form))) : null;
   const mine = owner || cs.find(c => c.pubkey === sp.reader_pubkey && String(c.serial) === sp.reader_card && (c.touch === 'FIXED' || isCard(c.form)));
   p.asOwner = !!owner;
   p.other = !mine && cs.length ? cs[0].serial : null;

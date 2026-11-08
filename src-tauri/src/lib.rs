@@ -547,7 +547,7 @@ async fn card_import(reader: String, admin_pin: String, words: String, expect: S
         let s = secret::secret_of(&secret::from_words(&words)?)?;
         if secret::pubkey_of(&s) != expect.to_lowercase() { return Err("those words are not this key's: the key they carry is a different one. Check them against the page".into()); }
         let card = cards::list().map_err(|e| e.to_string())?.into_iter().find(|c| c.reader == reader).ok_or("that card is no longer plugged in")?;
-        cards::import_empty(&reader, &admin, card.serial, &s, &secret::point_of(&s), None).map_err(|e| e.to_string())
+        cards::import_empty(&reader, &admin, card.serial, &s, &secret::point_of(&s), None, cards::Slot::Sig).map_err(|e| e.to_string())
     }).await
 }
 
@@ -1125,7 +1125,7 @@ async fn spark_restore(name: String, address: String) -> R<Vault> {
             return Err(if balance > 0 { "Spark will not list this wallet's transfers — its privacy setting is on. The balance can be read but the history cannot, so there is nothing here to account with.".into() }
                 else { "Spark shows nothing under this address: no balance and no transfers. That is what an EMPTY wallet looks like — and also exactly what a wallet with its privacy setting on looks like, since a private wallet answers with nothing rather than with a refusal. If you know this wallet holds sats, its privacy setting is on (Wallet of Satoshi's wallets are), and authenticated reader enrolment can grant access without turning privacy off.".into() });
         }
-        let mut v = Vault { watch: None, spark: Some(wallet::Spark { address: address.trim().to_string(), identity, reader_pubkey: String::new(), reader_card: String::new(), authenticated: false, memos: Default::default(), owner_card: String::new() }), muun: None, statement: None, node: None,
+        let mut v = Vault { watch: None, spark: Some(wallet::Spark { address: address.trim().to_string(), identity, reader_pubkey: String::new(), reader_card: String::new(), authenticated: false, memos: Default::default(), owner_card: String::new(), owner_slot: None }), muun: None, statement: None, node: None,
             name, network, threshold: 1, keys: Vec::new(), descriptor: String::new(), address: address.trim().to_string(),
             created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
             labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
@@ -1191,7 +1191,7 @@ fn spark_vault(mut s: Store, name: String, address: String, identity: String, ne
     if let Some(v) = s.vaults.iter().find(|v| v.spark.as_ref().map(|x| x.identity == identity).unwrap_or(false)) {
         return Err(format!("this Spark wallet is already here, as '{}'", v.name));
     }
-    let v = new_spark_vault(name, wallet::Spark { address, identity, reader_pubkey: String::new(), reader_card: String::new(), authenticated: false, memos: Default::default(), owner_card: String::new() }, network);
+    let v = new_spark_vault(name, wallet::Spark { address, identity, reader_pubkey: String::new(), reader_card: String::new(), authenticated: false, memos: Default::default(), owner_card: String::new(), owner_slot: None }, network);
     s.vaults.push(v.clone());
     wallet::save(&s)?;
     Ok(v)
@@ -1609,7 +1609,7 @@ async fn spark_memos(name: String, words: String, ids: Vec<String>) -> R<Vec<spa
 #[tauri::command]
 /// The wallet's own key onto a card with an empty signing slot, from the words: from then on that card opens Spark
 /// and the Lightning service provider at every unlock, and the descriptions arrive with every sync.
-async fn spark_owner_import(name: String, reader: String, admin_pin: String, words: String) -> R<String> {
+async fn spark_owner_import(name: String, reader: String, admin_pin: String, words: String) -> R<spark_auth::OwnerCard> {
     let admin = zeroize::Zeroizing::new(admin_pin);
     let words = zeroize::Zeroizing::new(words);
     block(move || spark_auth::owner_import(name, reader, admin, words)).await

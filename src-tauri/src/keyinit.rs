@@ -10,7 +10,7 @@
 //!  * A factory PIN is only ever tried on a key that LOOKS untouched in every way that can be read without a PIN.
 //!    Changing the PIN is itself the test: a key PIN try that misses is repaired by the next right one, an admin PIN
 //!    try that misses three times is repaired by nothing — so the key PIN goes first.
-use crate::cards::{self, apdu, apdu_more, app_data, find, maker_of, pin_refusal, probe, read_sig_pubkey, readers, select, serial_of, tlv, verify, CardError, Maker, Probe, OID_SECP256K1};
+use crate::cards::{self, apdu, apdu_more, app_data, find, maker_of, pin_refusal, probe, read_pubkey, readers, select, serial_of, tlv, verify, CardError, Maker, Probe, OID_SECP256K1};
 use crate::transport::{Card, Wire};
 use serde::Serialize;
 
@@ -121,7 +121,7 @@ pub(crate) fn pgp_facts(card: &dyn Wire) -> Result<(OpenPgp, Option<[u8; 33]>), 
     // KDF (F9): 81 01 03 means iterated-salted hashing is on. A card too old to have the object has none.
     p.kdf = apdu(card, 0x00, 0xCA, 0x00, 0xF9, &[]).ok().and_then(|raw| find(inside(&raw, 0xF9), 0x81).map(|v| v.first().copied().unwrap_or(0) != 0)).unwrap_or(false);
     let is_k1 = find(disc, 0xC1).map(|a| a.len() >= 6 && a[0] == 0x13 && &a[1..6] == OID_SECP256K1).unwrap_or(false);
-    let ours = if is_k1 { read_sig_pubkey(card) } else { None };
+    let ours = if is_k1 { read_pubkey(card, cards::Slot::Sig) } else { None };
     Ok((p, ours))
 }
 
@@ -377,7 +377,7 @@ pub fn make_key(serial: u32, admin: &str, touch: Option<bool>) -> Result<String,
 pub fn make_key_from(serial: u32, admin: &str, secret: &crate::secret::Secret, touch: Option<bool>) -> Result<String, String> {
     let (card, reader) = open(serial).map_err(|e| e.to_string())?;
     drop(card);
-    cards::import_empty(&reader, admin, serial, secret, &crate::secret::point_of(secret), touch).map_err(|e| e.to_string())
+    cards::import_empty(&reader, admin, serial, secret, &crate::secret::point_of(secret), touch, cards::Slot::Sig).map_err(|e| e.to_string())
 }
 
 /// The first signature: key PIN, a touch, and the answer checked against the public key the key just made.
@@ -387,7 +387,7 @@ pub fn prove(serial: u32, user: &str, pubkey: &str) -> Result<(), String> {
     drop(card);
     let pk = bitcoin::secp256k1::PublicKey::from_str(pubkey).map_err(|_| "that public key is damaged")?;
     let digest: [u8; 32] = crate::lockbox::random();
-    let (r, s) = cards::sign_digest_checked(&reader, user, &digest, &pk.serialize()).map_err(|e| e.to_string())?;
+    let (r, s) = cards::sign_digest_checked(&reader, user, &digest, &pk.serialize(), cards::Slot::Sig).map_err(|e| e.to_string())?;
     let mut compact = [0u8; 64]; compact[..32].copy_from_slice(&r); compact[32..].copy_from_slice(&s);
     let sig = bitcoin::secp256k1::ecdsa::Signature::from_compact(&compact).map_err(|_| "the key's signature could not be read")?;
     bitcoin::secp256k1::Secp256k1::verification_only().verify_ecdsa(&bitcoin::secp256k1::Message::from_digest(digest), &sig, &pk)

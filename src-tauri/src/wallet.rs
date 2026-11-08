@@ -427,6 +427,9 @@ pub struct Spark {
     /// Spark and the Lightning service provider, so descriptions arrive with every sync; it can also sign for the
     /// wallet, which the person accepted when writing it
     #[serde(default)] pub owner_card: String,
+    /// Which slot on that card holds it: the signature slot, or the authentication slot when the card's signature slot
+    /// was already taken (by this wallet's reader key, say). Absent in stores written before 8 Nov 2026: signature.
+    #[serde(default)] pub owner_slot: Option<crate::cards::Slot>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

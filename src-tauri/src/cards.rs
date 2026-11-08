@@ -105,6 +105,38 @@ pub struct CardInfo {
     pub maker: String,            // yubico · nitrokey · token2 · other — from the AID, never the reader's name
     pub device: String,           // the devices.js id: yubikey · nitrokey3 · token2key · token2card · card
     pub pinpad: bool,             // the reader can take the PIN on its own keypad (a class-3 reader; the PIN never reaches this computer)
+    pub aut_pubkey: Option<String>, // the same for the AUTHENTICATION slot, the second place a secp256k1 key can sign from
+    pub aut_touch: String,
+}
+impl CardInfo {
+    pub fn key(&self, slot: Slot) -> Option<&str> { match slot { Slot::Sig => self.pubkey.as_deref(), Slot::Aut => self.aut_pubkey.as_deref() } }
+    pub fn touch_of(&self, slot: Slot) -> &str { match slot { Slot::Sig => &self.touch, Slot::Aut => &self.aut_touch } }
+}
+
+/// The two OpenPGP slots this app signs from. Every key so far has lived in the SIGNATURE slot (PSO:CDS, PIN mode 81).
+/// The AUTHENTICATION slot (INTERNAL AUTHENTICATE, PIN mode 82) is a second, independent signing slot with its own
+/// touch policy, so one YubiKey can carry a second role — a Spark wallet's own key beside its reader key — without
+/// anything being written over. Each slot knows its own tags; nothing else in this file names them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Slot { Sig, Aut }
+impl Slot {
+    /// Control reference template: which key GENERATE / key import / read-public-key talk about.
+    fn crt(self) -> &'static [u8] { match self { Slot::Sig => &[0xB6, 0x00], Slot::Aut => &[0xA4, 0x00] } }
+    /// Algorithm attributes data object.
+    fn attrs(self) -> u16 { match self { Slot::Sig => 0xC1, Slot::Aut => 0xC3 } }
+    /// User interaction flag (touch policy) data object.
+    fn uif(self) -> u8 { match self { Slot::Sig => 0xD6, Slot::Aut => 0xD8 } }
+    /// Key reference in the Key Information object (DE), and the slot's 20-byte run in the fingerprints (C5).
+    fn key_ref(self) -> u8 { match self { Slot::Sig => 1, Slot::Aut => 3 } }
+    fn fingerprint_at(self) -> usize { match self { Slot::Sig => 0, Slot::Aut => 40 } }
+    /// The PIN mode the signing command checks.
+    fn pin_mode(self) -> u8 { match self { Slot::Sig => 0x81, Slot::Aut => 0x82 } }
+    /// The signing command itself, over a 32-byte digest.
+    fn sign(self, card: &dyn Wire, digest: &[u8; 32]) -> Result<Vec<u8>, CardError> {
+        match self { Slot::Sig => apdu(card, 0x00, 0x2A, 0x9E, 0x9A, digest), Slot::Aut => apdu(card, 0x00, 0x88, 0x00, 0x00, digest) }
+    }
+    pub fn name(self) -> &'static str { match self { Slot::Sig => "signature", Slot::Aut => "authentication" } }
 }
 
 
@@ -249,8 +281,8 @@ fn compress(point: &[u8]) -> Option<[u8; 33]> {
     Some(out)
 }
 
-pub(crate) fn read_sig_pubkey(card: &dyn Wire) -> Option<[u8; 33]> {
-    let resp = apdu(card, 0x00, 0x47, 0x81, 0x00, &[0xB6, 0x00]).ok()?;
+pub(crate) fn read_pubkey(card: &dyn Wire, slot: Slot) -> Option<[u8; 33]> {
+    let resp = apdu(card, 0x00, 0x47, 0x81, 0x00, slot.crt()).ok()?;
     let pk = find(&resp, 0x7F49)?;
     let point = find(pk, 0x86)?;
     compress(point)
@@ -320,17 +352,17 @@ fn list_once() -> Result<Vec<CardInfo>, CardError> {
         let maker = Maker::of(aid);
         let version = format!("OpenPGP {}.{}", aid[6], aid[7]);
         let serial = maker.serial(aid);
-        // algorithm attributes for SIG live inside 6E → 73 → C1; only a secp256k1 key counts
+        // algorithm attributes live inside 6E → 73 → C1 (SIG) / C3 (AUT); only a secp256k1 key counts
         let disc = find(&ad, 0x73).unwrap_or(&[]);
-        let is_k1 = find(disc, 0xC1).map(|a| a.len() >= 6 && a[0] == 0x13 && &a[1..6] == OID_SECP256K1).unwrap_or(false);
-        let pubkey = if is_k1 { read_sig_pubkey(&card).map(hex::encode) } else { None };
-        let touch = apdu(&card, 0x00, 0xCA, 0x00, 0xD6, &[]).ok()
-            .and_then(|v| v.first().copied())
-            .map(|u| match u { 0 => "OFF", 1 => "ON", 2 => "FIXED", 3 => "CACHED", 4 => "CACHED_FIXED", _ => "?" }.to_string())
-            .unwrap_or_else(|| "?".into());
+        let key_in = |slot: Slot| -> Option<String> {
+            let is_k1 = find(disc, slot.attrs()).map(|a| a.len() >= 6 && a[0] == 0x13 && &a[1..6] == OID_SECP256K1).unwrap_or(false);
+            if is_k1 { read_pubkey(&card, slot).map(hex::encode) } else { None }
+        };
+        let (pubkey, aut_pubkey) = (key_in(Slot::Sig), key_in(Slot::Aut));
+        let (touch, aut_touch) = (touch_word(&card, Slot::Sig), touch_word(&card, Slot::Aut));
         let (form, nfc, firmware) = hardware(&card, maker, serial, &reader);
         let pinpad = card.pinpad();
-        out.push(CardInfo { reader, serial, version, pubkey, touch, form, nfc, firmware, maker: maker.name().into(), device: maker.device(form).into(), pinpad });
+        out.push(CardInfo { reader, serial, version, pubkey, touch, form, nfc, firmware, maker: maker.name().into(), device: maker.device(form).into(), pinpad, aut_pubkey, aut_touch });
     }
     if out.is_empty() {
         return Err(CardError::NotFound);
@@ -342,25 +374,30 @@ fn list_once() -> Result<Vec<CardInfo>, CardError> {
 /// has nothing to touch, and FIXED on it would end its signing for good — so never. A Token2 reached by NFC could be
 /// either, and the walk ASKS (`asked`); with no answer the safe side is taken: no touch policy is written, which
 /// leaves a key weaker but never leaves a card dead.
+fn touch_word(card: &dyn Wire, slot: Slot) -> String {
+    apdu(card, 0x00, 0xCA, 0x00, slot.uif(), &[]).ok().and_then(|v| v.first().copied())
+        .map(|u| match u { 0 => "OFF", 1 => "ON", 2 => "FIXED", 3 => "CACHED", 4 => "CACHED_FIXED", _ => "?" }.to_string())
+        .unwrap_or_else(|| "?".into())
+}
 fn wants_touch(card: &dyn Wire, reader: &str, asked: Option<bool>) -> Result<bool, CardError> {
     let ad = app_data(card)?;
     let form = maker_of(&ad).form_for(reader);
     Ok(match has_button(form) { Some(b) => b, None => asked.unwrap_or(false) })
 }
 /// Lock touch to FIXED (2, button 0x20) and read it back. One-way: the card refuses to lower it afterwards.
-fn fix_touch(card: &dyn Wire) -> Result<bool, CardError> {
+fn fix_touch(card: &dyn Wire, slot: Slot) -> Result<bool, CardError> {
     // A slot whose policy is already FIXED (a key was set up here before and later removed) refuses every write to
     // the policy, the same value included: read first, write only when it is not yet fixed.
-    if apdu(card, 0x00, 0xCA, 0x00, 0xD6, &[])?.first() == Some(&2) { return Ok(true); }
-    apdu(card, 0x00, 0xDA, 0x00, 0xD6, &[0x02, 0x20])?;
-    Ok(apdu(card, 0x00, 0xCA, 0x00, 0xD6, &[])?.first() == Some(&2))
+    if apdu(card, 0x00, 0xCA, 0x00, slot.uif(), &[])?.first() == Some(&2) { return Ok(true); }
+    apdu(card, 0x00, 0xDA, 0x00, slot.uif(), &[0x02, 0x20])?;
+    Ok(apdu(card, 0x00, 0xCA, 0x00, slot.uif(), &[])?.first() == Some(&2))
 }
 /// What the touch policy must read at signing time for the key to be the one that was set up here: FIXED on a
 /// device with a button, OFF on a card, and either for a Token2 over NFC (its shape is not known from there).
-pub(crate) fn touch_as_set_up(card: &dyn Wire, reader: &str) -> Result<(), CardError> {
+pub(crate) fn touch_as_set_up(card: &dyn Wire, reader: &str, slot: Slot) -> Result<(), CardError> {
     let ad = app_data(card)?;
     let form = maker_of(&ad).form_for(reader);
-    let uif = apdu(card, 0x00, 0xCA, 0x00, 0xD6, &[])?.first().copied().unwrap_or(0xFF);
+    let uif = apdu(card, 0x00, 0xCA, 0x00, slot.uif(), &[])?.first().copied().unwrap_or(0xFF);
     let ok = match has_button(form) { Some(true) => uif == 2, Some(false) => uif == 0, None => uif == 0 || uif == 2 };
     if ok { Ok(()) } else { Err(CardError::Unverified) }
 }
@@ -375,11 +412,11 @@ fn generate_once(reader: &str, admin_pin: &str) -> Result<String, CardError> {
     verify(&card, 0x83, admin_pin)?;
     let mut attrs = vec![0x13];
     attrs.extend_from_slice(OID_SECP256K1);
-    apdu(&card, 0x00, 0xDA, 0x00, 0xC1, &attrs)?;
-    let resp = apdu(&card, 0x00, 0x47, 0x80, 0x00, &[0xB6, 0x00])?;
+    apdu(&card, 0x00, 0xDA, 0x00, Slot::Sig.attrs() as u8, &attrs)?;
+    let resp = apdu(&card, 0x00, 0x47, 0x80, 0x00, Slot::Sig.crt())?;
     let point = find(&resp, 0x7F49).and_then(|pk| find(pk, 0x86)).ok_or(CardError::Parse)?;
     let comp = compress(point).ok_or(CardError::Parse)?;
-    let ok = if touch { fix_touch(&card)? } else { true };
+    let ok = if touch { fix_touch(&card, Slot::Sig)? } else { true };
     forget_admin(&card);
     if !ok { return Err(CardError::Unverified); }
     Ok(hex::encode(comp))
@@ -390,17 +427,17 @@ fn generate_once(reader: &str, admin_pin: &str) -> Result<String, CardError> {
 pub fn sign_digest(reader: &str, pin: &str, digest: &[u8; 32]) -> Result<([u8; 32], [u8; 32]), CardError> { again(|| sign_digest_once(reader, pin, digest)) }
 fn sign_digest_once(reader: &str, pin: &str, digest: &[u8; 32]) -> Result<([u8; 32], [u8; 32]), CardError> {
     let card = connect(reader)?;
-    sign_on_card(&card, pin, digest)
+    sign_on_card(&card, pin, digest, Slot::Sig)
 }
 
 /// Recheck the public key and uncached FIXED touch policy on the SAME connection
 /// that verifies the PIN and signs; never sign after a card swap or policy change.
-pub fn sign_digest_checked(reader: &str, pin: &str, digest: &[u8;32], expected: &[u8;33]) -> Result<([u8;32], [u8;32]), CardError> { again(|| sign_digest_checked_once(reader, pin, digest, expected)) }
-fn sign_digest_checked_once(reader: &str, pin: &str, digest: &[u8;32], expected: &[u8;33]) -> Result<([u8;32], [u8;32]), CardError> {
+pub fn sign_digest_checked(reader: &str, pin: &str, digest: &[u8;32], expected: &[u8;33], slot: Slot) -> Result<([u8;32], [u8;32]), CardError> { again(|| sign_digest_checked_once(reader, pin, digest, expected, slot)) }
+fn sign_digest_checked_once(reader: &str, pin: &str, digest: &[u8;32], expected: &[u8;33], slot: Slot) -> Result<([u8;32], [u8;32]), CardError> {
     let card = connect(reader)?;
-    if read_sig_pubkey(&card).as_ref() != Some(expected) { return Err(CardError::Changed); }
-    touch_as_set_up(&card, reader)?;
-    sign_on_card(&card, pin, digest)
+    if read_pubkey(&card, slot).as_ref() != Some(expected) { return Err(CardError::Changed); }
+    touch_as_set_up(&card, reader, slot)?;
+    sign_on_card(&card, pin, digest, slot)
 }
 
 /// Spark setup is never allowed to replace a slot, including a non-secp256k1 key.
@@ -408,15 +445,15 @@ pub fn generate_empty(reader: &str, admin_pin: &str, serial: u32, touch: Option<
 fn generate_empty_once(reader: &str, admin_pin: &str, serial: u32, touch: Option<bool>) -> Result<String, CardError> {
     let mut card = connect(reader)?;
     let card = card.transaction()?;
-    require_empty(&card, serial)?;
+    require_empty(&card, serial, Slot::Sig)?;
     let touch = wants_touch(&card, reader, touch)?;
     verify(&card, 0x83, admin_pin)?;
     let mut attrs = vec![0x13]; attrs.extend_from_slice(OID_SECP256K1);
-    apdu(&card, 0x00, 0xDA, 0x00, 0xC1, &attrs)?;
-    let resp = apdu(&card, 0x00, 0x47, 0x80, 0x00, &[0xB6, 0x00])?;
+    apdu(&card, 0x00, 0xDA, 0x00, Slot::Sig.attrs() as u8, &attrs)?;
+    let resp = apdu(&card, 0x00, 0x47, 0x80, 0x00, Slot::Sig.crt())?;
     let point = find(&resp, 0x7F49).and_then(|pk| find(pk, 0x86)).ok_or(CardError::Parse)?;
     let comp = compress(point).ok_or(CardError::Parse)?;
-    let ok = (if touch { fix_touch(&card)? } else { true }) && read_sig_pubkey(&card) == Some(comp);
+    let ok = (if touch { fix_touch(&card, Slot::Sig)? } else { true }) && read_pubkey(&card, Slot::Sig) == Some(comp);
     forget_admin(&card);
     if !ok { return Err(CardError::Unverified); }
     Ok(hex::encode(comp))
@@ -425,43 +462,44 @@ fn generate_empty_once(reader: &str, admin_pin: &str, serial: u32, touch: Option
 /// The slot must be EMPTY: 6A88 by the specification, 6581 from a YubiKey 5.4, 6984 from a Token2 key or card
 /// (measured 2026-10-19: the walk's first "Make it inside the key" on the card died here, before any PIN), and a key whose public key can be
 /// read is occupied even with its fingerprints unset.
-fn require_empty(card: &dyn Wire, serial: u32) -> Result<(), CardError> {
+fn require_empty(card: &dyn Wire, serial: u32, slot: Slot) -> Result<(), CardError> {
     let ad = app_data(card)?;
     if serial_of(&ad) != serial { return Err(CardError::Changed); }
     let disc = find(&ad, 0x73).ok_or(CardError::Parse)?;
     let fingerprints = find(disc, 0xC5).ok_or(CardError::Parse)?;
-    if fingerprints.len() < 20 || fingerprints[..20].iter().any(|b| *b != 0) { return Err(CardError::Changed); }
-    // Key information (DE), where the card keeps it, says outright whether slot 1 holds anything
-    if let Some(st) = find(disc, 0xDE).filter(|d| d.len() >= 2).and_then(|d| d.chunks(2).find(|c| c.len() == 2 && c[0] == 1)) {
+    let at = slot.fingerprint_at();
+    if fingerprints.len() < at + 20 || fingerprints[at..at + 20].iter().any(|b| *b != 0) { return Err(CardError::Changed); }
+    // Key information (DE), where the card keeps it, says outright whether the slot holds anything
+    if let Some(st) = find(disc, 0xDE).filter(|d| d.len() >= 2).and_then(|d| d.chunks(2).find(|c| c.len() == 2 && c[0] == slot.key_ref())) {
         return if st[1] == 0 { Ok(()) } else { Err(CardError::Changed) };
     }
-    match apdu(card, 0x00, 0x47, 0x81, 0x00, &[0xB6, 0x00]) {
+    match apdu(card, 0x00, 0x47, 0x81, 0x00, slot.crt()) {
         Err(CardError::Sw { sw: 0x6A88 | 0x6581 | 0x6984, .. }) => Ok(()),
         Ok(_) => Err(CardError::Changed),
         Err(e) => Err(e),
     }
 }
 
-/// Write a secret made OUTSIDE the key into the EMPTY signature slot (key import, PUT DATA 4D), lock touch to
+/// Write a secret made OUTSIDE the key into an EMPTY slot (key import, PUT DATA 4D), lock touch to
 /// FIXED, and read back the public key, which must be the one the secret implies. Needs the ADMIN PIN.
 /// The template carries the scalar AND the public point: opcard (a Nitrokey 3) insists on both (measured 2026-10-10;
 /// "wrong data" without the point); the specification allows it, and a YubiKey takes the scalar-only form, which is
 /// tried second if the first is refused.
-pub fn import_empty(reader: &str, admin_pin: &str, serial: u32, secret: &[u8; 32], point: &[u8; 65], touch: Option<bool>) -> Result<String, CardError> { again(|| import_empty_once(reader, admin_pin, serial, secret, point, touch)) }
-fn import_empty_once(reader: &str, admin_pin: &str, serial: u32, secret: &[u8; 32], point: &[u8; 65], touch: Option<bool>) -> Result<String, CardError> {
+pub fn import_empty(reader: &str, admin_pin: &str, serial: u32, secret: &[u8; 32], point: &[u8; 65], touch: Option<bool>, slot: Slot) -> Result<String, CardError> { again(|| import_empty_once(reader, admin_pin, serial, secret, point, touch, slot)) }
+fn import_empty_once(reader: &str, admin_pin: &str, serial: u32, secret: &[u8; 32], point: &[u8; 65], touch: Option<bool>, slot: Slot) -> Result<String, CardError> {
     let mut card = connect(reader)?;
     let card = card.transaction()?;
-    require_empty(&card, serial)?;
+    require_empty(&card, serial, slot)?;
     let touch = wants_touch(&card, reader, touch)?;
     let want = compress(point).ok_or(CardError::Parse)?;
     verify(&card, 0x83, admin_pin)?;
     let mut attrs = vec![0x13]; attrs.extend_from_slice(OID_SECP256K1);
-    apdu(&card, 0x00, 0xDA, 0x00, 0xC1, &attrs)?;
-    // extended header list 4D { B6 00 | 7F48 { 92 20 [99 41] } | 5F48 { d [‖ Q] } }
+    apdu(&card, 0x00, 0xDA, 0x00, slot.attrs() as u8, &attrs)?;
+    // extended header list 4D { CRT | 7F48 { 92 20 [99 41] } | 5F48 { d [‖ Q] } }
     let template = |with_point: bool| -> Vec<u8> {
         let (tpl, mut data) = if with_point { (vec![0x7F, 0x48, 0x04, 0x92, 0x20, 0x99, 0x41], [&secret[..], &point[..]].concat()) } else { (vec![0x7F, 0x48, 0x02, 0x92, 0x20], secret.to_vec()) };
         let mut body = vec![0x5F, 0x48]; if data.len() > 127 { body.push(0x81); } body.push(data.len() as u8); body.append(&mut data);
-        let inner = [&[0xB6, 0x00][..], &tpl, &body].concat();
+        let inner = [slot.crt(), &tpl, &body].concat();
         let mut out = vec![0x4D]; if inner.len() > 127 { out.push(0x81); } out.push(inner.len() as u8); out.extend_from_slice(&inner); out
     };
     match apdu(&card, 0x00, 0xDB, 0x3F, 0xFF, &template(true)) {
@@ -469,21 +507,21 @@ fn import_empty_once(reader: &str, admin_pin: &str, serial: u32, secret: &[u8; 3
         Err(CardError::Sw { sw: 0x6A80, .. }) => { apdu(&card, 0x00, 0xDB, 0x3F, 0xFF, &template(false))?; }
         Err(e) => { forget_admin(&card); return Err(e); }
     }
-    let got = read_sig_pubkey(&card);
+    let got = read_pubkey(&card, slot);
     if got != Some(want) { forget_admin(&card); return Err(CardError::Unverified); }
-    let ok = if touch { fix_touch(&card)? } else { true };
+    let ok = if touch { fix_touch(&card, slot)? } else { true };
     forget_admin(&card);
     if !ok { return Err(CardError::Unverified); }
     Ok(hex::encode(want))
 }
 
-pub(crate) fn sign_on_card(card: &dyn Wire, pin: &str, digest: &[u8;32]) -> Result<([u8;32], [u8;32]), CardError> {
+pub(crate) fn sign_on_card(card: &dyn Wire, pin: &str, digest: &[u8;32], slot: Slot) -> Result<([u8;32], [u8;32]), CardError> {
     let mut raw = None;
     for _ in 0..4 {
         // verified before EVERY try: a Nitrokey 3 spends the PIN on a signature that times out, so a retry without
         // it would answer 6982 at once instead of waiting for the finger again. A YubiKey does not mind the repeat.
-        verify(&card, 0x81, pin)?;
-        match apdu(&card, 0x00, 0x2A, 0x9E, 0x9A, digest) {
+        verify(&card, slot.pin_mode(), pin)?;
+        match slot.sign(card, digest) {
             Ok(r) => { raw = Some(r); break; }
             Err(CardError::NoTouch) => continue,
             // A Nitrokey 3 answers 6982 when the touch does not come (about 15 s; its source says 6600 is "not
@@ -551,7 +589,7 @@ fn read_sealed_once() -> Result<Vec<Sealed>, CardError> {
         // its maker's cards were measured to take
         let room = maker_of(&ad).cert_room(find(&ad, 0x73).and_then(|d| find(d, 0xC0)).filter(|c| c.len() >= 6).map(|c| ((c[4] as usize) << 8) | c[5] as usize).unwrap_or(0));
         let container = apdu(&card, 0x00, 0xCA, 0x7F, 0x21, &[])?;
-        out.push(Sealed { serial: serial_of(&ad), pubkey: read_sig_pubkey(&card).map(hex::encode), reader, container, room });
+        out.push(Sealed { serial: serial_of(&ad), pubkey: read_pubkey(&card, Slot::Sig).map(hex::encode), reader, container, room });
     }
     Ok(out)
 }
@@ -610,7 +648,7 @@ fn reset_openpgp_once(reader: &str, admin_pin: &str, serial: u32) -> Result<(), 
     apdu(&card, 0x00, 0xE6, 0x00, 0x00, &[])?;
     apdu(&card, 0x00, 0x44, 0x00, 0x00, &[])?;
     select(&card)?;
-    let fresh = read_sig_pubkey(&card).is_none() && apdu(&card, 0x00, 0xCA, 0x7F, 0x21, &[]).map(|c| c.is_empty()).unwrap_or(false);
+    let fresh = read_pubkey(&card, Slot::Sig).is_none() && apdu(&card, 0x00, 0xCA, 0x7F, 0x21, &[]).map(|c| c.is_empty()).unwrap_or(false);
     if !fresh { return Err(CardError::Unverified); }
     Ok(())
 }
@@ -724,16 +762,16 @@ mod tests {
         apdu(&card, 0x00, 0xDA, 0x00, 0xC1, &attrs).unwrap();
         apdu(&card, 0x00, 0x47, 0x80, 0x00, &[0xB6, 0x00]).unwrap();
         apdu(&card, 0x00, 0xDA, 0x00, 0xC4, &[0x01]).unwrap();
-        let pk = PublicKey::from_slice(&read_sig_pubkey(&card).unwrap()).unwrap();
+        let pk = PublicKey::from_slice(&read_pubkey(&card, Slot::Sig).unwrap()).unwrap();
         let secp = Secp256k1::verification_only();
         let compact = |r: [u8; 32], s: [u8; 32]| { let mut c = [0u8; 64]; c[..32].copy_from_slice(&r); c[32..].copy_from_slice(&s); Signature::from_compact(&c).unwrap() };
         // eight signatures of one digest: every one verifies, and (random nonces) they differ
         let z = [7u8; 32]; let mut seen = std::collections::HashSet::new();
-        for _ in 0..8 { let (r, s) = sign_on_card(&card, "123456", &z).unwrap(); secp.verify_ecdsa(&Message::from_digest(z), &compact(r, s), &pk).unwrap(); seen.insert(r); }
+        for _ in 0..8 { let (r, s) = sign_on_card(&card, "123456", &z, Slot::Sig).unwrap(); secp.verify_ecdsa(&Message::from_digest(z), &compact(r, s), &pk).unwrap(); seen.insert(r); }
         assert!(seen.len() > 1, "eight signatures of one digest were all the same");
         // the rotated child: the card signs z·T⁻¹, the lifted s verifies under the child key
         let cc = [9u8; 32]; let t = crate::hd::child_scalar(&cc, &pk, 5);
-        let (r, sc) = sign_on_card(&card, "123456", &crate::hd::card_digest(&z, &t)).unwrap();
+        let (r, sc) = sign_on_card(&card, "123456", &crate::hd::card_digest(&z, &t), Slot::Sig).unwrap();
         secp.verify_ecdsa(&Message::from_digest(z), &compact(r, crate::hd::lift_s(&sc, &t)), &crate::hd::child_pubkey(&cc, &pk, 5)).unwrap();
         drop(card);
         // the seal's objects through the app's own doors: the real room, a full write, the PIN-locked secret
@@ -747,7 +785,7 @@ mod tests {
         // back to the factory: TERMINATE DF under the admin PIN, ACTIVATE FILE
         verify(&c2, 0x83, "12345678").unwrap();
         apdu(&c2, 0x00, 0xE6, 0x00, 0x00, &[]).unwrap(); apdu(&c2, 0x00, 0x44, 0x00, 0x00, &[]).unwrap(); select(&c2).unwrap();
-        assert!(read_sig_pubkey(&c2).is_none()); assert_eq!(apdu(&c2, 0x00, 0xCA, 0x7F, 0x21, &[]).unwrap().len(), 0);
+        assert!(read_pubkey(&c2, Slot::Sig).is_none()); assert_eq!(apdu(&c2, 0x00, 0xCA, 0x7F, 0x21, &[]).unwrap().len(), 0);
         let (facts, _) = crate::keyinit::pgp_facts(&c2).unwrap(); assert_eq!(crate::keyinit::judge(&facts, false).0, "fresh");
         println!("round trip done; the key is back at the factory");
     }
@@ -767,14 +805,14 @@ mod tests {
         assert_eq!(crate::keyinit::judge(&facts, ours.is_some()).0, "fresh", "not a factory-fresh key: {facts:?}");
         drop(card);
         let secret = crate::secret::secret_of(&crate::secret::from_hex("1e99423a4ed27608a15a2616a2b0e9e52ced330ac530edcc32c8ffc6a526aedd").unwrap()).unwrap();
-        let pk = import_empty(&reader, "12345678", serial, &secret, &crate::secret::point_of(&secret), None).unwrap();
+        let pk = import_empty(&reader, "12345678", serial, &secret, &crate::secret::point_of(&secret), None, Slot::Sig).unwrap();
         assert_eq!(pk, crate::secret::pubkey_of(&secret));
-        assert!(matches!(import_empty(&reader, "12345678", serial, &secret, &crate::secret::point_of(&secret), None), Err(CardError::Changed)), "an occupied slot is refused");
+        assert!(matches!(import_empty(&reader, "12345678", serial, &secret, &crate::secret::point_of(&secret), None, Slot::Sig), Err(CardError::Changed)), "an occupied slot is refused");
         // admin forgotten: a fresh connection cannot write C4 without the PIN
         let c2 = connect(&reader).unwrap();
         assert!(matches!(apdu(&c2, 0x00, 0xDA, 0x00, 0xC4, &[0x01]), Err(CardError::Sw { sw: 0x6982, .. })), "the admin PIN must be forgotten after the import");
         verify(&c2, 0x83, "12345678").unwrap(); apdu(&c2, 0x00, 0xE6, 0x00, 0x00, &[]).unwrap(); apdu(&c2, 0x00, 0x44, 0x00, 0x00, &[]).unwrap(); select(&c2).unwrap();
-        assert!(read_sig_pubkey(&c2).is_none()); println!("import round trip done; key back at the factory");
+        assert!(read_pubkey(&c2, Slot::Sig).is_none()); println!("import round trip done; key back at the factory");
     }
 
     /// Needs a key plugged in: `cargo test hardware_read -- --ignored --nocapture`. Reads only.
@@ -820,7 +858,7 @@ mod tests {
         assert_eq!(&c1[..6], &attrs[..], "C1 reads back as secp256k1");
         apdu(&card, 0x00, 0x47, 0x80, 0x00, &[0xB6, 0x00]).expect("a key generated");
         apdu(&card, 0x00, 0xDA, 0x00, 0xC4, &[0x01]).expect("PIN good for many signatures");
-        let pk = PublicKey::from_slice(&read_sig_pubkey(&card).expect("the public key reads back")).unwrap();
+        let pk = PublicKey::from_slice(&read_pubkey(&card, Slot::Sig).expect("the public key reads back")).unwrap();
         println!("attributes + generate + read back: {:?}", t.elapsed());
         let secp = Secp256k1::verification_only();
         let compact = |r: [u8; 32], s: [u8; 32]| { let mut c = [0u8; 64]; c[..32].copy_from_slice(&r); c[32..].copy_from_slice(&s); Signature::from_compact(&c).unwrap() };
@@ -831,7 +869,7 @@ mod tests {
         println!("signature comes back as {} bytes", raw.len());
         let mut seen = std::collections::HashSet::new();
         let t = std::time::Instant::now();
-        for _ in 0..8 { let (r, s) = sign_on_card(&card, "123456", &z).unwrap(); secp.verify_ecdsa(&Message::from_digest(z), &compact(r, s), &pk).unwrap(); seen.insert(r); }
+        for _ in 0..8 { let (r, s) = sign_on_card(&card, "123456", &z, Slot::Sig).unwrap(); secp.verify_ecdsa(&Message::from_digest(z), &compact(r, s), &pk).unwrap(); seen.insert(r); }
         println!("8 signatures verified in {:?}; {} distinct r", t.elapsed(), seen.len());
         assert_eq!(seen.len(), 8);
         let counter = apdu(&card, 0x00, 0xCA, 0x00, 0x7A, &[]).ok().and_then(|raw| find(find(&raw, 0x7A).unwrap_or(&raw), 0x93).map(|v| v.iter().fold(0u32, |a, b| (a << 8) | *b as u32)));
@@ -849,7 +887,7 @@ mod tests {
             println!("untouched: {:?} after {:?}", r.as_ref().map(|v| v.len()).map_err(|e| e.to_string()), t.elapsed());
             println!("NOW touch the key when it blinks (you have the key's window)…");
             let t = std::time::Instant::now();
-            let (r, s) = sign_on_card(&card, "123456", &z).expect("a touched signature");
+            let (r, s) = sign_on_card(&card, "123456", &z, Slot::Sig).expect("a touched signature");
             secp.verify_ecdsa(&Message::from_digest(z), &compact(r, s), &pk).unwrap();
             println!("touched signature verified after {:?}", t.elapsed());
             verify(&card, 0x83, "12345678").unwrap();
@@ -864,7 +902,7 @@ mod tests {
             let r = verify(&card, 0x81, "");
             println!("keypad VERIFY: {:?} after {:?}", r.as_ref().map(|_| ()).map_err(|e| e.to_string()), t.elapsed());
             r.expect("the PIN typed on the reader opened the card");
-            let (r, s) = sign_on_card(&card, "", &z).expect("a signature with the PIN from the keypad (type it again when asked)");
+            let (r, s) = sign_on_card(&card, "", &z, Slot::Sig).expect("a signature with the PIN from the keypad (type it again when asked)");
             secp.verify_ecdsa(&Message::from_digest(z), &compact(r, s), &pk).unwrap();
             println!("signature with a keypad PIN verified");
         }
@@ -978,4 +1016,4 @@ mod tests {
 }
 
 #[cfg(test)]
-mod live_list { #[test] #[ignore] fn live_list_prints_what_is_plugged_in() { match super::list() { Ok(cs) => for c in cs { println!("LIST serial={} key={} touch={} form={} maker={} reader={}", c.serial, c.pubkey.is_some(), c.touch, c.form, c.maker, c.reader); }, Err(e) => println!("LIST error: {e}") } } }
+mod live_list { #[test] #[ignore] fn live_list_prints_what_is_plugged_in() { match super::list() { Ok(cs) => for c in cs { println!("LIST serial={} sig_key={} sig_touch={} aut_key={} aut_touch={} form={} maker={}", c.serial, c.pubkey.is_some(), c.touch, c.aut_pubkey.is_some(), c.aut_touch, c.form, c.maker); }, Err(e) => println!("LIST error: {e}") } } }

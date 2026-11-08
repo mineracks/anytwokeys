@@ -221,58 +221,67 @@ pub fn discover(words: Zeroizing<String>, start: u32, count: u32, scheme: String
     Ok(report)
 }
 
-fn checked_card(reader: &str, expected: &str) -> R<cards::CardInfo> {
+fn checked_card(reader: &str, expected: &str, slot: cards::Slot) -> R<cards::CardInfo> {
     let c = cards::list().map_err(|e| e.to_string())?.into_iter().find(|c| c.reader == reader).ok_or("insert the selected YubiKey")?;
-    if c.pubkey.as_deref() != Some(expected) { return Err("the selected card does not hold the expected reader key".into()); }
-    if c.touch != "FIXED" { return Err("this reader requires touch locked to FIXED; configure the card before enrolling".into()); }
+    if c.key(slot) != Some(expected) { return Err(format!("the selected card does not hold the expected key in its {} slot", slot.name())); }
+    if c.touch_of(slot) != "FIXED" { return Err(format!("the {} slot needs touch locked to FIXED; configure the card before enrolling", slot.name())); }
     Ok(c)
 }
 fn card_session(base: &str, c: &cards::CardInfo, pin: &str) -> R<Session> {
     let public = PublicKey::from_slice(&hex::decode(c.pubkey.as_ref().ok_or("card has no reader key")?).map_err(|_| "invalid card public key")?).map_err(|_| "invalid card public key")?;
     authenticate(base, &public, |digest| {
-        let (r, s) = cards::sign_digest_checked(&c.reader, pin, digest, &public.serialize()).map_err(|e| e.to_string())?;
+        let (r, s) = cards::sign_digest_checked(&c.reader, pin, digest, &public.serialize(), cards::Slot::Sig).map_err(|e| e.to_string())?;
         let mut compact = [0u8;64]; compact[..32].copy_from_slice(&r); compact[32..].copy_from_slice(&s);
         Ok(ecdsa::Signature::from_compact(&compact).map_err(|_| "invalid card signature")?.serialize_der().to_vec())
     })
 }
 /// The card's signature, DER, over a digest — the shape both Spark and the Lightning service provider verify.
-fn card_sign(c: &cards::CardInfo, pin: &str, public: &PublicKey, digest: &[u8;32]) -> R<Vec<u8>> {
-    let (r, s) = cards::sign_digest_checked(&c.reader, pin, digest, &public.serialize()).map_err(|e| e.to_string())?;
+fn card_sign(c: &cards::CardInfo, pin: &str, public: &PublicKey, digest: &[u8;32], slot: cards::Slot) -> R<Vec<u8>> {
+    let (r, s) = cards::sign_digest_checked(&c.reader, pin, digest, &public.serialize(), slot).map_err(|e| e.to_string())?;
     let mut compact = [0u8;64]; compact[..32].copy_from_slice(&r); compact[32..].copy_from_slice(&s);
     Ok(ecdsa::Signature::from_compact(&compact).map_err(|_| "invalid card signature")?.serialize_der().to_vec())
 }
 /// The wallet's own key on a card opens Spark as the owner and the Lightning service provider too: one PIN, a touch
 /// for each. A refusal by the provider is said, not fatal: the Spark session is still worth having.
-fn owner_card_session(base: &str, c: &cards::CardInfo, pin: &str) -> R<(Session, Option<String>)> {
-    let public = PublicKey::from_slice(&hex::decode(c.pubkey.as_ref().ok_or("card has no key")?).map_err(|_| "invalid card public key")?).map_err(|_| "invalid card public key")?;
-    let mut s = authenticate(base, &public, |digest| card_sign(c, pin, &public, digest))?;
-    match crate::spark_ssp::login(&public, |digest| card_sign(c, pin, &public, digest)) {
+fn owner_card_session(base: &str, c: &cards::CardInfo, pin: &str, slot: cards::Slot) -> R<(Session, Option<String>)> {
+    let public = PublicKey::from_slice(&hex::decode(c.key(slot).ok_or("card has no key")?).map_err(|_| "invalid card public key")?).map_err(|_| "invalid card public key")?;
+    let mut s = authenticate(base, &public, |digest| card_sign(c, pin, &public, digest, slot))?;
+    match crate::spark_ssp::login(&public, |digest| card_sign(c, pin, &public, digest, slot)) {
         Ok(token) => { s.lightning = Some(token); Ok((s, None)) }
         Err(e) => Ok((s, Some(e))),
     }
 }
-/// Write the wallet's own key, from its words, into a card's EMPTY signing slot, and record the card as the
-/// wallet's owner card. The words make the key only if they reproduce the identity the vault records.
-pub fn owner_import(name: String, reader: String, admin_pin: Zeroizing<String>, words: Zeroizing<String>) -> R<String> {
+/// Which slot the wallet's own key would go into on this card: the signature slot when it is empty, else the
+/// authentication slot when that is — so the reader card itself can take the owner key beside its reader key.
+pub fn owner_slot_for(card: &cards::CardInfo) -> Option<cards::Slot> {
+    if card.pubkey.is_none() { Some(cards::Slot::Sig) } else if card.aut_pubkey.is_none() { Some(cards::Slot::Aut) } else { None }
+}
+#[derive(Serialize)]
+pub struct OwnerCard { pub serial: String, pub slot: cards::Slot }
+/// Write the wallet's own key, from its words, into an EMPTY slot on a card, and record the card and slot as the
+/// wallet's owner key. The words make the key only if they reproduce the identity the vault records.
+pub fn owner_import(name: String, reader: String, admin_pin: Zeroizing<String>, words: Zeroizing<String>) -> R<OwnerCard> {
     let store = wallet::load()?;
     let v = store.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
     let sp = v.spark.as_ref().ok_or("this is not a Spark wallet")?;
     let key = owner_from_words(&words, &sp.identity)?;
     drop(words);
     let card = cards::list().map_err(|e| e.to_string())?.into_iter().find(|c| c.reader == reader).ok_or("that card is no longer plugged in")?;
-    if card.serial.to_string() == sp.reader_card { return Err("that is the reader card; its signing slot already holds the reader key. Use a card with an empty signing slot".into()); }
+    if card.key(cards::Slot::Sig).or(card.key(cards::Slot::Aut)).map(|k| k.eq_ignore_ascii_case(&sp.identity)).unwrap_or(false) { return Err("that card already holds this wallet's own key".into()); }
+    let slot = owner_slot_for(&card).ok_or("both of that card's signing slots already hold keys; use a card with an empty one")?;
     let secret = key.secret_bytes();
     let point = key.public().serialize_uncompressed();
     drop(key);
-    let written = cards::import_empty(&reader, &admin_pin, card.serial, &secret, &point, None).map_err(|e| e.to_string())?;
+    let written = cards::import_empty(&reader, &admin_pin, card.serial, &secret, &point, None, slot).map_err(|e| e.to_string())?;
     drop(secret);
     if !written.eq_ignore_ascii_case(&sp.identity) { return Err("the card reports a different key from the wallet's; nothing was recorded".into()); }
     let mut store = wallet::load()?;   // fresh: do not overwrite concurrent edits
     let v = store.vaults.iter_mut().find(|v| v.name == name).ok_or("no such vault")?;
     let sp = v.spark.as_mut().ok_or("this is not a Spark wallet")?;
     sp.owner_card = card.serial.to_string();
+    sp.owner_slot = Some(slot);
     wallet::save(&store)?;
-    Ok(card.serial.to_string())
+    Ok(OwnerCard { serial: card.serial.to_string(), slot })
 }
 #[derive(Serialize)]
 pub struct Unlocked { pub expires: i64, pub operator: String, #[serde(default)] pub lightning: bool, #[serde(default)] pub lightning_error: Option<String> }
@@ -284,16 +293,17 @@ pub fn unlock(name: String, reader: String, pin: Zeroizing<String>) -> R<Unlocke
     let epoch = EPOCH.load(Ordering::SeqCst);
     // The owner card (the wallet's own key) or the reader card: whichever is in, told apart by the key it holds.
     let present = cards::list().map_err(|e| e.to_string())?.into_iter().find(|c| c.reader == reader).ok_or("insert the registered YubiKey")?;
-    let as_owner = !sp.owner_card.is_empty() && present.serial.to_string() == sp.owner_card && present.pubkey.as_deref().map(|p| p.eq_ignore_ascii_case(&sp.identity)).unwrap_or(false);
-    let c = if as_owner { checked_card(&reader, present.pubkey.as_deref().unwrap_or(""))? } else {
-        let c = checked_card(&reader, &sp.reader_pubkey)?;
+    let slot = sp.owner_slot.unwrap_or(cards::Slot::Sig);
+    let as_owner = !sp.owner_card.is_empty() && present.serial.to_string() == sp.owner_card && present.key(slot).map(|p| p.eq_ignore_ascii_case(&sp.identity)).unwrap_or(false);
+    let c = if as_owner { checked_card(&reader, present.key(slot).unwrap_or(""), slot)? } else {
+        let c = checked_card(&reader, &sp.reader_pubkey, cards::Slot::Sig)?;
         if c.serial.to_string() != sp.reader_card { return Err("this is not the registered reader card".into()); }
         c
     };
     let k = key_for(sp, &v.network);
     let n = *runtime().lock().map_err(|_| "Spark session lock failed")?.next_operator.get(&k).unwrap_or(&0);
     // One touch attempt per click. Never automatically retry a wrong PIN.
-    let opened = if as_owner { owner_card_session(spark::OPERATORS[n], &c, &pin) } else { card_session(spark::OPERATORS[n], &c, &pin).map(|s| (s, None)) };
+    let opened = if as_owner { owner_card_session(spark::OPERATORS[n], &c, &pin, slot) } else { card_session(spark::OPERATORS[n], &c, &pin).map(|s| (s, None)) };
     drop(pin);
     let (s, lightning_error) = match opened { Ok(s) => s, Err(e) => { runtime().lock().map_err(|_| "Spark session lock failed")?.next_operator.insert(k, (n + 1) % spark::OPERATORS.len()); return Err(e); } };
     let result = Unlocked { expires: s.expires, operator: s.operator.clone(), lightning: s.lightning.is_some(), lightning_error };
@@ -309,7 +319,7 @@ pub fn enroll(candidate_id: String, name: String, reader: String, pubkey: String
     let store = wallet::load()?;
     let p = runtime().lock().map_err(|_| "Spark session lock failed")?.pending.get(&candidate_id).cloned().ok_or("discovery expired; enter the words and find the wallet again")?;
     if p.until <= Instant::now() || !p.owner.live() || (p.epoch != EPOCH.load(Ordering::SeqCst) || p.discovery != DISCOVERY.load(Ordering::SeqCst)) { consume(&candidate_id); return Err("discovery expired; find the wallet again".into()); }
-    let c = checked_card(&reader, &pubkey)?;
+    let c = checked_card(&reader, &pubkey, cards::Slot::Sig)?;
     if pubkey == p.candidate.identity { return Err("the reader must be a different key from the wallet owner".into()); }
     if store.vaults.iter().any(|v| v.name == name && v.spark.as_ref().map(|s| s.identity.as_str()) != Some(&p.candidate.identity)) { return Err("that name belongs to another vault".into()); }
     // Touch and authenticate the actual card BEFORE changing the wallet.
@@ -340,7 +350,7 @@ pub fn enroll(candidate_id: String, name: String, reader: String, pubkey: String
     verify.map_err(|e: String| format!("{e}. The reader setting was updated, but verification did not complete. Discover again to check and finish enrolment."))?;
     let mut store = wallet::load()?; // fresh store: do not overwrite concurrent edits
     if p.epoch != EPOCH.load(Ordering::SeqCst) || p.discovery != DISCOVERY.load(Ordering::SeqCst) { return Err("the app locked after updating Spark; discover again to finish saving".into()); }
-    let sp = wallet::Spark { address: p.candidate.address.clone(), identity: p.candidate.identity.clone(), reader_pubkey: pubkey, reader_card: c.serial.to_string(), authenticated: true, memos: Default::default(), owner_card: String::new() };
+    let sp = wallet::Spark { address: p.candidate.address.clone(), identity: p.candidate.identity.clone(), reader_pubkey: pubkey, reader_card: c.serial.to_string(), authenticated: true, memos: Default::default(), owner_card: String::new(), owner_slot: None };
     let v = if let Some(v) = store.vaults.iter_mut().find(|v| v.network == p.candidate.network && v.spark.as_ref().map(|s| &s.identity) == Some(&sp.identity)) { v.spark = Some(sp.clone()); v.clone() } else {
         if store.vaults.iter().any(|v| v.name == name) { return Err("that vault name was used while enrolling; discover again to save under another name".into()); }
         let v = crate::new_spark_vault(name, sp.clone(), p.candidate.network.clone()); store.vaults.push(v.clone()); v
@@ -457,7 +467,7 @@ mod tests {
     #[test]
     fn absent_or_expired_reader_never_becomes_anonymous_and_lock_drops_credentials() {
         clear();
-        let sp = wallet::Spark { identity: hex::encode(identity().public().serialize()), address: "spark1test".into(), reader_pubkey: "reader".into(), reader_card: "123".into(), authenticated: true, memos: Default::default(), owner_card: String::new() };
+        let sp = wallet::Spark { identity: hex::encode(identity().public().serialize()), address: "spark1test".into(), reader_pubkey: "reader".into(), reader_card: "123".into(), authenticated: true, memos: Default::default(), owner_card: String::new(), owner_slot: None };
         assert!(session(&sp,"mainnet").is_err());
         let epoch = EPOCH.load(Ordering::SeqCst);
         runtime().lock().unwrap().readers.insert(key_for(&sp, "mainnet"), Cached { session: std::sync::Arc::new(Session { operator: spark::OPERATORS[0].into(), token: Zeroizing::new("not-persisted".into()), until: Instant::now() + Duration::from_secs(30), expires: 1, epoch, lightning: None }), epoch });
