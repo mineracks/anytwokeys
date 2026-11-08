@@ -1726,8 +1726,8 @@ async function cgtReport(sc, [label, from, to]) {
   const blocks = [{ kind: 'facts', rows: [
     ['For', scopeWords(sc)],
     ['Year', `${au ? 'Australian financial year ' : 'Calendar year '}${label} · ${dateOf(from)} to ${dateOf(to)}`],
-    ['Method', methods.map(m => `${COST_METHODS[m].name} — ${COST_METHODS[m].short}`).join('; ')],
-    ['Disposals', `${sats(rows.length)} · ${sats(Math.round(sum(rows.map(x => ({ v: x.r.sats })), 'v')))} sats left${unknown.length ? ` · ${sats(unknown.length)} of unknown cost, listed apart` : ''}`],
+    ['Method', methods.map(m => COST_METHODS[m].name.toLowerCase() === COST_METHODS[m].short ? COST_METHODS[m].name : `${COST_METHODS[m].name} — ${COST_METHODS[m].short}`).join('; ')],
+    ['Disposals', `${sats(rows.length)} · ${sats(Math.round(sum(rows.map(x => ({ v: x.r.sats })), 'v')))} sats in all${unknown.length ? ` · ${sats(unknown.length)} of unknown cost, listed apart` : ''}`],
     ['Proceeds', money(sum(known.map(x => ({ v: x.r.proceeds })), 'v'), ccy)],
     ['Cost of the coins', money(sum(known.map(x => ({ v: x.r.cost })), 'v'), ccy)],
     ['Gains, coins held over 12 months', `${money(longGain, ccy)}${au ? ' — ' + discount : ''}`],
