@@ -2433,14 +2433,15 @@ async function pricesRange(ccy, fromT, toT, names = []) {
 // What the ledger needs for one vault: its transactions with dates, amounts and prices. The screen usually has it.
 // how many past prices the backend is still fetching for this vault — its own count, from its own note
 const pricesPending = note => { const m = /^Fetching (\d+) past price/.exec(note || ''); return m ? Number(m[1]) : 0; };
-async function sumInput(name) {
+// `linksLater`: the caller refreshes the transfer links itself once every vault is in, rather than once per vault
+async function sumInput(name, linksLater = false) {
   const v = store.vaults.find(x => x.name === name); if (!v) return null;
   const ccy = v.network === 'mainnet' ? fiatCcy() : '';
   let f = txFacts[name];
   if (!f || (f.stale && name !== vault?.name) || (f.owner && f.owner !== factOwner(v)) || (f.ccy || '') !== ccy) {
     const s = await invoke('vault_sync', { name });
     const a = await invoke('vault_activity', { name, history: s.history.map(h => [h.txid, h.height]), ccy });
-    f = keepActivity(name, a); f.history=s.history.map(h=>[h.txid,h.height]); await refreshTransferLinks();
+    f = keepActivity(name, a); f.history=s.history.map(h=>[h.txid,h.height]); if (!linksLater) await refreshTransferLinks(); else sumInput.pendingLinks = true;
   }
   return { name, network: v.network, asset: assetOf(v), links: f.links, rows: Object.values(f.rows), now: f.now, ccy: f.ccy, pending: f.pending || 0 };
 }
@@ -2454,7 +2455,9 @@ async function renderSummary(box, names, opts = {}) {
   box.classList.add('sum-loading');   // refetch keeps the frame: the last drawing stays, dimmed, until the new one is ready
   // one vault that cannot be read (its reader locked, its node away) must not blank the others: draw what came,
   // say what did not, and mark it on its chip
-  const settled = await Promise.all(names.map(n => sumInput(n).then(v => ({ v }), e => ({ e, n }))));
+  sumInput.pendingLinks = false;
+  const settled = await Promise.all(names.map(n => sumInput(n, true).then(v => ({ v }), e => ({ e, n }))));
+  if (sumInput.pendingLinks) { sumInput.pendingLinks = false; await refreshTransferLinks(); }
   if (me !== renderSummary.seq) return;
   const inputs = settled.filter(r => r.v).map(r => r.v);
   const locked = settled.filter(r => r.e).map(r => ({ name: r.n, why: lockedWhy(r.e) }));

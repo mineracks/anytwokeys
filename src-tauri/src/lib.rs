@@ -2109,6 +2109,10 @@ async fn search_all(q: String, ccy: String, tz_min: i64) -> R<search::Found> {
 #[tauri::command]
 async fn vault_sync(name: String) -> R<Snapshot> {
     block(move || {
+        // the screen is asking: the background watcher waits rather than share the node's connection with it
+        struct Busy; impl Drop for Busy { fn drop(&mut self) { watch::SYNCING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst); } }
+        watch::SYNCING.fetch_add(1, std::sync::atomic::Ordering::SeqCst); let _busy = Busy;
+        let started = std::time::Instant::now();
         let s = wallet::load()?;
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
         let servers = wallet::servers_for(&s, &v.network);
@@ -2186,7 +2190,11 @@ async fn vault_sync(name: String) -> R<Snapshot> {
         let balance = sc.coins.iter().map(|c| c.value).sum();
         let height = chain::height(&servers).unwrap_or(0);
         let (n, sm, nc, smc) = (sc.next, sc.scan_max, sc.next_change, sc.scan_max_change);
-        wallet::update(|s| if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == v.name) { vm.next = n; vm.scan_max = sm; vm.next_change = nc; vm.scan_max_change = smc; })?;
+        // the store is written only when the scan moved something: a sync that finds the vault as it was costs no write
+        if (v.next, v.scan_max, v.next_change, v.scan_max_change) != (n, sm, nc, smc) {
+            wallet::update(|s| if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == v.name) { vm.next = n; vm.scan_max = sm; vm.next_change = nc; vm.scan_max_change = smc; })?;
+        }
+        if let Some(i) = s.vaults.iter().position(|x| x.name == v.name) { watch::log(&format!("sync vault {}: {} ms, {} txs", i + 1, started.elapsed().as_millis(), sc.history.len())); }
         let receive_index = if wallet::rotates(&v) { sc.next } else { 0 };
         let receive = wallet::address_at(&v, receive_index)?;
         let mut history: Vec<HistoryRow> = sc.history.into_iter().map(|(txid, height, index)| HistoryRow { txid, height, index }).collect();
@@ -3870,18 +3878,27 @@ mod watch {
         format!("{h:02}:{m:02}:{sec:02}")
     }
 
+    /// How many syncs the screen has in flight. The watcher's pass waits while there are any: both read the same
+    /// node over the same connections, and the person at the screen is the one waiting.
+    pub static SYNCING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    fn yield_to_screen() { let t = std::time::Instant::now(); while SYNCING.load(std::sync::atomic::Ordering::SeqCst) > 0 && t.elapsed() < std::time::Duration::from_secs(180) { std::thread::sleep(std::time::Duration::from_millis(500)); } }
+
     pub fn pass() -> Vec<Event> {
         // a store that cannot be read (damaged, or locked) means no pass at all: nothing is compared, nothing is saved
         let s0 = match wallet::load() { Ok(s) => s, Err(e) => { if e != crate::lockbox::LOCKED { log(&format!("pass skipped: {e}")); } return Vec::new() } };
         let mut out = Vec::new();
         let vaults = s0.vaults.clone();
+        // what each vault's scan found, written to the store ONCE at the end of the pass: a pass over fifty vaults used
+        // to write the whole sealed store fifty times a minute
+        let mut writes: Vec<(String, wallet::Seen, Vec<String>, (u32, u32, u32, u32))> = Vec::new();
         for (n, v) in vaults.iter().enumerate() {
             let tag = format!("vault {}", n + 1);   // the log is readable by anyone who can read the disk: no names, amounts or ids in it
             if v.liquid.is_some() { continue; }   // a Liquid wallet is read on its own sync; its sidechain is not this watcher's chain
+            yield_to_screen();
             let servers = wallet::servers_for(&s0, &v.network);
             let sc = match wallet::scan(v, &servers, s0.settings.gap) { Ok(sc) => sc, Err(e) => { log(&format!("{tag}: scan failed: {e}")); continue } };
-            // re-read after the slow part, so a sync that saved meanwhile is not erased
-            let mut s = match wallet::load() { Ok(s) => s, Err(e) => { log(&format!("pass stopped: {e}")); return out } };
+            // re-read after the slow part, so a sync that saved meanwhile is not erased (a read of an unchanged file is a copy, not a parse)
+            let mut s = match wallet::load() { Ok(s) => s, Err(e) => { log(&format!("pass stopped: {e}")); break } };
             let seen = s.seen.entry(v.name.clone()).or_default();
             let now_txs: std::collections::HashMap<String, i32> = sc.history.iter().map(|(t, h, _)| (t.clone(), *h)).collect();
             let now_coins: std::collections::HashMap<String, u64> = sc.coins.iter().map(|c| (format!("{}:{}", c.txid, c.vout), c.value)).collect();
@@ -3919,11 +3936,26 @@ mod watch {
             let (n, sm, nc, smc) = (sc.next, sc.scan_max, sc.next_change, sc.scan_max_change);
             let name = v.name.clone();
             let fresh: Vec<String> = out[before..].iter().filter(|e| e.kind != "confirmed").map(|e| e.txid.clone()).collect();
-            let r = wallet::update(move |s| { s.seen.insert(name.clone(), seen_now);
+            // nothing to write when the vault is as it was last seen and the scan moved nothing: most passes, most vaults
+            let changed = s.seen.get(&v.name).map(|p| p.txs != seen_now.txs || p.coins != seen_now.coins || !p.primed).unwrap_or(true)
+                || (v.next, v.scan_max, v.next_change, v.scan_max_change) != (n, sm, nc, smc) || !fresh.is_empty();
+            if changed { writes.push((name, seen_now, fresh, (n, sm, nc, smc))); }
+            log(&format!("{tag}: {} coins, {} txs, primed_before={primed_before}, events={}, changed={changed}", sc.coins.len(), sc.history.len(), out.len() - before));
+        }
+        if !writes.is_empty() {
+            let count = writes.len();
+            let r = wallet::update(move |s| {
                 // a transaction first noticed from here: say so, and where "here" was, unless it was made here (then it already says)
                 let (t, fix, exact) = (super::now(), if s.settings.location { crate::location::fresh(super::now(), 1800) } else { None }, s.settings.location_exact);
-                if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == name) { for txid in &fresh { crate::context::stamp(vm, txid, crate::context::build("seen", fix, exact, t), t); } } if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == name) { vm.next = n; vm.scan_max = sm; vm.next_change = nc; vm.scan_max_change = smc; } });
-            log(&format!("{tag}: {} coins, {} txs, primed_before={primed_before}, events={}, save={}", sc.coins.len(), sc.history.len(), out.len() - before, r.as_ref().map(|_| "ok").unwrap_or("FAILED")));
+                for (name, seen_now, fresh, (n, sm, nc, smc)) in writes {
+                    s.seen.insert(name.clone(), seen_now);
+                    if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == name) {
+                        for txid in &fresh { crate::context::stamp(vm, txid, crate::context::build("seen", fix.clone(), exact, t), t); }
+                        vm.next = n; vm.scan_max = sm; vm.next_change = nc; vm.scan_max_change = smc;
+                    }
+                }
+            });
+            log(&format!("pass: {count} vault(s) written in one save={}", r.as_ref().map(|_| "ok").unwrap_or("FAILED")));
         }
         out
     }

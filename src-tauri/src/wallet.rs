@@ -212,10 +212,24 @@ pub fn load() -> Result<Store, String> {
     let p = store_path();
     let bytes = if crate::lockbox::sealed_mode() {
         let key = crate::lockbox::key()?;   // locked is locked, whatever is or is not on disk
-        match std::fs::read(p.with_extension("enc")) {
-            Ok(blob) => Some(crate::lockbox::open_with(&key, "store", &blob).map_err(|e| format!("the app's own file was left alone ({}): {e}", p.with_extension("enc").display()))?),
+        let enc = p.with_extension("enc");
+        match std::fs::metadata(&enc) {
+            // the file as it was last parsed is the file: opening and parsing a few megabytes for every command, forty
+            // times over when the overview loads every vault at once, was most of what a sync cost
+            Ok(m) => { if let Some(s) = parsed(&enc, &m) { return Ok(s); } }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("the app's own file could not be read ({}): {e}", enc.display())),
+        }
+        match std::fs::read(&enc) {
+            Ok(blob) => {
+                let plain = crate::lockbox::open_with(&key, "store", &blob).map_err(|e| format!("the app's own file was left alone ({}): {e}", enc.display()))?;
+                let mut s: Store = parse_store(&plain).map_err(|e| format!("the app's own file is damaged and was left alone: {e}"))?;
+                if s.settings.network.is_empty() { s.settings.network = "signet".into(); }
+                if let Ok(m) = std::fs::metadata(&enc) { keep_parsed(&enc, &m, &s); }
+                return Ok(s);
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(format!("the app's own file could not be read ({}): {e}", p.with_extension("enc").display())),
+            Err(e) => return Err(format!("the app's own file could not be read ({}): {e}", enc.display())),
         }
     } else { None };
     // no sealed store: the readable one, if there is one — before the move to sealed files, or part-way through it.
@@ -232,6 +246,20 @@ pub fn load() -> Result<Store, String> {
     Ok(s)
 }
 pub fn parse_store(bytes: &[u8]) -> Result<Store, String> { serde_json::from_slice(bytes).map_err(|e| e.to_string()) }
+
+// The sealed store as last parsed, with the file's identity (path, size, modification time) it came from. A read
+// finds the file unchanged and hands back a copy; any write — ours through `save`, or anyone else's — changes the
+// identity and the next read parses afresh. Never consulted while locked: `load` asks for the key first.
+type Parsed = (std::path::PathBuf, u64, std::time::SystemTime, Store);
+static PARSED: std::sync::Mutex<Option<Parsed>> = std::sync::Mutex::new(None);
+fn parsed(path: &std::path::Path, m: &std::fs::Metadata) -> Option<Store> {
+    let g = PARSED.lock().ok()?;
+    let (p, len, mt, s) = g.as_ref()?;
+    if p == path && *len == m.len() && Some(*mt) == m.modified().ok() { Some(s.clone()) } else { None }
+}
+fn keep_parsed(path: &std::path::Path, m: &std::fs::Metadata, s: &Store) {
+    if let (Ok(mt), Ok(mut g)) = (m.modified(), PARSED.lock()) { *g = Some((path.to_path_buf(), m.len(), mt, s.clone())); }
+}
 
 static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

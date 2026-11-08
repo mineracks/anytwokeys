@@ -31,32 +31,41 @@ pub struct Coin {
 #[derive(Debug, Clone, Serialize)]
 pub struct Fees { pub slow: f64, pub medium: f64, pub fast: f64 }
 
-// One connection per server, kept open. Opening one is a TCP and TLS handshake (~80 ms to ours); a scan used to open
-// two per address — a 3.4 s scan of an empty 2-of-3 that one kept connection answers in ~30 ms. A connection idle for a
-// while is pinged before use, and any failure drops it so the next request opens a fresh one.
+// A few connections per server, kept open. Opening one is a TCP and TLS handshake (~80 ms to ours); a scan used to open
+// two per address — a 3.4 s scan of an empty 2-of-3 that one kept connection answers in ~30 ms. One connection answers
+// one request at a time, so forty vaults syncing at once (the overview) used to queue behind each other on it: now
+// they are dealt round the kept connections, up to LANES per server. A connection idle for a while is pinged before
+// use, and any failure drops the server's connections so the next request opens fresh ones.
 struct Held { c: Arc<Client>, used: Instant }
-static POOL: Mutex<Option<HashMap<String, Held>>> = Mutex::new(None);
+static POOL: Mutex<Option<HashMap<String, Vec<Option<Held>>>>> = Mutex::new(None);
+static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 const IDLE_CHECK: Duration = Duration::from_secs(30);
+const LANES: usize = 4;
 
 fn open(servers: &Servers) -> Result<Client, String> {
     let cfg = ConfigBuilder::new().timeout(Some(20)).validate_domain(true).build();
     Client::from_config(&servers.electrum, cfg).map_err(|e| format!("electrum {}: {e}", servers.electrum))
 }
-/// The kept connection to this server (opened if there is none, or if the one kept no longer answers).
+/// A kept connection to this server (opened if the lane has none, or if the one kept no longer answers).
 pub fn client(servers: &Servers) -> Result<Arc<Client>, String> {
     crate::net::out("the node")?;
-    let held = POOL.lock().map_err(|_| "connection pool poisoned")?.get_or_insert_with(HashMap::new).get(&servers.electrum).map(|h| (h.c.clone(), h.used.elapsed()));
+    let lane = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % LANES;
+    let held = POOL.lock().map_err(|_| "connection pool poisoned")?.get_or_insert_with(HashMap::new).get(&servers.electrum).and_then(|v| v.get(lane)).and_then(|h| h.as_ref()).map(|h| (h.c.clone(), h.used.elapsed()));
     if let Some((c, idle)) = held {
-        if idle < IDLE_CHECK || c.ping().is_ok() { touch(servers, &c); return Ok(c); }
+        if idle < IDLE_CHECK || c.ping().is_ok() { touch(servers, lane, &c); return Ok(c); }
     }
     let c = Arc::new(open(servers)?);
-    touch(servers, &c);
+    touch(servers, lane, &c);
     Ok(c)
 }
-fn touch(servers: &Servers, c: &Arc<Client>) {
-    if let Ok(mut g) = POOL.lock() { g.get_or_insert_with(HashMap::new).insert(servers.electrum.clone(), Held { c: c.clone(), used: Instant::now() }); }
+fn touch(servers: &Servers, lane: usize, c: &Arc<Client>) {
+    if let Ok(mut g) = POOL.lock() {
+        let v = g.get_or_insert_with(HashMap::new).entry(servers.electrum.clone()).or_default();
+        while v.len() <= lane { v.push(None); }
+        v[lane] = Some(Held { c: c.clone(), used: Instant::now() });
+    }
 }
-/// Drop the kept connection after a failure: the next request opens a fresh one rather than reusing a broken one.
+/// Drop the kept connections after a failure: the next request opens a fresh one rather than reusing a broken one.
 pub fn forget(servers: &Servers) { if let Ok(mut g) = POOL.lock() { if let Some(m) = g.as_mut() { m.remove(&servers.electrum); } } }
 /// Run a read over the kept connection; on failure, once more over a fresh one (a server may have closed it).
 fn read<T>(servers: &Servers, f: impl Fn(&Client) -> Result<T, electrum_client::Error>) -> Result<T, String> {
