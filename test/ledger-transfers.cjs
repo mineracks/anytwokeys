@@ -33,3 +33,23 @@ console.log('PASS: scoped Home/report totals, multi-hop, clock skew, both bridge
  assert.ok(Math.abs(l.realised.spend.cost-70)<1e-8);assert.ok(Math.abs(l.perVault.basis.S-80)<1e-8);
  console.log('PASS: partial Spark account entries retain the unused basis');
 }
+
+// A Liquid swap: ONE transaction in two vaults of different assets. L-BTC leaves one, USDt arrives in the other. It is a
+// disposal of the L-BTC (realised at bitcoin's price) and an acquisition of USDt at the dollar's rate — never a move of
+// the same coins between the two vaults. Each asset is held and counted apart; the pooled basis is money, and adds.
+for(const method of ['utxo','fifo','average']) {
+ const USDT='ce091c998b83c78bb71a632313ba3760f1763d9cfcffae02258ffa9865a37bd2';
+ const inputs=[
+  {name:'L',network:'mainnet',asset:'BTC',rows:[row('fund',1,200000,100000),row('swap',2,-100000,150000)]},         // 1 BTC = $100k then $150k
+  {name:'U',network:'mainnet',asset:USDT,rows:[row('swap',2,90_00000000,1.5),row('send',3,-10_00000000,1.6)]}];   // 90 USDt at AUD 1.50, 10 sent at AUD 1.60
+ const l=buildLedger(inputs,method,{},['L','U']);
+ assert.equal(l.internal,0,method+': a swap is not a transfer');
+ assert.equal(l.realised.swap.sats,100000,method+': the L-BTC left is a disposal');
+ assert.ok(Math.abs(l.realised.swap.proceeds-150)<1e-8,method);assert.ok(Math.abs(l.realised.swap.cost-100)<1e-8,method);
+ assert.ok(Math.abs(l.realised.send.proceeds-16)<1e-8,method+': 10 USDt at 1.60');assert.ok(Math.abs(l.realised.send.cost-15)<1e-8,method+': cost 10 at 1.50');
+ const end=l.timeline.at(-1);
+ assert.equal(end.units.BTC,100000,method);assert.equal(end.units[USDT],80_00000000,method);
+ assert.ok(Math.abs(end.basis-(100+120))<1e-8,method+': basis is money and adds across assets');
+ const u=buildLedger(inputs,method,{},['U']);assert.equal(u.timeline.at(-1).sats,80_00000000,method+': a one-asset scope still reads .sats');
+}
+console.log('PASS: a Liquid swap is a disposal and an acquisition, assets held apart, basis added');

@@ -171,7 +171,9 @@ function cyclePriceView(el, { curve, acq, dis, now, from, to, selected, pick }) 
 const cyclePrefs = { view: 'time' };
 function cycleSummary(L, card, alive) {
   const acq = [], dis = [];
-  for (const e of L.timeline) { const d = e.sats - (e.before ? e.before.sats : 0); if (e.internal || !d) continue; (d > 0 ? acq : dis).push({ t: e.t, sats: Math.abs(d), txid: e.txid, way: d > 0 ? 'received' : 'left' }); }
+  // bitcoin alone: a ledger that also holds another asset keeps its sats under units.BTC
+  const satsOf = (st) => st && st.units ? (st.units.BTC || 0) : (st ? st.sats : 0);
+  for (const e of L.timeline) { const d = satsOf(e) - satsOf(e.before); if (e.internal || !d) continue; (d > 0 ? acq : dis).push({ t: e.t, sats: Math.abs(d), txid: e.txid, way: d > 0 ? 'received' : 'left' }); }
   const all = [...acq, ...dis];
   card.className = 'pc'; card.hidden = false;
   card.innerHTML = `<div class="pc-eyebrow">Purchase context</div><h3 class="pc-title">Where your buys landed</h3><div class="pc-sub">Market position relative to Bitcoin’s 200-week average, as it stood on each day.</div><div class="pc-stats"><div class="pc-stat"><div class="k">Coins received</div><div class="v">…</div><div class="s">working out where the price sat</div></div><div class="pc-stat"><div class="k">Market now</div><div class="v">…</div><div class="s"></div></div></div><div class="pc-rest"></div>`;

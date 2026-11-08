@@ -1697,8 +1697,8 @@ async function loadFacts(names, say) {
 }
 /// The scope of a report: its title, the vault names, and the entity (if one) it is for.
 const scopeOfVault = (v) => ({ title: v.name, names: [v.name], entity: entityOf(v.entity), one: v });
-const scopeOfEntity = (e) => ({ title: e.name, names: vaultsOf(e.id).filter(inSats).map(v => v.name), entity: e });
-const scopeOfAll = () => ({ title: 'All vaults', names: store.vaults.filter(v => v.network === 'mainnet' && inSats(v)).map(v => v.name), entity: null });
+const scopeOfEntity = (e) => ({ title: e.name, names: vaultsOf(e.id).filter(hasPrice).map(v => v.name), entity: e });
+const scopeOfAll = () => ({ title: 'All vaults', names: store.vaults.filter(v => v.network === 'mainnet' && hasPrice(v)).map(v => v.name), entity: null });
 const scopeWords = (sc) => sc.one ? `${sc.one.name} · ${sc.one.node ? `a ${sc.one.node.kind === 'cln' ? 'Core Lightning' : 'LND'} node` : sc.one.network}${sc.entity ? ` · owned by ${sc.entity.name} (${kindWord(sc.entity.kind)})` : ''}` : sc.entity ? `${sc.entity.name} · ${kindWord(sc.entity.kind)} · ${sats(sc.names.length)} vault${sc.names.length === 1 ? '' : 's'}: ${sc.names.join(', ')}` : `${sats(sc.names.length)} vaults: ${sc.names.join(', ')}`;
 /// Financial years in which the scope disposed of coins, newest first: Australian years (1 July to 30 June) when
 /// priced in AUD, calendar years otherwise. Each is [label, from, to] in seconds.
@@ -1748,7 +1748,7 @@ async function cgtReport(sc, [label, from, to]) {
     ['For', scopeWords(sc)],
     ['Year', `${au ? 'Australian financial year ' : 'Calendar year '}${label} · ${dateOf(from)} to ${dateOf(to)}`],
     ['Method', methods.map(m => COST_METHODS[m].name.toLowerCase() === COST_METHODS[m].short ? COST_METHODS[m].name : `${COST_METHODS[m].name} — ${COST_METHODS[m].short}`).join('; ')],
-    ['Disposals', `${sats(rows.length)} · ${amountIn(sc.names, sum(rows.map(x => ({ v: x.r.sats })), 'v'))} in all${unknown.length ? ` · ${sats(unknown.length)} of unknown cost, listed apart` : ''}`],
+    ['Disposals', `${sats(rows.length)} · ${amountsText(unitsOfRows(rows.map(x => [x.vault, x.r.sats])))} in all${unknown.length ? ` · ${sats(unknown.length)} of unknown cost, listed apart` : ''}`],
     ['Proceeds', money(sum(known.map(x => ({ v: x.r.proceeds })), 'v'), ccy)],
     ['Cost of the coins', money(sum(known.map(x => ({ v: x.r.cost })), 'v'), ccy)],
     ['Gains, coins held over 12 months', `${money(longGain, ccy)}${au ? ' — ' + discount : ''}`],
@@ -1788,11 +1788,11 @@ async function cgtReport(sc, [label, from, to]) {
   blocks.push({ kind: 'para', text: `${au ? taxNote(sc.entity) + ' ' : ''}Each disposal is dated by its block; proceeds are the market price that day applied to the coins that left (a sale’s own price, if an exchange statement gives one, is on that row); cost is what those coins were worth when received, by the method named. "Over 12 months" is judged lot by lot, from the day each lot of coins was received. Moves between the vaults of this report are not disposals and are left out.` });
   blocks.push({ kind: 'heading', text: `Disposals (${rows.length})` });
   blocks.push({ kind: 'facts', rows: rows.map(x => { const r = x.r, what = ['stolen', 'lost', 'sold', 'spent', 'gift'].includes(r.kind) ? r.kind : 'disposal';
-    const longs = x.lots.filter(l => l.long === true).reduce((a, l) => a + l.sats, 0), hold = r.from ? (longs >= r.sats - 1 ? 'all over 12 months' : longs > 0 ? `${amountIn(sc.names, longs)} over 12 months` : '12 months or less') : 'holding period not known';
-    return [dateOf(r.t), `${sc.names.length > 1 ? x.vault + ' · ' : ''}${amountIn(sc.names, r.sats)} ${what} · ${x.txid.length === 64 ? x.txid : x.txid.slice(0, 24)}${r.gain === null ? ` · ${r.cost === null ? 'cost not known for some of the coins' : 'no price for the day'}` : ` · proceeds ${money(r.proceeds, ccy)} · cost ${money(r.cost, ccy)} · ${r.gain >= 0 ? 'gain +' : 'loss −'}${money(Math.abs(r.gain), ccy)}`} · ${hold}`]; }) });
+    const longs = x.lots.filter(l => l.long === true).reduce((a, l) => a + l.sats, 0), hold = r.from ? (longs >= r.sats - 1 ? 'all over 12 months' : longs > 0 ? `${amountIn([x.vault], longs)} over 12 months` : '12 months or less') : 'holding period not known';
+    return [dateOf(r.t), `${sc.names.length > 1 ? x.vault + ' · ' : ''}${amountIn([x.vault], r.sats)} ${what} · ${x.txid.length === 64 ? x.txid : x.txid.slice(0, 24)}${r.gain === null ? ` · ${r.cost === null ? 'cost not known for some of the coins' : 'no price for the day'}` : ` · proceeds ${money(r.proceeds, ccy)} · cost ${money(r.cost, ccy)} · ${r.gain >= 0 ? 'gain +' : 'loss −'}${money(Math.abs(r.gain), ccy)}`} · ${hold}`]; }) });
   if (unknown.length) blocks.push({ kind: 'para', text: `${sats(unknown.length)} disposal${unknown.length === 1 ? '' : 's'} above ${unknown.length === 1 ? 'has' : 'have'} no gain figure: the coins came from a deposit whose cost this app does not know (received before the vault was watched, or from a wallet it cannot see), or there is no price for the day. Give those a cost on the row that received them, and this report settles.` });
-  const uv = unitVault(sc.names);
-  if (uv && !inSats(uv)) blocks.push({ kind: 'para', text: `${assetTicker(uv)} is a stablecoin: each unit is priced at one US dollar, converted at the European Central Bank's reference rate for the day (the service names the fixing it used). Its gains and losses are the dollar's own moves against the ${ccy} between the day a unit arrived and the day it left; swapping it for L-BTC, or sending it, is a disposal. In Australia a stablecoin is a CGT asset like any other crypto asset — there is no exemption for a coin pegged to a currency.` });
+  const uv = sc.names.map(n => store.vaults.find(v => v.name === n)).find(v => v && !inSats(v) && hasPrice(v));
+  if (uv) blocks.push({ kind: 'para', text: `${assetTicker(uv)} is a stablecoin: each unit is priced at one US dollar, converted at the European Central Bank's reference rate for the day (the service names the fixing it used). Its gains and losses are the dollar's own moves against the ${ccy} between the day a unit arrived and the day it left; swapping it for L-BTC, or sending it, is a disposal. In Australia a stablecoin is a CGT asset like any other crypto asset — there is no exemption for a coin pegged to a currency.` });
   blocks.push({ kind: 'para', text: `This is a record drawn from the chain and the vaults’ ledgers, for an accountant or a return; it is not tax advice. ${methods.map(m => COST_METHODS[m].note).join(' ')}` });
   const file = `${sc.title}-cgt-${label.replace('–', '-')}`;
   const path = await invoke('report_pdf', { title: `${sc.title} — capital gains ${label}`, subtitle: `${sats(rows.length)} disposal${rows.length === 1 ? '' : 's'} · net ${net >= 0 ? '+' : '−'}${money(Math.abs(net), ccy)} before discount · printed ${new Date().toLocaleDateString()}`, blocks, file });
@@ -1820,7 +1820,7 @@ async function lossReport(sc) {
     ['For', scopeWords(sc)],
     ['Prepared', dateOf(Math.floor(Date.now() / 1000))],
     ['Rows', `${sats(rows.length)} — ${sats(rows.filter(x => x.r.kind === 'stolen').length)} stolen, ${sats(rows.filter(x => x.r.kind === 'lost').length)} lost`],
-    ['Coins gone', `${amountIn(sc.names, totalSats)}${anyQuote && ccy ? ` · worth ${money(worthThen, ccy)} as they left` : ''}`],
+    ['Coins gone', `${amountsText(unitsOfRows(rows.map(x => [x.vault, x.r.sats])))}${anyQuote && ccy ? ` · worth ${money(worthThen, ccy)} as they left` : ''}`],
     ccy ? ['Their cost', `${money(totalCost, ccy)}${known.length < rows.length ? ` for ${sats(known.length)} of the ${sats(rows.length)} rows; the rest have coins of unknown cost` : ''}`] : null,
     ccy ? ['Capital loss', `${money(totalCost, ccy)}${known.length < rows.length ? ' at least' : ''} — nothing was received for the coins, so the loss is their whole cost`] : null,
   ].filter(Boolean) }];
@@ -1830,13 +1830,13 @@ async function lossReport(sc) {
     const e = v && v.node ? ((v.node.events || []).find(ev => ev.id === x.id) || null) : null;
     let to = e ? (e.to || []) : [];
     if (!e && x.row.txid) { try { const d = await invoke('tx_detail', { name: x.vault, txid: x.row.txid, height: (f.history || []).find(h => h[0] === x.row.txid)?.[1] || 0 }); to = (d.outputs || []).filter(o => o.ours === null).map(o => [o.address || o.kind, o.sats]); } catch {} }
-    blocks.push({ kind: 'heading', text: `${x.row.time ? dateOf(x.row.time) : 'not in a block'} — ${amountIn(sc.names, x.r.sats)} ${x.r.kind}${sc.names.length > 1 ? ` — ${x.vault}` : ''}` });
+    blocks.push({ kind: 'heading', text: `${x.row.time ? dateOf(x.row.time) : 'not in a block'} — ${amountIn([x.vault], x.r.sats)} ${x.r.kind}${sc.names.length > 1 ? ` — ${x.vault}` : ''}` });
     const lab = (v && v.labels || {})['tx:' + x.id] || '', note = (v && v.notes || {})['tx:' + x.id] || '';
     blocks.push({ kind: 'facts', rows: [
       ['Transaction', e && !e.txid ? (e.kind === 'unaccounted' ? 'none: this row is the difference between what the node holds and what its ledger explains — money that left without the node’s bookkeeper seeing it go (channels closed by someone else holding the keys, coins swept by another copy of the wallet)' : `Lightning · payment hash ${e.hash || '—'}`) : (e && e.txid ? e.txid : (x.row.txid || x.id))],
       e ? ['Layer', `${nodeLayer(e)} · ${e.kind}`] : null,
       to.length ? ['Where the coins went', to.map(([a, s_]) => `${a}  ${sats(s_)} sats`).join('\n')] : (e && e.txid ? ['Where the coins went', 'not read from the chain yet: refresh this vault and save the report again'] : null),
-      x.row.quote && ccy ? ['Worth as they left', `${money(x.r.sats / 1e8 * x.row.quote.price, ccy)} at ${perUnit(sc.names, x.row.quote, ccy)}`] : null,
+      x.row.quote && ccy ? ['Worth as they left', `${money(x.r.sats / 1e8 * x.row.quote.price, ccy)} at ${perUnit([x.vault], x.row.quote, ccy)}`] : null,
       ccy ? ['Cost of the coins', x.r.cost === null ? 'not known for some of them' : `${money(x.r.cost, ccy)}${x.r.from ? ` · received ${x.r.from === x.r.to ? 'on ' + new Date(x.r.from * 1000).toLocaleDateString() : 'between ' + new Date(x.r.from * 1000).toLocaleDateString() + ' and ' + new Date(x.r.to * 1000).toLocaleDateString()}` : ''}`] : null,
       ccy ? ['Loss', x.r.cost === null ? 'at least the part of known cost' : `${money(x.r.cost, ccy)} — proceeds nil`] : null,
       e && e.memo ? ['Memo', e.memo] : null,
@@ -1845,7 +1845,7 @@ async function lossReport(sc) {
   }
   blocks.push({ kind: 'heading', text: 'For the tax return' });
   blocks.push({ kind: 'para', text: `In Australia, coins stolen or lost are CGT event C1 (loss or destruction of a CGT asset). The capital proceeds are nil, so the capital loss is the cost base of the coins — ${ccy ? money(totalCost, ccy) : 'as above'}${known.length < rows.length ? ' at least' : ''} here — claimed in the income year the loss is discovered, and only against capital gains. ${taxNote(sc.entity)} The ATO asks for evidence that the coins existed and were the entity’s (the ledgers and the transactions above), that they are gone (the addresses they went to, which the entity does not control), and that steps were taken to recover them (the police or exchange report; keep its reference with this document). In the United States a theft loss on personal-use property is not deductible for 2018 to 2025 under TCJA; the figures above still give the basis that leaves the books.` });
-  const path = await invoke('report_pdf', { title: `${sc.title} — stolen and lost`, subtitle: `${sats(rows.length)} row${rows.length === 1 ? '' : 's'} · ${amountIn(sc.names, totalSats)} · printed ${new Date().toLocaleDateString()}`, blocks, file: `${sc.title}-stolen-and-lost` });
+  const path = await invoke('report_pdf', { title: `${sc.title} — stolen and lost`, subtitle: `${sats(rows.length)} row${rows.length === 1 ? '' : 's'} · ${amountsText(unitsOfRows(rows.map(x => [x.vault, x.r.sats])))} · printed ${new Date().toLocaleDateString()}`, blocks, file: `${sc.title}-stolen-and-lost` });
   toast('Saved ' + path, 6000);
 }
 /// The report buttons, wherever they sit: Home (this vault), an entity's page (its vaults), the entities page (all).
@@ -2071,7 +2071,9 @@ function buildLedger(inputs, method, kinds, scope) {
   const eventKey = (v,r) => {
     const l=v.links?.[r.txid], peer=l && inputByName.get(l.peer), pr=peer?.rows.find(x=>x.txid===l.peer_id);
     if (l && !l.forgotten && !l.own && peer?.network === v.network && peer.links?.[l.peer_id]?.event === l.event && pr && r.net*pr.net<0 && (r.net<0 ? -r.net>=pr.net : -pr.net>=r.net)) return 'link:'+l.event;
-    return (v.network || '') + ':' + r.txid;
+    // one asset per event: a Liquid swap is one transaction in two vaults of different assets, and it is a disposal
+    // of one for the other, never a move of the same coins between them
+    return (v.network || '') + ':' + (v.asset || 'BTC') + ':' + r.txid;
   };
   for (const v of inputs) for (const r of v.rows) {
     if (r.net === null || r.net === undefined) continue;
@@ -2079,7 +2081,7 @@ function buildLedger(inputs, method, kinds, scope) {
     const k = eventKey(v,r);
     const e = ev.get(k) || { txid: r.txid, t, legs: [], price: null };
     e.t = Math.min(e.t, t);
-    e.legs.push({ vault: v.name, id:r.txid, t, price:r.quote?.price || (!r.time ? v.now?.price : null), net: v.links?.[r.txid]?.own ? 0 : r.net, ins: (r.ins || []).map(x => [...x]), outs: (r.outs || []).map(([n, sats]) => [r.txid + ':' + n, sats]) });
+    e.legs.push({ vault: v.name, asset: v.asset || 'BTC', id:r.txid, t, price:r.quote?.price || (!r.time ? v.now?.price : null), net: v.links?.[r.txid]?.own ? 0 : r.net, ins: (r.ins || []).map(x => [...x]), outs: (r.outs || []).map(([n, sats]) => [r.txid + ':' + n, sats]) });
     const p = r.quote ? r.quote.price : (!r.time && v.now ? v.now.price : null);
     if (p && !e.price) e.price = p;
     ev.set(k, e);
@@ -2092,7 +2094,8 @@ function buildLedger(inputs, method, kinds, scope) {
   // chain's own order); anything still undecided takes covered spends first, then arrivals, then the rest ----
   const byT = new Map(); for (const e of ev.values()) { if (!byT.has(e.t)) byT.set(e.t, []); byT.get(e.t).push(e); }
   const netOf = (e) => e.legs.reduce((a, l) => a + l.net, 0);
-  const events = []; let held = 0;
+  const events = []; const held = {};   // per asset: sats and another asset's units are never added
+  const assetOfEvent = (e) => e.legs[0]?.asset || 'BTC';
   for (const t of [...byT.keys()].sort((a, b) => a - b)) {
     let group = byT.get(t).sort((a, b) => (a.txid < b.txid ? -1 : 1));
     while (group.length) {
@@ -2100,9 +2103,10 @@ function buildLedger(inputs, method, kinds, scope) {
       const madeBy = new Map(); for (const e of group) for (const l of e.legs) for (const [op] of l.outs) madeBy.set(op, e);
       const ready = group.filter(e => !e.legs.some(l => l.ins.some(([op]) => { const m = madeBy.get(op); return m && m !== e; })));
       const pick = ready.length ? ready : group;
-      const covered = pick.filter(e => netOf(e) < 0 && -netOf(e) <= held), arr = pick.filter(e => netOf(e) >= 0), rest = pick.filter(e => netOf(e) < 0 && -netOf(e) > held);
+      const heldOf = (e) => held[assetOfEvent(e)] || 0;
+      const covered = pick.filter(e => netOf(e) < 0 && -netOf(e) <= heldOf(e)), arr = pick.filter(e => netOf(e) >= 0), rest = pick.filter(e => netOf(e) < 0 && -netOf(e) > heldOf(e));
       const next = (covered[0] || arr[0] || rest[0]);
-      events.push(next); held += netOf(next); group = group.filter(e => e !== next);
+      events.push(next); held[assetOfEvent(next)] = heldOf(next) + netOf(next); group = group.filter(e => e !== next);
     }
   }
   // ---- the three ways of finding what a disposal cost ----
@@ -2112,6 +2116,9 @@ function buildLedger(inputs, method, kinds, scope) {
   const queues = {};              // fifo: vault → lots, oldest first
   const pools = {};               // average: vault → { sats, basis }
   const realised = {}, sats = {}, timeline = [];
+  const assetByVault = Object.fromEntries(inputs.map(v => [v.name, v.asset || 'BTC']));
+  // what the scope holds, asset by asset: sats under 'BTC', another asset's units under its id — never added together
+  const unitsNow = () => { const u = {}; for (const [n, x] of Object.entries(sats)) if (inScope(n)) u[assetByVault[n] || 'BTC'] = (u[assetByVault[n] || 'BTC'] || 0) + x; return u; };
   let internal = 0, unpriced = 0;
   const heldLots = () => method === 'utxo' ? [...coins.values()].filter(c => inScope(c.vault)).flatMap(c => c.lots) : method === 'fifo' ? Object.entries(queues).filter(([n]) => inScope(n)).flatMap(([,q]) => q) : null;
   const basisNow = () => method === 'average' ? Object.entries(pools).filter(([n]) => inScope(n)).reduce((a, [,p]) => a + p.basis, 0) : (heldLots().reduce((a, l) => a + (l.cost || 0), 0));
@@ -2120,7 +2127,7 @@ function buildLedger(inputs, method, kinds, scope) {
     if (need > 1e-9) out.push({ sats: need, cost: null, t: null });   // more left than was known to be held: its cost is unknown, never zero
     return out; };
   for (const e of events) {
-    const before = { sats: Object.entries(sats).filter(([n]) => inScope(n)).reduce((a, [,x]) => a + x, 0), basis: basisNow() };
+    const before = { sats: Object.entries(sats).filter(([n]) => inScope(n)).reduce((a, [,x]) => a + x, 0), units: unitsNow(), basis: basisNow() };
     if (method === 'utxo') for (const l of e.legs) {
       if (l.ins.length || l.outs.length || !l.net) continue;
       if (l.net > 0) l.outs = [[l.id + ':account:' + l.vault, l.net]];
@@ -2201,7 +2208,7 @@ function buildLedger(inputs, method, kinds, scope) {
       if (kinds[e.txid] === 'stolen' || kinds[e.txid] === 'lost') { realised[e.txid].proceeds = 0; realised[e.txid].gain = cost !== null ? -cost : null; }
     }
     if (realised[e.txid]) for (const l of e.legs) if (l.net < 0) realised[l.id] = realised[e.txid];
-    timeline.push({ t: e.t, txid: e.txid, price: e.price, before, sats: Object.entries(sats).filter(([n]) => inScope(n)).reduce((a, [,x]) => a + x, 0), basis: basisNow(), internal: isInternal });
+    timeline.push({ t: e.t, txid: e.txid, price: e.price, asset: assetOfEvent(e), before, sats: Object.entries(sats).filter(([n]) => inScope(n)).reduce((a, [,x]) => a + x, 0), units: unitsNow(), basis: basisNow(), internal: isInternal });
   }
   // each coin still held, with the lots its sats came from (meaningful under 'utxo', where coins keep their own history)
   return { coins: Object.fromEntries([...coins].map(([op, c]) => [op, c.lots])), queues, pools, timeline, internal, unpriced, realised, method, perVault: { sats, basis: method === 'average' ? Object.fromEntries(Object.entries(pools).map(([k, p]) => [k, p.basis])) : Object.fromEntries(Object.keys(sats).map(v => [v, (method === 'utxo' ? [...coins.values()].filter(c => c.vault === v).flatMap(c => c.lots) : (queues[v] || [])).reduce((a, l) => a + (l.cost || 0), 0)])) } };
@@ -2224,7 +2231,7 @@ function vaultLedger(name) {
   const names = [name];
   for (let i=0; i<names.length; i++) for (const peer of Object.values(txFacts[names[i]]?.transfers || {}).flat())
     if (!names.includes(peer) && txFacts[peer] && store.vaults.some(x => x.name === peer && x.network === v.network)) names.push(peer);
-  const inputs = names.map(n => ({ name: n, network: v.network, links: txFacts[n].links, rows: Object.values(txFacts[n].rows), now: txFacts[n].now })).filter(i => i.rows.length || i.name === name);
+  const inputs = names.map(n => ({ name: n, network: v.network, asset: assetOf(store.vaults.find(x => x.name === n)), links: txFacts[n].links, rows: Object.values(txFacts[n].rows), now: txFacts[n].now })).filter(i => i.rows.length || i.name === name);
   // what the person said each spend out of these vaults was (Send asks; Activity can change it)
   const kinds = {};
   for (const n of names) for (const [k, rec] of Object.entries((store.vaults.find(x => x.name === n) || {}).more || {}))
@@ -2236,7 +2243,7 @@ function vaultLedger(name) {
   return vaultLedger.memo[name].L;
 }
 vaultLedger.memo = {};
-const ledgerAt = (L, t) => { let s = { sats: 0, basis: 0 }; for (const e of L.timeline) { if (e.t > t) break; s = e; } return s; };
+const ledgerAt = (L, t) => { let s = { sats: 0, units: {}, basis: 0 }; for (const e of L.timeline) { if (e.t > t) break; s = e; } return s; };
 // What a spend WOULD realise, before it is made: the cost of the sats that actually leave (the payment and the fee,
 // never the change), under the method this taxpayer uses. Only 'utxo' answers from the coins picked — under FIFO the
 // oldest lots leave whichever coins the transaction spends, and under average cost every sat costs the same.
@@ -2265,7 +2272,10 @@ function costOfLeaving(L, vaultName, chosen, spending, leaving) {
 
 // The three series for a range. Balance and basis only change at transactions, so they are steps; value moves with
 // the price, so it is sampled — and it steps at each transaction too, because holdings did.
-function sumSeries(L, from, to, prices, now) {
+// `more`, when the scope holds more than one asset: { assetId: { prices, now } } for each asset beyond bitcoin. Then
+// `prices`/`now` are bitcoin's and apply to the sats held; the balance line is sats alone; worth and cost are the sum.
+function sumSeries(L, from, to, prices, now, more = null) {
+  if (more) return sumSeriesMixed(L, from, to, prices, now, more);
   // one point per instant: several transactions in one block are drawn as the state after all of them, because the
   // states in between existed only in the order this app chose to apply them (a spike to 39,010 sats, a dip to 0)
   const raw = L.timeline.filter(e => e.t > from && e.t <= to), inRange = [];
@@ -2287,6 +2297,29 @@ function sumSeries(L, from, to, prices, now) {
   const nearPrice = (t) => { let best = null; for (const [x, p] of dayPrices) if (!best || Math.abs(x - t) < Math.abs(best[0] - t)) best = [x, p]; return best ? best[1] : (now ? now.price : null); };
   for (const e of inRange) { const p = e.price || nearPrice(e.t); if (p === null) continue; val.push([e.t, e.before.sats / 1e8 * p]); val.push([e.t, e.sats / 1e8 * p]); }
   if (now) val.push([to, (inRange.length ? inRange[inRange.length - 1] : start).sats / 1e8 * now.price]);
+  val.sort((a, b) => a[0] - b[0]);
+  return { bal, cost, val };
+}
+function sumSeriesMixed(L, from, to, prices, now, more) {
+  const raw = L.timeline.filter(e => e.t > from && e.t <= to), inRange = [];
+  for (const e of raw) { const last = inRange[inRange.length - 1];
+    if (last && last.t === e.t) inRange[inRange.length - 1] = Object.assign({}, e, { before: last.before });
+    else inRange.push(e); }
+  const start = ledgerAt(L, from), satsOf = (st) => (st.units && st.units.BTC) || 0;
+  const bal = [[from, satsOf(start)]], cost = [[from, start.basis]], val = [];
+  for (const e of inRange) { bal.push([e.t, satsOf(e)]); cost.push([e.t, e.basis]); }
+  const last = inRange.length ? inRange[inRange.length - 1] : start;
+  bal.push([to, satsOf(last)]); cost.push([to, last.basis]);
+  // each asset's price on a day, or the nearest day's, or now
+  const px = { BTC: { days: Object.entries(prices).filter(([, q]) => q).map(([d, q]) => [Date.parse(d + 'T12:00:00Z') / 1000, q.price]), now } };
+  for (const [a, m] of Object.entries(more)) px[a] = { days: Object.entries(m.prices || {}).filter(([, q]) => q).map(([d, q]) => [Date.parse(d + 'T12:00:00Z') / 1000, q.price]), now: m.now };
+  const near = (a, t) => { let best = null; for (const [x, p] of px[a].days) if (!best || Math.abs(x - t) < Math.abs(best[0] - t)) best = [x, p]; return best ? best[1] : (px[a].now ? px[a].now.price : null); };
+  // worth at an instant: every asset's units at its own price; the event's own asset at the event's own price
+  const worth = (st, t, ownAsset, ownPrice) => { let v = 0; for (const [a, n] of Object.entries(st.units || {})) { if (!n) continue; const p = a === ownAsset && ownPrice ? ownPrice : near(a, t); if (p === null) return null; v += n / 1e8 * p; } return v; };
+  const days = [...new Set(Object.values(px).flatMap(x => x.days.map(([t]) => t)))].sort((a, b) => a - b);
+  for (const t of days) { const tt = t + 11 * 3600 + 59 * 60 + 59; if (tt < from || tt > to) continue; const w = worth(ledgerAt(L, tt), tt); if (w !== null) val.push([tt, w]); }
+  for (const e of inRange) { const a = worth(e.before, e.t, e.asset, e.price), b = worth(e, e.t, e.asset, e.price); if (a !== null) val.push([e.t, a]); if (b !== null) val.push([e.t, b]); }
+  { const w = worth(last, to); if (w !== null) val.push([to, w]); }
   val.sort((a, b) => a[0] - b[0]);
   return { bal, cost, val };
 }
@@ -2409,7 +2442,7 @@ async function sumInput(name) {
     const a = await invoke('vault_activity', { name, history: s.history.map(h => [h.txid, h.height]), ccy });
     f = keepActivity(name, a); f.history=s.history.map(h=>[h.txid,h.height]); await refreshTransferLinks();
   }
-  return { name, network: v.network, links: f.links, rows: Object.values(f.rows), now: f.now, ccy: f.ccy, pending: f.pending || 0 };
+  return { name, network: v.network, asset: assetOf(v), links: f.links, rows: Object.values(f.rows), now: f.now, ccy: f.ccy, pending: f.pending || 0 };
 }
 async function renderSummary(box, names, opts = {}) {
   const me = (renderSummary.seq = (renderSummary.seq || 0) + 1);
@@ -2430,24 +2463,32 @@ async function renderSummary(box, names, opts = {}) {
   if (!inputs.length && locked.length) { box.classList.remove('sum-loading'); box.innerHTML = ''; const lbl0 = document.createElement('div'); lbl0.className = 'label'; lbl0.textContent = opts.title || 'Over time'; box.append(lbl0); if (opts.chips) box.append(opts.chips); box.append(lockedLine()); return; }
   const priced = inputs.length && inputs.every(i => i.network === 'mainnet' && i.ccy);
   const ccy = priced ? inputs[0].ccy : '';
-  const now = priced ? (inputs.find(i => i.now) || {}).now : null;
+  // bitcoin's price is the summary's, when there is a sats vault; every other asset held brings its own
+  const assets = [...new Set(inputs.map(i => i.asset || 'BTC'))], mixed = assets.length > 1;
+  const nowOf = (a) => (inputs.find(i => (i.asset || 'BTC') === a && i.now) || {}).now || null;
+  const now = priced ? (mixed ? nowOf('BTC') : (inputs.find(i => i.now) || {}).now) : null;
   const methods = [...new Set(inputs.map(i => methodFor(store.vaults.find(v => v.name === i.name))))];
   const method = methods.length === 1 ? methods[0] : methodFor(null);
   // a node's rows are summed exactly: the millisatoshi each row carries, not the whole sats it is shown as, or the
   // running balance of a node that holds nothing shows the rounding as a holding
   const exactRows = (n) => { const ev = store.vaults.find(v => v.name === n)?.node?.events; const by = ev ? Object.fromEntries(ev.map(e => [e.id, e])) : null;
     return Object.values(txFacts[n]?.rows || {}).map(r => { const e = by && by[r.txid]; return e && e.msat && r.net !== null ? { ...r, net: e.msat / 1000 } : r; }); };
-  const ledgerInputs = linkedNames(names).map(n => ({name:n, network:store.vaults.find(v=>v.name===n)?.network, rows:exactRows(n), now:txFacts[n]?.now, links:txFacts[n]?.links}));
+  const ledgerInputs = linkedNames(names).map(n => ({name:n, network:store.vaults.find(v=>v.name===n)?.network, asset: assetOf(store.vaults.find(v=>v.name===n)), rows:exactRows(n), now:txFacts[n]?.now, links:txFacts[n]?.links}));
   const L = buildLedger(ledgerInputs, method, {}, names);
   const rangeKey = sumPref('range', 'all'), R = SUM_RANGES.find(r => r[0] === rangeKey) || SUM_RANGES[3];
   const to = Math.floor(Date.now() / 1000), first = L.timeline.length ? L.timeline[0].t : to;
   const from = R[2] ? Math.min(to - R[2] * 86400, to - 3600) : Math.max(0, first - Math.max(3600, (to - first) * 0.03));
-  const run = priced && L.timeline.length ? await pricesRange(ccy, Math.max(from, first), to, names) : { every: 1, prices: {}, ok: true };
+  const namesOf = (a) => inputs.filter(i => (i.asset || 'BTC') === a).map(i => i.name);
+  const run = priced && L.timeline.length ? await pricesRange(ccy, Math.max(from, first), to, mixed ? namesOf('BTC') : names) : { every: 1, prices: {}, ok: true };
   const prices = run.prices;
+  // the other assets' price runs, each asked for by its own vault so the service is asked in that asset's unit
+  const more = {};
+  if (mixed && priced && L.timeline.length) for (const a of assets.filter(a => a !== 'BTC')) { const r = await pricesRange(ccy, Math.max(from, first), to, namesOf(a).slice(0, 1)); more[a] = { prices: r.prices, now: nowOf(a) }; }
   if (me !== renderSummary.seq) return;
-  const S = sumSeries(L, from, to, prices, now);
-  const nowState = L.timeline.length ? L.timeline[L.timeline.length - 1] : { sats: 0, basis: 0 };
-  const value = now ? nowState.sats / 1e8 * now.price : null, gain = value !== null ? value - nowState.basis : null;
+  const S = sumSeries(L, from, to, prices, now, mixed ? more : null);
+  const nowState = L.timeline.length ? L.timeline[L.timeline.length - 1] : { sats: 0, units: {}, basis: 0 };
+  const worthNow = () => { if (!mixed) return now ? nowState.sats / 1e8 * now.price : null; let v = 0; for (const [a, n] of Object.entries(nowState.units || {})) { const q = a === 'BTC' ? now : nowOf(a); if (n && !q) return null; v += (n || 0) / 1e8 * (q ? q.price : 0); } return v; };
+  const value = worthNow(), gain = value !== null ? value - nowState.basis : null;
   // past prices still on their way: a basis drawn without them is not a small basis, it is an unfinished one
   const loading = linkedNames(names).map(n=>txFacts[n] || {}).reduce((n, i) => n + (i.pending || 0), 0), loadingS = loading === 1 ? '' : 's';
   box.classList.remove('sum-loading');
@@ -2464,9 +2505,9 @@ async function renderSummary(box, names, opts = {}) {
   // stat tiles first: the numbers a reader came for, before any picture
   const k = document.createElement('div'); k.className = 'kpis';
   const tile = (key, v, sub, cls) => { const d = document.createElement('div'); d.className = 'kpi'; d.innerHTML = `<div class="k"></div><div class="v"></div><div class="s"></div>`; d.querySelector('.k').textContent = key; d.querySelector('.v').textContent = v; const sEl = d.querySelector('.s'); sEl.textContent = sub || ''; if (cls) sEl.classList.add(cls); return d; };
-  k.appendChild(tile('Holding', amountIn(names, nowState.sats), inputs.length > 1 ? `across ${inputs.length} vaults` : ''));
+  k.appendChild(tile('Holding', mixed ? amountsText(nowState.units) : amountIn(names, nowState.sats), inputs.length > 1 ? `across ${inputs.length} vaults` : ''));
   if (priced && value !== null) {
-    k.appendChild(tile('Worth now', money(value, ccy), perUnit(names, now, ccy)));
+    k.appendChild(tile('Worth now', money(value, ccy), mixed ? [now ? perUnit(namesOf('BTC'), now, ccy) : null, ...assets.filter(a => a !== 'BTC').map(a => nowOf(a) ? perUnit(namesOf(a).slice(0, 1), nowOf(a), ccy) : null)].filter(Boolean).join(' \u00b7 ') : perUnit(names, now, ccy)));
     k.appendChild(tile('Cost basis', money(nowState.basis, ccy), loading ? `incomplete \u00b7 ${loading} past price${loadingS} still loading` : 'what it was worth as it arrived'));
     const pct = nowState.basis > 0 ? gain / nowState.basis * 100 : null;
     // a status colour, so it goes with a sign and an arrow and never by colour alone
@@ -2477,7 +2518,7 @@ async function renderSummary(box, names, opts = {}) {
   }
   box.appendChild(k);
   const c1 = document.createElement('div'); c1.className = 'chart'; box.appendChild(c1);
-  lineChart(c1, { title: `Balance, in ${unitName(names)}`, sub: 'It changes only when something arrives or leaves.', from, to,
+  lineChart(c1, { title: `Balance, in ${mixed ? 'sats' : unitName(names)}`, sub: mixed ? `It changes only when something arrives or leaves. ${assets.filter(a => a !== 'BTC').map(a => unitName(namesOf(a).slice(0, 1))).join(' and ')} ${assets.length > 2 ? 'are' : 'is'} counted in worth and cost, not in this line.` : 'It changes only when something arrives or leaves.', from, to,
     series: [{ name: 'Balance', color: 'var(--series-value)', pts: S.bal, step: true, area: true }],
     fmt: (v) => amountIn(names, v), fmtAxis: (v) => cunits(names, v) });
   if (priced) {
@@ -2487,7 +2528,7 @@ async function renderSummary(box, names, opts = {}) {
       fmt: (v) => money(v, ccy), fmtAxis: (v) => cmoney(v, ccy) });
   }
   // where the price sat on the long cycle as coins arrived and left: drawn when its marks are here, into its own slot
-  if (priced) { const card = document.createElement('div'); box.appendChild(card); cycleSummary(L, card, () => me === renderSummary.seq); }
+  if (priced && assets.includes('BTC')) { const card = document.createElement('div'); box.appendChild(card); cycleSummary(L, card, () => me === renderSummary.seq); }
   // what the figures rest on, said once and plainly
   const notes = [];
   if (!priced) notes.push(inputs.some(i => i.network !== 'mainnet') ? 'Test coins have no price, so only the balance is drawn.' : 'No currency is chosen in App settings, so only the balance is drawn.');
@@ -2508,7 +2549,7 @@ async function renderSummary(box, names, opts = {}) {
   const tw = document.createElement('div'); tw.className = 'sum-table'; tw.hidden = true;
   tg.onclick = () => {
     tw.hidden = !tw.hidden; tg.textContent = tw.hidden ? 'Show the figures as a table' : 'Hide the table'; if (tw.hidden) return;
-    const cols = [{ n: 'Balance', s: { pts: S.bal, step: true }, f: (v) => sats(Math.round(v)) + ' sats' }].concat(priced ? [{ n: 'Worth', s: { pts: S.val }, f: (v) => money(v, ccy) }, { n: 'Cost basis', s: { pts: S.cost, step: true }, f: (v) => money(v, ccy) }] : []);
+    const cols = [{ n: 'Balance', s: { pts: S.bal, step: true }, f: (v) => mixed ? sats(Math.round(v)) + ' sats' : amountIn(names, v) }].concat(priced ? [{ n: 'Worth', s: { pts: S.val }, f: (v) => money(v, ccy) }, { n: 'Cost basis', s: { pts: S.cost, step: true }, f: (v) => money(v, ccy) }] : []);
     const xs = [...new Set([...S.bal, ...S.val, ...S.cost].map(p => p[0]))].sort((a, b) => b - a);
     const t = document.createElement('table'), hr = t.insertRow(); for (const h of ['When'].concat(cols.map(c => c.n))) { const th = document.createElement('th'); th.textContent = h; hr.appendChild(th); }
     for (const x of xs) { const r = t.insertRow(); r.insertCell().textContent = new Date(x * 1000).toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' }); for (const c of cols) r.insertCell().textContent = c.f(seriesAt(c.s, x) || 0); }
@@ -2525,7 +2566,7 @@ function lockedWhy(e) { const s = String(e); if (s.startsWith('SPARK_UNLOCK:')) 
 function renderOverview() {
   // in a fiction profile the made-up person's world is the real one: its signet vaults count as their holdings
   const fiction = !!(profile && profile.class === 'fiction');
-  const main = store.vaults.filter(v => (fiction || v.network === 'mainnet') && inSats(v)), test = fiction ? [] : store.vaults.filter(v => v.network !== 'mainnet' && inSats(v));
+  const main = store.vaults.filter(v => (fiction || v.network === 'mainnet') && hasPrice(v)), test = fiction ? [] : store.vaults.filter(v => v.network !== 'mainnet' && hasPrice(v));
   let off = []; try { off = JSON.parse(sumPref('off', '[]')); } catch {}
   const names = main.map(v => v.name).filter(n => !off.includes(n));
   const chips = document.createElement('div'); chips.style.cssText = 'display:flex;gap:var(--s2) 14px;flex-wrap:wrap;align-items:center';
@@ -4898,6 +4939,16 @@ const LIQUID_USDT = 'ce091c998b83c78bb71a632313ba3760f1763d9cfcffae02258ffa9865a
 // the currency, and the ATO treats a stablecoin as a CGT asset like any other); null for an asset with no price here.
 // The money arithmetic is shared: a vault's figure / 1e8 × price, which holds for USDt because Tether's precision is 8.
 const priceUnit = v => inSats(v) ? 'BTC' : (v.liquid.asset === LIQUID_USDT ? 'USD' : null);
+// the asset a vault's figures are counted in: 'BTC' (sats) for every vault but a Liquid vault of another asset
+const assetOf = v => inSats(v) ? 'BTC' : v.liquid.asset;
+// amounts from several vaults, added asset by asset: [[vaultName, n], …] → { BTC: sats, <assetId>: units }
+function unitsOfRows(pairs) { const u = {}; for (const [n, x] of pairs) { const v = store.vaults.find(y => y.name === n), a = v ? assetOf(v) : 'BTC'; u[a] = (u[a] || 0) + x; } return u; }
+// several assets' amounts in words, sats first: "1,234,567 sats · 190.74 USDt"
+function amountsText(units) {
+  const parts = Object.entries(units || {}).filter(([, n]) => n).sort(([a], [b]) => (a === 'BTC' ? -1 : b === 'BTC' ? 1 : a < b ? -1 : 1));
+  if (!parts.length) return '0 sats';
+  return parts.map(([a, n]) => { if (a === 'BTC') return `${sats(Math.round(n))} sats`; const v = store.vaults.find(x => x.liquid && x.liquid.asset === a); return v ? unitAmount(v, n) : `${n} ${a.slice(0, 8)}`; }).join(' \u00b7 ');
+}
 const hasPrice = v => priceUnit(v) !== null;
 // the unit a scope's figures are in: a single vault of another asset speaks in that asset's units; everything else in sats
 const unitVault = names => names.length === 1 ? (store.vaults.find(v => v.name === names[0]) || null) : null;
