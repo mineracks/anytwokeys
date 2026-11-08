@@ -689,6 +689,22 @@ fn key_form_seen(pubkey: String, form: u8, nfc: bool, firmware: Option<String>) 
 #[tauri::command]
 async fn vault_activity(name: String, history: Vec<(String, i32)>, ccy: String) -> R<activity::Activity> {
     block(move || {
+        let started = std::time::Instant::now();
+        let idx = wallet::load().ok().and_then(|s| s.vaults.iter().position(|v| v.name == name)).map(|i| i + 1).unwrap_or(0);
+        let r = vault_activity_inner(name, history, ccy, &started);
+        if let Ok(a) = &r { watch::log(&format!("activity vault {idx}: {} ms, {} rows", started.elapsed().as_millis(), a.rows.len())); }
+        r
+    }).await
+}
+/// A timing line for the screen's own phases (numbers and a phase name, nothing of the person's), so a slow overview
+/// can be read off the same log as the syncs.
+#[tauri::command]
+fn perf_log(phase: String, ms: u64, n: u64) -> R<()> {
+    let phase: String = phase.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == ' ').take(40).collect();
+    watch::log(&format!("ui {phase}: {ms} ms, n={n}")); Ok(())
+}
+fn vault_activity_inner(name: String, history: Vec<(String, i32)>, ccy: String, _started: &std::time::Instant) -> R<activity::Activity> {
+    {
         let s = wallet::load()?;
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
         let servers = wallet::servers_for(&s, &v.network);
@@ -812,9 +828,11 @@ async fn vault_activity(name: String, history: Vec<(String, i32)>, ccy: String) 
             let peers: Vec<String> = s.seen.iter().filter(|(n, seen)| *n != &v.name && seen.txs.contains_key(txid) && s.vaults.iter().any(|o| &o.name == *n && o.network == v.network)).map(|(n, _)| n.clone()).collect();
             if !peers.is_empty() { a.transfers.insert(txid.clone(), peers); }
         }
+        let t = std::time::Instant::now();
         transfers::record(&v, &mut a, &s);
+        if t.elapsed().as_millis() > 200 { watch::log(&format!("activity: transfer matching {} ms for {} rows", t.elapsed().as_millis(), a.rows.len())); }
         Ok(a)
-    }).await
+    }
 }
 
 #[tauri::command]
@@ -4020,7 +4038,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![search_all, profiles_list, profile_open, profile_close, profile_create, profile_update, profile_delete, profile_picture_pick, guard_displays, guard_sharing, guard_override, vault_move_start, move_land, persona_generate, persona_defaults, transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, cycle_curve, cycle_now, cycle_marks, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, icon_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
+        .invoke_handler(tauri::generate_handler![search_all, profiles_list, profile_open, profile_close, profile_create, profile_update, profile_delete, profile_picture_pick, guard_displays, guard_sharing, guard_override, vault_move_start, move_land, persona_generate, persona_defaults, transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, perf_log, cycle_curve, cycle_now, cycle_marks, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, icon_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
             cards_list, card_generate, attach_view, profiles_refresh, sync_face_refresh, sync_status, sync_enable, sync_rotate, sync_remove_card, sync_now, sync_tick, sync_disable, sync_find, sync_adopt, card_survey, card_tap, nk_firmware, nk_firmware_update, secret_preview, card_init_key_from, card_import, card_init_resume_check, key_setup_restart, card_reset, card_pin_change_pad, platform, ui_note, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, node_retire, node_import_pick, node_import, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, liquid_restore, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_forget, spark_memos, spark_owner_import, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard,
             engraver_find, engraver_jog, engraver_run, engraver_cancel, vault_shares_plates, share_rewrap

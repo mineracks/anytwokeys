@@ -2456,8 +2456,12 @@ async function renderSummary(box, names, opts = {}) {
   // one vault that cannot be read (its reader locked, its node away) must not blank the others: draw what came,
   // say what did not, and mark it on its chip
   sumInput.pendingLinks = false;
+  const t0 = performance.now(), perf = (phase, t, n) => { if (names.length > 1) invoke('perf_log', { phase, ms: Math.round(performance.now() - t), n }).catch(() => {}); };
   const settled = await Promise.all(names.map(n => sumInput(n, true).then(v => ({ v }), e => ({ e, n }))));
+  perf('overview inputs', t0, names.length);
+  const t1 = performance.now();
   if (sumInput.pendingLinks) { sumInput.pendingLinks = false; await refreshTransferLinks(); }
+  perf('overview links', t1, names.length);
   if (me !== renderSummary.seq) return;
   const inputs = settled.filter(r => r.v).map(r => r.v);
   const locked = settled.filter(r => r.e).map(r => ({ name: r.n, why: lockedWhy(r.e) }));
@@ -2477,7 +2481,10 @@ async function renderSummary(box, names, opts = {}) {
   const exactRows = (n) => { const ev = store.vaults.find(v => v.name === n)?.node?.events; const by = ev ? Object.fromEntries(ev.map(e => [e.id, e])) : null;
     return Object.values(txFacts[n]?.rows || {}).map(r => { const e = by && by[r.txid]; return e && e.msat && r.net !== null ? { ...r, net: e.msat / 1000 } : r; }); };
   const ledgerInputs = linkedNames(names).map(n => ({name:n, network:store.vaults.find(v=>v.name===n)?.network, asset: assetOf(store.vaults.find(v=>v.name===n)), rows:exactRows(n), now:txFacts[n]?.now, links:txFacts[n]?.links}));
+  const t2 = performance.now();
   const L = buildLedger(ledgerInputs, method, {}, names);
+  perf('overview ledger', t2, L.timeline.length);
+  const t3 = performance.now();
   const rangeKey = sumPref('range', 'all'), R = SUM_RANGES.find(r => r[0] === rangeKey) || SUM_RANGES[3];
   const to = Math.floor(Date.now() / 1000), first = L.timeline.length ? L.timeline[0].t : to;
   const from = R[2] ? Math.min(to - R[2] * 86400, to - 3600) : Math.max(0, first - Math.max(3600, (to - first) * 0.03));
@@ -2488,7 +2495,11 @@ async function renderSummary(box, names, opts = {}) {
   const more = {};
   if (mixed && priced && L.timeline.length) for (const a of assets.filter(a => a !== 'BTC')) { const r = await pricesRange(ccy, Math.max(from, first), to, namesOf(a).slice(0, 1)); more[a] = { prices: r.prices, now: nowOf(a) }; }
   if (me !== renderSummary.seq) return;
+  perf('overview prices', t3, Object.keys(prices).length);
+  const t4 = performance.now();
   const S = sumSeries(L, from, to, prices, now, mixed ? more : null);
+  perf('overview series', t4, S.val.length);
+  const t5 = performance.now();
   const nowState = L.timeline.length ? L.timeline[L.timeline.length - 1] : { sats: 0, units: {}, basis: 0 };
   const worthNow = () => { if (!mixed) return now ? nowState.sats / 1e8 * now.price : null; let v = 0; for (const [a, n] of Object.entries(nowState.units || {})) { const q = a === 'BTC' ? now : nowOf(a); if (n && !q) return null; v += (n || 0) / 1e8 * (q ? q.price : 0); } return v; };
   const value = worthNow(), gain = value !== null ? value - nowState.basis : null;
@@ -2559,6 +2570,7 @@ async function renderSummary(box, names, opts = {}) {
     tw.innerHTML = ''; tw.appendChild(t);
   };
   box.append(tg, tw);
+  perf('overview draw', t5, 0); perf('overview total', t0, names.length);
 }
 function renderHomeSummary() {
   { const b = $('#s-home [data-loss-report]'); if (b) b.hidden = !(vault && txFacts[vault.name] && lossRows(scopeOfVault(vault)).length); } $('#home-summary').hidden = !!(vault && !hasPrice(vault)); $$('#s-home [data-vault-report], #s-home [data-cgt-report]').forEach(b => { b.hidden = !!(vault && !hasPrice(vault)); }); if (vault && hasPrice(vault) && $('#s-home').classList.contains('on')) renderSummary($('#home-summary'), [vault.name]); }
