@@ -349,6 +349,9 @@ fn wants_touch(card: &dyn Wire, reader: &str, asked: Option<bool>) -> Result<boo
 }
 /// Lock touch to FIXED (2, button 0x20) and read it back. One-way: the card refuses to lower it afterwards.
 fn fix_touch(card: &dyn Wire) -> Result<bool, CardError> {
+    // A slot whose policy is already FIXED (a key was set up here before and later removed) refuses every write to
+    // the policy, the same value included: read first, write only when it is not yet fixed.
+    if apdu(card, 0x00, 0xCA, 0x00, 0xD6, &[])?.first() == Some(&2) { return Ok(true); }
     apdu(card, 0x00, 0xDA, 0x00, 0xD6, &[0x02, 0x20])?;
     Ok(apdu(card, 0x00, 0xCA, 0x00, 0xD6, &[])?.first() == Some(&2))
 }
