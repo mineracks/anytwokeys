@@ -4783,7 +4783,7 @@ async function seedBuild(n, root) {
   const boxes = seedBoxes();
   const mark = (box) => { const w = box.value.trim().toLowerCase(); box.parentElement.className = !w ? '' : set.has(w) ? 'ok' : 'bad'; };
   const verdict = async () => {
-    const filled = boxes.filter(b => b.value.trim()).length, bad = boxes.filter(b => b.parentElement.className === 'bad').length;
+    const filled = boxes.filter(b => b.value.trim() && (b !== document.activeElement || set.has(b.value.trim().toLowerCase()))).length, bad = boxes.filter(b => b.parentElement.className === 'bad').length;
     if (filled < n) { count.innerHTML = `${filled} of ${n}${bad ? ` \u00b7 <span class="warn">${bad} not in the list</span>` : ''}`; return; }
     // 23 drawn words (Entropia) carry no checksum yet: the 24th is chosen next
     if (n === 23) { count.innerHTML = bad ? `<span class="warn">${bad} not in the list</span>` : '<span class="ok">\u2713 23 drawn words, all on the list \u2014 the 24th is chosen next</span>'; return; }
@@ -4792,7 +4792,7 @@ async function seedBuild(n, root) {
   };
   const suggest = (box) => {
     const typing = box.value.trim().toLowerCase();
-    const hits = typing && !set.has(typing) ? seedWords.filter(w => w.startsWith(typing)).slice(0, 8) : [];
+    const hits = typing ? seedWords.filter(w => w.startsWith(typing)).slice(0, 8) : [];
     strip.innerHTML = hits.map(w => `<button type="button" class="btn small" data-word="${w}">${w}</button>`).join('');
     strip.querySelectorAll('[data-word]').forEach(b => { b.onmousedown = (e) => e.preventDefault(); b.onclick = () => { box.value = b.dataset.word; advance(box); }; });
   };
@@ -4800,7 +4800,7 @@ async function seedBuild(n, root) {
   boxes.forEach(box => {
     box.addEventListener('focus', () => { box.type = 'text'; suggest(box); });
     box.addEventListener('blur', () => { box.type = 'password'; mark(box); verdict(); });
-    box.addEventListener('input', () => suggest(box));
+    box.addEventListener('input', () => { suggest(box); box.parentElement.className = ''; verdict(); });
     box.addEventListener('keydown', (e) => {
       const first = strip.firstElementChild;
       if ((e.key === 'Tab' || e.key === 'Enter' || e.key === ' ') && !e.shiftKey) {
@@ -5131,16 +5131,18 @@ function renderLnCard() {
   if (card.hidden) return;
   const have = Object.keys(vault.spark.memos || {}).length, rows = Object.values(txFacts[vault.name]?.spark || {});
   const ln = rows.filter(t => t.kind === 0).length, missing = rows.filter(t => t.kind === 0 && !t.memo).length;
-  const owner = vault.spark.owner_card ? `The wallet\u2019s own key is in the ${slotName(vault.spark.owner_slot)} of card ${esc(vault.spark.owner_card)}: unlocking with that card reads the descriptions with every sync (two touches: Spark, then the Lightning service). ` : '';
+  const owner = vault.spark.owner_card ? `The wallet\u2019s own key is in the ${slotName(vault.spark.owner_slot)} of card ${esc(vault.spark.owner_card)}. Unlocking with that card (PIN, then two touches: Spark, then the Lightning service) reads the description of every new Lightning receive with each sync; unlocking with the reader card reads none. ` : '';
   $('#vs-ln-text').innerHTML = owner + esc(have ? `${sats(have)} transfer${have === 1 ? '' : 's'} carr${have === 1 ? 'ies' : 'y'} the description its invoice was given${missing ? `; ${sats(missing)} Lightning receive${missing === 1 ? '' : 's'} on the list still ${missing === 1 ? 'has' : 'have'} none` : ''}.`
     : ln ? `${sats(ln)} Lightning receive${ln === 1 ? '' : 's'} on the list; none carries its description yet.` : 'No Lightning receives on the list yet.');
   $('#vs-ln-words').querySelector('summary').textContent = vault.spark.owner_card ? 'Read them once with the words instead' : 'Read them from the Lightning service';
   $('#vs-ln-card-form').hidden = !!vault.spark.owner_card;
+  $('#vs-ln-open-row').hidden = !vault.spark.owner_card;
   const root = $('#vs-ln-words'); if (root.open && !root.querySelector('.seed-grid input')) seedBuild(12, root);
 }
 const ownerSlotFor = c => !c.pubkey ? 'sig' : !c.aut_pubkey ? 'aut' : null;
 const slotName = s => s === 'aut' ? 'authentication slot' : 'signature slot';
 const holdsOwner = (c, sp) => !!sp && String(c.serial) === sp.owner_card && (c[(sp.owner_slot || 'sig') === 'aut' ? 'aut_pubkey' : 'pubkey'] === sp.identity);
+$('#vs-ln-open').onclick = async () => { if (!vault || !vault.spark) return; const me = vault.name; try { await invoke('spark_forget', { name: me }); } catch {} show('home'); sync(); };
 async function lnCards() {
   let cs = []; try { cs = await invoke('cards_list'); } catch {}
   const sp = vault && vault.spark, sel = $('#vs-ln-cards'), was = sel.value;
@@ -5166,7 +5168,12 @@ $('#vs-ln-write').onclick = async () => {
   try {
     const { serial, slot } = await invoke('spark_owner_import', { name: me, reader, adminPin: admin, words }); seedClear(); $('#vs-ln-admin').value = '';
     const st = await invoke('store_get'); store = st; const v = store.vaults.find(x => x.name === me); if (v && vault && vault.name === me) vault = v;
-    note.textContent = `Written to the ${slotName(slot)} of card ${serial}. It now opens this wallet and its Lightning descriptions; unlock with it next time.`;
+    const card = $('#vs-ln-cards').selectedOptions[0]?.textContent.split(' \u2014 ')[0] || `card ${serial}`;
+    $('#vs-ln-words').open = false;
+    const done = $('#vs-ln-done'); done.hidden = false;
+    done.innerHTML = `<b>\u2713 Written.</b> The wallet\u2019s own key is now in the ${slotName(slot)} of ${esc(card)}, verified by reading it back. The words were not kept.<br><b>What happens next.</b> The wallet is still open on the reader\u2019s session, which reads no descriptions. The next time it needs a card \u2014 when that session runs out, or now \u2014 unlocking with ${esc(card)} asks for its PIN and two touches, Spark then the Lightning service, and every Lightning receive without a description is read in that sync and shown in Activity. Nothing else changes: the balance, the history and the reader key stay as they were.<div class="row" style="margin-top:8px"><button class="btn primary" type="button" id="vs-ln-open-now">Open it with this card now</button></div>`;
+    $('#vs-ln-open-now').onclick = async () => { try { await invoke('spark_forget', { name: me }); } catch {} done.hidden = true; show('home'); sync(); };
+    toast(`Written to ${card}`);
     renderLnCard();
   } catch (e) { note.textContent = ''; fail(e); }
   finally { b.disabled = false; }

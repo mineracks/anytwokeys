@@ -148,6 +148,9 @@ static DISCOVERY: AtomicU64 = AtomicU64::new(0);
 fn runtime() -> &'static Mutex<Runtime> { RUNTIME.get_or_init(|| Mutex::new(Runtime::default())) }
 fn key_for(sp: &wallet::Spark, network: &str) -> String { format!("{network}:{}:{}:{}", sp.identity, sp.reader_pubkey, sp.reader_card) }
 pub fn clear() { EPOCH.fetch_add(1, Ordering::SeqCst); if let Ok(mut r) = runtime().lock() { *r = Runtime::default(); } }
+/// Drop one wallet's open read session, so its next sync asks for a card again — the way to start using a card
+/// that was just written, without waiting for the reader's session to run out.
+pub fn forget(sp: &wallet::Spark, network: &str) { if let Ok(mut r) = runtime().lock() { r.readers.remove(&key_for(sp, network)); } }
 /// The point of no return for one discovered wallet: once its setting is about to change, or its discovery has
 /// expired, the candidate is not offered again on the same discovery. Until then a wrong PIN, a wrong card or a name
 /// clash leaves it in place for another go within its own lifetime — nothing is extended, and no seed is kept.
