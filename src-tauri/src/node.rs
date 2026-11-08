@@ -353,17 +353,23 @@ fn hash32(text: &str) -> String {
     STANDARD.decode(text).ok().filter(|b| b.len() == 32).map(hex::encode).unwrap_or_default()
 }
 
-/// One wallet transaction as a ledger row. A funding is an open (−fee), a known closing transaction a close (0), else a
+/// One wallet transaction as a ledger row. A funding is an open (−fee), a known closing transaction a close (what the
+/// transaction paid the wallet less this node's settled side), else a
 /// deposit or a withdrawal by LND's `amount`. One correction: when the outputs that are not this node's add up to MORE
 /// than LND says left, the transaction spent inputs the wallet had never counted as its own (a channel's close output
 /// swept straight out, as in a rescue), and the row takes the transaction's own figure — the outputs plus what the
 /// wallet did book — with a memo saying so. Otherwise a sweep to safety looks like a 3,200 sat fee.
-fn lnd_chain_row(t: &serde_json::Value, opens: &std::collections::HashSet<String>, closes: &std::collections::HashSet<String>) -> Option<Event> {
+fn lnd_chain_row(t: &serde_json::Value, opens: &std::collections::HashSet<String>, closes: &std::collections::HashMap<String, i64>) -> Option<Event> {
     let s = |k: &str| t.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
     let n = |k: &str| t.get(k).and_then(|x| x.as_str().and_then(|v| v.parse::<i64>().ok()).or_else(|| x.as_i64())).unwrap_or(0);
     let txid = s("tx_hash").to_lowercase(); let amount = n("amount"); let fee = n("total_fees").max(0) as u64; let time = n("time_stamp") as u32;
     if txid.is_empty() { return None; }
-    let (layer, kind, mut net) = if opens.contains(&txid) { ("channel", "open", -(fee as i64)) } else if closes.contains(&txid) { ("channel", "close", 0) } else if amount >= 0 { ("chain", "deposit", amount) } else { ("chain", "withdrawal", amount) };
+    // a close takes this node's side OUT of the channel (`settled_balance`) and pays the wallet what the closing
+    // transaction itself delivered to it (`amount`). Cooperative: the two match and the row is near zero. Force
+    // close: the wallet sees nothing yet — our side sits in a time-locked output and comes back as a later sweep,
+    // which LND books as a deposit; a close row of zero counted that money twice (once still "in the channel", once
+    // arriving), and a routing node's life has many such closes
+    let (layer, kind, mut net) = if opens.contains(&txid) { ("channel", "open", -(fee as i64)) } else if let Some(settled) = closes.get(&txid) { ("channel", "close", amount.max(0) - settled) } else if amount >= 0 { ("chain", "deposit", amount) } else { ("chain", "withdrawal", amount) };
     let to = lnd_outs(t); let mut memo = s("label");
     if kind == "withdrawal" { let paid: i64 = to.iter().map(|(_, v)| *v as i64).sum(); if paid > -amount {
         net = -(paid + (-amount));
@@ -390,9 +396,9 @@ pub fn lnd_events_from(d: &LndDump) -> Vec<Event> {
         let s = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
         let arr = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_array()).cloned().unwrap_or_default();
         // which transactions are channels being opened or closed
-        let mut opens = std::collections::HashSet::new(); let mut closes = std::collections::HashSet::new();
+        let mut opens = std::collections::HashSet::new(); let mut closes: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         for c in arr(&d.channels, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } }
-        for c in arr(&d.closed, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } let ct = s(&c, "closing_tx_hash").to_lowercase(); if !ct.is_empty() { closes.insert(ct); } }
+        for c in arr(&d.closed, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } let ct = s(&c, "closing_tx_hash").to_lowercase(); if !ct.is_empty() { closes.insert(ct, n(&c, "settled_balance")); } }
         for c in arr(&d.pending, "pending_open_channels") { if let Some(t) = c.get("channel").and_then(|x| x.get("channel_point")).and_then(|x| x.as_str()).and_then(|p| p.split(':').next()) { opens.insert(t.to_lowercase()); } }
         let mut out = Vec::new();
         // a close whose transaction the wallet never saw (no output of it is ours) still happened: it gets a row with
@@ -402,7 +408,7 @@ pub fn lnd_events_from(d: &LndDump) -> Vec<Event> {
             let ct = s(&c, "closing_tx_hash").to_lowercase(); if ct.is_empty() || known.contains(&ct) { continue; }
             let cap = n(&c, "capacity"); let settled = n(&c, "settled_balance");
             let memo = format!("channel {} ({} sats capacity) closed: {}; the wallet that reported this recognised none of the closing transaction's outputs as its own (a wallet restored from a backup does not know addresses derived after it was taken, so an output may still have been this node's and swept later — the outputs are listed under To){}", s(&c, "channel_point").split(':').next().unwrap_or("").chars().take(12).collect::<String>(), cap, s(&c, "close_type").to_lowercase().replace('_', " "), if settled > 0 { format!("; the node expected {settled} sats back") } else { String::new() });
-            out.push(Event { id: ct.clone(), time: 0, net: 0, fee: 0, layer: "channel".into(), txid: ct, hash: String::new(), kind: "close".into(), memo, to: Vec::new(), height: n(&c, "close_height").max(0) as u32, phantom: false, msat: 0 });
+            out.push(Event { id: ct.clone(), time: 0, net: -settled, fee: 0, layer: "channel".into(), txid: ct, hash: String::new(), kind: "close".into(), memo, to: Vec::new(), height: n(&c, "close_height").max(0) as u32, phantom: false, msat: 0 });
         }
         for t in arr(&d.transactions, "transactions") {
             if let Some(e) = lnd_chain_row(&t, &opens, &closes) { out.push(e); }
@@ -526,9 +532,9 @@ impl Lnd {
         let n = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str().and_then(|s| s.parse::<i64>().ok()).or_else(|| x.as_i64())).unwrap_or(0);
         let s = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
         let arr = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_array()).cloned().unwrap_or_default();
-        let mut opens = std::collections::HashSet::new(); let mut closes = std::collections::HashSet::new();
+        let mut opens = std::collections::HashSet::new(); let mut closes: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         for c in arr(&self.get("/v1/channels")?, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } }
-        for c in arr(&self.get("/v1/channels/closed")?, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } let ct = s(&c, "closing_tx_hash").to_lowercase(); if !ct.is_empty() { closes.insert(ct); } }
+        for c in arr(&self.get("/v1/channels/closed")?, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } let ct = s(&c, "closing_tx_hash").to_lowercase(); if !ct.is_empty() { closes.insert(ct, n(&c, "settled_balance")); } }
         let outs = |t: &serde_json::Value| if n(t, "amount") < 0 { lnd_outs(t) } else { Vec::new() };
         let mut out = Vec::new();
         let from_height = m("height").saturating_sub(6);
@@ -972,6 +978,27 @@ mod tests {
         // a channel the peer opened puts nothing in: its drift is the records against the node's figure alone
         let mut d2 = d; d2.channels = serde_json::json!({ "channels": [ { "chan_id": "333", "channel_point": "EE:0", "local_balance": "0" } ] }); d2.closed = serde_json::json!({});
         assert!(lnd_events_from(&d2).iter().all(|e| !e.id.ends_with(":side")), "nothing put in, nothing recorded through it, nothing on our side: no row");
+    }
+
+    #[test]
+    fn a_force_close_does_not_count_our_side_twice() {
+        // 1,000,000 funded (fee 200); the peer force-closes; our 1,000,000 sit in a time-locked output the wallet does not
+        // see on the closing transaction (amount 0) and come back a week later as a sweep LND books as a deposit
+        let d = LndDump {
+            channels: serde_json::json!({}), pending: serde_json::json!({}),
+            closed: serde_json::json!({ "channels": [ { "chan_id": "9", "channel_point": "aa:0", "closing_tx_hash": "cc", "settled_balance": "1000000", "close_height": "800000", "close_type": "REMOTE_FORCE_CLOSE" } ] }),
+            transactions: serde_json::json!({ "transactions": [
+                { "tx_hash": "00", "amount": "1000200", "total_fees": "0", "time_stamp": "1700000000" },
+                { "tx_hash": "aa", "amount": "-1000200", "total_fees": "200", "time_stamp": "1700000100" },
+                { "tx_hash": "cc", "amount": "0", "total_fees": "0", "time_stamp": "1700001000" },
+                { "tx_hash": "dd", "amount": "999500", "total_fees": "0", "time_stamp": "1700600000", "label": "sweep" } ] }),
+            invoices: serde_json::json!({}), payments: serde_json::json!({}), forwards: serde_json::json!({}),
+        };
+        let ev = lnd_events_from(&d);
+        let close = ev.iter().find(|e| e.id == "cc").unwrap();
+        assert_eq!((close.kind.as_str(), close.net), ("close", -1_000_000), "the close takes our side out of the channel");
+        assert!(ev.iter().all(|e| e.id != "cc:side"), "funding − fee = settled: nothing drifted, no settlement row");
+        assert_eq!(ev.iter().map(|e| e.net).sum::<i64>(), 999_500, "the wallet ends with the sweep, once — before this it read 1,999,500");
     }
 
     #[test]
