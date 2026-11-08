@@ -351,9 +351,10 @@ fn signers_of(v: &wallet::Vault, tx: &Transaction, i: usize, index: u32, value: 
 
 pub fn detail(v: &wallet::Vault, servers: &Servers, txid: &str, height: i32) -> Result<Detail, String> {
     use bitcoin::consensus::encode::serialize_hex;
-    let client = crate::chain::client(servers)?;
     let id = Txid::from_str(txid).map_err(|_| "that is not a transaction id".to_string())?;
     let tx = crate::chain::transactions_kept(servers, &v.network, &[id], &|_| height > 0).map_err(|e| format!("transaction {}: {e}", &txid[..8.min(txid.len())]))?.remove(0);
+    // leased after the read above, which leases one of its own: a caller never holds one connection while waiting for another
+    let client = crate::chain::client(servers)?;
     let net_kind = wallet::network_of(&v.network);
     let addr = |spk: &bitcoin::ScriptBuf| bitcoin::Address::from_script(spk, net_kind).ok().map(|a| a.to_string());
     let table = wallet::ours_table(v)?;

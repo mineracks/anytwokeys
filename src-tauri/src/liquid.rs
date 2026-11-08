@@ -33,7 +33,7 @@ const COIN: u32 = 1776;
 pub fn servers() -> crate::chain::Servers { crate::chain::Servers { electrum: "ssl://liquid-electrum.mineracks.com:50002".into(), explorer: "https://liquid.mineracks.com".into() } }
 pub fn fallback() -> crate::chain::Servers { crate::chain::Servers { electrum: "ssl://blockstream.info:995".into(), explorer: "https://blockstream.info/liquid".into() } }
 /// A connection to our node, or to Blockstream's when ours is down: the servers used come back with it.
-fn connect() -> Result<(std::sync::Arc<electrum_client::Client>, crate::chain::Servers), String> {
+fn connect() -> Result<(crate::chain::Lease, crate::chain::Servers), String> {
     match crate::chain::client(&servers()) {
         Ok(c) => Ok((c, servers())),
         Err(ours) => { crate::chain::forget(&servers()); let c = crate::chain::client(&fallback()).map_err(|e| format!("our Liquid node did not answer ({ours}) and neither did Blockstream's ({e})"))?; Ok((c, fallback())) }

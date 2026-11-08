@@ -31,47 +31,83 @@ pub struct Coin {
 #[derive(Debug, Clone, Serialize)]
 pub struct Fees { pub slow: f64, pub medium: f64, pub fast: f64 }
 
-// A few connections per server, kept open. Opening one is a TCP and TLS handshake (~80 ms to ours); a scan used to open
-// two per address — a 3.4 s scan of an empty 2-of-3 that one kept connection answers in ~30 ms. One connection answers
-// one request at a time, so forty vaults syncing at once (the overview) used to queue behind each other on it: now
-// they are dealt round the kept connections, up to LANES per server. A connection idle for a while is pinged before
-// use, and any failure drops the server's connections so the next request opens fresh ones.
+// Connections to a server, kept open and LEASED one caller at a time. Opening one is a TCP and TLS handshake (~80 ms
+// to ours), so they are kept; but the Electrum client's way of sharing one connection between threads (one thread
+// reads for all and hands over) left callers parked for a reply nobody was reading — three syncs of the overview, for
+// a minute and more, on 8 Nov 2026. So no sharing: a caller takes a connection out of the pool, has it to itself for
+// the request, and puts it back. Up to LANES per server are open; a caller beyond that waits for one to come back.
+// A connection idle for a while is pinged before use, and one that failed is dropped, never returned.
 struct Held { c: Arc<Client>, used: Instant }
-static POOL: Mutex<Option<HashMap<String, Vec<Option<Held>>>>> = Mutex::new(None);
-static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[derive(Default)]
+struct Lanes { idle: Vec<Held>, open: usize }
+static POOL: std::sync::LazyLock<Mutex<HashMap<String, Lanes>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static FREE: std::sync::Condvar = std::sync::Condvar::new();
 const IDLE_CHECK: Duration = Duration::from_secs(30);
-const LANES: usize = 4;
+const LANES: usize = 6;
+const WAIT: Duration = Duration::from_secs(90);
+
+/// One connection, this caller's alone until it is dropped. Dropping it returns it to the pool; `broken()` first
+/// and it is closed instead.
+pub struct Lease { c: Option<Arc<Client>>, server: String, broken: bool }
+impl std::ops::Deref for Lease { type Target = Client; fn deref(&self) -> &Client { self.c.as_ref().expect("a leased connection") } }
+impl Lease {
+    /// The connection misbehaved: close it rather than hand it to the next caller.
+    pub fn broken(&mut self) { self.broken = true; }
+}
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let c = self.c.take();
+        if let Ok(mut g) = POOL.lock() {
+            let l = g.entry(self.server.clone()).or_default();
+            if self.broken { l.open = l.open.saturating_sub(1); } else if let Some(c) = c { l.idle.push(Held { c, used: Instant::now() }); }
+        }
+        FREE.notify_one();
+    }
+}
 
 fn open(servers: &Servers) -> Result<Client, String> {
     let cfg = ConfigBuilder::new().timeout(Some(20)).validate_domain(true).build();
     Client::from_config(&servers.electrum, cfg).map_err(|e| format!("electrum {}: {e}", servers.electrum))
 }
-/// A kept connection to this server (opened if the lane has none, or if the one kept no longer answers).
-pub fn client(servers: &Servers) -> Result<Arc<Client>, String> {
+/// A connection to this server for the caller alone: a kept one, a fresh one if there is room, or a wait for one.
+pub fn client(servers: &Servers) -> Result<Lease, String> {
     crate::net::out("the node")?;
-    let lane = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % LANES;
-    let held = POOL.lock().map_err(|_| "connection pool poisoned")?.get_or_insert_with(HashMap::new).get(&servers.electrum).and_then(|v| v.get(lane)).and_then(|h| h.as_ref()).map(|h| (h.c.clone(), h.used.elapsed()));
-    if let Some((c, idle)) = held {
-        if idle < IDLE_CHECK || c.ping().is_ok() { touch(servers, lane, &c); return Ok(c); }
+    let deadline = Instant::now() + WAIT;
+    let mut g = POOL.lock().map_err(|_| "connection pool poisoned")?;
+    loop {
+        let l = g.entry(servers.electrum.clone()).or_default();
+        if let Some(h) = l.idle.pop() {
+            let idle = h.used.elapsed();
+            drop(g);
+            if idle < IDLE_CHECK || h.c.ping().is_ok() { return Ok(Lease { c: Some(h.c), server: servers.electrum.clone(), broken: false }); }
+            // a kept connection that no longer answers: closed, and its place taken by a fresh one
+            g = POOL.lock().map_err(|_| "connection pool poisoned")?;
+            g.entry(servers.electrum.clone()).or_default().open = g.entry(servers.electrum.clone()).or_default().open.saturating_sub(1);
+            continue;
+        }
+        if l.open < LANES {
+            l.open += 1;
+            drop(g);
+            match open(servers) {
+                Ok(c) => return Ok(Lease { c: Some(Arc::new(c)), server: servers.electrum.clone(), broken: false }),
+                Err(e) => { if let Ok(mut g) = POOL.lock() { g.entry(servers.electrum.clone()).or_default().open -= 1; } FREE.notify_one(); return Err(e); }
+            }
+        }
+        let now = Instant::now();
+        if now >= deadline { return Err(format!("electrum {}: every connection is busy", servers.electrum)); }
+        let (g2, _) = FREE.wait_timeout(g, deadline - now).map_err(|_| "connection pool poisoned")?;
+        g = g2;
     }
-    let c = Arc::new(open(servers)?);
-    touch(servers, lane, &c);
-    Ok(c)
 }
-fn touch(servers: &Servers, lane: usize, c: &Arc<Client>) {
-    if let Ok(mut g) = POOL.lock() {
-        let v = g.get_or_insert_with(HashMap::new).entry(servers.electrum.clone()).or_default();
-        while v.len() <= lane { v.push(None); }
-        v[lane] = Some(Held { c: c.clone(), used: Instant::now() });
-    }
-}
-/// Drop the kept connections after a failure: the next request opens a fresh one rather than reusing a broken one.
-pub fn forget(servers: &Servers) { if let Ok(mut g) = POOL.lock() { if let Some(m) = g.as_mut() { m.remove(&servers.electrum); } } }
-/// Run a read over the kept connection; on failure, once more over a fresh one (a server may have closed it).
+/// Drop the kept connections to a server after a failure: the next request opens a fresh one rather than reusing a
+/// broken one. (A leased connection that failed is closed by its own lease; this is for a server-wide failure.)
+pub fn forget(servers: &Servers) { if let Ok(mut g) = POOL.lock() { if let Some(l) = g.get_mut(&servers.electrum) { l.open = l.open.saturating_sub(l.idle.len()); l.idle.clear(); } } FREE.notify_all(); }
+/// Run a read over a leased connection; on failure, once more over a fresh one (a server may have closed it).
 fn read<T>(servers: &Servers, f: impl Fn(&Client) -> Result<T, electrum_client::Error>) -> Result<T, String> {
-    match f(&*client(servers)?) {
+    let mut lease = client(servers)?;
+    match f(&lease) {
         Ok(v) => Ok(v),
-        Err(_) => { forget(servers); f(&*client(servers)?).map_err(|e| { forget(servers); e.to_string() }) }
+        Err(_) => { lease.broken(); drop(lease); let mut again = client(servers)?; f(&again).map_err(|e| { again.broken(); e.to_string() }) }
     }
 }
 const BATCH: usize = 100;
