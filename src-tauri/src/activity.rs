@@ -15,7 +15,20 @@ pub const PRICES: &str = "https://prices.mineracks.com";
 struct Cache { #[serde(default)] times: HashMap<String, u32>, #[serde(default)] prices: HashMap<String, Quote> }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Quote { pub price: f64, pub basis: String }   // basis: "hourly 2026-09-18 08:00 UTC" | "daily 2026-09-19"
+pub struct Quote { pub price: f64, pub basis: String }   // basis: "hourly 2026-09-18 08:00 UTC" | "daily 2026-09-19" | "ECB 2025-01-17"
+
+/// What a price is the price OF: one bitcoin (every sats vault), or one US dollar — a Liquid USDt is taken at one
+/// dollar, so its rows carry the day's ECB USD→{ccy} rate and its gain is the dollar's own move against the currency.
+/// The service answers both in one body: `prices.{ccy}` over `btc_usd` is exactly the cross rate it applied to that
+/// day's bitcoin price, so a USDt row and an L-BTC row of the same day can never disagree about the dollar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Unit { Btc, Usd }
+impl Unit { pub fn parse(s: Option<&str>) -> Unit { if s == Some("USD") { Unit::Usd } else { Unit::Btc } } }
+/// The cache key of a price: by the hour for bitcoin (`AUD:2024-01-04T09`), by the day for the dollar (`USD>AUD:2024-01-04`)
+/// — the ECB fixes once a day, and a fixing is never improved by asking for an hour.
+fn key(unit: Unit, ccy: &str, day: &str, hour: Option<u32>) -> String {
+    match (unit, hour) { (Unit::Btc, Some(h)) => format!("{ccy}:{day}T{h:02}"), (Unit::Btc, None) => format!("{ccy}:{day}"), (Unit::Usd, _) => format!("USD>{ccy}:{day}") }
+}
 
 #[derive(Debug, Serialize)]
 pub struct Row { pub txid: String, pub time: Option<u32>, pub net: Option<i64>, pub fee: Option<u64>, pub quote: Option<Quote>,
@@ -58,30 +71,30 @@ fn http() -> &'static reqwest::blocking::Client {
 }
 
 /// Today's price, kept five minutes: every screen that shows money asked for it afresh.
-pub(crate) fn now_quote(base: &str, ccy: &str) -> Option<Quote> {
+pub(crate) fn now_quote(base: &str, unit: Unit, ccy: &str) -> Option<Quote> {
     static NOW: std::sync::Mutex<Option<HashMap<String, (std::time::Instant, Quote)>>> = std::sync::Mutex::new(None);
-    let key = format!("{base}|{ccy}");
+    let key = format!("{base}|{unit:?}|{ccy}");
     if let Some((at, q)) = NOW.lock().ok()?.as_ref().and_then(|m| m.get(&key)).cloned() { if at.elapsed() < std::time::Duration::from_secs(300) { return Some(q); } }
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as u32).unwrap_or(0); let (day, hour) = day_hour(t);
-    let q = fetch(http(), base, ccy, &day, Some(hour))?;
+    let q = fetch(http(), base, unit, ccy, &day, Some(hour))?;
     NOW.lock().ok()?.get_or_insert_with(HashMap::new).insert(key, (std::time::Instant::now(), q.clone()));
     Some(q)
 }
 
 /// Prices not yet kept, fetched in the background at the pace the price service allows (5 a second, burst 10), each
 /// kept as it arrives; the window is told when there are new ones. One fill per vault and currency at a time.
-fn fill_later(vault: &str, base: &str, ccy: &str, wanted: Vec<(String, u32)>) {
+fn fill_later(vault: &str, base: &str, unit: Unit, ccy: &str, wanted: Vec<(String, u32)>) {
     static FILLING: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
-    let tag = format!("{vault}|{ccy}");
+    let tag = format!("{vault}|{unit:?}|{ccy}");
     { let Ok(mut g) = FILLING.lock() else { return }; if !g.get_or_insert_with(Default::default).insert(tag.clone()) { return; } }
     let (vault, base, ccy) = (vault.to_string(), base.to_string(), ccy.to_string());
     std::thread::spawn(move || {
         let mut got = 0usize;
         for (i, (day, hour)) in wanted.iter().enumerate() {
             if i > 0 { std::thread::sleep(std::time::Duration::from_millis(250)); }   // under the service's 5 a second
-            let mut q = fetch(http(), &base, &ccy, day, Some(*hour));
-            if q.is_none() { std::thread::sleep(std::time::Duration::from_millis(1200)); q = fetch(http(), &base, &ccy, day, Some(*hour)); }   // refused for pace: once more
-            if let Some(q) = q { change_cache(|c| { c.prices.insert(format!("{ccy}:{day}T{hour:02}"), q); }); got += 1; }
+            let mut q = fetch(http(), &base, unit, &ccy, day, Some(*hour));
+            if q.is_none() { std::thread::sleep(std::time::Duration::from_millis(1200)); q = fetch(http(), &base, unit, &ccy, day, Some(*hour)); }   // refused for pace: once more
+            if let Some(q) = q { change_cache(|c| { c.prices.insert(key(unit, &ccy, day, Some(*hour)), q); }); got += 1; }
             // tell the window every so often, so the column fills in as it goes rather than all at the end
             if got > 0 && (i + 1) % 20 == 0 { crate::net::emit("prices-filled", vault.clone()); }
         }
@@ -105,16 +118,31 @@ pub fn read_quote(body: &serde_json::Value, ccy: &str, day: &str) -> Option<Quot
     Some(Quote { price, basis })
 }
 
-fn fetch(http: &reqwest::blocking::Client, base: &str, ccy: &str, day: &str, hour: Option<u32>) -> Option<Quote> {
+/// The dollar in `ccy` on a day, out of the same answer that prices bitcoin: `prices.{ccy}` / `btc_usd`. The basis
+/// names the ECB fixing used and how many days it was carried (the ECB fixes on business days; bitcoin trades on all).
+/// The dollar in dollars is one, and is not asked for.
+pub fn read_fx(body: &serde_json::Value, ccy: &str) -> Option<Quote> {
+    if ccy == "USD" { return Some(Quote { price: 1.0, basis: "one dollar".into() }); }
+    let in_ccy = body.get("prices").and_then(|p| p.get(ccy)).and_then(|v| v.as_f64()).filter(|p| p.is_finite() && *p > 0.0)?;
+    let in_usd = body.get("btc_usd").and_then(|v| v.as_f64()).filter(|p| p.is_finite() && *p > 0.0)?;
+    let fx_day = body.get("fx_day").and_then(|d| d.as_str()).unwrap_or("");
+    let carried = body.get("fx_carried_days").and_then(|n| n.as_u64()).unwrap_or(0);
+    let basis = match (fx_day.is_empty(), carried) { (true, _) => "ECB rate".to_string(), (false, 0) => format!("ECB {fx_day}"), (false, 1) => format!("ECB {fx_day}, carried a day"), (false, n) => format!("ECB {fx_day}, carried {n} days") };
+    Some(Quote { price: in_ccy / in_usd, basis })
+}
+
+fn fetch(http: &reqwest::blocking::Client, base: &str, unit: Unit, ccy: &str, day: &str, hour: Option<u32>) -> Option<Quote> {
+    if unit == Unit::Usd && ccy == "USD" { return read_fx(&serde_json::Value::Null, ccy); }
     let ask = |with_time: bool| -> Option<Quote> {
         let mut url = format!("{}/v1/price?day={day}&ccy={ccy}", base.trim_end_matches('/'));
         if let (true, Some(h)) = (with_time, hour) { url.push_str(&format!("&time={h:02}:00")); }   // the hour, never the minute: the server need not learn more
         crate::net::out("prices").ok()?;
         let r = http.get(&url).send().ok()?;
         if !r.status().is_success() { return None; }
-        read_quote(&r.json::<serde_json::Value>().ok()?, ccy, day)
+        let body = r.json::<serde_json::Value>().ok()?;
+        match unit { Unit::Btc => read_quote(&body, ccy, day), Unit::Usd => read_fx(&body, ccy) }
     };
-    if hour.is_some() { if let Some(q) = ask(true) { return Some(q); } }
+    if unit == Unit::Btc && hour.is_some() { if let Some(q) = ask(true) { return Some(q); } }   // the dollar is daily: one question
     ask(false)
 }
 
@@ -150,16 +178,16 @@ pub fn build(v: &wallet::Vault, servers: &Servers, history: &[(String, i32)], cc
             cache.times.get(&key).copied()
         } else { None };
         let quote = match (fiat, time) {
-            (true, Some(t)) => { let (day, hour) = day_hour(t); let key = format!("{ccy}:{day}T{hour:02}");
+            (true, Some(t)) => { let (day, hour) = day_hour(t); let key = key(Unit::Btc, ccy, &day, Some(hour));
                 match cache.prices.get(&key) { Some(q) => Some(q.clone()), None => { if !wanted.contains(&(day.clone(), hour)) { wanted.push((day, hour)); } None } } }
             _ => None,
         };
         rows.push(Row { txid: txid.clone(), time, net: Some(received as i64 - spent as i64), fee, quote, ins, outs });
     }
-    let now = if fiat { now_quote(prices_url, ccy) } else { None };
+    let now = if fiat { now_quote(prices_url, Unit::Btc, ccy) } else { None };
     if dirty { let times = cache.times.clone(); change_cache(|c| c.times.extend(times)); }
     let pending = wanted.len();
-    if fiat && pending > 0 { fill_later(&v.name, prices_url, ccy, wanted); }
+    if fiat && pending > 0 { fill_later(&v.name, prices_url, Unit::Btc, ccy, wanted); }
     let note = if v.network != "mainnet" { Some("Test coins have no price.".into()) } else if !fiat { None }
         else if pending > 0 { Some(format!("Fetching {pending} past price{} in the background; they fill in as they arrive, and are kept.", if pending == 1 { "" } else { "s" })) }
         else if now.is_none() { Some("Today's price could not be fetched; values are left blank rather than guessed.".into()) } else { None };
@@ -169,23 +197,23 @@ pub fn build(v: &wallet::Vault, servers: &Servers, history: &[(String, i32)], cc
 /// Rows that arrive already made — a Spark wallet's transfers, which have no inputs, no outputs and no chain — given
 /// the same prices as every other row: the quote for the hour each one happened, today's price for what they are
 /// worth now, and the rest fetched in the background and kept.
-pub fn priced(v: &wallet::Vault, mut rows: Vec<Row>, ccy: &str, prices_url: &str) -> Result<Activity, String> {
+pub fn priced(v: &wallet::Vault, mut rows: Vec<Row>, unit: Unit, ccy: &str, prices_url: &str) -> Result<Activity, String> {
     let cache = load_cache();
     let fiat = v.network == "mainnet" && !ccy.is_empty() && !prices_url.is_empty();
     let mut wanted: Vec<(String, u32)> = Vec::new();
     for r in rows.iter_mut() {
         if let (true, Some(t)) = (fiat, r.time) {
             let (day, hour) = day_hour(t);
-            let key = format!("{ccy}:{day}T{hour:02}");
-            match cache.prices.get(&key) {
+            let hour = if unit == Unit::Usd { 0 } else { hour };   // one dollar price a day: one fetch a day
+            match cache.prices.get(&key(unit, ccy, &day, Some(hour))) {
                 Some(q) => r.quote = Some(q.clone()),
                 None => if !wanted.contains(&(day.clone(), hour)) { wanted.push((day, hour)); },
             }
         }
     }
-    let now = if fiat { now_quote(prices_url, ccy) } else { None };
+    let now = if fiat { now_quote(prices_url, unit, ccy) } else { None };
     let pending = wanted.len();
-    if fiat && pending > 0 { fill_later(&v.name, prices_url, ccy, wanted); }
+    if fiat && pending > 0 { fill_later(&v.name, prices_url, unit, ccy, wanted); }
     let note = if v.network != "mainnet" { Some("Test coins have no price.".into()) }
         else if !fiat { None }
         else if pending > 0 { Some(format!("Fetching {pending} past price{} in the background; they fill in as they arrive, and are kept.", if pending == 1 { "" } else { "s" })) }
@@ -222,13 +250,13 @@ pub fn flow_of(spk: &bitcoin::ScriptBuf, history: &[(String, i32)], txs: &[Trans
 
 /// The price at one moment, from the cache when it is there. Used by a sheet that prints one transaction long after
 /// the screen worked the same number out; `None` when there is no price to be had, never a guess.
-pub fn quote_at(prices_url: &str, ccy: &str, t: Option<u32>) -> Option<Quote> {
+pub fn quote_at(prices_url: &str, unit: Unit, ccy: &str, t: Option<u32>) -> Option<Quote> {
     if ccy.is_empty() || prices_url.is_empty() { return None; }
     let t = t.or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs() as u32))?;
     let (day, hour) = day_hour(t);
-    let key = format!("{ccy}:{day}T{hour:02}");
+    let key = key(unit, ccy, &day, Some(hour));
     if let Some(q) = load_cache().prices.get(&key) { return Some(q.clone()); }
-    let q = fetch(http(), prices_url, ccy, &day, Some(hour))?;
+    let q = fetch(http(), prices_url, unit, ccy, &day, Some(hour))?;
     let keep = q.clone(); change_cache(|c| { c.prices.insert(key, keep); });
     Some(q)
 }
@@ -249,10 +277,10 @@ pub fn series_every(from: &str, to: &str) -> u32 {
 /// to 36. Each day is exactly what the service says for that day asked alone. Past days go into the sealed cache
 /// for good — a closed day's price never changes — so a range already seen costs no request at all; today's is not
 /// kept, the day has not closed. A day with no price is a hole, `None`, never filled from its neighbour.
-pub fn price_series(prices_url: &str, ccy: &str, from: &str, to: &str, every: u32) -> Result<Vec<(String, Option<Quote>)>, String> {
+pub fn price_series(prices_url: &str, unit: Unit, ccy: &str, from: &str, to: &str, every: u32) -> Result<Vec<(String, Option<Quote>)>, String> {
     let today = crate::export::ymd(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
     let cache = load_cache();
-    let cached = |c: &Cache, d: &str| c.prices.get(&format!("{ccy}:{d}")).cloned();
+    let cached = |c: &Cache, d: &str| c.prices.get(&key(unit, ccy, d, None)).cloned();
     let url = format!("{}/v1/series?from={from}&to={to}&every={every}&ccy={ccy}", prices_url.trim_end_matches('/'));
     let http = http();
     let mut body = None;
@@ -265,17 +293,17 @@ pub fn price_series(prices_url: &str, ccy: &str, from: &str, to: &str, every: u3
         break;
     }
     let body = body.ok_or("the price service is busy; try again in a moment")?;
-    let points = read_series(&body, ccy);
-    let new: Vec<(String, Quote)> = points.iter().filter_map(|(d, q)| match q { Some(q) if d.as_str() < today.as_str() && cached(&cache, d).is_none() => Some((format!("{ccy}:{d}"), q.clone())), _ => None }).collect();
+    let points = read_series(&body, unit, ccy);
+    let new: Vec<(String, Quote)> = points.iter().filter_map(|(d, q)| match q { Some(q) if d.as_str() < today.as_str() && cached(&cache, d).is_none() => Some((key(unit, ccy, d, None), q.clone())), _ => None }).collect();
     if !new.is_empty() { change_cache(|c| c.prices.extend(new)); }
     Ok(points)
 }
 
 /// The days out of a `series` answer. A point whose `prices` is null is a hole the service could not fill, and stays one.
-pub fn read_series(body: &serde_json::Value, ccy: &str) -> Vec<(String, Option<Quote>)> {
+pub fn read_series(body: &serde_json::Value, unit: Unit, ccy: &str) -> Vec<(String, Option<Quote>)> {
     body.get("points").and_then(|p| p.as_array()).map(|pts| pts.iter().filter_map(|p| {
         let day = p.get("day")?.as_str()?.to_string();
-        let q = if p.get("prices").map(|v| v.is_null()).unwrap_or(true) { None } else { read_quote(p, ccy, &day) };
+        let q = if p.get("prices").map(|v| v.is_null()).unwrap_or(true) { None } else { match unit { Unit::Btc => read_quote(p, ccy, &day), Unit::Usd => read_fx(p, ccy) } };
         Some((day, q))
     }).collect()).unwrap_or_default()
 }
@@ -397,6 +425,19 @@ pub fn device() -> Device {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The dollar's price in a currency comes out of the bitcoin answer itself, and names the fixing it used.
+    #[test]
+    fn the_dollar_rate_is_the_cross_rate_the_service_applied() {
+        let body: serde_json::Value = serde_json::json!({"prices": {"AUD": 168769.70119829092}, "btc_usd": 104408.89, "fx_day": "2025-01-17", "fx_carried_days": 2, "day": "2025-01-19"});
+        let q = read_fx(&body, "AUD").unwrap();
+        assert!((q.price - 1.61643).abs() < 0.00001, "{}", q.price);
+        assert_eq!(q.basis, "ECB 2025-01-17, carried 2 days");
+        assert_eq!(read_fx(&body, "USD").unwrap().price, 1.0);
+        assert!(read_fx(&serde_json::json!({"prices": {"AUD": 1.0}}), "AUD").is_none(), "no btc_usd, no rate");
+        assert_eq!(key(Unit::Usd, "AUD", "2025-01-19", Some(14)), "USD>AUD:2025-01-19");
+        assert_eq!(key(Unit::Btc, "AUD", "2025-01-19", Some(14)), "AUD:2025-01-19T14");
+    }
+
     #[test]
     fn a_price_answer_is_read_strictly() {
         // the two shapes prices.mineracks.com really returned on 2026-09-19 (hourly candle; daily fallback)
@@ -465,7 +506,7 @@ mod series_tests {
 
     #[test]
     fn a_series_reads_every_day_including_the_mt_gox_crash() {
-        let p = read_series(&fx("series-aud-2013-04.json"), "AUD");
+        let p = read_series(&fx("series-aud-2013-04.json"), Unit::Btc, "AUD");
         assert_eq!(p.len(), 5);
         // fetched from prices.mineracks.com on 2026-09-21: A$219.45 on the 10th, A$151.25 on the 11th
         let q = |d: &str| p.iter().find(|x| x.0 == d).unwrap().1.clone().unwrap().price;
@@ -474,13 +515,13 @@ mod series_tests {
     }
     #[test]
     fn a_day_with_no_price_is_a_hole_never_a_zero() {
-        let p = read_series(&fx("series-holes-2009.json"), "AUD");
+        let p = read_series(&fx("series-holes-2009.json"), Unit::Btc, "AUD");
         assert_eq!(p.len(), 3);
         assert!(p.iter().all(|x| x.1.is_none()), "{p:?}");
     }
     #[test]
     fn usd_is_read_from_prices_and_from_btc_usd_for_an_older_service() {
-        let p = read_series(&fx("series-usd-2026-09.json"), "USD");
+        let p = read_series(&fx("series-usd-2026-09.json"), Unit::Btc, "USD");
         assert_eq!(p.iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["2026-09-01", "2026-09-03", "2026-09-05"]);
         assert!((p[0].1.as_ref().unwrap().price - 78549.65).abs() < 1e-9);
         // the shape the service answered with before the fix: prices empty, the number only in btc_usd
@@ -504,16 +545,16 @@ mod series_tests {
     #[test]
     #[ignore]
     fn live_series_agrees_with_the_single_day_question() {
-        let run = price_series(PRICES, "AUD", "2026-09-01", "2026-09-10", 3).expect("the series question answered");
+        let run = price_series(PRICES, Unit::Btc, "AUD", "2026-09-01", "2026-09-10", 3).expect("the series question answered");
         assert_eq!(run.last().unwrap().0, "2026-09-10", "the last point is always `to`");
         let http = reqwest::blocking::Client::builder().user_agent("anytwokeys/0.1").build().unwrap();
         for (day, q) in &run {
             std::thread::sleep(std::time::Duration::from_millis(250));
-            let one = fetch(&http, PRICES, "AUD", day, None).expect("the single-day question answered");
+            let one = fetch(&http, PRICES, Unit::Btc, "AUD", day, None).expect("the single-day question answered");
             assert!((one.price - q.as_ref().unwrap().price).abs() < 1e-9, "{day}: series {:?} vs single {}", q, one.price);
         }
         std::thread::sleep(std::time::Duration::from_millis(1200));
-        let usd = price_series(PRICES, "USD", "2026-09-01", "2026-09-03", 1).unwrap();
+        let usd = price_series(PRICES, Unit::Btc, "USD", "2026-09-01", "2026-09-03", 1).unwrap();
         assert!(usd.iter().all(|(_, q)| q.is_some()), "USD comes back priced now the service fills prices.USD: {usd:?}");
     }
     fn chrono_days(d: &str) -> i64 { let t = |s: &str, a, b| s[a..b].parse::<i64>().unwrap(); let (y, m, dd) = (t(d, 0, 4), t(d, 5, 7), t(d, 8, 10));

@@ -301,6 +301,10 @@ fn registry(asset: &str) -> Option<AssetInfo> {
     Some(AssetInfo { ticker: v["ticker"].as_str().unwrap_or("").to_string(), name: v["name"].as_str().unwrap_or("").to_string(), precision: v["precision"].as_u64().unwrap_or(0) as u8 })
 }
 
+/// What one unit of an asset is priced as: L-BTC at a bitcoin, USDt at a US dollar; any other asset has no price here.
+pub fn unit_of(asset: &str) -> Option<crate::activity::Unit> {
+    match asset { LBTC => Some(crate::activity::Unit::Btc), USDT => Some(crate::activity::Unit::Usd), _ => None }
+}
 /// What an asset is called on a row: its ticker, or the first eight characters of its id.
 pub fn ticker(l: &Liquid, asset: &str) -> String {
     if asset == LBTC { return "L-BTC".into(); }

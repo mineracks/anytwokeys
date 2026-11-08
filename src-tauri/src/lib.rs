@@ -173,7 +173,7 @@ async fn cards_list() -> R<Vec<cards::CardInfo>> {
 #[derive(serde::Serialize)]
 struct PriceRun { every: u32, points: Vec<(String, Option<activity::Quote>)> }
 #[tauri::command]
-async fn prices_series(ccy: String, from: String, to: String) -> R<PriceRun> {
+async fn prices_series(ccy: String, from: String, to: String, unit: Option<String>) -> R<PriceRun> {
     block(move || {
         if !(ccy.len() == 3 && ccy.chars().all(|c| c.is_ascii_uppercase())) { return Err("the currency is a three-letter code".into()); }
         let well_formed = |d: &str| d.len() == 10 && d.as_bytes()[4] == b'-' && d.as_bytes()[7] == b'-' && d.chars().filter(|c| c.is_ascii_digit()).count() == 8;
@@ -182,7 +182,7 @@ async fn prices_series(ccy: String, from: String, to: String) -> R<PriceRun> {
         let prices = if s.settings.custom { s.settings.prices.clone() } else { activity::PRICES.to_string() };
         let every = activity::series_every(&from, &to);
         if prices.is_empty() { return Ok(PriceRun { every, points: vec![] }); }
-        Ok(PriceRun { every, points: activity::price_series(&prices, &ccy, &from, &to, every)? })
+        Ok(PriceRun { every, points: activity::price_series(&prices, activity::Unit::parse(unit.as_deref()), &ccy, &from, &to, every)? })
     }).await
 }
 
@@ -699,7 +699,7 @@ async fn vault_activity(name: String, history: Vec<(String, i32)>, ccy: String) 
         // A node's history is its bookkeeper's ledger, read at the last sync: rows that are facts, priced like every other
         if let Some(n) = &v.node {
             let rows: Vec<activity::Row> = n.events.iter().map(|e| activity::Row { txid: e.id.clone(), time: Some(e.time), net: Some(e.net), fee: if e.fee > 0 { Some(e.fee) } else { None }, quote: None, ins: Vec::new(), outs: Vec::new() }).collect();
-            let mut a = activity::priced(&v, rows, &ccy, &prices)?;
+            let mut a = activity::priced(&v, rows, activity::Unit::Btc, &ccy, &prices)?;
             // an on-chain event another vault's record also holds is a move between them: the same rule as everywhere
             for e in n.events.iter().filter(|e| !e.txid.is_empty()) {
                 let peers: Vec<String> = s.seen.iter().filter(|(nm, seen)| *nm != &v.name && seen.txs.contains_key(&e.txid) && s.vaults.iter().any(|o| &o.name == *nm && o.network == v.network)).map(|(nm, _)| nm.clone()).collect();
@@ -711,7 +711,7 @@ async fn vault_activity(name: String, history: Vec<(String, i32)>, ccy: String) 
         // An exchange account's history is its statements: sats in and out, and a buy priced at what it really cost,
         // fee included, rather than at the feed — the one place the app has a true cost basis.
         if let Some(ex) = &v.exchange {
-            let mut a = activity::priced(&v, exchange::activity_rows(ex), &ccy, &prices)?;
+            let mut a = activity::priced(&v, exchange::activity_rows(ex), activity::Unit::Btc, &ccy, &prices)?;
             if !ccy.is_empty() && ccy == ex.ccy {
                 let by: std::collections::HashMap<&str, &exchange::ExRow> = ex.rows.iter().map(|r| (r.id.as_str(), r)).collect();
                 for r in a.rows.iter_mut() { if let Some(p) = by.get(r.txid.as_str()).and_then(|x| exchange::real_price(x)) { r.quote = Some(activity::Quote { price: p, basis: format!("paid at {}", ex.provider) }); } }
@@ -722,24 +722,26 @@ async fn vault_activity(name: String, history: Vec<(String, i32)>, ccy: String) 
         // A closed custodial wallet's history is its statement: rows that are facts, priced like every other row.
         if let Some(st) = &v.statement {
             let rows: Vec<activity::Row> = st.rows.iter().map(|r| activity::Row { txid: r.id.clone(), time: Some(r.time), net: Some(r.net), fee: if r.fee > 0 { Some(r.fee) } else { None }, quote: None, ins: Vec::new(), outs: Vec::new() }).collect();
-            let mut a = activity::priced(&v, rows, &ccy, &prices)?;
+            let mut a = activity::priced(&v, rows, activity::Unit::Btc, &ccy, &prices)?;
             transfers::record(&v, &mut a, &s);
             return Ok(a);
         }
-        // A Liquid wallet's history is what the last sync read and unblinded: L-BTC on the sats row, priced like
-        // every other row; the other assets ride beside it in their own units, shown, not priced.
+        // A Liquid wallet's history is what the last sync read and unblinded, one vault per asset: L-BTC in sats at
+        // bitcoin's price; USDt in its own units at the dollar's rate (one USDt taken as one dollar); any other asset
+        // in its units, unpriced. The rows are this asset's alone — the account's other assets have vaults of their own.
         if let Some(l) = &v.liquid {
-            // this vault's asset alone on the sats row: L-BTC in sats (priced), another asset in its own units
-            // (not priced — the row count and the figures are in that asset, and the price feed is bitcoin's)
             let rows: Vec<activity::Row> = l.txs.values().filter(|t| t.moves.contains_key(&l.asset) || (l.is_lbtc() && t.paid_fee)).map(|t| activity::Row {
                 txid: t.id.clone(), time: if t.time > 0 { Some(t.time) } else { None },
                 net: Some(t.moves.get(&l.asset).copied().unwrap_or(0)), fee: if l.is_lbtc() && t.paid_fee && t.fee > 0 { Some(t.fee) } else { None },
                 quote: None, ins: Vec::new(), outs: Vec::new(),
             }).collect();
-            let mut a = activity::priced(&v, rows, if l.is_lbtc() { &ccy } else { "" }, &prices)?;
+            let unit = liquid::unit_of(&l.asset);
+            let mut a = activity::priced(&v, rows, unit.unwrap_or(activity::Unit::Btc), if unit.is_some() { &ccy } else { "" }, &prices)?;
             a.liquid = liquid::rows(l);
             if !l.server.is_empty() && l.server != liquid::servers().electrum { a.note = Some(format!("Read from {} because our own Liquid node did not answer.", l.server.trim_start_matches("ssl://"))); }
-            transfers::record(&v, &mut a, &s);
+            // only the sats vault goes to the transfer matcher: another asset's units are not sats, and must never be
+            // paired with anyone's
+            if l.is_lbtc() { transfers::record(&v, &mut a, &s); }
             return Ok(a);
         }
         // A Spark wallet's history comes from an operator, in whole transfers: no inputs, no outputs, no fee of its
@@ -754,7 +756,7 @@ async fn vault_activity(name: String, history: Vec<(String, i32)>, ccy: String) 
                 net: if spark::settled(t.status) { Some(if t.sender.eq_ignore_ascii_case(&sp.identity) && t.receiver.eq_ignore_ascii_case(&sp.identity) { 0 } else if t.direction == "out" { -(t.sats as i64) } else { t.sats as i64 }) } else { None },
                 fee: None, quote: None, ins: Vec::new(), outs: Vec::new(),
             }).collect();
-            let mut a = activity::priced(&v, rows, &ccy, &prices)?;
+            let mut a = activity::priced(&v, rows, activity::Unit::Btc, &ccy, &prices)?;
             // A wallet that holds sats but shows no transfers is not an empty wallet: it is one whose history Spark
             // is withholding (its owner turned on private mode). Said plainly rather than drawn as "nothing here".
             // With the wallet's own key on the card, the session reaches the Lightning service provider too: every
@@ -2146,7 +2148,9 @@ async fn vault_sync(name: String) -> R<Snapshot> {
             liquid::sync(&mut l, s.settings.gap)?;
             let receive = liquid::address_at(&l, 0, l.next)?;
             let height = l.txs.values().map(|t| t.height).max().unwrap_or(0);
-            let mut history: Vec<HistoryRow> = l.txs.values().map(|t| HistoryRow { txid: t.id.clone(), height: t.height as i32, index: 0 }).collect();
+            // this vault's rows only: the transactions in which ITS asset moved (or, on the L-BTC vault, whose fee it
+            // paid) — the account's other assets have vaults of their own
+            let mut history: Vec<HistoryRow> = liquid::rows(&l).iter().map(|t| HistoryRow { txid: t.id.clone(), height: t.height as i32, index: 0 }).collect();
             history.sort_by_key(|h| if h.height <= 0 { i32::MAX } else { h.height });
             let balance = l.held();
             let servers = if l.server.is_empty() || l.server == liquid::servers().electrum { liquid::servers() } else { liquid::fallback() };
@@ -2959,7 +2963,7 @@ pub(crate) fn tx_sheet(name: &str, txid: &str, height: i32, ccy: &str) -> R<Vec<
     let d = activity::detail(&v, &servers, txid, height)?;
     let prices = if s.settings.custom { s.settings.prices.clone() } else { activity::PRICES.to_string() };
     let fiat_ok = v.network == "mainnet" && !ccy.is_empty() && !prices.is_empty();
-    let (q_then, q_now) = if fiat_ok { (activity::quote_at(&prices, ccy, d.time), activity::quote_at(&prices, ccy, None)) } else { (None, None) };
+    let (q_then, q_now) = if fiat_ok { (activity::quote_at(&prices, activity::Unit::Btc, ccy, d.time), activity::quote_at(&prices, activity::Unit::Btc, ccy, None)) } else { (None, None) };
     let (title, subtitle, blocks) = tx_blocks(&v, &d, &s.contacts, ccy, &q_then, &q_now, true);
     export::doc(&title, &subtitle, &blocks)
 }

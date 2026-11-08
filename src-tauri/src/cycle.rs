@@ -56,7 +56,7 @@ pub fn curve(prices_url: &str) -> Result<Curve, String> {
         let e = (s + CHUNK).min(n);
         if closes[s..e].iter().all(|c| c.is_some()) { continue; }
         let (from, _) = grid_day(s); let (to, _) = grid_day(e - 1);
-        let points = activity::price_series(prices_url, "USD", &from, &to, 7)?;
+        let points = activity::price_series(prices_url, activity::Unit::Btc, "USD", &from, &to, 7)?;
         let by_day: std::collections::HashMap<String, Option<Quote>> = points.into_iter().collect();
         for i in s..e { if closes[i].is_none() { closes[i] = by_day.get(&grid_day(i).0).and_then(|q| q.as_ref()).map(|q| q.price); } }
     }
@@ -127,8 +127,8 @@ pub fn marks(prices_url: &str, times: &[u32]) -> Result<Vec<Option<Mark>>, Strin
     let curve = curve(prices_url)?;
     let today = crate::export::ymd(now_t() as u64);
     let missing: Vec<i64> = times.iter().map(|&t| day_number(t)).filter(|&n| day_of(n) < today && activity::cached_price(&format!("USD:{}", day_of(n))).is_none()).collect();
-    for (from, to) in spans(missing) { let _ = activity::price_series(prices_url, "USD", &day_of(from), &day_of(to), 1); }   // a run that fails leaves holes, which stay holes
-    let now = if times.iter().any(|&t| crate::export::ymd(t as u64) == today) { activity::now_quote(prices_url, "USD") } else { None };
+    for (from, to) in spans(missing) { let _ = activity::price_series(prices_url, activity::Unit::Btc, "USD", &day_of(from), &day_of(to), 1); }   // a run that fails leaves holes, which stay holes
+    let now = if times.iter().any(|&t| crate::export::ymd(t as u64) == today) { activity::now_quote(prices_url, activity::Unit::Btc, "USD") } else { None };
     Ok(times.iter().map(|&t| {
         let day = crate::export::ymd(t as u64);
         let q = if day == today { now.clone() } else { activity::cached_price(&format!("USD:{day}")) };
@@ -140,7 +140,7 @@ pub fn marks(prices_url: &str, times: &[u32]) -> Result<Vec<Option<Mark>>, Strin
 /// window can say "as of".
 pub fn now(prices_url: &str) -> Result<Option<Mark>, String> {
     let curve = curve(prices_url)?;
-    if let Some(m) = activity::now_quote(prices_url, "USD").and_then(|q| mark(&curve, now_t(), q.price)) { return Ok(Some(m)); }
+    if let Some(m) = activity::now_quote(prices_url, activity::Unit::Btc, "USD").and_then(|q| mark(&curve, now_t(), q.price)) { return Ok(Some(m)); }
     Ok(curve.weeks.iter().rev().find(|w| w.mult.is_some()).and_then(|w| mark(&curve, w.t, w.close?)))
 }
 

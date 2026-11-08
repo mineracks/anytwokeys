@@ -508,7 +508,7 @@ const fiatCcy = () => { const f = (store.settings.fiat ?? 'auto'); return f === 
 const moneyExact = (amount, ccy) => { try { return new Intl.NumberFormat(undefined, { style: 'currency', currency: ccy, minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount); } catch { return amount.toFixed(2) + ' ' + ccy; } };
 const money = (amount, ccy) => { try { return new Intl.NumberFormat(undefined, { style: 'currency', currency: ccy, maximumFractionDigits: Math.abs(amount) >= 100 ? 0 : 2 }).format(amount); } catch { return amount.toFixed(2) + ' ' + ccy; } };
 const worth = (satsN, q, ccy) => money(satsN / 1e8 * q.price, ccy);
-const basisWords = (q, ccy) => `1 BTC = ${money(q.price, ccy)} · ${q.basis} · Bitstamp price × ECB reference rate`;
+const basisWords = (q, ccy) => q.basis.startsWith('ECB') || q.basis === 'one dollar' ? `1 USD = ${money(q.price, ccy)} · ${q.basis} · one USDt taken as one US dollar` : `1 BTC = ${money(q.price, ccy)} · ${q.basis} · Bitstamp price × ECB reference rate`;
 
 // ---------- cards ----------
 async function pollCards() {
@@ -544,10 +544,11 @@ let balUnit = 'sats'; try { balUnit = localStorage.getItem('a2k-balance-unit') |
 function paintBalance() {
   if (!vault || vault._balance === undefined) return;
   const n = vault._now, big = $('#balance'), small = $('#balance-fiat');
-  if (!inSats(vault)) { big.classList.remove('switch'); big.title = ''; big.innerHTML = `${esc(unitAmount(vault, vault._balance).replace(/ [^ ]+$/, ''))} <small>${esc(assetTicker(vault))}</small>`; small.hidden = true; return; }
-  big.classList.toggle('switch', !!n); big.title = n ? 'Click to lead with ' + (balUnit === 'fiat' ? 'sats' : n.ccy) : '';
-  if (n && balUnit === 'fiat') { big.innerHTML = `${worth(vault._balance, n.q, n.ccy)} <small>${n.ccy}</small>`; small.textContent = `${sats(vault._balance)} sats`; }
-  else { big.innerHTML = `${sats(vault._balance)} <small>sats</small>`; small.textContent = n ? `≈ ${worth(vault._balance, n.q, n.ccy)}` : ''; }
+  const unit = inSats(vault) ? 'sats' : assetTicker(vault), amount = inSats(vault) ? sats(vault._balance) : unitAmount(vault, vault._balance).replace(/ [^ ]+$/, '');
+  if (!hasPrice(vault)) { big.classList.remove('switch'); big.title = ''; big.innerHTML = `${esc(amount)} <small>${esc(unit)}</small>`; small.hidden = true; return; }
+  big.classList.toggle('switch', !!n); big.title = n ? 'Click to lead with ' + (balUnit === 'fiat' ? unit : n.ccy) : '';
+  if (n && balUnit === 'fiat') { big.innerHTML = `${worth(vault._balance, n.q, n.ccy)} <small>${n.ccy}</small>`; small.textContent = `${amount} ${unit}`; }
+  else { big.innerHTML = `${esc(amount)} <small>${esc(unit)}</small>`; small.textContent = n ? `≈ ${worth(vault._balance, n.q, n.ccy)}` : ''; }
   small.title = n ? basisWords(n.q, n.ccy) : ''; small.hidden = !n;
 }
 $('#balance').onclick = () => { if (!vault || !vault._now) return; balUnit = balUnit === 'fiat' ? 'sats' : 'fiat'; try { localStorage.setItem('a2k-balance-unit', balUnit); } catch {} paintBalance(); };
@@ -1271,7 +1272,7 @@ function paintSnap(s) {
     }
     if (vault.exchange) { const ex = vault.exchange; $('#balance-sub').textContent = `held at ${ex.provider}, ${ex.stated ? 'as its newest statement states' : 'as the rows add up'} \u2014 with ${moneyExact(ex.fiat_now / 100, ex.ccy)} in cash beside it${ex.agrees === false ? ' \u00b7 the running balance did not chain in every file' : ''}`; $('#conn').textContent = 'Off-chain \u00b7 the exchange\u2019s own statements, nothing on the chain to check them against'; }
     if (vault.statement) { $('#balance-sub').textContent = `closed wallet \u2014 the statement leaves ${sats(vault.statement.closes_at)} sats; its history is kept for the coins that left it`; $('#conn').textContent = 'Off-chain \u00b7 figures from the custodian\u2019s statement, nothing on the chain to check them against'; }
-    if (vault.liquid) { $('#balance-sub').textContent = inSats(vault) ? 'L-BTC on the Liquid sidechain, unblinded here' + liquidSiblings(vault) : `${assetTicker(vault)} on the Liquid sidechain, unblinded here \u00b7 not priced yet` + liquidSiblings(vault); $('#conn').textContent = vault.liquid.server && !vault.liquid.server.includes('mineracks') ? `Liquid \u00b7 read from ${vault.liquid.server.replace('ssl://', '')} because our own node did not answer` : 'Liquid \u00b7 read from our own Liquid node'; }
+    if (vault.liquid) { $('#balance-sub').textContent = inSats(vault) ? 'L-BTC on the Liquid sidechain, unblinded here' + liquidSiblings(vault) : `${assetTicker(vault)} on the Liquid sidechain, unblinded here \u00b7 ${hasPrice(vault) ? 'one USDt priced as one US dollar at the ECB rate' : 'not priced'}` + liquidSiblings(vault); $('#conn').textContent = vault.liquid.server && !vault.liquid.server.includes('mineracks') ? `Liquid \u00b7 read from ${vault.liquid.server.replace('ssl://', '')} because our own node did not answer` : 'Liquid \u00b7 read from our own Liquid node'; }
     if (vault.spark) { $('#balance-sub').textContent = vault.spark.authenticated ? 'Spark reports this balance · key reader' : 'Spark reports this balance · anonymous read'; $('#conn').textContent = 'Off-chain · figures supplied by Spark, not verified against the chain'; }
     $('#activity-note').hidden = true;
     txList[vault.name] = s.history.slice().reverse();
@@ -1434,7 +1435,11 @@ function paintFactRow(txid, r, facts) {
     const sub = r.net === 0 ? (nodeRow(txid)?.msat || 0) : 0;
     if (sub) amt.classList.toggle('in', sub > 0);
     const uv = vn ? store.vaults.find(x => x.name === vn) : null;
-    if (uv && !inSats(uv)) { amt.innerHTML = `${r.net > 0 ? '+' : r.net < 0 ? '\u2212' : ''}${esc(unitAmount(uv, r.net))}<small>not priced</small>`; continue; }
+    if (uv && !inSats(uv)) {
+      amt.innerHTML = `${r.net > 0 ? '+' : r.net < 0 ? '\u2212' : ''}${esc(unitAmount(uv, r.net))}<small>${!hasPrice(uv) ? 'not priced' : q ? worth(Math.abs(r.net), q, facts.ccy) + (r.time ? ' then' : ' now') : ''}${hasPrice(uv) ? rtext : ''}</small>`;
+      if (q && hasPrice(uv)) amt.title = basisWords(q, facts.ccy);
+      continue;
+    }
     amt.innerHTML = sub ? `${sub > 0 ? '+' : '−'}${(Math.abs(sub) / 1000).toFixed(3)} sats<small>exactly ${sats(Math.abs(sub))} msat</small>`
       : `${r.net > 0 ? '+' : r.net < 0 ? '−' : ''}${sats(Math.abs(r.net))} sats<small>${q ? worth(Math.abs(r.net), q, facts.ccy) + (r.time ? ' then' : ' now') : ''}${r.fee !== null && r.net < 0 ? (q ? ' · ' : '') + '<span class="nowrap">fee ' + sats(r.fee) + '</span>' : ''}${rtext}</small>`;
     if (q) amt.title = basisWords(q, facts.ccy);
@@ -1616,9 +1621,9 @@ async function vaultReport() {
     const last = L && L.timeline.length ? L.timeline[L.timeline.length - 1] : { sats: vault._balance || 0, basis: 0 };
     const held = vault._balance !== undefined ? vault._balance : last.sats, value = priced ? held / 1e8 * now.price : null;
     const facts = [['Vault', `${vault.threshold} of ${vault.keys.length} · ${vault.network}${vault.ext ? ' · keys held on signing devices' : ''}`],
-      ['Created', vault.created ? dateOf(vault.created) : '—'], ['Holding', `${sats(held)} sats in ${sats((vault._coins || []).length)} coin${(vault._coins || []).length === 1 ? '' : 's'}`]];
+      ['Created', vault.created ? dateOf(vault.created) : '—'], ['Holding', vault.liquid ? amountIn([name], held) : `${sats(held)} sats in ${sats((vault._coins || []).length)} coin${(vault._coins || []).length === 1 ? '' : 's'}`]];
     if (priced) {
-      facts.push(['Worth now', `${money(value, ccy)}  (1 BTC = ${money(now.price, ccy)})`], ['Cost basis', `${money(last.basis, ccy)}  (${COST_METHODS[m].name})`]);
+      facts.push(['Worth now', `${money(value, ccy)}  (${perUnit([name], now, ccy)})`], ['Cost basis', `${money(last.basis, ccy)}  (${COST_METHODS[m].name})`]);
       const g = value - last.basis; facts.push(['Unrealised', `${g >= 0 ? '+' : '−'}${money(Math.abs(g), ccy)}${last.basis > 0 ? `  (${(g >= 0 ? '+' : '−') + Math.abs(g / last.basis * 100).toFixed(1)}% on cost)` : ''}`]);
       const rz = Object.values(L.realised), known = rz.filter(x => x.gain !== null), rg = known.reduce((a, x) => a + x.gain, 0);
       facts.push(['Realised', rz.length ? `${rg >= 0 ? '+' : '−'}${money(Math.abs(rg), ccy)} over ${rz.length} disposal${rz.length === 1 ? '' : 's'}${known.length < rz.length ? ` (${rz.length - known.length} of unknown cost)` : ''}` : 'nothing yet']);
@@ -1627,11 +1632,11 @@ async function vaultReport() {
     // the two charts from Home, over the vault's whole life
     if (L && L.timeline.length) {
       const first = L.timeline[0].t, to = Math.floor(Date.now() / 1000), from = Math.max(0, first - 3600);
-      const run = priced ? await pricesRange(ccy, first, to) : { prices: {} };
+      const run = priced ? await pricesRange(ccy, first, to, [vault.name]) : { prices: {} };
       const S = sumSeries(L, from, to, run.prices || {}, now);
       const lbl = (t) => new Date(t * 1000).toLocaleDateString();
       const hiB = Math.max(1, ...S.bal.map(p => p[1])) * 1.05;
-      blocks.push({ kind: 'chart', chart: { title: 'Balance, in sats', lo: 0, hi: hiB, lo_label: '0 sats', hi_label: sats(Math.round(hiB)) + ' sats', from_label: lbl(from), to_label: lbl(to), series: [{ name: 'Balance', color: 'value', pts: S.bal, step: true }] } });
+      blocks.push({ kind: 'chart', chart: { title: `Balance, in ${unitName([name])}`, lo: 0, hi: hiB, lo_label: amountIn([name], 0), hi_label: amountIn([name], hiB), from_label: lbl(from), to_label: lbl(to), series: [{ name: 'Balance', color: 'value', pts: S.bal, step: true }] } });
       if (priced && S.val.length) {
         const all = [...S.val, ...S.cost].map(p => p[1]), hi = Math.max(1, ...all) * 1.05;
         blocks.push({ kind: 'chart', chart: { title: `Worth and cost basis, in ${ccy}`, lo: 0, hi, lo_label: money(0, ccy), hi_label: money(hi, ccy), from_label: lbl(from), to_label: lbl(to), series: [{ name: 'Worth', color: 'value', pts: S.val }, { name: 'Cost basis', color: 'cost', pts: S.cost, step: true }] } });
@@ -1651,7 +1656,7 @@ async function vaultReport() {
       blocks.push({ kind: 'heading', text: `Transactions (${rows.length})` });
       blocks.push({ kind: 'facts', rows: rows.map(r => { const lab = labelOf('tx:' + r.txid), rz = L && L.realised[r.txid], xf = (f.transfers || {})[r.txid];
         const worth = r.quote && ccy ? ' · ' + money(Math.abs(r.net) / 1e8 * r.quote.price, ccy) + (r.time ? ' then' : ' now') : '';
-        return [r.time ? dateOf(r.time) : 'unconfirmed', `${r.net > 0 ? '+' : r.net < 0 ? '−' : ''}${sats(Math.abs(r.net || 0))} sats${worth}${rz && rz.gain !== null ? ' · realised ' + (rz.gain >= 0 ? '+' : '−') + money(Math.abs(rz.gain), ccy) : ''}${xf ? ' · transfer ' + (r.net < 0 ? 'to ' : 'from ') + xf.join(', ') : ''}${lab ? ' · ' + lab : ''} · ${r.txid.slice(0, 12)}…`]; }) });
+        return [r.time ? dateOf(r.time) : 'unconfirmed', `${r.net > 0 ? '+' : r.net < 0 ? '−' : ''}${amountIn([name], Math.abs(r.net || 0))}${worth}${rz && rz.gain !== null ? ' · realised ' + (rz.gain >= 0 ? '+' : '−') + money(Math.abs(rz.gain), ccy) : ''}${xf ? ' · transfer ' + (r.net < 0 ? 'to ' : 'from ') + xf.join(', ') : ''}${lab ? ' · ' + lab : ''} · ${r.txid.slice(0, 12)}…`]; }) });
     }
     blocks.push({ kind: 'para', text: `The recovery line is not in this report: it is on the recovery sheet (Vault settings › Save the recovery sheet), which should be kept apart from anything shared. ${priced ? 'Figures in ' + ccy + ' use ' + COST_METHODS[m].name.toLowerCase() + ' for cost; they are facts about the coins, not a tax position.' : ''}` });
     const path = await invoke('report_pdf', { title: name, subtitle: `Vault report · ${vault.network} · printed ${new Date().toLocaleDateString()}`, blocks, file: `${name}-report` });
@@ -1743,7 +1748,7 @@ async function cgtReport(sc, [label, from, to]) {
     ['For', scopeWords(sc)],
     ['Year', `${au ? 'Australian financial year ' : 'Calendar year '}${label} · ${dateOf(from)} to ${dateOf(to)}`],
     ['Method', methods.map(m => COST_METHODS[m].name.toLowerCase() === COST_METHODS[m].short ? COST_METHODS[m].name : `${COST_METHODS[m].name} — ${COST_METHODS[m].short}`).join('; ')],
-    ['Disposals', `${sats(rows.length)} · ${sats(Math.round(sum(rows.map(x => ({ v: x.r.sats })), 'v')))} sats in all${unknown.length ? ` · ${sats(unknown.length)} of unknown cost, listed apart` : ''}`],
+    ['Disposals', `${sats(rows.length)} · ${amountIn(sc.names, sum(rows.map(x => ({ v: x.r.sats })), 'v'))} in all${unknown.length ? ` · ${sats(unknown.length)} of unknown cost, listed apart` : ''}`],
     ['Proceeds', money(sum(known.map(x => ({ v: x.r.proceeds })), 'v'), ccy)],
     ['Cost of the coins', money(sum(known.map(x => ({ v: x.r.cost })), 'v'), ccy)],
     ['Gains, coins held over 12 months', `${money(longGain, ccy)}${au ? ' — ' + discount : ''}`],
@@ -1783,9 +1788,11 @@ async function cgtReport(sc, [label, from, to]) {
   blocks.push({ kind: 'para', text: `${au ? taxNote(sc.entity) + ' ' : ''}Each disposal is dated by its block; proceeds are the market price that day applied to the coins that left (a sale’s own price, if an exchange statement gives one, is on that row); cost is what those coins were worth when received, by the method named. "Over 12 months" is judged lot by lot, from the day each lot of coins was received. Moves between the vaults of this report are not disposals and are left out.` });
   blocks.push({ kind: 'heading', text: `Disposals (${rows.length})` });
   blocks.push({ kind: 'facts', rows: rows.map(x => { const r = x.r, what = ['stolen', 'lost', 'sold', 'spent', 'gift'].includes(r.kind) ? r.kind : 'disposal';
-    const longs = x.lots.filter(l => l.long === true).reduce((a, l) => a + l.sats, 0), hold = r.from ? (longs >= r.sats - 1 ? 'all over 12 months' : longs > 0 ? `${sats(Math.round(longs))} sats over 12 months` : '12 months or less') : 'holding period not known';
-    return [dateOf(r.t), `${sc.names.length > 1 ? x.vault + ' · ' : ''}${sats(Math.round(r.sats))} sats ${what} · ${x.txid.length === 64 ? x.txid : x.txid.slice(0, 24)}${r.gain === null ? ` · ${r.cost === null ? 'cost not known for some of the coins' : 'no price for the day'}` : ` · proceeds ${money(r.proceeds, ccy)} · cost ${money(r.cost, ccy)} · ${r.gain >= 0 ? 'gain +' : 'loss −'}${money(Math.abs(r.gain), ccy)}`} · ${hold}`]; }) });
+    const longs = x.lots.filter(l => l.long === true).reduce((a, l) => a + l.sats, 0), hold = r.from ? (longs >= r.sats - 1 ? 'all over 12 months' : longs > 0 ? `${amountIn(sc.names, longs)} over 12 months` : '12 months or less') : 'holding period not known';
+    return [dateOf(r.t), `${sc.names.length > 1 ? x.vault + ' · ' : ''}${amountIn(sc.names, r.sats)} ${what} · ${x.txid.length === 64 ? x.txid : x.txid.slice(0, 24)}${r.gain === null ? ` · ${r.cost === null ? 'cost not known for some of the coins' : 'no price for the day'}` : ` · proceeds ${money(r.proceeds, ccy)} · cost ${money(r.cost, ccy)} · ${r.gain >= 0 ? 'gain +' : 'loss −'}${money(Math.abs(r.gain), ccy)}`} · ${hold}`]; }) });
   if (unknown.length) blocks.push({ kind: 'para', text: `${sats(unknown.length)} disposal${unknown.length === 1 ? '' : 's'} above ${unknown.length === 1 ? 'has' : 'have'} no gain figure: the coins came from a deposit whose cost this app does not know (received before the vault was watched, or from a wallet it cannot see), or there is no price for the day. Give those a cost on the row that received them, and this report settles.` });
+  const uv = unitVault(sc.names);
+  if (uv && !inSats(uv)) blocks.push({ kind: 'para', text: `${assetTicker(uv)} is a stablecoin: each unit is priced at one US dollar, converted at the European Central Bank's reference rate for the day (the service names the fixing it used). Its gains and losses are the dollar's own moves against the ${ccy} between the day a unit arrived and the day it left; swapping it for L-BTC, or sending it, is a disposal. In Australia a stablecoin is a CGT asset like any other crypto asset — there is no exemption for a coin pegged to a currency.` });
   blocks.push({ kind: 'para', text: `This is a record drawn from the chain and the vaults’ ledgers, for an accountant or a return; it is not tax advice. ${methods.map(m => COST_METHODS[m].note).join(' ')}` });
   const file = `${sc.title}-cgt-${label.replace('–', '-')}`;
   const path = await invoke('report_pdf', { title: `${sc.title} — capital gains ${label}`, subtitle: `${sats(rows.length)} disposal${rows.length === 1 ? '' : 's'} · net ${net >= 0 ? '+' : '−'}${money(Math.abs(net), ccy)} before discount · printed ${new Date().toLocaleDateString()}`, blocks, file });
@@ -1813,7 +1820,7 @@ async function lossReport(sc) {
     ['For', scopeWords(sc)],
     ['Prepared', dateOf(Math.floor(Date.now() / 1000))],
     ['Rows', `${sats(rows.length)} — ${sats(rows.filter(x => x.r.kind === 'stolen').length)} stolen, ${sats(rows.filter(x => x.r.kind === 'lost').length)} lost`],
-    ['Coins gone', `${sats(Math.round(totalSats))} sats${anyQuote && ccy ? ` · worth ${money(worthThen, ccy)} as they left` : ''}`],
+    ['Coins gone', `${amountIn(sc.names, totalSats)}${anyQuote && ccy ? ` · worth ${money(worthThen, ccy)} as they left` : ''}`],
     ccy ? ['Their cost', `${money(totalCost, ccy)}${known.length < rows.length ? ` for ${sats(known.length)} of the ${sats(rows.length)} rows; the rest have coins of unknown cost` : ''}`] : null,
     ccy ? ['Capital loss', `${money(totalCost, ccy)}${known.length < rows.length ? ' at least' : ''} — nothing was received for the coins, so the loss is their whole cost`] : null,
   ].filter(Boolean) }];
@@ -1823,13 +1830,13 @@ async function lossReport(sc) {
     const e = v && v.node ? ((v.node.events || []).find(ev => ev.id === x.id) || null) : null;
     let to = e ? (e.to || []) : [];
     if (!e && x.row.txid) { try { const d = await invoke('tx_detail', { name: x.vault, txid: x.row.txid, height: (f.history || []).find(h => h[0] === x.row.txid)?.[1] || 0 }); to = (d.outputs || []).filter(o => o.ours === null).map(o => [o.address || o.kind, o.sats]); } catch {} }
-    blocks.push({ kind: 'heading', text: `${x.row.time ? dateOf(x.row.time) : 'not in a block'} — ${sats(Math.round(x.r.sats))} sats ${x.r.kind}${sc.names.length > 1 ? ` — ${x.vault}` : ''}` });
+    blocks.push({ kind: 'heading', text: `${x.row.time ? dateOf(x.row.time) : 'not in a block'} — ${amountIn(sc.names, x.r.sats)} ${x.r.kind}${sc.names.length > 1 ? ` — ${x.vault}` : ''}` });
     const lab = (v && v.labels || {})['tx:' + x.id] || '', note = (v && v.notes || {})['tx:' + x.id] || '';
     blocks.push({ kind: 'facts', rows: [
       ['Transaction', e && !e.txid ? (e.kind === 'unaccounted' ? 'none: this row is the difference between what the node holds and what its ledger explains — money that left without the node’s bookkeeper seeing it go (channels closed by someone else holding the keys, coins swept by another copy of the wallet)' : `Lightning · payment hash ${e.hash || '—'}`) : (e && e.txid ? e.txid : (x.row.txid || x.id))],
       e ? ['Layer', `${nodeLayer(e)} · ${e.kind}`] : null,
       to.length ? ['Where the coins went', to.map(([a, s_]) => `${a}  ${sats(s_)} sats`).join('\n')] : (e && e.txid ? ['Where the coins went', 'not read from the chain yet: refresh this vault and save the report again'] : null),
-      x.row.quote && ccy ? ['Worth as they left', `${money(x.r.sats / 1e8 * x.row.quote.price, ccy)} at ${money(x.row.quote.price, ccy)} per BTC`] : null,
+      x.row.quote && ccy ? ['Worth as they left', `${money(x.r.sats / 1e8 * x.row.quote.price, ccy)} at ${perUnit(sc.names, x.row.quote, ccy)}`] : null,
       ccy ? ['Cost of the coins', x.r.cost === null ? 'not known for some of them' : `${money(x.r.cost, ccy)}${x.r.from ? ` · received ${x.r.from === x.r.to ? 'on ' + new Date(x.r.from * 1000).toLocaleDateString() : 'between ' + new Date(x.r.from * 1000).toLocaleDateString() + ' and ' + new Date(x.r.to * 1000).toLocaleDateString()}` : ''}`] : null,
       ccy ? ['Loss', x.r.cost === null ? 'at least the part of known cost' : `${money(x.r.cost, ccy)} — proceeds nil`] : null,
       e && e.memo ? ['Memo', e.memo] : null,
@@ -1838,7 +1845,7 @@ async function lossReport(sc) {
   }
   blocks.push({ kind: 'heading', text: 'For the tax return' });
   blocks.push({ kind: 'para', text: `In Australia, coins stolen or lost are CGT event C1 (loss or destruction of a CGT asset). The capital proceeds are nil, so the capital loss is the cost base of the coins — ${ccy ? money(totalCost, ccy) : 'as above'}${known.length < rows.length ? ' at least' : ''} here — claimed in the income year the loss is discovered, and only against capital gains. ${taxNote(sc.entity)} The ATO asks for evidence that the coins existed and were the entity’s (the ledgers and the transactions above), that they are gone (the addresses they went to, which the entity does not control), and that steps were taken to recover them (the police or exchange report; keep its reference with this document). In the United States a theft loss on personal-use property is not deductible for 2018 to 2025 under TCJA; the figures above still give the basis that leaves the books.` });
-  const path = await invoke('report_pdf', { title: `${sc.title} — stolen and lost`, subtitle: `${sats(rows.length)} row${rows.length === 1 ? '' : 's'} · ${sats(Math.round(totalSats))} sats · printed ${new Date().toLocaleDateString()}`, blocks, file: `${sc.title}-stolen-and-lost` });
+  const path = await invoke('report_pdf', { title: `${sc.title} — stolen and lost`, subtitle: `${sats(rows.length)} row${rows.length === 1 ? '' : 's'} · ${amountIn(sc.names, totalSats)} · printed ${new Date().toLocaleDateString()}`, blocks, file: `${sc.title}-stolen-and-lost` });
   toast('Saved ' + path, 6000);
 }
 /// The report buttons, wherever they sit: Home (this vault), an entity's page (its vaults), the entities page (all).
@@ -2381,10 +2388,11 @@ const sumSave = (k, v) => { try { localStorage.setItem('a2k-sum-' + k, v); } cat
 // longer than a year) exactly as it answers each day on its own. Rust keeps closed days in the sealed cache for good.
 const sumRuns = {};   // "CCY:from:to" → { every, prices }, for this session
 const isoDay = (t) => new Date(t * 1000).toISOString().slice(0, 10);
-async function pricesRange(ccy, fromT, toT) {
-  const from = isoDay(fromT), to = isoDay(toT), key = `${ccy}:${from}:${to}`;
+async function pricesRange(ccy, fromT, toT, names = []) {
+  const unit = (unitVault(names) && priceUnit(unitVault(names))) || 'BTC';
+  const from = isoDay(fromT), to = isoDay(toT), key = `${unit}:${ccy}:${from}:${to}`;
   if (!sumRuns[key]) {
-    try { const r = await invoke('prices_series', { ccy, from, to }); sumRuns[key] = { every: r.every, prices: Object.fromEntries(r.points.map(([d, q]) => [d, q])), ok: true }; }
+    try { const r = await invoke('prices_series', { ccy, from, to, unit }); sumRuns[key] = { every: r.every, prices: Object.fromEntries(r.points.map(([d, q]) => [d, q])), ok: true }; }
     catch (e) { return { every: 1, prices: {}, ok: false, why: String(e) }; }   // not kept: a failure is asked again next time
   }
   return sumRuns[key];
@@ -2434,7 +2442,7 @@ async function renderSummary(box, names, opts = {}) {
   const rangeKey = sumPref('range', 'all'), R = SUM_RANGES.find(r => r[0] === rangeKey) || SUM_RANGES[3];
   const to = Math.floor(Date.now() / 1000), first = L.timeline.length ? L.timeline[0].t : to;
   const from = R[2] ? Math.min(to - R[2] * 86400, to - 3600) : Math.max(0, first - Math.max(3600, (to - first) * 0.03));
-  const run = priced && L.timeline.length ? await pricesRange(ccy, Math.max(from, first), to) : { every: 1, prices: {}, ok: true };
+  const run = priced && L.timeline.length ? await pricesRange(ccy, Math.max(from, first), to, names) : { every: 1, prices: {}, ok: true };
   const prices = run.prices;
   if (me !== renderSummary.seq) return;
   const S = sumSeries(L, from, to, prices, now);
@@ -2456,9 +2464,9 @@ async function renderSummary(box, names, opts = {}) {
   // stat tiles first: the numbers a reader came for, before any picture
   const k = document.createElement('div'); k.className = 'kpis';
   const tile = (key, v, sub, cls) => { const d = document.createElement('div'); d.className = 'kpi'; d.innerHTML = `<div class="k"></div><div class="v"></div><div class="s"></div>`; d.querySelector('.k').textContent = key; d.querySelector('.v').textContent = v; const sEl = d.querySelector('.s'); sEl.textContent = sub || ''; if (cls) sEl.classList.add(cls); return d; };
-  k.appendChild(tile('Holding', sats(Math.round(nowState.sats)) + ' sats', inputs.length > 1 ? `across ${inputs.length} vaults` : ''));
+  k.appendChild(tile('Holding', amountIn(names, nowState.sats), inputs.length > 1 ? `across ${inputs.length} vaults` : ''));
   if (priced && value !== null) {
-    k.appendChild(tile('Worth now', money(value, ccy), '1 BTC = ' + money(now.price, ccy)));
+    k.appendChild(tile('Worth now', money(value, ccy), perUnit(names, now, ccy)));
     k.appendChild(tile('Cost basis', money(nowState.basis, ccy), loading ? `incomplete \u00b7 ${loading} past price${loadingS} still loading` : 'what it was worth as it arrived'));
     const pct = nowState.basis > 0 ? gain / nowState.basis * 100 : null;
     // a status colour, so it goes with a sign and an arrow and never by colour alone
@@ -2469,9 +2477,9 @@ async function renderSummary(box, names, opts = {}) {
   }
   box.appendChild(k);
   const c1 = document.createElement('div'); c1.className = 'chart'; box.appendChild(c1);
-  lineChart(c1, { title: 'Balance, in sats', sub: 'It changes only when something arrives or leaves.', from, to,
+  lineChart(c1, { title: `Balance, in ${unitName(names)}`, sub: 'It changes only when something arrives or leaves.', from, to,
     series: [{ name: 'Balance', color: 'var(--series-value)', pts: S.bal, step: true, area: true }],
-    fmt: (v) => sats(Math.round(v)) + ' sats', fmtAxis: (v) => csats(v) });
+    fmt: (v) => amountIn(names, v), fmtAxis: (v) => cunits(names, v) });
   if (priced) {
     const c2 = document.createElement('div'); c2.className = 'chart'; box.appendChild(c2);
     lineChart(c2, { title: `What it is worth, and what it cost, in ${ccy}`, sub: 'The gap between the two lines is the gain or loss not yet realised.', from, to,
@@ -2509,7 +2517,7 @@ async function renderSummary(box, names, opts = {}) {
   box.append(tg, tw);
 }
 function renderHomeSummary() {
-  { const b = $('#s-home [data-loss-report]'); if (b) b.hidden = !(vault && txFacts[vault.name] && lossRows(scopeOfVault(vault)).length); } $('#home-summary').hidden = !!(vault && !inSats(vault)); $$('#s-home [data-vault-report], #s-home [data-cgt-report]').forEach(b => { b.hidden = !!(vault && !inSats(vault)); }); if (vault && inSats(vault) && $('#s-home').classList.contains('on')) renderSummary($('#home-summary'), [vault.name]); }
+  { const b = $('#s-home [data-loss-report]'); if (b) b.hidden = !(vault && txFacts[vault.name] && lossRows(scopeOfVault(vault)).length); } $('#home-summary').hidden = !!(vault && !hasPrice(vault)); $$('#s-home [data-vault-report], #s-home [data-cgt-report]').forEach(b => { b.hidden = !!(vault && !hasPrice(vault)); }); if (vault && hasPrice(vault) && $('#s-home').classList.contains('on')) renderSummary($('#home-summary'), [vault.name]); }
 
 // ---------- all vaults: the same view, of everything that has a price ----------
 // why a vault's history could not be read just now, in the words the person needs
@@ -4884,6 +4892,20 @@ const LIQUID_LBTC = '6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381
 // are in that asset's own units and cannot be added to anyone's sats, priced from bitcoin's feed, or charted with it.
 const inSats = v => !(v && v.liquid && v.liquid.asset && v.liquid.asset !== LIQUID_LBTC);
 const assetTicker = v => v.liquid.assets?.[v.liquid.asset]?.ticker || v.liquid.asset.slice(0, 8);
+const LIQUID_USDT = 'ce091c998b83c78bb71a632313ba3760f1763d9cfcffae02258ffa9865a37bd2';
+// What one unit of a vault's figures is priced as: a bitcoin for every sats vault; a US dollar for a Liquid USDt vault
+// (one USDt taken as one dollar — its rows carry the day's ECB rate, its gain or loss is the dollar's own move against
+// the currency, and the ATO treats a stablecoin as a CGT asset like any other); null for an asset with no price here.
+// The money arithmetic is shared: a vault's figure / 1e8 × price, which holds for USDt because Tether's precision is 8.
+const priceUnit = v => inSats(v) ? 'BTC' : (v.liquid.asset === LIQUID_USDT ? 'USD' : null);
+const hasPrice = v => priceUnit(v) !== null;
+// the unit a scope's figures are in: a single vault of another asset speaks in that asset's units; everything else in sats
+const unitVault = names => names.length === 1 ? (store.vaults.find(v => v.name === names[0]) || null) : null;
+const amountIn = (names, n) => { const v = unitVault(names); return v && !inSats(v) ? unitAmount(v, n) : `${sats(Math.round(n))} sats`; };
+const unitName = names => { const v = unitVault(names); return v && !inSats(v) ? assetTicker(v) : 'sats'; };
+const perUnit = (names, q, ccy) => { const v = unitVault(names); return `1 ${v && !inSats(v) ? assetTicker(v) : 'BTC'} = ${money(q.price, ccy)}`; };
+// the chart's axis: compact sats, or an asset's units in its own precision
+const cunits = (names, n) => { const v = unitVault(names); if (!v || inSats(v)) return csats(n); const p = v.liquid.assets?.[v.liquid.asset]?.precision || 0, u = n / 10 ** p; return u >= 1e6 ? +(u / 1e6).toFixed(1) + 'M' : u >= 1e3 ? +(u / 1e3).toFixed(1) + 'k' : String(+u.toFixed(2)); };
 // an amount of THIS vault's unit, in words: '12,345 sats' or '190.74 USDt'
 const unitAmount = (v, n) => inSats(v) ? `${sats(Math.abs(n))} sats` : liquidAmount(v.liquid, v.liquid.asset, Math.abs(n)).replace(/^\u2212/, '');
 // an asset's units in its own precision, with its ticker: 19074000000 of Tether → "190.74 USDt"
