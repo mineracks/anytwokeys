@@ -271,14 +271,20 @@ pub fn sync(l: &mut Liquid, gap: u32) -> Result<(), String> {
 }
 
 /// Every transaction's movements from the whole set's inputs and outputs — the same answer whatever order the
-/// transactions were read in.
+/// transactions were read in. `paid_fee` is true only when one of our own L-BTC coins went in: that is the only
+/// coin a fee can come from.
 pub fn book(txs: &mut BTreeMap<String, Tx>) {
     let outs: HashMap<(String, u32), (String, u64)> = txs.values().flat_map(|t| t.outs.iter().map(move |(v, a, n)| ((t.id.clone(), *v), (a.clone(), *n)))).collect();
     for t in txs.values_mut() {
         let mut moves: BTreeMap<String, i64> = BTreeMap::new();
         let mut paid = false;
         for (ptx, vout) in &t.ins {
-            if let Some((asset, value)) = outs.get(&(ptx.clone(), *vout)) { *moves.entry(asset.clone()).or_insert(0) -= *value as i64; paid = true; }
+            if let Some((asset, value)) = outs.get(&(ptx.clone(), *vout)) {
+                *moves.entry(asset.clone()).or_insert(0) -= *value as i64;
+                // Only L-BTC pays a Liquid fee: a wallet whose inputs are all another asset had the fee paid for it
+                // (Aqua's "pay fees in USDt" sends a little more USDt to a service that adds the L-BTC input).
+                if asset == LBTC { paid = true; }
+            }
         }
         for (_, asset, value) in &t.outs { *moves.entry(asset.clone()).or_insert(0) += *value as i64; }
         moves.retain(|_, v| *v != 0);
@@ -400,6 +406,24 @@ mod tests {
         book(&mut txs);
         let l = Liquid { txs, ..l };
         assert_eq!(rows(&l).iter().find(|r| r.id == "swap").unwrap().kind, "swap");
+    }
+
+    /// Aqua's "pay fees in USDt": the wallet spends only USDt, a service adds the L-BTC input that pays the fee and
+    /// keeps a little USDt for it. The three such sends of 19 Jan 2025 read as swaps, and as 0-sat rows of the
+    /// L-BTC vault, when "paid the fee" meant "had any input".
+    #[test]
+    fn a_usdt_send_whose_fee_a_service_paid_is_a_send_and_not_an_lbtc_row() {
+        let mut txs = BTreeMap::new();
+        txs.insert("coin".into(), Tx { id: "coin".into(), height: 1, time: 1, outs: vec![(0, USDT.into(), 2000_00000000)], ..Default::default() });
+        txs.insert("send".into(), Tx { id: "send".into(), height: 2, time: 2, fee: 40, outs: vec![(2, USDT.into(), 999_90682995)], ins: vec![("coin".into(), 0), ("service".into(), 1)], ins_all: 2, outs_all: 5, ..Default::default() });
+        book(&mut txs);
+        assert!(!txs["send"].paid_fee, "no L-BTC of ours went in, so the fee was not ours");
+        assert_eq!(txs["send"].moves[USDT], -1000_09317005);
+        assert!(txs["send"].moves.get(LBTC).is_none());
+        let usdt = Liquid { xpub: String::new(), fingerprint: String::new(), path: String::new(), wrapped: false, blinding: String::new(), next: 0, next_change: 0, txs, assets: Default::default(), balances: Default::default(), read_at: 0, server: String::new(), asset: USDT.into() };
+        assert_eq!(rows(&usdt).iter().find(|r| r.id == "send").unwrap().kind, "send");
+        let lbtc = Liquid { asset: LBTC.into(), ..usdt };
+        assert!(rows(&lbtc).iter().all(|r| r.id != "send"), "the L-BTC vault has no row for it");
     }
 
     /// Throwaway words, derived and scanned against the live server: proves the derivation, the server and the

@@ -1298,7 +1298,9 @@ function actRowHtml(h) {
     return `<td class="when muted">…</td><td class="mono">${esc(h.txid.slice(0, 10))}…</td><td>${lblHtml('tx:' + h.txid)}<span class="xfer" data-xfer="${esc(h.txid)}"></span></td><td class="r amt muted">…</td><td class="r">${esc(how)}</td>`;
   }
   if (vault?.liquid) {
-    const t = txFacts[vault.name]?.liquid?.[h.txid], memo = t ? `<small class="muted memo">${esc(t.moves.filter(m => m.asset !== vault.liquid.asset).map(m => `${t.kind === 'swap' ? 'for ' : ''}${m.amount} ${m.ticker}`).join(' \u00b7 '))}</small>` : '';
+    // Another asset's movement, in words: on a swap the other side ("for −0.001 L-BTC"); on a USDt send the L-BTC
+    // that left was only the fee, so say so rather than show it as an L-BTC movement of this vault
+    const t = txFacts[vault.name]?.liquid?.[h.txid], memo = t ? `<small class="muted memo">${esc(t.moves.filter(m => m.asset !== vault.liquid.asset).map(m => m.asset === LIQUID_LBTC && t.kind !== 'swap' && t.paid_fee && m.units === -t.fee ? `fee ${sats(t.fee)} sats of L-BTC` : `${t.kind === 'swap' ? 'for ' : ''}${m.amount} ${m.ticker}`).join(' \u00b7 '))}</small>` : '';
     return `<td class="when muted">…</td><td class="mono">${esc(h.txid.slice(0, 10))}…</td><td>${lblHtml('tx:' + h.txid)}${memo}<span class="xfer" data-xfer="${esc(h.txid)}"></span></td><td class="r amt muted">…</td><td class="r">${esc(liquidRowStatus(t))}</td>`;
   }
   if (vault?.spark) {
