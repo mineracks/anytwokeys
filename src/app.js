@@ -587,7 +587,7 @@ async function renderTx() {
   $('#tx-explorer').hidden = offchain; $('#tx-pdf').hidden = !!(vault.spark || vault.liquid || vault.statement || vault.node || vault.exchange); $('#tx-chain').hidden = offchain || !!vault.liquid;
   if (vault.liquid) {
     const t = txFacts[vault.name]?.liquid?.[txid], st = $('#tx-status'); st.className = 'state ' + (t?.height > 0 ? 'ok' : 'here'); st.querySelector('span').textContent = liquidRowStatus(t);
-    $('#tx-dl').innerHTML = [['Transfer', transferText(txFacts[vault.name], txid) || 'Outside the watched vaults'], ['Source', 'The Liquid sidechain, read from our own node and unblinded here'], ['Transaction', txid], ['Block', t?.height > 0 ? sats(t.height) : 'unconfirmed'], ['Kind', t ? LIQUID_KIND[t.kind] || t.kind : 'unknown'], ...(t ? t.moves.map(m => ['Moved', `${m.amount} ${m.ticker}`]) : []), t?.fee ? ['Fee', `${sats(t.fee)} sats of L-BTC${t.paid_fee ? ', paid by this wallet' : ', paid by the other party'}`] : null].filter(Boolean).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+    $('#tx-dl').innerHTML = [['Transfer', transferText(txFacts[vault.name], txid) || 'Outside the watched vaults'], ['Source', 'The Liquid sidechain, read from our own node and unblinded here'], ['Transaction', txid], ['Block', t?.height > 0 ? sats(t.height) : 'unconfirmed'], ['Kind', t ? LIQUID_KIND[t.kind] || t.kind : 'unknown'], ...(t ? t.moves.map(m => { const c = liquidAmount(vault.liquid, m.asset, m.units), p = m.asset === LIQUID_LBTC ? 8 : (vault.liquid.assets?.[m.asset]?.precision || 0), hidden = m.asset !== LIQUID_LBTC && p > 2 && Math.abs(m.units) % 10 ** (p - 2) !== 0; return ['Moved', hidden ? `${c} (exactly ${liquidAmount(vault.liquid, m.asset, m.units, true).replace(/ [^ ]+$/, '')})` : c]; }) : []), t?.fee ? ['Fee', `${sats(t.fee)} sats of L-BTC${t.paid_fee ? ', paid by this wallet' : ', paid by the other party'}`] : null].filter(Boolean).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
     $('#tx-proof').textContent = ''; $('#tx-chain-body').innerHTML = ''; return;
   }
   if (vault.node) {
@@ -4960,11 +4960,17 @@ const cunits = (names, n) => { const v = unitVault(names); if (!v || inSats(v)) 
 // an amount of THIS vault's unit, in words: '12,345 sats' or '190.74 USDt'
 const unitAmount = (v, n) => inSats(v) ? `${sats(Math.abs(n))} sats` : liquidAmount(v.liquid, v.liquid.asset, Math.abs(n)).replace(/^\u2212/, '');
 // an asset's units in its own precision, with its ticker: 19074000000 of Tether → "190.74 USDt"
-function liquidAmount(l, asset, units) {
-  const info = l.assets?.[asset], p = asset === LIQUID_LBTC ? 8 : (info?.precision || 0), t = asset === LIQUID_LBTC ? 'L-BTC' : (info?.ticker || asset.slice(0, 8));
-  const neg = units < 0, n = BigInt(Math.abs(units)), d = 10n ** BigInt(p);
-  const whole = (n / d).toString(), frac = p ? (n % d).toString().padStart(p, '0').replace(/0+$/, '') : '';
-  return `${neg ? '\u2212' : ''}${whole}${frac ? '.' + frac : ''} ${t}`;
+// A money-like asset (Tether carries eight decimals) is shown to the cent unless `exact` is asked for; the units
+// themselves are never rounded — every figure is kept and added at full precision, only the words are shortened.
+function liquidAmount(l, asset, units, exact = false) {
+  const info = l.assets?.[asset], p0 = asset === LIQUID_LBTC ? 8 : (info?.precision || 0), t = asset === LIQUID_LBTC ? 'L-BTC' : (info?.ticker || asset.slice(0, 8));
+  const shown = asset !== LIQUID_LBTC && !exact && p0 > 2 ? 2 : p0;
+  const neg = units < 0; let n = BigInt(Math.round(Math.abs(units)));
+  if (shown < p0) { const f = 10n ** BigInt(p0 - shown); n = (n + f / 2n) / f; }   // to the nearest cent, half up
+  const d = 10n ** BigInt(shown);
+  const whole = (n / d).toString(), frac = shown ? (n % d).toString().padStart(shown, '0') : '';
+  const fracShown = exact || asset === LIQUID_LBTC ? frac.replace(/0+$/, '') : frac;
+  return `${neg ? '\u2212' : ''}${whole}${fracShown ? '.' + fracShown : ''} ${t}`;
 }
 
 // ---------- a Muun wallet, watched ----------

@@ -310,11 +310,14 @@ pub fn ticker(l: &Liquid, asset: &str) -> String {
     if asset == LBTC { return "L-BTC".into(); }
     l.assets.get(asset).filter(|a| !a.ticker.is_empty()).map(|a| a.ticker.clone()).unwrap_or_else(|| asset.chars().take(8).collect())
 }
-/// Units shown in the asset's own precision: 19074000000 USDt units → "190.74".
+/// Units in words: L-BTC in its own precision ("0.02064676"); a money-like asset to the cent ("190.74", "1000.09"),
+/// however many decimals it carries — Tether has eight, and nobody reads 1000.09317005. The units themselves are
+/// never rounded, only the words.
 pub fn amount(l: &Liquid, asset: &str, units: i64) -> String {
     let p = if asset == LBTC { 8 } else { l.assets.get(asset).map(|a| a.precision).unwrap_or(0) } as u32;
-    let (sign, n) = (if units < 0 { "−" } else { "" }, units.unsigned_abs());
+    let (sign, mut n) = (if units < 0 { "−" } else { "" }, units.unsigned_abs());
     if p == 0 { return format!("{sign}{n}"); }
+    if asset != LBTC && p > 2 { let f = 10u64.pow(p - 2); n = (n + f / 2) / f; return format!("{sign}{}.{:02}", n / 100, n % 100); }
     let d = 10u64.pow(p);
     let frac = format!("{:0width$}", n % d, width = p as usize);
     let frac = frac.trim_end_matches('0');
@@ -383,6 +386,9 @@ mod tests {
         l.assets.insert(USDT.into(), AssetInfo { ticker: "USDt".into(), name: "Tether USD".into(), precision: 8 });
         assert_eq!(amount(&l, USDT, 19_074_000_000), "190.74");
         assert_eq!(amount(&l, USDT, -5_000_000), "−0.05");
+        assert_eq!(amount(&l, USDT, -100_009_317_005), "−1000.09", "to the cent, not eight places");
+        assert_eq!(amount(&l, USDT, 1_000_000_000), "10.00");
+        assert_eq!(amount(&l, USDT, 9_999_500_000), "100.00", "half a cent rounds up");
         assert_eq!(amount(&l, LBTC, 2_064_676), "0.02064676");
         assert_eq!(amount(&l, LBTC, 100_000_000), "1");
         assert_eq!(ticker(&l, USDT), "USDt");
