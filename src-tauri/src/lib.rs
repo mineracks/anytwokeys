@@ -7,6 +7,7 @@ mod spark_auth;
 mod spark_ssp;
 mod sync;
 mod muun;
+mod liquid;
 mod activity;
 mod cycle;
 mod transfers;
@@ -725,6 +726,20 @@ async fn vault_activity(name: String, history: Vec<(String, i32)>, ccy: String) 
             transfers::record(&v, &mut a, &s);
             return Ok(a);
         }
+        // A Liquid wallet's history is what the last sync read and unblinded: L-BTC on the sats row, priced like
+        // every other row; the other assets ride beside it in their own units, shown, not priced.
+        if let Some(l) = &v.liquid {
+            let rows: Vec<activity::Row> = l.txs.values().map(|t| activity::Row {
+                txid: t.id.clone(), time: if t.time > 0 { Some(t.time) } else { None },
+                net: Some(t.moves.get(liquid::LBTC).copied().unwrap_or(0)), fee: if t.paid_fee && t.fee > 0 { Some(t.fee) } else { None },
+                quote: None, ins: Vec::new(), outs: Vec::new(),
+            }).collect();
+            let mut a = activity::priced(&v, rows, &ccy, &prices)?;
+            a.liquid = liquid::rows(l);
+            if !l.server.is_empty() && l.server != liquid::servers().electrum { a.note = Some(format!("Read from {} because our own Liquid node did not answer.", l.server.trim_start_matches("ssl://"))); }
+            transfers::record(&v, &mut a, &s);
+            return Ok(a);
+        }
         // A Spark wallet's history comes from an operator, in whole transfers: no inputs, no outputs, no fee of its
         // own, and an id that is Spark's rather than a txid. Priced the same way every other row is.
         if let Some(sp) = &v.spark {
@@ -863,6 +878,7 @@ async fn tx_detail(name: String, txid: String, height: i32) -> R<activity::Detai
         let s = wallet::load()?;
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
         if v.spark.is_some() { return Err("Spark transfers are off-chain; their details come from the Spark activity list".into()); }
+        if v.liquid.is_some() { return Err("a Liquid transaction's details come from the Liquid activity list".into()); }
         let mut d = activity::detail(&v, &wallet::servers_for(&s, &v.network), &txid, height)?;
         mark_peers(&s, &v, &mut d);
         Ok(d)
@@ -953,7 +969,7 @@ fn vault_create(name: String, threshold: usize, keys: Vec<NewKey>, rotating: Opt
     let pubs: Vec<String> = keys.iter().map(|k| k.pubkey.to_lowercase()).collect();
     let descriptor = wallet::descriptor_for(threshold, &pubs)?;
     let network = wallet::network_of(&s.settings.network);
-    let mut v = Vault { watch: None, spark: None, muun: None, statement: None, node: None, name, network: s.settings.network.clone(), threshold,
+    let mut v = Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name, network: s.settings.network.clone(), threshold,
         keys: keys.into_iter().map(|k| wallet::KeyRef { name: k.name, serial: k.serial, pubkey: k.pubkey.to_lowercase(), device: None }).collect(),
         descriptor, address: String::new(), created: now(),
         chain_code: if rotating.unwrap_or(true) { Some(fresh_chain_code()) } else { None }, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None, entity: None, exchange: None };
@@ -1003,7 +1019,7 @@ fn descriptor_parse(text: String) -> R<Parsed> {
     let (desc_text, cc) = wallet::split_recovery(&text);
     let (threshold, keys) = wallet::keys_of(&desc_text)?;
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
-    let tmp = Vault { watch: None, spark: None, muun: None, statement: None, node: None, name: String::new(), network: s.settings.network.clone(), threshold, keys: keys.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.clone(), device: None }).collect(),
+    let tmp = Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name: String::new(), network: s.settings.network.clone(), threshold, keys: keys.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.clone(), device: None }).collect(),
         descriptor: descriptor.clone(), address: String::new(), created: 0, chain_code: cc.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None, entity: None, exchange: None };
     let address = wallet::address_at(&tmp, 0)?;
     Ok(Parsed { threshold, keys, descriptor: wallet::recovery_line(&tmp), address, rotating: cc.is_some(), ext: None, kind: "cards".into(), name: ur_name })
@@ -1060,7 +1076,7 @@ fn muun_restore(name: String, key1: String, key2: String, code: String, expect: 
     if let Some(v) = s.vaults.iter().find(|v| v.muun.as_ref().map(|o| o.user == m.user).unwrap_or(false)) {
         return Err(format!("this Muun wallet is already here, as '{}'", v.name));
     }
-    let mut v = Vault { watch: None, spark: None, muun: Some(m), statement: None, node: None, name, network: s.settings.network.clone(), threshold: 2,
+    let mut v = Vault { watch: None, spark: None, muun: Some(m), liquid: None, statement: None, node: None, name, network: s.settings.network.clone(), threshold: 2,
         keys: Vec::new(), descriptor: String::new(), address: String::new(), created: now(), chain_code: None,
         next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(),
         notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0,
@@ -1105,7 +1121,7 @@ fn xpub_restore(name: String, text: String, names: Vec<String>) -> R<Vault> {
     if x.depth == 0 {
         return Err("that is a MASTER key, not an account key. Hardened levels cannot be derived from a public key, so this app could only watch m/0/i — almost certainly not where your wallet keeps its coins. Export the account key (what a wallet calls its watch-only or xpub export).".into());
     }
-    let mut v = Vault { watch: Some(wallet::Watch { key, kinds, said, sp: None }), spark: None, muun: None, statement: None, node: None, name,
+    let mut v = Vault { watch: Some(wallet::Watch { key, kinds, said, sp: None }), spark: None, muun: None, liquid: None, statement: None, node: None, name,
         network: network.to_string(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address: String::new(),
         created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
         labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
@@ -1140,7 +1156,7 @@ async fn spark_restore(name: String, address: String) -> R<Vault> {
             return Err(if balance > 0 { "Spark will not list this wallet's transfers — its privacy setting is on. The balance can be read but the history cannot, so there is nothing here to account with.".into() }
                 else { "Spark shows nothing under this address: no balance and no transfers. That is what an EMPTY wallet looks like — and also exactly what a wallet with its privacy setting on looks like, since a private wallet answers with nothing rather than with a refusal. If you know this wallet holds sats, its privacy setting is on (Wallet of Satoshi's wallets are), and authenticated reader enrolment can grant access without turning privacy off.".into() });
         }
-        let mut v = Vault { watch: None, spark: Some(wallet::Spark { address: address.trim().to_string(), identity, reader_pubkey: String::new(), reader_card: String::new(), authenticated: false, memos: Default::default(), owner_card: String::new(), owner_slot: None }), muun: None, statement: None, node: None,
+        let mut v = Vault { watch: None, spark: Some(wallet::Spark { address: address.trim().to_string(), identity, reader_pubkey: String::new(), reader_card: String::new(), authenticated: false, memos: Default::default(), owner_card: String::new(), owner_slot: None }), muun: None, liquid: None, statement: None, node: None,
             name, network, threshold: 1, keys: Vec::new(), descriptor: String::new(), address: address.trim().to_string(),
             created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
             labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
@@ -1338,7 +1354,7 @@ fn exchange_import(name: String, entity: Option<String>) -> R<(Vault, usize)> {
     }
     let n = ex.rows.len();
     let entity = entity.filter(|id| s.entities.iter().any(|e| &e.id == id));
-    let v = Vault { watch: None, spark: None, muun: None, statement: None, node: None, exchange: Some(ex),
+    let v = Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, exchange: Some(ex),
         name, network: "mainnet".into(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address: String::new(),
         created: t, chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
         labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
@@ -1456,7 +1472,7 @@ async fn node_add(name: String, kind: String, url: String, cred: String, pin: St
         let keep: zeroize::Zeroizing<String> = if kind == "lnd" { zeroize::Zeroizing::new(node::lnd_cred(&cred)?.macaroon_hex) } else { cred.clone() };
         node::keep_cred(&node::id_of(&n.url, &n.pubkey), &keep)?;
         let txs: std::collections::HashMap<String, i32> = n.events.iter().filter(|e| !e.txid.is_empty()).map(|e| (e.txid.clone(), 0)).collect();
-        let v = Vault { watch: None, spark: None, muun: None, statement: None, node: Some(n),
+        let v = Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: Some(n),
             name: name.clone(), network: "mainnet".into(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address: String::new(),
             created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
             labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
@@ -1574,7 +1590,7 @@ fn statement_import(name: String, text: String) -> R<(Vault, usize)> {
         let out = v.clone(); wallet::save(&s)?; return Ok((out, n));
     }
     let n = st.rows.len();
-    let mut v = Vault { watch: None, spark: None, muun: None, statement: Some(st), node: None,
+    let mut v = Vault { watch: None, spark: None, muun: None, liquid: None, statement: Some(st), node: None,
         name, network: "mainnet".into(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address: String::new(),
         created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
         labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
@@ -1587,7 +1603,7 @@ fn statement_import(name: String, text: String) -> R<(Vault, usize)> {
 
 fn new_spark_vault(name: String, spark: wallet::Spark, network: String) -> Vault {
     let address = spark.address.clone();
-    Vault { watch: None, spark: Some(spark), muun: None, statement: None, node: None,
+    Vault { watch: None, spark: Some(spark), muun: None, liquid: None, statement: None, node: None,
         name, network, threshold: 1, keys: Vec::new(), descriptor: String::new(), address,
         created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
         labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
@@ -1654,6 +1670,32 @@ fn spark_session_status(name: String) -> R<bool> {
     Ok(!sp.authenticated || spark_auth::session(sp, &v.network).is_ok())
 }
 
+/// A Liquid wallet from its words (Aqua's, Green's): the account key and the SLIP-77 blinding key are derived and
+/// kept, the chain is read once, and the words live for this call only. A second vault for the same account key is
+/// refused by name of the first.
+#[tauri::command]
+async fn liquid_restore(name: String, words: String) -> R<Vault> {
+    let words = zeroize::Zeroizing::new(words);
+    block(move || {
+        let name = name.trim().to_string();
+        if name.is_empty() || name.chars().count() > 60 { return Err("give it a name of up to 60 characters".into()); }
+        let s = wallet::load()?;
+        if s.vaults.iter().any(|v| v.name == name) { return Err(format!("a vault called '{name}' already exists")); }
+        let l = liquid::from_words(words, s.settings.gap)?;
+        if let Some(v) = s.vaults.iter().find(|v| v.liquid.as_ref().map(|x| x.xpub == l.xpub).unwrap_or(false)) { return Err(format!("this Liquid wallet is already watched as ‘{}’", v.name)); }
+        let address = liquid::address_at(&l, 0, l.next)?;
+        let v = Vault { watch: None, spark: None, muun: None, liquid: Some(l), statement: None, node: None,
+            name, network: "mainnet".into(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address,
+            created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
+            labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
+            more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: Some("fifo".into()), entity: None, exchange: None };
+        let mut s = wallet::load()?;
+        s.vaults.push(v.clone());
+        wallet::save(&s)?;
+        Ok(v)
+    }).await
+}
+
 /// What a kit's key says about itself before any code is typed: enough to tell someone they pasted the wrong thing.
 #[tauri::command]
 fn muun_check(key1: String, key2: String) -> R<serde_json::Value> {
@@ -1680,7 +1722,7 @@ fn vault_restore(name: String, text: String, names: Vec<String>) -> R<Vault> {
     let (desc_text, cc) = wallet::split_recovery(&text);
     let (threshold, keys) = wallet::keys_of(&desc_text)?;
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
-    let mut v = Vault { watch: None, spark: None, muun: None, statement: None, node: None, name, network: s.settings.network.clone(), threshold,
+    let mut v = Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name, network: s.settings.network.clone(), threshold,
         keys: keys.iter().enumerate().map(|(i, k)| wallet::KeyRef { name: names.get(i).cloned().unwrap_or_else(|| format!("key {}", i + 1)), serial: 0, pubkey: k.clone(), device: None }).collect(),
         descriptor, address: String::new(), created: now(), chain_code: cc, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None, entity: None, exchange: None };
     v.address = wallet::address_at(&v, 0)?;
@@ -1762,7 +1804,7 @@ fn signers_vault(name: String, threshold: usize, keys: &[SignerIn], network: &st
 /// A vault of extended keys held by other signers. Each key is named for the person, and keeps its origin — the
 /// fingerprint and path a hardware signer matches on — as the "pubkey" shown for it; it is never a card's key.
 pub(crate) fn ext_vault(name: String, info: &wallet::ExtInfo, names: &[String]) -> Vault {
-    Vault { watch: None, spark: None, muun: None, statement: None, node: None, name, network: info.network.clone(), threshold: info.threshold,
+    Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name, network: info.network.clone(), threshold: info.threshold,
         keys: info.keys.iter().enumerate().map(|(i, k)| wallet::KeyRef { name: names.get(i).cloned().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| if k.fixed { format!("key {} · a card", i + 1) } else { format!("key {} · {}", i + 1, k.fingerprint) }),
             // a fixed key is kept as the bare key, so a card plugged in is recognised as this vault's by the key it holds
             serial: 0, pubkey: if k.fixed { k.xpub.clone() } else { format!("[{}/{}]{}", k.fingerprint, k.path.trim_start_matches("m/").replace('\'', "h"), k.xpub) }, device: if k.fixed { Some("card".into()) } else { None } }).collect(),
@@ -2085,6 +2127,21 @@ async fn vault_sync(name: String) -> R<Snapshot> {
         if let Some(st) = &v.statement {
             let history: Vec<HistoryRow> = st.rows.iter().map(|r| HistoryRow { txid: r.id.clone(), height: 0, index: 0 }).collect();
             return Ok(Snapshot { stale: String::new(), coins: Vec::new(), balance: st.closes_at.max(0) as u64, height: 0, history, servers, receive: String::new(), receive_index: 0, rotating: false, next_change: 0, gap: 0 });
+        }
+        // A Liquid wallet: read the sidechain through its account key and blinding key, keep what was read on the
+        // vault, and draw the screen from it. Its coins are confidential, so none are listed; the balance is L-BTC.
+        if let Some(l) = &v.liquid {
+            let mut l = l.clone();
+            liquid::sync(&mut l, s.settings.gap)?;
+            let receive = liquid::address_at(&l, 0, l.next)?;
+            let height = l.txs.values().map(|t| t.height).max().unwrap_or(0);
+            let mut history: Vec<HistoryRow> = l.txs.values().map(|t| HistoryRow { txid: t.id.clone(), height: t.height as i32, index: 0 }).collect();
+            history.sort_by_key(|h| if h.height <= 0 { i32::MAX } else { h.height });
+            let balance = l.balances.get(liquid::LBTC).copied().unwrap_or(0);
+            let servers = if l.server.is_empty() || l.server == liquid::servers().electrum { liquid::servers() } else { liquid::fallback() };
+            let (name, l2, recv2) = (v.name.clone(), l.clone(), receive.clone());
+            wallet::update(move |s| if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == name) { vm.liquid = Some(l2); vm.address = recv2; })?;
+            return Ok(Snapshot { stale: String::new(), coins: Vec::new(), balance, height, history, servers, receive, receive_index: l.next, rotating: true, next_change: l.next_change, gap: s.settings.gap });
         }
         // A Spark wallet is not on the chain: its balance comes from an operator, and it has no coins, no addresses
         // and no block height of its own. Everything else on the screen is drawn from this same shape.
@@ -2723,7 +2780,7 @@ struct Candidate { id: String, have: usize, locked: usize, need: usize, record: 
 
 fn seal_vault(rec: &seal::Record, name: String, shares: Vec<String>, sealed: Vec<String>) -> R<Vault> {
     let descriptor = wallet::descriptor_for(rec.threshold, &rec.pubkeys)?;
-    let mut v = Vault { watch: None, spark: None, muun: None, statement: None, node: None, name, network: rec.network.clone(), threshold: rec.threshold,
+    let mut v = Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name, network: rec.network.clone(), threshold: rec.threshold,
         keys: rec.pubkeys.iter().zip(&rec.key_names).map(|(p, n)| wallet::KeyRef { name: n.clone(), serial: 0, pubkey: p.clone(), device: None }).collect(),
         descriptor, address: String::new(), created: now(), chain_code: rec.chain_code.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0,
         seal: wallet::Seal { shares, sealed }, ext: None, cost_method: None, entity: None, exchange: None };
@@ -3791,6 +3848,7 @@ mod watch {
         let vaults = s0.vaults.clone();
         for (n, v) in vaults.iter().enumerate() {
             let tag = format!("vault {}", n + 1);   // the log is readable by anyone who can read the disk: no names, amounts or ids in it
+            if v.liquid.is_some() { continue; }   // a Liquid wallet is read on its own sync; its sidechain is not this watcher's chain
             let servers = wallet::servers_for(&s0, &v.network);
             let sc = match wallet::scan(v, &servers, s0.settings.gap) { Ok(sc) => sc, Err(e) => { log(&format!("{tag}: scan failed: {e}")); continue } };
             // re-read after the slow part, so a sync that saved meanwhile is not erased
@@ -3902,7 +3960,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![search_all, profiles_list, profile_open, profile_close, profile_create, profile_update, profile_delete, profile_picture_pick, guard_displays, guard_sharing, guard_override, vault_move_start, move_land, persona_generate, persona_defaults, transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, cycle_curve, cycle_now, cycle_marks, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, icon_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
-            cards_list, card_generate, attach_view, profiles_refresh, sync_face_refresh, sync_status, sync_enable, sync_rotate, sync_remove_card, sync_now, sync_tick, sync_disable, sync_find, sync_adopt, card_survey, card_tap, nk_firmware, nk_firmware_update, secret_preview, card_init_key_from, card_import, card_init_resume_check, key_setup_restart, card_reset, card_pin_change_pad, platform, ui_note, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, node_retire, node_import_pick, node_import, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_forget, spark_memos, spark_owner_import, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
+            cards_list, card_generate, attach_view, profiles_refresh, sync_face_refresh, sync_status, sync_enable, sync_rotate, sync_remove_card, sync_now, sync_tick, sync_disable, sync_find, sync_adopt, card_survey, card_tap, nk_firmware, nk_firmware_update, secret_preview, card_init_key_from, card_import, card_init_resume_check, key_setup_restart, card_reset, card_pin_change_pad, platform, ui_note, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, node_retire, node_import_pick, node_import, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, liquid_restore, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_forget, spark_memos, spark_owner_import, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard,
             engraver_find, engraver_jog, engraver_run, engraver_cancel, vault_shares_plates, share_rewrap
         ])
@@ -4348,7 +4406,7 @@ mod shares_tests {
         let mut ext = ext_vault("x".into(), &info, &[]); ext.address = wallet::address_at(&ext, 0).unwrap();
         let cards = ["03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2", "032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe", "038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47"];
         let d = wallet::descriptor_for(2, &cards.iter().map(|c| c.to_string()).collect::<Vec<_>>()).unwrap();
-        let card = Vault { watch: None, spark: None, muun: None, statement: None, node: None, name: "c".into(), network: "mainnet".into(), threshold: 2, keys: cards.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.to_string(), device: None }).collect(),
+        let card = Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name: "c".into(), network: "mainnet".into(), threshold: 2, keys: cards.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.to_string(), device: None }).collect(),
             descriptor: d, address: String::new(), created: 0, chain_code: Some("ab".repeat(32)), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None, entity: None, exchange: None };
         let dir = std::env::temp_dir().join(format!("a2k-shares-{}", std::process::id())); let _ = std::fs::remove_dir_all(&dir);
         unsafe { std::env::set_var("A2K_DATA_DIR", &dir); }

@@ -206,6 +206,7 @@ fn kind_words(v: &Vault) -> String {
     if let Some(e) = &v.exchange { return format!("Exchange · {}", e.provider); }
     if v.statement.is_some() { return "Closed wallet · from its statement".into(); }
     if v.spark.is_some() { return "Spark wallet · watched".into(); }
+    if v.liquid.is_some() { return "Liquid wallet · watched".into(); }
     if v.muun.is_some() { return "Muun wallet · watched".into(); }
     if v.watch.is_some() { return "Watched from an extended key".into(); }
     if v.ext.is_some() { return format!("{} of {} signers", v.threshold, v.keys.len().max(v.threshold)); }

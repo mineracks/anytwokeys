@@ -335,7 +335,7 @@ mod tests {
     fn vault(name:&str)->wallet::Vault { serde_json::from_value(serde_json::json!({"name":name,"network":"mainnet","threshold":0,"keys":[],"descriptor":name,"address":name,"created":0})).unwrap() }
     #[test] fn fingerprint_gate_ignores_prices_but_not_amount_or_time() {
         let v=vault("A"); let mut s=wallet::Store::default();s.vaults.push(v.clone());
-        let mut a=activity::Activity {spark:vec![],ccy:"AUD".into(),rows:vec![activity::Row{txid:"r".into(),time:Some(1),net:Some(10),fee:None,quote:None,ins:vec![],outs:vec![]}],now:None,note:None,transfers:Default::default()};
+        let mut a=activity::Activity {spark:vec![],liquid:vec![],ccy:"AUD".into(),rows:vec![activity::Row{txid:"r".into(),time:Some(1),net:Some(10),fee:None,quote:None,ins:vec![],outs:vec![]}],now:None,note:None,transfers:Default::default()};
         let mut i=Index::default();assert!(i.ingest(&v,&a,&s));let n=i.builds;
         a.rows[0].quote=Some(activity::Quote{price:100.,basis:"test".into()});assert!(!i.ingest(&v,&a,&s));assert_eq!(i.builds,n);
         a.rows[0].net=Some(11);assert!(i.ingest(&v,&a,&s));a.rows[0].time=Some(2);assert!(i.ingest(&v,&a,&s));

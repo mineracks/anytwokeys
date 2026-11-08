@@ -24,7 +24,9 @@ pub struct Row { pub txid: String, pub time: Option<u32>, pub net: Option<i64>, 
     /// day it left — so a gain is measured against the coins actually spent, which the chain itself records.
     #[serde(default)] pub ins: Vec<(String, u64)>, #[serde(default)] pub outs: Vec<(u32, u64)> }
 #[derive(Debug, Serialize)]
-pub struct Activity { #[serde(default, skip_serializing_if = "Vec::is_empty")] pub spark: Vec<crate::spark::Transfer>, pub ccy: String, pub rows: Vec<Row>, pub now: Option<Quote>, pub note: Option<String>,
+pub struct Activity { #[serde(default, skip_serializing_if = "Vec::is_empty")] pub spark: Vec<crate::spark::Transfer>,
+    /// a Liquid wallet's rows in their own words: kind, and each asset's movement (the sats row carries L-BTC alone)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub liquid: Vec<crate::liquid::RowDetail>, pub ccy: String, pub rows: Vec<Row>, pub now: Option<Quote>, pub note: Option<String>,
     /// txid → this person's other vaults the same transaction belongs to (transfers between vaults)
     #[serde(default)] pub transfers: HashMap<String, Vec<String>> }
 
@@ -161,7 +163,7 @@ pub fn build(v: &wallet::Vault, servers: &Servers, history: &[(String, i32)], cc
     let note = if v.network != "mainnet" { Some("Test coins have no price.".into()) } else if !fiat { None }
         else if pending > 0 { Some(format!("Fetching {pending} past price{} in the background; they fill in as they arrive, and are kept.", if pending == 1 { "" } else { "s" })) }
         else if now.is_none() { Some("Today's price could not be fetched; values are left blank rather than guessed.".into()) } else { None };
-    Ok(Activity { spark: Vec::new(), ccy: ccy.to_string(), rows, now, note, transfers: HashMap::new() })
+    Ok(Activity { spark: Vec::new(), liquid: Vec::new(), ccy: ccy.to_string(), rows, now, note, transfers: HashMap::new() })
 }
 
 /// Rows that arrive already made — a Spark wallet's transfers, which have no inputs, no outputs and no chain — given
@@ -188,7 +190,7 @@ pub fn priced(v: &wallet::Vault, mut rows: Vec<Row>, ccy: &str, prices_url: &str
         else if !fiat { None }
         else if pending > 0 { Some(format!("Fetching {pending} past price{} in the background; they fill in as they arrive, and are kept.", if pending == 1 { "" } else { "s" })) }
         else { None };
-    Ok(Activity { spark: Vec::new(), ccy: ccy.to_string(), rows, now, note, transfers: HashMap::new() })
+    Ok(Activity { spark: Vec::new(), liquid: Vec::new(), ccy: ccy.to_string(), rows, now, note, transfers: HashMap::new() })
 }
 
 /// One address's own flow: for each transaction that touched it, when, and how many sats it gained or lost there —
@@ -526,7 +528,7 @@ mod lineage_tests {
     #[ignore]
     fn rows_dump() {
         let info = crate::wallet::ext_parse(&std::env::var("EXT_DESC").unwrap()).unwrap().unwrap();
-        let v = crate::wallet::Vault { watch: None, spark: None, muun: None, statement: None, node: None, name: "real".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
+        let v = crate::wallet::Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name: "real".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
             chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(),
             files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: Some(info.descriptor), cost_method: None, entity: None, exchange: None };
         let servers = crate::chain::Servers { electrum: "ssl://electrum.mineracks.com:50002".into(), explorer: String::new() };
@@ -542,7 +544,7 @@ mod lineage_tests {
     #[ignore]
     fn lineage_live_closes_on_a_real_wallet() {
         let info = crate::wallet::ext_parse(&std::env::var("EXT_DESC").unwrap()).unwrap().unwrap();
-        let v = crate::wallet::Vault { watch: None, spark: None, muun: None, statement: None, node: None, name: "x".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
+        let v = crate::wallet::Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name: "x".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
             chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(),
             files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: Some(info.descriptor), cost_method: None, entity: None, exchange: None };
         let servers = crate::chain::Servers { electrum: "ssl://electrum.mineracks.com:50002".into(), explorer: String::new() };

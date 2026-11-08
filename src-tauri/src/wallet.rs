@@ -54,6 +54,9 @@ pub struct Vault {
     /// A **watched** Muun wallet: the two keys out of its Emergency Kit. Not a descriptor — a Muun wallet pays to
     /// four kinds of address from the same pair, so it is derived rather than written (see `muun.rs`).
     #[serde(default)] pub muun: Option<Muun>,
+    /// A **watched** Liquid wallet (Aqua's spending accounts, Green single-sig): account key plus SLIP-77 blinding
+    /// key, both derived from the words once; the outputs are unblinded here (see `liquid.rs`).
+    #[serde(default)] pub liquid: Option<crate::liquid::Liquid>,
     /// a closed custodial wallet, imported from the statement its custodian gave (statement.rs): its rows are the facts
     #[serde(default)] pub statement: Option<crate::statement::Statement>,
     /// a Lightning node the person runs, read through a read-only credential kept sealed apart (node.rs)
@@ -557,6 +560,7 @@ pub fn script_at(v: &Vault, index: u32) -> Result<ScriptBuf, String> {
     let id = identity(v);
     if let Some(s) = DERIVED.lock().map_err(|_| "derivation cache poisoned")?.as_ref().and_then(|m| m.get(&id)).and_then(|d| d.fwd.get(&index)) { return Ok(s.clone()); }
     if v.spark.is_some() { return Err("a Spark wallet has no addresses on the chain".into()); }
+    if v.liquid.is_some() { return Err("a Liquid wallet's addresses are on the sidechain, not this chain".into()); }
     let spk = match (&v.muun, &v.ext) {
         _ if v.watch.is_some() && index & SCHEME_MASK == SP_SCHEME => sp_script(v.watch.as_ref().unwrap(), index)?,
         _ if v.watch.is_some() => watch_script(v.watch.as_ref().unwrap(), index, &v.network)?,
@@ -575,6 +579,7 @@ fn ext_definite_of(v: &Vault, index: u32) -> Result<Descriptor<miniscript::Defin
 
 pub fn descriptor_at(v: &Vault, index: u32) -> Result<String, String> {
     if v.spark.is_some() { return Err("a Spark wallet holds nothing on the chain: it has no addresses here, and nothing here can spend it. Use its own app.".into()); }
+    if v.liquid.is_some() { return Err("a Liquid wallet is watched, not spent from here: its keys stayed in its own app, which is where to spend it.".into()); }
     if v.muun.is_some() { return Err("a Muun wallet is watched, not spent from here: it pays to four kinds of address from the same keys, so it has no one descriptor. Spend it in Muun.".into()); }
     // an extended-key vault is read AS WRITTEN — never rebuilt through descriptor_for, which only makes sortedmulti
     if let Some(ext) = &v.ext { return ext_definite(ext, index).map(|d| d.to_string()); }
@@ -977,7 +982,7 @@ pub fn scan(v: &Vault, servers: &Servers, gap: u32) -> Result<Scanned, String> {
 pub fn all_addresses(v: &Vault) -> Vec<(u32, String)> {
     let net = network_of(&v.network);
     let addr = |i: u32| script_at(v, i).ok().and_then(|s| Address::from_script(&s, net).ok()).map(|a| (i, a.to_string()));
-    if v.spark.is_some() { return Vec::new(); }
+    if v.spark.is_some() || v.liquid.is_some() { return Vec::new(); }
     if !rotates(v) { return addr(0).into_iter().collect(); }
     let (recv, chg) = (v.scan_max.max(v.next) + GAP, v.scan_max_change.max(v.next_change) + GAP);
     let mut out = Vec::new();
@@ -1397,7 +1402,7 @@ mod tests {
     fn vault(cc: Option<&str>) -> Vault {
         let keys = ["03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2", "032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe", "038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47"];
         let descriptor = descriptor_for(2, &keys.iter().map(|k| k.to_string()).collect::<Vec<_>>()).unwrap();
-        Vault { watch: None, spark: None, muun: None, statement: None, node: None, name: "t".into(), network: "signet".into(), threshold: 2, keys: keys.iter().enumerate().map(|(i, k)| KeyRef { name: format!("k{i}"), serial: 0, pubkey: k.to_string() , device: None }).collect(),
+        Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name: "t".into(), network: "signet".into(), threshold: 2, keys: keys.iter().enumerate().map(|(i, k)| KeyRef { name: format!("k{i}"), serial: 0, pubkey: k.to_string() , device: None }).collect(),
             descriptor, address: String::new(), created: 0, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None, entity: None, exchange: None }
     }
     #[test]
@@ -1467,7 +1472,7 @@ mod ext_tests {
     use super::*;
     fn vault_of(desc: &str) -> Vault {
         let info = ext_parse(desc).unwrap().unwrap();
-        Vault { watch: None, spark: None, muun: None, statement: None, node: None, name: "ext".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
+        Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name: "ext".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
             chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(),
             files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: Some(info.descriptor), cost_method: None, entity: None, exchange: None }
     }

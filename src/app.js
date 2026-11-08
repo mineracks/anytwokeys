@@ -86,16 +86,16 @@ function show(name) {
   $$('.nav[data-go]').forEach(n => n.classList.toggle('on', n.dataset.go === navName));
   // the vault you are in stays lit on every screen that is about it, matching the breadcrumb; not while making another, nor in app settings
   // a watched wallet has no keys here: the screens that would sign are not offered at all
-  const watched = !!(vault && (vault.muun || vault.spark || vault.watch || vault.statement || vault.node || vault.exchange));
+  const watched = !!(vault && (vault.muun || vault.spark || vault.liquid || vault.watch || vault.statement || vault.node || vault.exchange));
   // a Spark wallet has no addresses and no coins at all — not hidden screens, absent ones. Only ever HIDDEN here:
   // whether the Coins tab is shown at all is the person's own setting, and this must not undo it.
-  if (vault && (vault.spark || vault.statement || vault.node || vault.exchange)) for (const go of ['coins', 'addresses']) $$(`.nav[data-go=${go}]`).forEach(n => { n.hidden = true; });
+  if (vault && (vault.spark || vault.liquid || vault.statement || vault.node || vault.exchange)) for (const go of ['coins', 'addresses']) $$(`.nav[data-go=${go}]`).forEach(n => { n.hidden = true; });
   else { paintCoinsTab(); $$('.nav[data-go=addresses]').forEach(n => { n.hidden = false; }); }
   // only the ways IN to those screens — the sidebar and Home's own actions. A blanket [data-go] would also
   // un-hide buttons that are hidden for their own reasons elsewhere.
   for (const go of ['send', 'messages', 'keys']) $$(`.nav[data-go=${go}], #s-home [data-go=${go}]`).forEach(n => { n.hidden = watched; });
   // Receive is real for a watched wallet of one key — those addresses ARE its own — but means nothing for Muun or Spark
-  $$('.nav[data-go=receive], #s-home [data-go=receive]').forEach(n => { n.hidden = !!(vault && (vault.muun || vault.spark || vault.statement || vault.node || vault.exchange)); });
+  $$('.nav[data-go=receive], #s-home [data-go=receive]').forEach(n => { n.hidden = !!(vault && (vault.muun || vault.spark || vault.liquid || vault.statement || vault.node || vault.exchange)); });
   const inVault = vault && !APP_LEVEL.has(name);
   $$('#vault-tabs .nav').forEach(n => n.classList.toggle('on', !!inVault && n.dataset.vault === vault.name));
   $('#title').textContent = { overview: 'All vaults', home: vault ? vault.name : 'Vault', activity: 'Activity', send: 'Send', receive: 'Receive', coins: 'Coins', addresses: 'Addresses', vault: 'Vault settings', backup: 'Backup', keys: 'Keys', settings: 'App settings', places: 'Locations', entities: 'Entities', allkeys: 'Keys', setup: 'New vault · enrol keys', restore: 'Restore a vault', sign: 'Sign', messages: 'Messages' }[name] || '';
@@ -219,7 +219,7 @@ function renderTabs() {
   const tabs = $('#vault-tabs'); tabs.innerHTML = '';
   for (const v of store.vaults) {
     const d = document.createElement('div'); d.className = 'nav' + (vault && v.name === vault.name ? ' on' : ''); d.style.fontWeight = '600'; d.dataset.vault = v.name;
-    d.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${v.network === 'mainnet' ? 'var(--gold)' : 'var(--signal)'};display:inline-block;flex:0 0 8px"></span><span style="flex-grow:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v.name)}">${esc(v.name)}</span><span class="muted" style="font-size:11px;font-weight:400">${v.node ? 'Node' : v.statement ? 'Statement' : v.exchange ? 'Exchange' : v.spark ? (v.spark.authenticated ? 'key reader' : 'Watched \u00b7 Spark') : v.muun || v.watch ? 'Watched' : v.keys.length === 1 ? '1 key' : v.threshold + ' of ' + v.keys.length}</span>`;
+    d.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${v.network === 'mainnet' ? 'var(--gold)' : 'var(--signal)'};display:inline-block;flex:0 0 8px"></span><span style="flex-grow:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v.name)}">${esc(v.name)}</span><span class="muted" style="font-size:11px;font-weight:400">${v.node ? 'Node' : v.statement ? 'Statement' : v.exchange ? 'Exchange' : v.spark ? (v.spark.authenticated ? 'key reader' : 'Watched \u00b7 Spark') : v.liquid ? 'Liquid' : v.muun || v.watch ? 'Watched' : v.keys.length === 1 ? '1 key' : v.threshold + ' of ' + v.keys.length}</span>`;
     d.onclick = () => { if (d.dataset.dragged) return; vault = v; rememberVault(v); paintNet(); show('home'); };
     // drag to reorder — by pointer, not HTML5 drag-and-drop: the window's file-drop handling (attachments) takes
     // every drag session on macOS, so a dragover never reaches the page. The drop goes before or after the row
@@ -582,7 +582,12 @@ async function renderTx() {
   renderFiles(); renderCtx();
   $('#tx-chain').open = (() => { try { return localStorage.getItem('a2k-chain-open') === '1'; } catch { return false; } })();
   const offchain = !!(vault.spark || vault.statement || vault.exchange || (vault.node && !(nodeRow(txid) || {}).txid));
-  $('#tx-explorer').hidden = offchain; $('#tx-pdf').hidden = !!(vault.spark || vault.statement || vault.node || vault.exchange); $('#tx-chain').hidden = offchain;
+  $('#tx-explorer').hidden = offchain; $('#tx-pdf').hidden = !!(vault.spark || vault.liquid || vault.statement || vault.node || vault.exchange); $('#tx-chain').hidden = offchain || !!vault.liquid;
+  if (vault.liquid) {
+    const t = txFacts[vault.name]?.liquid?.[txid], st = $('#tx-status'); st.className = 'state ' + (t?.height > 0 ? 'ok' : 'here'); st.querySelector('span').textContent = liquidRowStatus(t);
+    $('#tx-dl').innerHTML = [['Transfer', transferText(txFacts[vault.name], txid) || 'Outside the watched vaults'], ['Source', 'The Liquid sidechain, read from our own node and unblinded here'], ['Transaction', txid], ['Block', t?.height > 0 ? sats(t.height) : 'unconfirmed'], ['Kind', t ? LIQUID_KIND[t.kind] || t.kind : 'unknown'], ...(t ? t.moves.map(m => ['Moved', `${m.amount} ${m.ticker}`]) : []), t?.fee ? ['Fee', `${sats(t.fee)} sats of L-BTC${t.paid_fee ? ', paid by this wallet' : ', paid by the other party'}`] : null].filter(Boolean).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+    $('#tx-proof').textContent = ''; $('#tx-chain-body').innerHTML = ''; return;
+  }
   if (vault.node) {
     const e = nodeRow(txid), st = $('#tx-status'); st.className = 'state ok'; st.querySelector('span').textContent = e ? `${nodeLayer(e)} \u00b7 ${e.kind} \u00b7 from the node` : 'from the node';
     $('#tx-dl').innerHTML = [['Transfer', transferText(facts, txid) || 'Outside the watched vaults'], ['Source', `${esc(vault.node.alias)}\u2019s bookkeeper \u2014 the node\u2019s own ledger`],
@@ -1154,12 +1159,12 @@ async function refreshTransferLinks() {
   vaultLedger.memo = {};
   paintTransferProposals();
 }
-const factOwner = v => v ? JSON.stringify([v.network,v.spark?.identity,v.ext || v.descriptor,v.watch?.key,v.muun?.user,v.muun?.cosign]) : '';
+const factOwner = v => v ? JSON.stringify([v.network,v.spark?.identity,v.liquid?.xpub,v.ext || v.descriptor,v.watch?.key,v.muun?.user,v.muun?.cosign]) : '';
 function keepActivity(name, a) {
   vaultLedger.memo = {};
   return txFacts[name] = { owner:factOwner(store.vaults.find(v=>v.name===name)), rows: Object.fromEntries(a.rows.map(r => [r.txid, r])), now: a.now, ccy: a.ccy,
     transfers: a.transfers || {}, chainTransfers: (a.spark || []).length ? {} : (a.transfers || {}), links: transferView.links?.[name] || {},
-    spark: Object.fromEntries((a.spark || []).map(t => [t.id, t])), pending: pricesPending(a.note) };
+    spark: Object.fromEntries((a.spark || []).map(t => [t.id, t])), liquid: Object.fromEntries((a.liquid || []).map(t => [t.id, t])), pending: pricesPending(a.note) };
 }
 function transferText(f, id) {
   const l = f.links?.[id];
@@ -1231,8 +1236,8 @@ async function sync() {
 function paintVaultCard() {
   if (!vault) return;
   // a watched wallet has no keys HERE, so the card must not read as though it had ("2 of 0 keys sign")
-  $('#vault-kind').textContent = vault.node ? `Node \u00b7 ${vault.node.kind === 'cln' ? 'Core Lightning' : 'LND'}` : vault.exchange ? `Exchange \u00b7 ${vault.exchange.provider}` : vault.statement ? 'Closed wallet \u00b7 from its statement' : vault.spark ? (vault.spark.authenticated ? 'Watched \u00b7 key reader' : 'Watched \u00b7 Spark') : vault.muun ? 'Watched' : vault.watch ? 'Watched \u00b7 one key' : vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
-  $('#vault-keys').textContent = vault.node ? `${esc(vault.node.alias)} \u00b7 on-chain ${sats(vault.node.onchain)} \u00b7 in channels ${sats(vault.node.channels)}${vault.node.pending ? ' \u00b7 pending ' + sats(vault.node.pending) : ''} \u00b7 read only` : vault.exchange ? `Read from ${vault.exchange.provider}\u2019s statements \u00b7 ${sats(vault.exchange.rows.length)} rows \u00b7 ${moneyExact(vault.exchange.fiat_now / 100, vault.exchange.ccy)} in cash there \u00b7 nothing here can be spent` : vault.statement ? `Read from the statement ${vault.statement.source} gave \u00b7 ${sats(vault.statement.rows.length)} rows \u00b7 nothing here can be spent` : vault.watch ? `From one exported key \u00b7 ${vault.watch.kinds.length > 1 ? 'every kind of address watched' : vault.watch.kinds[0]}` : vault.spark ? 'Told to us by Spark \u2014 these figures are not checked against the chain' : vault.muun ? 'Its keys stay in Muun; this vault only reads the chain' : vault.keys.map(k => k.name).join(' · ');
+  $('#vault-kind').textContent = vault.node ? `Node \u00b7 ${vault.node.kind === 'cln' ? 'Core Lightning' : 'LND'}` : vault.exchange ? `Exchange \u00b7 ${vault.exchange.provider}` : vault.statement ? 'Closed wallet \u00b7 from its statement' : vault.spark ? (vault.spark.authenticated ? 'Watched \u00b7 key reader' : 'Watched \u00b7 Spark') : vault.liquid ? 'Watched \u00b7 Liquid' : vault.muun ? 'Watched' : vault.watch ? 'Watched \u00b7 one key' : vault.keys.length === 1 ? 'Single key' : `${vault.threshold} of ${vault.keys.length} keys sign`;
+  $('#vault-keys').textContent = vault.node ? `${esc(vault.node.alias)} \u00b7 on-chain ${sats(vault.node.onchain)} \u00b7 in channels ${sats(vault.node.channels)}${vault.node.pending ? ' \u00b7 pending ' + sats(vault.node.pending) : ''} \u00b7 read only` : vault.exchange ? `Read from ${vault.exchange.provider}\u2019s statements \u00b7 ${sats(vault.exchange.rows.length)} rows \u00b7 ${moneyExact(vault.exchange.fiat_now / 100, vault.exchange.ccy)} in cash there \u00b7 nothing here can be spent` : vault.statement ? `Read from the statement ${vault.statement.source} gave \u00b7 ${sats(vault.statement.rows.length)} rows \u00b7 nothing here can be spent` : vault.watch ? `From one exported key \u00b7 ${vault.watch.kinds.length > 1 ? 'every kind of address watched' : vault.watch.kinds[0]}` : vault.spark ? 'Told to us by Spark \u2014 these figures are not checked against the chain' : vault.liquid ? liquidKeysLine(vault.liquid) : vault.muun ? 'Its keys stay in Muun; this vault only reads the chain' : vault.keys.map(k => k.name).join(' · ');
 }
 function paintSnap(s) {
   { const b = $('#scanbar'); if (b) b.hidden = true; }
@@ -1265,6 +1270,7 @@ function paintSnap(s) {
     }
     if (vault.exchange) { const ex = vault.exchange; $('#balance-sub').textContent = `held at ${ex.provider}, ${ex.stated ? 'as its newest statement states' : 'as the rows add up'} \u2014 with ${moneyExact(ex.fiat_now / 100, ex.ccy)} in cash beside it${ex.agrees === false ? ' \u00b7 the running balance did not chain in every file' : ''}`; $('#conn').textContent = 'Off-chain \u00b7 the exchange\u2019s own statements, nothing on the chain to check them against'; }
     if (vault.statement) { $('#balance-sub').textContent = `closed wallet \u2014 the statement leaves ${sats(vault.statement.closes_at)} sats; its history is kept for the coins that left it`; $('#conn').textContent = 'Off-chain \u00b7 figures from the custodian\u2019s statement, nothing on the chain to check them against'; }
+    if (vault.liquid) { $('#balance-sub').textContent = 'L-BTC on the Liquid sidechain, unblinded here' + liquidOthers(vault.liquid); $('#conn').textContent = vault.liquid.server && !vault.liquid.server.includes('mineracks') ? `Liquid \u00b7 read from ${vault.liquid.server.replace('ssl://', '')} because our own node did not answer` : 'Liquid \u00b7 read from our own Liquid node'; }
     if (vault.spark) { $('#balance-sub').textContent = vault.spark.authenticated ? 'Spark reports this balance · key reader' : 'Spark reports this balance · anonymous read'; $('#conn').textContent = 'Off-chain · figures supplied by Spark, not verified against the chain'; }
     $('#activity-note').hidden = true;
     txList[vault.name] = s.history.slice().reverse();
@@ -1289,6 +1295,10 @@ function actRowHtml(h) {
   if (vault?.statement) {
     const r = stmtRow(h.txid), how = r ? `${r.layer === 'chain' ? 'on-chain' : 'Lightning'} \u00b7 ${r.kind === 'income' ? (r.pos ? 'sale' : 'reward') : r.kind}` : 'from the statement';
     return `<td class="when muted">…</td><td class="mono">${esc(h.txid.slice(0, 10))}…</td><td>${lblHtml('tx:' + h.txid)}<span class="xfer" data-xfer="${esc(h.txid)}"></span></td><td class="r amt muted">…</td><td class="r">${esc(how)}</td>`;
+  }
+  if (vault?.liquid) {
+    const t = txFacts[vault.name]?.liquid?.[h.txid], memo = t ? `<small class="muted memo">${esc(t.moves.filter(m => m.asset !== LIQUID_LBTC).map(m => `${m.amount} ${m.ticker}`).join(' \u00b7 '))}</small>` : '';
+    return `<td class="when muted">…</td><td class="mono">${esc(h.txid.slice(0, 10))}…</td><td>${lblHtml('tx:' + h.txid)}${memo}<span class="xfer" data-xfer="${esc(h.txid)}"></span></td><td class="r amt muted">…</td><td class="r">${esc(liquidRowStatus(t))}</td>`;
   }
   if (vault?.spark) {
     const t = txFacts[vault.name]?.spark?.[h.txid], memo = t && t.memo ? `<small class="muted memo" title="${esc(t.memo)}">${esc(t.memo)}</small>` : '';
@@ -1350,6 +1360,7 @@ function actKind(h, f) {
   if (vault?.exchange) { const r = exRow(h.txid); return r ? (EX_WORDS[r.kind] || r.kind).replace(/^./, c => c.toUpperCase()) : 'From the statement'; }
   if (vault?.statement) { const r = stmtRow(h.txid); return r ? `${r.layer === 'chain' ? 'On-chain' : 'Lightning'} \u00b7 ${r.kind === 'income' ? (r.pos ? 'sale' : 'reward') : r.kind}` : 'From the statement'; }
   if (vault?.spark) { const t = f?.spark?.[h.txid]; return sparkTransferStatus(t); }
+  if (vault?.liquid) { const t = f?.liquid?.[h.txid]; return t ? (LIQUID_KIND[t.kind] || t.kind).replace(/^./, c => c.toUpperCase()) : 'Liquid'; }
   const r = f?.rows?.[h.txid];
   if (f?.transfers?.[h.txid]) return 'Transfers between your vaults';
   if (!r || r.net === null) return h.height > 0 ? 'Confirmed' : 'Unconfirmed';
@@ -4061,7 +4072,7 @@ const ENTITY_KINDS = [['person', 'Person'], ['company', 'Company'], ['trust', 'T
 const kindWord = (k) => (ENTITY_KINDS.find(x => x[0] === k) || ['', 'Other'])[1];
 const entGlyph = (e) => e.kind === 'company' ? 'building' : e.kind === 'trust' ? 'shield' : e.kind === 'smsf' ? 'bank' : 'entity';
 const vaultsOf = (id) => store.vaults.filter(v => v.entity === id);
-const kindOfVault = (v) => v.node ? 'Lightning node' : v.statement ? 'closed wallet' : v.exchange ? 'exchange account' : v.spark ? 'Spark wallet' : v.muun ? 'Muun wallet' : v.watch ? 'watched' : v.keys.length === 1 ? 'one key' : `${v.threshold} of ${v.keys.length}`;
+const kindOfVault = (v) => v.node ? 'Lightning node' : v.statement ? 'closed wallet' : v.exchange ? 'exchange account' : v.spark ? 'Spark wallet' : v.liquid ? 'Liquid wallet' : v.muun ? 'Muun wallet' : v.watch ? 'watched' : v.keys.length === 1 ? 'one key' : `${v.threshold} of ${v.keys.length}`;
 // the chips: every entity, the current one pressed; New entity opens the form in `slot`; `pick(id)` records it
 function entityChips(current, slot, pick) {
   const wrap = document.createElement('div'); wrap.className = 'row'; wrap.style.cssText = 'gap:8px;align-items:center;flex-wrap:wrap';
@@ -4737,7 +4748,7 @@ function restoreFresh() {
   const adv = $('#spark-words-adv'); if (adv) adv.open = false;
   restoreTab.now = 'keys';
 }
-function restoreTab(name) { if (name !== 'spark' && restoreTab.now === 'spark') { seedClear(); if (sparkSelected || sparkBusy) sparkCancel().catch(() => {}); } restoreTab.now = name; $$('.tabs div').forEach(x => x.classList.toggle('on', x.dataset.tab === name)); for (const t of ['keys', 'scan', 'paste', 'muun', 'spark', 'statement', 'exchange', 'node']) $('#tab-' + t).hidden = t !== name; $('#sheet-note').hidden = !['scan', 'paste'].includes(name);   // it is about a recovery sheet, and only two of these are
+function restoreTab(name) { if (name !== 'spark' && restoreTab.now === 'spark') { seedClear(); if (sparkSelected || sparkBusy) sparkCancel().catch(() => {}); } if (name !== 'liquid' && restoreTab.now === 'liquid') seedClear(); restoreTab.now = name; $$('.tabs div').forEach(x => x.classList.toggle('on', x.dataset.tab === name)); for (const t of ['keys', 'scan', 'paste', 'muun', 'spark', 'liquid', 'statement', 'exchange', 'node']) $('#tab-' + t).hidden = t !== name; if (name === 'liquid') { const root = $('#tab-liquid'); if (!root.querySelector('.seed-grid input')) seedBuild(12, root); else seedRoot = root; } $('#sheet-note').hidden = !['scan', 'paste'].includes(name);   // it is about a recovery sheet, and only two of these are
   // a result from another way in is not about this one: it goes when the choice changes
   if (restoreTab.last && restoreTab.last !== name) { $('#restore-card').innerHTML = ''; parsed = null; }
   restoreTab.last = name;
@@ -4839,6 +4850,38 @@ $('#spark-words-go') && ($('#spark-words-go').onclick = async () => {
     renderTabs(); show('home');
   } catch (e) { seedClear(); note.textContent = 'The words were cleared. An empty anonymous answer can also mean private. Enter them again and choose Gate this wallet with a key for authenticated discovery.'; fail(e); }
 });
+
+// ---------- a Liquid wallet, watched ----------
+// The words derive the account key and the blinding key; both are kept, the words are not. Cleared from the boxes
+// on success AND on failure — a failure is not a reason to leave them sitting on a screen.
+$('#liquid-read') && ($('#liquid-read').onclick = async () => {
+  seedRoot = $('#tab-liquid');
+  const words = seedPhrase(), note = $('#liquid-note');
+  const name = $('#liquid-name').value.trim() || 'Aqua \u00b7 Liquid';
+  const n = words.split(/\s+/).filter(Boolean).length;
+  if (![12, 15, 18, 21, 24].includes(n)) return toast(`Seed words come in 12, 15, 18, 21 or 24 (this has ${n})`);
+  note.textContent = 'Deriving the two read keys and asking our Liquid node which transactions are the wallet\u2019s\u2026';
+  $('#liquid-read').disabled = true;
+  try {
+    const request = invoke('liquid_restore', { name, words }); seedClear();
+    const v = await request;
+    seedClear();
+    store = await invoke('store_get'); vault = store.vaults.find(x => x.name === v.name) || v;
+    note.textContent = '';
+    const l = v.liquid, lb = l.balances[LIQUID_LBTC] || 0, others = Object.entries(l.balances).filter(([a]) => a !== LIQUID_LBTC).map(([a, u]) => liquidAmount(l, a, u)).join(', ');
+    toast(`Watching \u2018${v.name}\u2019 at ${l.path}: ${sats(lb)} sats of L-BTC${others ? ', ' + others : ''}, ${Object.keys(l.txs).length} transactions. The words were not kept.`, 10000);
+    renderTabs(); show('home');
+  } catch (e) { seedClear(); note.textContent = 'The words were cleared.'; fail(e); }
+  $('#liquid-read').disabled = false;
+});
+const LIQUID_LBTC = '6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d';
+// an asset's units in its own precision, with its ticker: 19074000000 of Tether → "190.74 USDt"
+function liquidAmount(l, asset, units) {
+  const info = l.assets?.[asset], p = asset === LIQUID_LBTC ? 8 : (info?.precision || 0), t = asset === LIQUID_LBTC ? 'L-BTC' : (info?.ticker || asset.slice(0, 8));
+  const neg = units < 0, n = BigInt(Math.abs(units)), d = 10n ** BigInt(p);
+  const whole = (n / d).toString(), frac = p ? (n % d).toString().padStart(p, '0').replace(/0+$/, '') : '';
+  return `${neg ? '\u2212' : ''}${whole}${frac ? '.' + frac : ''} ${t}`;
+}
 
 // ---------- a Muun wallet, watched ----------
 // Muun publishes no xpub and no export. Its kit holds both keys, encrypted with the Recovery Code, so the code is
@@ -5051,7 +5094,7 @@ function renderVaultSettings() {
   $('#vs-facts').innerHTML = [
     ['Name', esc(vault.name)],
     ['Network', vault.network === 'mainnet' ? 'mainnet \u2014 real coins' : esc(vault.network) + ' \u2014 a test network; these coins are worth nothing'],
-    ['Kind', vault.node ? `a ${vault.node.kind === 'cln' ? 'Core Lightning' : 'LND'} node, ${esc(vault.node.alias)}, read with a read-only credential` : vault.exchange ? `an exchange account at ${esc(vault.exchange.provider)}, read from its statements` : vault.statement ? `a closed custodial wallet, read from the statement ${esc(vault.statement.source)} gave` : vault.watch ? `watched \u2014 one exported key, ${vault.watch.kinds.length > 1 ? 'every kind of address' : vault.watch.kinds[0]}${vault.watch.sp ? ', and silent payments' : ''}` : vault.spark ? (vault.spark.authenticated ? 'watched \u2014 Spark, through a key reader' : 'watched \u2014 Spark') : vault.muun ? 'watched \u2014 a Muun wallet' : single ? 'a single key' : `${vault.threshold} of ${n} keys \u2014 any ${vault.threshold} of them sign`],
+    ['Kind', vault.node ? `a ${vault.node.kind === 'cln' ? 'Core Lightning' : 'LND'} node, ${esc(vault.node.alias)}, read with a read-only credential` : vault.exchange ? `an exchange account at ${esc(vault.exchange.provider)}, read from its statements` : vault.statement ? `a closed custodial wallet, read from the statement ${esc(vault.statement.source)} gave` : vault.watch ? `watched \u2014 one exported key, ${vault.watch.kinds.length > 1 ? 'every kind of address' : vault.watch.kinds[0]}${vault.watch.sp ? ', and silent payments' : ''}` : vault.spark ? (vault.spark.authenticated ? 'watched \u2014 Spark, through a key reader' : 'watched \u2014 Spark') : vault.liquid ? `watched \u2014 a Liquid wallet, account ${esc(vault.liquid.path)}, read with its account key and blinding key; neither can spend` : vault.muun ? 'watched \u2014 a Muun wallet' : single ? 'a single key' : `${vault.threshold} of ${n} keys \u2014 any ${vault.threshold} of them sign`],
     ['Keys', vault.keys.map(k => esc(k.name)).join(' \u00b7 ')],
     ['Made', vault.created ? new Date(vault.created * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' }) : '\u2014'],
   ].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
@@ -5071,7 +5114,7 @@ function renderVaultSettings() {
     ? '<b>This vault has never been drilled.</b> Until it has, "the keys can recover it" is something you believe rather than something you have seen.'
     : `Last drill: <b>${esc(drillWords(ds))}</b> \u2014 ${ds.days === 0 ? 'today' : sats(ds.days) + ' day' + (ds.days === 1 ? '' : 's') + ' ago'}. ${ds.every ? (ds.due ? 'That is past the ' + sats(ds.every) + ' days you asked for.' : 'The next is due in ' + sats(ds.every - ds.days) + ' day' + (ds.every - ds.days === 1 ? '' : 's') + '.') : 'You have asked not to be reminded.'}`;
   $('#vs-drill-when').classList.toggle('warn', ds.due);
-  $('#vs-drill').hidden = single || !!vault.ext || !!(vault.watch || vault.spark || vault.muun || vault.statement || vault.node);
+  $('#vs-drill').hidden = single || !!vault.ext || !!(vault.watch || vault.spark || vault.liquid || vault.muun || vault.statement || vault.node);
   if (fixedCards(vault).length) { $('#vs-drill-when').classList.remove('warn'); $('#vs-drill-when').textContent = ''; $('#vs-drill-what').textContent = `To check this vault can be recovered: plug in each card \u2014 the Keys screen shows it plugged in only if it holds this vault\u2019s key; on each signing device, load its seed words and confirm it shows the fingerprint on the Keys screen; then load the wallet descriptor below into a wallet and confirm the first address matches this vault\u2019s.`; }
   else if (vault.ext) { $('#vs-drill-when').classList.remove('warn'); $('#vs-drill-when').textContent = ''; $('#vs-drill-what').textContent = `This vault's keys live on other devices, each from its own seed words, so there are no cards here to drill. To check it can be recovered: on each signing device, load its seed words and confirm it shows the fingerprint on this vault's Keys screen; then load the wallet descriptor below into it and confirm the first address matches this vault's.`; }
   else $('#vs-drill-what').textContent = single
@@ -5723,6 +5766,12 @@ document.addEventListener('keydown', e => {
 // Kind 3 is an on-chain deposit claimed through a static deposit address: the service provider takes the coin and
 // sends the sats in as a transfer, so it is money arriving, with the provider's fee already off.
 const SPARK_STATUS = ['sender initiated', 'sender key tweak pending', 'sender key tweaked', 'receiver key tweaked', 'receiver refund signed', 'completed', 'expired', 'returned', 'sender initiated at the coordinator', 'receiver key tweak locked', 'receiver key tweak applied'];
+// A Liquid row's own words: what kind of transaction it was, and the status column text
+const LIQUID_KIND = { receive: 'receive', send: 'send', swap: 'swap', self: 'to itself' };
+function liquidRowStatus(t) { if (!t) return 'Liquid'; return `${t.height > 0 ? 'confirmed' : 'unconfirmed'} \u00b7 ${LIQUID_KIND[t.kind] || t.kind} \u00b7 Liquid`; }
+// the other assets held, for the balance line: ' · 190.74 USDt'
+function liquidOthers(l) { return Object.entries(l.balances || {}).filter(([a]) => a !== LIQUID_LBTC).map(([a, u]) => ' \u00b7 ' + liquidAmount(l, a, u)).join(''); }
+function liquidKeysLine(l) { const n = Object.keys(l.txs || {}).length; return `Account ${l.path} \u00b7 ${sats(n)} transaction${n === 1 ? '' : 's'}${liquidOthers(l)} \u00b7 nothing here can be spent`; }
 const SPARK_KIND = { 0: 'Lightning receive', 1: 'exit to the chain', 2: 'transfer', 3: 'deposit from the chain', 4: 'swap', 5: 'counter swap', 30: 'swap', 40: 'counter swap' };
 function sparkTransferStatus(t) {
   if (!t) return 'Spark';

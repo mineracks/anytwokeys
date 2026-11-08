@@ -478,7 +478,7 @@
     <section id="s-restore" class="screen">
       <div class="grid2 alone" id="restore-grid" style="align-items:start">
         <div style="display:flex;flex-direction:column;gap:14px">
-          <div class="tabs"><div class="on" data-tab="keys">From the keys</div><div data-tab="scan">Scan the sheet</div><div data-tab="paste">Paste the line</div><div data-tab="muun">From a Muun kit</div><div data-tab="spark">From a Spark wallet</div><div data-tab="statement">From a statement</div><div data-tab="exchange">From an exchange</div><div data-tab="node">From a Lightning node</div></div>
+          <div class="tabs"><div class="on" data-tab="keys">From the keys</div><div data-tab="scan">Scan the sheet</div><div data-tab="paste">Paste the line</div><div data-tab="muun">From a Muun kit</div><div data-tab="spark">From a Spark wallet</div><div data-tab="liquid">From a Liquid wallet</div><div data-tab="statement">From a statement</div><div data-tab="exchange">From an exchange</div><div data-tab="node">From a Lightning node</div></div>
           <div id="tab-keys"><div class="muted" id="seal-read-note">Plug in the keys, together or one after another. Each asks for its own PIN: a sealed key gives up its share only for that, so holding the keys is not enough to see what a vault holds.</div><div id="seal-read-list" style="display:flex;flex-direction:column;gap:10px;margin-top:12px"></div></div>
           <div id="tab-scan" hidden><div class="field" hidden style="margin-bottom:12px"><div class="cap">Camera</div><div class="camrow" id="scan-pick2" role="radiogroup" aria-label="Which camera"></div></div><div class="cam"><video id="cam" autoplay playsinline muted></video><div class="frame"></div></div><div class="muted" style="font-size:13px;margin-top:8px" id="cam-note">Hold the sheet's code in the frame.</div></div>
           <div id="tab-spark" class="stack" hidden>
@@ -690,6 +690,18 @@
             <div class="field"><div class="label">Call this vault</div><input id="muun-name" placeholder="Muun" maxlength="60"></div>
             <div class="row"><button class="btn primary" id="muun-read">Watch this wallet</button></div>
             <div class="muted" style="font-size:13px" id="muun-note"></div>
+          </div>
+          <div id="tab-liquid" class="stack seed-root" hidden>
+            <div class="muted" style="font-size:13px">Aqua’s spending accounts (L2 Bitcoin and Tether USDt), Blockstream Green’s single-signature Liquid wallet, and anything else built on their engine. Liquid hides every amount and asset behind a confidential commitment, so an account key alone shows <b>which</b> transactions are the wallet’s and nothing else. Reading the figures takes the wallet’s blinding key as well — a view key, derived from the same words, which the app never exports. So the words are read <b>once</b>, here, and only the two keys reading needs are kept: the account key and the blinding key. <b>Neither can spend.</b> The outputs are unblinded on this computer; our own Liquid node is asked which transactions touch the wallet and for the transactions themselves — the same questions Aqua asks its server.</div>
+            <div class="sk-warn"><b>Seed words unlock everything that wallet can spend.</b> They are used here once, to derive the two read keys, and are then cleared from the boxes — on success and on failure. They are not written down and never leave this computer.</div>
+            <div class="field"><div class="row" style="justify-content:space-between;align-items:center"><div class="label">Seed words</div><div class="pick tight seed-len"><div class="opt on" data-n="12">12</div><div class="opt" data-n="15">15</div><div class="opt" data-n="18">18</div><div class="opt" data-n="21">21</div><div class="opt" data-n="24">24</div></div></div>
+              <div class="muted" style="font-size:13px">Only the word you are on is shown; the rest stay hidden. Type the first letters and pick, or paste the whole set into the first box.</div>
+              <div class="seed-grid"></div>
+              <div class="row seed-suggest" style="gap:var(--s2);flex-wrap:wrap;min-height:34px" aria-live="polite"></div>
+              <div class="seed-count" style="font-size:14px" aria-live="polite"></div></div>
+            <div class="field"><div class="label">Call this vault</div><input id="liquid-name" placeholder="Aqua · Liquid" maxlength="60"></div>
+            <div class="row"><button class="btn primary" id="liquid-read">Watch this wallet</button></div>
+            <div class="muted" style="font-size:13px" id="liquid-note"></div>
           </div>
           <div id="tab-paste" class="stack" hidden><div class="field"><textarea id="desc-in" class="mono" placeholder="wsh(sortedmulti(2,02…,03…,03…))#checksum cc=…   ·   a wallet descriptor (wsh, sh(wsh), sh, wpkh, sh(wpkh), pkh, tr)   ·   a Coldcard multisig file   ·   a Sparrow or Specter JSON   ·   two descriptors, receive and change   ·   one key with its origin, [fingerprint/path]xpub…   ·   or the UR text of a backup, UR:CRYPTO-OUTPUT/1-2/…, each part on its own line" spellcheck="false"></textarea></div><div class="row"><button class="btn" id="desc-read">Read it</button><button class="btn" id="bsms-open" title="Open a BSMS descriptor record (BIP 129)">Open a BSMS file</button></div></div>
           <div class="muted" id="sheet-note" hidden style="font-size:13px">The code on a recovery sheet carries the descriptor alone. Nothing on it can spend.</div>
