@@ -398,14 +398,14 @@ pub fn lnd_events_from(d: &LndDump) -> Vec<Event> {
         // which transactions are channels being opened or closed
         let mut opens = std::collections::HashSet::new(); let mut closes: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         for c in arr(&d.channels, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } }
-        for c in arr(&d.closed, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } let ct = s(&c, "closing_tx_hash").to_lowercase(); if !ct.is_empty() { closes.insert(ct, n(&c, "settled_balance")); } }
+        for c in arr(&d.closed, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } let ct = s(&c, "closing_tx_hash").to_lowercase(); if !ct.is_empty() && ct.trim_matches('0') != "" { closes.insert(ct, n(&c, "settled_balance")); } }
         for c in arr(&d.pending, "pending_open_channels") { if let Some(t) = c.get("channel").and_then(|x| x.get("channel_point")).and_then(|x| x.as_str()).and_then(|p| p.split(':').next()) { opens.insert(t.to_lowercase()); } }
         let mut out = Vec::new();
         // a close whose transaction the wallet never saw (no output of it is ours) still happened: it gets a row with
         // the channel's size, so what left at that close can be shown — and the addresses looked up from the chain
         let known: std::collections::HashSet<String> = arr(&d.transactions, "transactions").iter().map(|t| s(t, "tx_hash").to_lowercase()).collect();
         for c in arr(&d.closed, "channels") {
-            let ct = s(&c, "closing_tx_hash").to_lowercase(); if ct.is_empty() || known.contains(&ct) { continue; }
+            let ct = s(&c, "closing_tx_hash").to_lowercase(); if ct.is_empty() || ct.trim_matches('0').is_empty() || known.contains(&ct) { continue; }
             let cap = n(&c, "capacity"); let settled = n(&c, "settled_balance");
             let memo = format!("channel {} ({} sats capacity) closed: {}; the wallet that reported this recognised none of the closing transaction's outputs as its own (a wallet restored from a backup does not know addresses derived after it was taken, so an output may still have been this node's and swept later — the outputs are listed under To){}", s(&c, "channel_point").split(':').next().unwrap_or("").chars().take(12).collect::<String>(), cap, s(&c, "close_type").to_lowercase().replace('_', " "), if settled > 0 { format!("; the node expected {settled} sats back") } else { String::new() });
             out.push(Event { id: ct.clone(), time: 0, net: -settled, fee: 0, layer: "channel".into(), txid: ct, hash: String::new(), kind: "close".into(), memo, to: Vec::new(), height: n(&c, "close_height").max(0) as u32, phantom: false, msat: 0 });
@@ -441,16 +441,17 @@ pub fn lnd_events_from(d: &LndDump) -> Vec<Event> {
 }
 
 /// What the node's records move through one channel, in millisatoshi, signed from this node's side: invoices settled
-/// on it (+), payments sent out over it (−, with the fee), forwards in (+) and out (−). The channel is named by its
-/// `chan_id`, which LND writes on every HTLC.
-fn lnd_channel_flow_msat(d: &LndDump, chan_id: &str) -> i64 {
+/// on it (+), payments sent out over it (−, with the fee), forwards in (+) and out (−). An HTLC names its channel by
+/// the SHORT channel id; LND 0.20 lists a closed channel with `chan_id` as the 32-byte channel id and the short one
+/// under `scid` — so every name the channel goes by is accepted.
+fn lnd_channel_flow_msat(d: &LndDump, chan_ids: &std::collections::HashSet<String>) -> i64 {
     let n = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str().and_then(|s| s.parse::<i64>().ok()).or_else(|| x.as_i64())).unwrap_or(0);
     let s = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
     let arr = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_array()).cloned().unwrap_or_default();
     let mut flow: i64 = 0;
     for i in arr(&d.invoices, "invoices") {
         if s(&i, "state") != "SETTLED" && i.get("settled").and_then(|x| x.as_bool()) != Some(true) { continue; }
-        for h in arr(&i, "htlcs") { if s(&h, "chan_id") == chan_id && s(&h, "state") == "SETTLED" { flow += n(&h, "amt_msat"); } }
+        for h in arr(&i, "htlcs") { if chan_ids.contains(&s(&h, "chan_id")) && s(&h, "state") == "SETTLED" { flow += n(&h, "amt_msat"); } }
     }
     for p in arr(&d.payments, "payments") {
         if s(&p, "status") != "SUCCEEDED" { continue; }
@@ -458,12 +459,12 @@ fn lnd_channel_flow_msat(d: &LndDump, chan_id: &str) -> i64 {
             if s(&h, "status") != "SUCCEEDED" { continue; }
             let route = h.get("route").cloned().unwrap_or_default();
             let first = route.get("hops").and_then(|x| x.as_array()).and_then(|a| a.first()).cloned().unwrap_or_default();
-            if s(&first, "chan_id") == chan_id { flow -= n(&route, "total_amt_msat"); }
+            if chan_ids.contains(&s(&first, "chan_id")) { flow -= n(&route, "total_amt_msat"); }
         }
     }
     for f in arr(&d.forwards, "forwarding_events") {
-        if s(&f, "chan_id_in") == chan_id { flow += n(&f, "amt_in_msat"); }
-        if s(&f, "chan_id_out") == chan_id { flow -= n(&f, "amt_out_msat"); }
+        if chan_ids.contains(&s(&f, "chan_id_in")) { flow += n(&f, "amt_in_msat"); }
+        if chan_ids.contains(&s(&f, "chan_id_out")) { flow -= n(&f, "amt_out_msat"); }
     }
     flow
 }
@@ -492,33 +493,47 @@ fn lnd_settlements(d: &LndDump, rows: &[Event]) -> Vec<Event> {
     let newest = rows.iter().map(|e| e.time).max().unwrap_or(0);
     let short = |cp: &str| cp.split(':').next().unwrap_or("").chars().take(12).collect::<String>();
     let mut out = Vec::new();
-    let mut row = |id: String, time: u32, height: u32, txid: String, gap_msat: i64, memo: String| {
+    let mut row = |id: String, time: u32, height: u32, txid: String, gap_msat: i64, memo: String, kind: Option<&str>| {
         if gap_msat.abs() < 1000 { return; }
-        out.push(Event { id, time, net: -gap_msat / 1000, fee: 0, layer: "channel".into(), txid, hash: String::new(), kind: if gap_msat > 0 { "peer-side" } else { "our-side" }.into(), memo, to: Vec::new(), height, phantom: false, msat: -gap_msat });
+        out.push(Event { id, time, net: -gap_msat / 1000, fee: 0, layer: "channel".into(), txid, hash: String::new(), kind: kind.unwrap_or(if gap_msat > 0 { "peer-side" } else { "our-side" }).into(), memo, to: Vec::new(), height, phantom: false, msat: -gap_msat });
     };
+    let names = |c: &serde_json::Value| -> std::collections::HashSet<String> { ["chan_id", "scid", "scid_str"].iter().map(|k| s(c, k)).filter(|x| !x.is_empty() && x != "0").collect() };
     for c in arr(&d.channels, "channels") {
-        let chan_id = s(&c, "chan_id"); let cp = s(&c, "channel_point");
-        if chan_id.is_empty() || chan_id == "0" || cp.is_empty() { continue; }
-        let (put_in, flow) = (ours_in(&cp), lnd_channel_flow_msat(d, &chan_id));
+        let ids = names(&c); let cp = s(&c, "channel_point");
+        if ids.is_empty() || cp.is_empty() { continue; }
+        let (put_in, flow) = (ours_in(&cp), lnd_channel_flow_msat(d, &ids));
         let local = { let m = n(&c, "local_balance_msat"); if m > 0 { m } else { n(&c, "local_balance") * 1000 } };
         let gap = put_in + flow - local;
         let memo = if gap > 0 { format!("channel {} open: the node reports {} sats on its side, {} sats fewer than its records explain (it put in {} sats and its records move {} sats through the channel). The rest is on the peer's side without a payment this node has a record of; the records do not say when it moved, so it is booked here, at the node's newest record.", short(&cp), local / 1000, gap / 1000, put_in / 1000, flow / 1000) }
             else { format!("channel {} open: the node reports {} sats on its side, {} sats more than its records explain (it put in {} sats and its records move {} sats through the channel). Booked here, at the node's newest record.", short(&cp), local / 1000, -gap / 1000, put_in / 1000, flow / 1000) };
-        row(format!("{}:side", cp.split(':').next().unwrap_or("").to_lowercase()), newest, 0, String::new(), gap, memo);
+        row(format!("{}:side", cp.split(':').next().unwrap_or("").to_lowercase()), newest, 0, String::new(), gap, memo, None);
     }
     for c in arr(&d.closed, "channels") {
-        let chan_id = s(&c, "chan_id"); let cp = s(&c, "channel_point"); let ct = s(&c, "closing_tx_hash").to_lowercase();
-        if chan_id.is_empty() || chan_id == "0" || cp.is_empty() || ct.is_empty() { continue; }
-        let (put_in, flow) = (ours_in(&cp), lnd_channel_flow_msat(d, &chan_id));
+        let ids = names(&c); let cp = s(&c, "channel_point"); let mut ct = s(&c, "closing_tx_hash").to_lowercase();
+        if ids.is_empty() || cp.is_empty() || ct.is_empty() { continue; }
+        // an abandoned channel has no closing transaction (LND writes an all-zero hash): the row hangs off the funding
+        // transaction instead, and the chain is not asked for a transaction that does not exist
+        let abandoned = ct.trim_matches('0').is_empty(); if abandoned { ct = format!("{}:abandoned", cp.split(':').next().unwrap_or("").to_lowercase()); }
+        let (put_in, flow) = (ours_in(&cp), lnd_channel_flow_msat(d, &ids));
         // what came back: the node's settled figure, or the closing transaction's outputs to its own addresses when it saw them
         let from_outputs: i64 = txs.get(&ct).map(|t| t.get("output_details").and_then(|x| x.as_array()).map(|a| a.iter().filter(|o| o.get("is_our_address").and_then(|x| x.as_bool()) == Some(true)).map(|o| n(o, "amount")).sum::<i64>()).unwrap_or(0)).unwrap_or(0);
         let back = n(&c, "settled_balance").max(from_outputs) * 1000;
         let gap = put_in + flow - back;
         let seen = txs.contains_key(&ct);
+        // nothing came back at all from a side the records say held money: not drift to the peer, but money this
+        // node's wallet never got — a close that paid an address it does not hold, or one a restored wallet cannot
+        // recognise. Its own kind, so the person can say what it was (stolen coins are a capital loss)
+        if back == 0 && gap >= 1000 {
+            let memo = if abandoned { format!("channel {} abandoned: the node dropped this channel without closing it, {} sats of this node's side in it by its records (it put in {} sats and its records move {} sats through it). Where the funding output went is not in the node's records — say below what became of it.", short(&cp), gap / 1000, put_in / 1000, flow / 1000) }
+                else { format!("channel {} closed ({}): by this node's records its side held {} sats at the close (it put in {} sats and its records move {} sats through the channel), and its wallet got none of it back — it recognised no output of the closing transaction as its own. Either the close paid this node's side to an address it does not hold, or a wallet restored from a backup does not know the address and the money was swept later (the outputs are under To). Say below what it was; stolen coins are a capital loss.", short(&cp), s(&c, "close_type").to_lowercase().replace('_', " "), gap / 1000, put_in / 1000, flow / 1000) };
+            let time = txs.get(&ct).map(|t| n(t, "time_stamp") as u32).unwrap_or(0);
+            row(format!("{ct}:side"), time, n(&c, "close_height").max(0) as u32, if abandoned { String::new() } else { ct.clone() }, gap, memo, Some("unreturned"));
+            continue;
+        }
         let memo = if gap > 0 { format!("channel {} closed ({}): {} sats of this node's side had gone to the peer's over the channel's life without a payment this node has a record of — it put in {} sats, its records move {} sats through the channel, {} sats came back{}. Booked here, at the close, so the balance shows this node's side falling where it did rather than one unaccounted cliff at the end.", short(&cp), s(&c, "close_type").to_lowercase().replace('_', " "), gap / 1000, put_in / 1000, flow / 1000, back / 1000, if seen { "" } else { " as far as this node's wallet knows (it recognised none of the closing transaction's outputs as its own; a wallet restored from a backup does not know addresses derived after it was taken)" }) }
-            else { format!("channel {} closed ({}): {} sats more came back to this node than its records explain — it put in {} sats, its records move {} sats through the channel, {} sats came back. Booked here, at the close.", short(&cp), s(&c, "close_type").to_lowercase().replace('_', " "), -gap / 1000, put_in / 1000, flow / 1000, back / 1000) };
+            else { format!("channel {} closed ({}): {} sats more came back to this node than its records explain — it put in {} sats, its records move {} sats through the channel, {} sats came back. Income this node earned before its records begin (a node recovered from its channel backup keeps its channels, not its invoices). Booked here, at the close.", short(&cp), s(&c, "close_type").to_lowercase().replace('_', " "), -gap / 1000, put_in / 1000, flow / 1000, back / 1000) };
         let time = txs.get(&ct).map(|t| n(t, "time_stamp") as u32).unwrap_or(0);
-        row(format!("{ct}:side"), time, n(&c, "close_height").max(0) as u32, ct.clone(), gap, memo);
+        row(format!("{ct}:side"), time, n(&c, "close_height").max(0) as u32, if abandoned { String::new() } else { ct.clone() }, gap, memo, None);
     }
     out
 }
@@ -534,7 +549,7 @@ impl Lnd {
         let arr = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_array()).cloned().unwrap_or_default();
         let mut opens = std::collections::HashSet::new(); let mut closes: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         for c in arr(&self.get("/v1/channels")?, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } }
-        for c in arr(&self.get("/v1/channels/closed")?, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } let ct = s(&c, "closing_tx_hash").to_lowercase(); if !ct.is_empty() { closes.insert(ct, n(&c, "settled_balance")); } }
+        for c in arr(&self.get("/v1/channels/closed")?, "channels") { if let Some(t) = s(&c, "channel_point").split(':').next() { opens.insert(t.to_lowercase()); } let ct = s(&c, "closing_tx_hash").to_lowercase(); if !ct.is_empty() && ct.trim_matches('0') != "" { closes.insert(ct, n(&c, "settled_balance")); } }
         let outs = |t: &serde_json::Value| if n(t, "amount") < 0 { lnd_outs(t) } else { Vec::new() };
         let mut out = Vec::new();
         let from_height = m("height").saturating_sub(6);
@@ -645,6 +660,49 @@ pub fn reconcile(mut events: Vec<Event>, held: i64, at: u32, why: &str) -> Vec<E
 /// keyed by the lncli commands: listchaintxns, listinvoices, listpayments, fwdinghistory, listchannels,
 /// closedchannels, pendingchannels, getinfo — and walletbalance / channelbalance when the balances are wanted (without
 /// them, on-chain is the sum of listchaintxns, valid only for a complete history, and channels the sum of listchannels).
+/// A close booked as "unreturned" whose output a transaction in THIS ledger later spent did come home: the wallet that
+/// made that transaction held the output (a copy restored from a backup did not know the address; the node read live
+/// before it was wiped did, and its rows are kept). The chain is asked which transactions spent each such closing
+/// transaction's outputs; the value spent by a transaction this ledger holds comes off the unreturned row, and a row
+/// left under 1,000 sats (the close fee) is dropped. Without this the money left twice: once at the close, once in
+/// the sweep. Failures leave the rows as they were.
+pub fn lnd_returned(events: &mut Vec<Event>, servers: &crate::chain::Servers, network: &str) {
+    use std::str::FromStr;
+    use bitcoin::Txid;
+    let want: Vec<usize> = events.iter().enumerate().filter(|(_, e)| e.kind == "unreturned" && !e.txid.is_empty()).map(|(i, _)| i).collect();
+    if want.is_empty() { return; }
+    let ids: Vec<Txid> = want.iter().filter_map(|&i| Txid::from_str(&events[i].txid).ok()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    let Ok(txs) = crate::chain::transactions_kept(servers, network, &ids, &|_| true) else { return };
+    let by_id: std::collections::HashMap<Txid, &bitcoin::Transaction> = txs.iter().map(|t| (t.compute_txid(), t)).collect();
+    // every output of every such closing transaction: whose row, which outpoint, how much
+    let mut outs: Vec<(usize, bitcoin::OutPoint, u64)> = Vec::new();
+    for &i in &want { if let Some(t) = Txid::from_str(&events[i].txid).ok().and_then(|id| by_id.get(&id)) { for (vout, o) in t.output.iter().enumerate() { outs.push((i, bitcoin::OutPoint { txid: t.compute_txid(), vout: vout as u32 }, o.value.to_sat())); } } }
+    let spks: Vec<bitcoin::ScriptBuf> = outs.iter().filter_map(|(_, op, _)| by_id.get(&op.txid).and_then(|t| t.output.get(op.vout as usize)).map(|o| o.script_pubkey.clone())).collect();
+    if spks.len() != outs.len() { return; }
+    let Ok(hists) = crate::chain::histories(servers, &spks) else { return };
+    let held: std::collections::HashSet<String> = events.iter().filter(|e| e.kind != "unreturned" && !e.txid.is_empty()).map(|e| e.txid.to_lowercase()).collect();
+    // candidate spenders: transactions in those histories that this ledger holds (others are not ours to count)
+    let cand: Vec<Txid> = hists.iter().flatten().filter(|h| held.contains(&h.txid.to_lowercase())).filter_map(|h| Txid::from_str(&h.txid).ok()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    if cand.is_empty() { return; }
+    let Ok(spenders) = crate::chain::transactions_kept(servers, network, &cand, &|_| true) else { return };
+    let mut back: std::collections::HashMap<usize, (u64, Vec<String>)> = std::collections::HashMap::new();
+    for (i, op, value) in &outs {
+        if let Some(sp) = spenders.iter().find(|t| t.input.iter().any(|inp| inp.previous_output == *op)) {
+            let e = back.entry(*i).or_default(); e.0 += value; let id = sp.compute_txid().to_string(); if !e.1.contains(&id) { e.1.push(id); }
+        }
+    }
+    let mut drop = Vec::new();
+    for (i, (sats, by)) in back {
+        let e = &mut events[i];
+        let left = (-e.net) - sats as i64;
+        let by_words = by.iter().map(|t| t[..12.min(t.len())].to_string()).collect::<Vec<_>>().join(", ");
+        if left < 1000 { drop.push(i); continue; }
+        e.net = -left; e.msat = -left * 1000;
+        e.memo = format!("{} Of it, {} sats came back through {} — transaction(s) this ledger holds — and are counted there; {} sats did not.", e.memo, sats, by_words, left);
+    }
+    drop.sort_unstable(); for i in drop.into_iter().rev() { events.remove(i); }
+}
+
 /// For Core Lightning, `listfunds` under "listfunds" gives the balances. Returns (kind, identity pubkey if the file
 /// names one, events, what the node holds if the file can say).
 /// What a Core Lightning file gives beyond its ledger: `listfunds` and `listclosedchannels` as the node answered them,
@@ -907,6 +965,7 @@ mod tests {
         for e in &ev { let k = kinds.entry(format!("{}/{}", e.layer, e.kind)).or_default(); k.0 += 1; k.1 += e.net; }
         println!("{kind} {pk} rows {} first {} last {}", ev.len(), ev.first().map(|e| e.time).unwrap_or(0), ev.last().map(|e| e.time).unwrap_or(0));
         for (k, (n, net)) in kinds { println!("  {k:22} {n:6} rows  net {net:>12} sats"); }
+        for e in ev.iter().filter(|e| e.id.ends_with(":side")) { println!("  side {:>12} {:10} {}", e.net, e.kind, e.memo.chars().take(230).collect::<String>()); }
     }
 
     #[test]
