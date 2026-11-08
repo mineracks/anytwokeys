@@ -39,13 +39,21 @@ pub fn login(public: &bitcoin::secp256k1::PublicKey, mut sign: impl FnMut(&[u8; 
     let public = hex::encode(public.serialize());
     let got = gql(None, "mutation GetChallenge($public_key: PublicKey!) { get_challenge(input: { public_key: $public_key }) { protected_challenge } }", json!({ "public_key": public }))?;
     let protected = got.pointer("/get_challenge/protected_challenge").and_then(|v| v.as_str()).ok_or("the Lightning service provider sent no challenge")?.to_string();
-    let bytes = B64.decode(&protected).map_err(|_| "the Lightning service provider sent an unreadable challenge")?;
+    let bytes = b64_any(&protected).ok_or("the Lightning service provider sent an unreadable challenge")?;
     let digest: [u8; 32] = Sha256::digest(&bytes).into();
     let signature = B64.encode(sign(&digest)?);
     let got = gql(None, "mutation VerifyChallenge($protected_challenge: String!, $signature: String!, $identity_public_key: PublicKey!) { verify_challenge(input: { protected_challenge: $protected_challenge, signature: $signature, identity_public_key: $identity_public_key }) { session_token valid_until } }",
         json!({ "protected_challenge": protected, "signature": signature, "identity_public_key": public }))?;
     let token = got.pointer("/verify_challenge/session_token").and_then(|v| v.as_str()).filter(|t| !t.is_empty()).ok_or("the Lightning service provider opened no session")?;
     Ok(Zeroizing::new(token.to_string()))
+}
+
+/// The provider writes its challenge in URL-safe base64 without padding (the SDK decodes it with Node's Buffer, which
+/// takes either alphabet and no padding); accept both alphabets, padded or not.
+fn b64_any(s: &str) -> Option<Vec<u8>> {
+    let mut t: String = s.trim().chars().filter(|c| *c != '=').map(|c| match c { '-' => '+', '_' => '/', c => c }).collect();
+    while t.len() % 4 != 0 { t.push('='); }
+    B64.decode(t).ok()
 }
 
 const TRANSFERS: &str = "query Transfers($ids: [UUID!]!) { transfers(transfer_spark_ids: $ids) { spark_id user_request { __typename ... on LightningReceiveRequest { invoice { encoded_invoice memo } } ... on LightningSendRequest { encoded_invoice } } } }";
@@ -125,6 +133,24 @@ mod tests {
     fn an_invoice_with_only_a_description_hash_has_no_words() {
         let inv = "lnbc20m1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqhp58yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqs9qrsgq7ea976txfraylvgzuxs8kgcw23ezlrszfnh8r6qtfpg6ldk52q6f46gpk4vznjk5q0zh2m5kudg9tctdxgl2p2u5qpenqff8d3q5n2nkcgpm4ckjg";
         assert_eq!(bolt11_description(inv), None);
+    }
+    #[test]
+    fn the_providers_challenge_is_url_safe_base64_without_padding() {
+        assert_eq!(b64_any("CAFSTwgBUIqdv9cGogEg4-3y7ImYiLV2LPI1_NMG").map(|v| v[..4].to_vec()), Some(vec![0x08, 0x01, 0x52, 0x4f]));
+        assert_eq!(b64_any("aGVsbG8"), Some(b"hello".to_vec()));
+        assert_eq!(b64_any("aGVsbG8="), Some(b"hello".to_vec()));
+        assert_eq!(b64_any("+/8"), b64_any("-_8"));
+        assert_eq!(b64_any("not base64!"), None);
+    }
+    /// Live: a session for a throwaway key the provider has never seen. Proves the decode, the digest, the signature
+    /// encoding and the verify call; the key is random and dropped.
+    #[test] #[ignore]
+    fn a_throwaway_key_gets_a_session_from_the_provider() {
+        let key = spark_auth::Identity::random();
+        let token = login(&key.public(), |d| key.sign(d)).expect("a session");
+        assert!(token.len() > 20);
+        let got = memos(&token, &["00000000-0000-0000-0000-000000000000".to_string()]).expect("an empty answer");
+        assert!(got.is_empty());
     }
     #[test]
     fn rubbish_is_not_an_invoice() {

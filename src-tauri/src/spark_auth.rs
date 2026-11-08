@@ -39,6 +39,7 @@ impl Drop for Identity { fn drop(&mut self) { self.0.non_secure_erase(); } }
 impl Identity {
     pub fn public(&self) -> PublicKey { self.0.public_key(&Secp256k1::new()) }
     pub(crate) fn secret_bytes(&self) -> Zeroizing<[u8; 32]> { Zeroizing::new(self.0.secret_bytes()) }
+    #[cfg(test)] pub(crate) fn random() -> Identity { Identity(SecretKey::new(&mut bitcoin::secp256k1::rand::thread_rng())) }
     pub(crate) fn sign(&self, digest: &[u8;32]) -> R<Vec<u8>> { Ok(Secp256k1::new().sign_ecdsa(&Message::from_digest(*digest), &self.0).serialize_der().to_vec()) }
 }
 struct Root(Xpriv);
