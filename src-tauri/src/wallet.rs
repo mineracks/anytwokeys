@@ -423,6 +423,10 @@ pub struct Spark {
     /// what the Lightning service provider held about a transfer — the invoice's description — by transfer id,
     /// read with the owner's words and kept here so the words are not needed again for these rows
     #[serde(default)] pub memos: std::collections::BTreeMap<String, String>,
+    /// the serial of a card whose signing slot holds the wallet's OWN key (written from its words): it opens both
+    /// Spark and the Lightning service provider, so descriptions arrive with every sync; it can also sign for the
+    /// wallet, which the person accepted when writing it
+    #[serde(default)] pub owner_card: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

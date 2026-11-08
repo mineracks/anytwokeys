@@ -34,25 +34,14 @@ fn gql(token: Option<&str>, query: &str, variables: Value) -> R<Value> {
     body.get("data").cloned().ok_or_else(|| format!("the Lightning service provider answered HTTP {status} without data"))
 }
 
-/// The words must make the identity the vault records, on one of the schemes the app knows; nothing else is tried.
-fn owner(words: &str, sp: &wallet::Spark) -> R<spark_auth::Identity> {
-    for scheme in ["direct", "blitz"] {
-        for account in 0..8u32 {
-            if let Ok(k) = spark_auth::derive_identity(words, account, scheme) {
-                if hex::encode(k.public().serialize()).eq_ignore_ascii_case(&sp.identity) { return Ok(k); }
-            }
-        }
-    }
-    Err("these words do not make this wallet's identity, so nothing was signed".into())
-}
-
-fn session(key: &spark_auth::Identity) -> R<Zeroizing<String>> {
-    let public = hex::encode(key.public().serialize());
+/// A session with the provider for whoever can sign for `public`: the owner key from words, or a card holding it.
+pub fn login(public: &bitcoin::secp256k1::PublicKey, mut sign: impl FnMut(&[u8; 32]) -> R<Vec<u8>>) -> R<Zeroizing<String>> {
+    let public = hex::encode(public.serialize());
     let got = gql(None, "mutation GetChallenge($public_key: PublicKey!) { get_challenge(input: { public_key: $public_key }) { protected_challenge } }", json!({ "public_key": public }))?;
     let protected = got.pointer("/get_challenge/protected_challenge").and_then(|v| v.as_str()).ok_or("the Lightning service provider sent no challenge")?.to_string();
     let bytes = B64.decode(&protected).map_err(|_| "the Lightning service provider sent an unreadable challenge")?;
     let digest: [u8; 32] = Sha256::digest(&bytes).into();
-    let signature = B64.encode(key.sign(&digest)?);
+    let signature = B64.encode(sign(&digest)?);
     let got = gql(None, "mutation VerifyChallenge($protected_challenge: String!, $signature: String!, $identity_public_key: PublicKey!) { verify_challenge(input: { protected_challenge: $protected_challenge, signature: $signature, identity_public_key: $identity_public_key }) { session_token valid_until } }",
         json!({ "protected_challenge": protected, "signature": signature, "identity_public_key": public }))?;
     let token = got.pointer("/verify_challenge/session_token").and_then(|v| v.as_str()).filter(|t| !t.is_empty()).ok_or("the Lightning service provider opened no session")?;
@@ -62,7 +51,7 @@ fn session(key: &spark_auth::Identity) -> R<Zeroizing<String>> {
 const TRANSFERS: &str = "query Transfers($ids: [UUID!]!) { transfers(transfer_spark_ids: $ids) { spark_id user_request { __typename ... on LightningReceiveRequest { invoice { encoded_invoice memo } } ... on LightningSendRequest { encoded_invoice } } } }";
 
 /// What the provider holds for each transfer id: the invoice's memo, or the description inside the invoice itself.
-fn memos_for(token: &str, ids: &[String]) -> R<Vec<Memo>> {
+pub fn memos(token: &str, ids: &[String]) -> R<Vec<Memo>> {
     let mut out = Vec::new();
     for chunk in ids.chunks(50) {
         let got = gql(Some(token), TRANSFERS, json!({ "ids": chunk }))?;
@@ -85,11 +74,11 @@ fn memos_for(token: &str, ids: &[String]) -> R<Vec<Memo>> {
 }
 
 pub fn read(words: Zeroizing<String>, sp: &wallet::Spark, ids: &[String]) -> R<Vec<Memo>> {
-    let key = owner(&words, sp)?;
+    let key = spark_auth::owner_from_words(&words, &sp.identity)?;
     drop(words);
-    let token = session(&key)?;
+    let token = login(&key.public(), |d| key.sign(d))?;
     drop(key);
-    memos_for(&token, ids)
+    memos(&token, ids)
 }
 
 /// The `d` field of a BOLT 11 invoice, which is where a payer's or a wallet's words about the payment are written.

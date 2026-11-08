@@ -38,6 +38,7 @@ pub struct Identity(SecretKey);
 impl Drop for Identity { fn drop(&mut self) { self.0.non_secure_erase(); } }
 impl Identity {
     pub fn public(&self) -> PublicKey { self.0.public_key(&Secp256k1::new()) }
+    pub(crate) fn secret_bytes(&self) -> Zeroizing<[u8; 32]> { Zeroizing::new(self.0.secret_bytes()) }
     pub(crate) fn sign(&self, digest: &[u8;32]) -> R<Vec<u8>> { Ok(Secp256k1::new().sign_ecdsa(&Message::from_digest(*digest), &self.0).serialize_der().to_vec()) }
 }
 struct Root(Xpriv);
@@ -61,6 +62,17 @@ fn derive_path(words: &str, account: u32) -> R<Identity> {
 /// Blitz recovery (3126b04ff7522558438ecaa5080d978cef04a8f9) first converts
 /// 16 bytes of a derived key to a NEW mnemonic, then opens Spark account 1 of it.
 /// It is not evidence that Wallet of Satoshi uses Blitz's namespaces.
+/// The words must make the identity a vault records, on one of the schemes the app knows; nothing else is tried.
+pub fn owner_from_words(words: &str, identity: &str) -> R<Identity> {
+    for scheme in ["direct", "blitz"] {
+        for account in 0..8u32 {
+            if let Ok(k) = derive_identity(words, account, scheme) {
+                if hex::encode(k.public().serialize()).eq_ignore_ascii_case(identity) { return Ok(k); }
+            }
+        }
+    }
+    Err("these words do not make this wallet's identity, so nothing was signed or written".into())
+}
 pub fn derive_identity(words: &str, account: u32, scheme: &str) -> R<Identity> {
     match scheme {
         "direct" => derive_path(words, account),
@@ -77,7 +89,9 @@ pub fn derive_identity(words: &str, account: u32, scheme: &str) -> R<Identity> {
 }
 
 #[derive(Clone)]
-pub struct Session { pub operator: String, token: Zeroizing<String>, until: Instant, pub expires: i64, epoch: u64 }
+pub struct Session { pub operator: String, token: Zeroizing<String>, until: Instant, pub expires: i64, epoch: u64,
+    /// a session with the Lightning service provider as well, when the wallet's own key signed in there (an owner card)
+    pub(crate) lightning: Option<Zeroizing<String>> }
 impl Session { pub fn live(&self) -> bool { Instant::now() < self.until && self.epoch == EPOCH.load(Ordering::SeqCst) } pub(crate) fn token(&self) -> &str { &self.token } }
 fn challenge_digest(p: &Protected, public: &[u8]) -> R<[u8;32]> {
     let c = p.challenge.as_ref().ok_or("Spark omitted its challenge")?;
@@ -106,7 +120,7 @@ fn authenticate(base: &str, public: &PublicKey, mut sign: impl FnMut(&[u8;32]) -
     let until = started.checked_add(Duration::from_secs((lifetime - 5) as u64)).ok_or("invalid session expiry")?;
     if token.is_empty() || token.len() > 16384 || !token.bytes().all(|b| b.is_ascii_graphic()) || until <= Instant::now() { return Err("Spark returned an unusable session".into()); }
     if epoch != EPOCH.load(Ordering::SeqCst) { return Err("the app locked while signing in to Spark".into()); }
-    Ok(Session { operator: base.into(), token, until, expires: verified.expiration_timestamp, epoch })
+    Ok(Session { operator: base.into(), token, until, expires: verified.expiration_timestamp, epoch, lightning: None })
 }
 fn owner_session(key: &Identity) -> R<Session> {
     let mut last = String::new();
@@ -220,23 +234,68 @@ fn card_session(base: &str, c: &cards::CardInfo, pin: &str) -> R<Session> {
         Ok(ecdsa::Signature::from_compact(&compact).map_err(|_| "invalid card signature")?.serialize_der().to_vec())
     })
 }
+/// The card's signature, DER, over a digest — the shape both Spark and the Lightning service provider verify.
+fn card_sign(c: &cards::CardInfo, pin: &str, public: &PublicKey, digest: &[u8;32]) -> R<Vec<u8>> {
+    let (r, s) = cards::sign_digest_checked(&c.reader, pin, digest, &public.serialize()).map_err(|e| e.to_string())?;
+    let mut compact = [0u8;64]; compact[..32].copy_from_slice(&r); compact[32..].copy_from_slice(&s);
+    Ok(ecdsa::Signature::from_compact(&compact).map_err(|_| "invalid card signature")?.serialize_der().to_vec())
+}
+/// The wallet's own key on a card opens Spark as the owner and the Lightning service provider too: one PIN, a touch
+/// for each. A refusal by the provider is said, not fatal: the Spark session is still worth having.
+fn owner_card_session(base: &str, c: &cards::CardInfo, pin: &str) -> R<(Session, Option<String>)> {
+    let public = PublicKey::from_slice(&hex::decode(c.pubkey.as_ref().ok_or("card has no key")?).map_err(|_| "invalid card public key")?).map_err(|_| "invalid card public key")?;
+    let mut s = authenticate(base, &public, |digest| card_sign(c, pin, &public, digest))?;
+    match crate::spark_ssp::login(&public, |digest| card_sign(c, pin, &public, digest)) {
+        Ok(token) => { s.lightning = Some(token); Ok((s, None)) }
+        Err(e) => Ok((s, Some(e))),
+    }
+}
+/// Write the wallet's own key, from its words, into a card's EMPTY signing slot, and record the card as the
+/// wallet's owner card. The words make the key only if they reproduce the identity the vault records.
+pub fn owner_import(name: String, reader: String, admin_pin: Zeroizing<String>, words: Zeroizing<String>) -> R<String> {
+    let store = wallet::load()?;
+    let v = store.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
+    let sp = v.spark.as_ref().ok_or("this is not a Spark wallet")?;
+    let key = owner_from_words(&words, &sp.identity)?;
+    drop(words);
+    let card = cards::list().map_err(|e| e.to_string())?.into_iter().find(|c| c.reader == reader).ok_or("that card is no longer plugged in")?;
+    if card.serial.to_string() == sp.reader_card { return Err("that is the reader card; its signing slot already holds the reader key. Use a card with an empty signing slot".into()); }
+    let secret = key.secret_bytes();
+    let point = key.public().serialize_uncompressed();
+    drop(key);
+    let written = cards::import_empty(&reader, &admin_pin, card.serial, &secret, &point, None).map_err(|e| e.to_string())?;
+    drop(secret);
+    if !written.eq_ignore_ascii_case(&sp.identity) { return Err("the card reports a different key from the wallet's; nothing was recorded".into()); }
+    let mut store = wallet::load()?;   // fresh: do not overwrite concurrent edits
+    let v = store.vaults.iter_mut().find(|v| v.name == name).ok_or("no such vault")?;
+    let sp = v.spark.as_mut().ok_or("this is not a Spark wallet")?;
+    sp.owner_card = card.serial.to_string();
+    wallet::save(&store)?;
+    Ok(card.serial.to_string())
+}
 #[derive(Serialize)]
-pub struct Unlocked { pub expires: i64, pub operator: String }
+pub struct Unlocked { pub expires: i64, pub operator: String, #[serde(default)] pub lightning: bool, #[serde(default)] pub lightning_error: Option<String> }
 pub fn unlock(name: String, reader: String, pin: Zeroizing<String>) -> R<Unlocked> {
     let store = wallet::load()?;
     let v = store.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
     let sp = v.spark.as_ref().filter(|s| s.authenticated).ok_or("this is not an enrolled Spark wallet")?;
-    if let Some(s) = session(sp, &v.network).ok().flatten() { return Ok(Unlocked { expires: s.expires, operator: s.operator.clone() }); }
+    if let Some(s) = session(sp, &v.network).ok().flatten() { return Ok(Unlocked { expires: s.expires, operator: s.operator.clone(), lightning: s.lightning.is_some(), lightning_error: None }); }
     let epoch = EPOCH.load(Ordering::SeqCst);
-    let c = checked_card(&reader, &sp.reader_pubkey)?;
-    if c.serial.to_string() != sp.reader_card { return Err("this is not the registered reader card".into()); }
+    // The owner card (the wallet's own key) or the reader card: whichever is in, told apart by the key it holds.
+    let present = cards::list().map_err(|e| e.to_string())?.into_iter().find(|c| c.reader == reader).ok_or("insert the registered YubiKey")?;
+    let as_owner = !sp.owner_card.is_empty() && present.serial.to_string() == sp.owner_card && present.pubkey.as_deref().map(|p| p.eq_ignore_ascii_case(&sp.identity)).unwrap_or(false);
+    let c = if as_owner { checked_card(&reader, present.pubkey.as_deref().unwrap_or(""))? } else {
+        let c = checked_card(&reader, &sp.reader_pubkey)?;
+        if c.serial.to_string() != sp.reader_card { return Err("this is not the registered reader card".into()); }
+        c
+    };
     let k = key_for(sp, &v.network);
     let n = *runtime().lock().map_err(|_| "Spark session lock failed")?.next_operator.get(&k).unwrap_or(&0);
     // One touch attempt per click. Never automatically retry a wrong PIN.
-    let opened = card_session(spark::OPERATORS[n], &c, &pin);
+    let opened = if as_owner { owner_card_session(spark::OPERATORS[n], &c, &pin) } else { card_session(spark::OPERATORS[n], &c, &pin).map(|s| (s, None)) };
     drop(pin);
-    let s = match opened { Ok(s) => s, Err(e) => { runtime().lock().map_err(|_| "Spark session lock failed")?.next_operator.insert(k, (n + 1) % spark::OPERATORS.len()); return Err(e); } };
-    let result = Unlocked { expires: s.expires, operator: s.operator.clone() };
+    let (s, lightning_error) = match opened { Ok(s) => s, Err(e) => { runtime().lock().map_err(|_| "Spark session lock failed")?.next_operator.insert(k, (n + 1) % spark::OPERATORS.len()); return Err(e); } };
+    let result = Unlocked { expires: s.expires, operator: s.operator.clone(), lightning: s.lightning.is_some(), lightning_error };
     let mut r = runtime().lock().map_err(|_| "Spark session lock failed")?;
     if epoch != EPOCH.load(Ordering::SeqCst) { return Err("the app locked while the reader was opening".into()); }
     r.readers.insert(k, Cached { session: std::sync::Arc::new(s), epoch });
@@ -280,7 +339,7 @@ pub fn enroll(candidate_id: String, name: String, reader: String, pubkey: String
     verify.map_err(|e: String| format!("{e}. The reader setting was updated, but verification did not complete. Discover again to check and finish enrolment."))?;
     let mut store = wallet::load()?; // fresh store: do not overwrite concurrent edits
     if p.epoch != EPOCH.load(Ordering::SeqCst) || p.discovery != DISCOVERY.load(Ordering::SeqCst) { return Err("the app locked after updating Spark; discover again to finish saving".into()); }
-    let sp = wallet::Spark { address: p.candidate.address.clone(), identity: p.candidate.identity.clone(), reader_pubkey: pubkey, reader_card: c.serial.to_string(), authenticated: true, memos: Default::default() };
+    let sp = wallet::Spark { address: p.candidate.address.clone(), identity: p.candidate.identity.clone(), reader_pubkey: pubkey, reader_card: c.serial.to_string(), authenticated: true, memos: Default::default(), owner_card: String::new() };
     let v = if let Some(v) = store.vaults.iter_mut().find(|v| v.network == p.candidate.network && v.spark.as_ref().map(|s| &s.identity) == Some(&sp.identity)) { v.spark = Some(sp.clone()); v.clone() } else {
         if store.vaults.iter().any(|v| v.name == name) { return Err("that vault name was used while enrolling; discover again to save under another name".into()); }
         let v = crate::new_spark_vault(name, sp.clone(), p.candidate.network.clone()); store.vaults.push(v.clone()); v
@@ -397,20 +456,20 @@ mod tests {
     #[test]
     fn absent_or_expired_reader_never_becomes_anonymous_and_lock_drops_credentials() {
         clear();
-        let sp = wallet::Spark { identity: hex::encode(identity().public().serialize()), address: "spark1test".into(), reader_pubkey: "reader".into(), reader_card: "123".into(), authenticated: true, memos: Default::default() };
+        let sp = wallet::Spark { identity: hex::encode(identity().public().serialize()), address: "spark1test".into(), reader_pubkey: "reader".into(), reader_card: "123".into(), authenticated: true, memos: Default::default(), owner_card: String::new() };
         assert!(session(&sp,"mainnet").is_err());
         let epoch = EPOCH.load(Ordering::SeqCst);
-        runtime().lock().unwrap().readers.insert(key_for(&sp, "mainnet"), Cached { session: std::sync::Arc::new(Session { operator: spark::OPERATORS[0].into(), token: Zeroizing::new("not-persisted".into()), until: Instant::now() + Duration::from_secs(30), expires: 1, epoch }), epoch });
+        runtime().lock().unwrap().readers.insert(key_for(&sp, "mainnet"), Cached { session: std::sync::Arc::new(Session { operator: spark::OPERATORS[0].into(), token: Zeroizing::new("not-persisted".into()), until: Instant::now() + Duration::from_secs(30), expires: 1, epoch, lightning: None }), epoch });
         assert!(session(&sp,"mainnet").unwrap().is_some());
         assert!(session(&sp,"signet").is_err());
         assert!(!serde_json::to_string(&sp).unwrap().contains("not-persisted"));
         assert!(read_result::<()>(&sp, "mainnet", Err("Spark RPC status 16".into())).unwrap_err().starts_with("SPARK_UNLOCK:"));
         assert_eq!(runtime().lock().unwrap().next_operator[&key_for(&sp,"mainnet")], 1);
         assert!(session(&sp,"mainnet").is_err());
-        runtime().lock().unwrap().readers.insert(key_for(&sp,"mainnet"), Cached { session: std::sync::Arc::new(Session { operator: spark::OPERATORS[0].into(), token: Zeroizing::new("expired".into()), until: Instant::now(), expires: 1, epoch }), epoch });
+        runtime().lock().unwrap().readers.insert(key_for(&sp,"mainnet"), Cached { session: std::sync::Arc::new(Session { operator: spark::OPERATORS[0].into(), token: Zeroizing::new("expired".into()), until: Instant::now(), expires: 1, epoch, lightning: None }), epoch });
         assert!(session(&sp,"mainnet").is_err());
         clear(); assert!(runtime().lock().unwrap().readers.is_empty());
-        let stale = Session { operator: "unused".into(), token: Zeroizing::new("stale".into()), until: Instant::now() + Duration::from_secs(60), expires: 1, epoch };
+        let stale = Session { operator: "unused".into(), token: Zeroizing::new("stale".into()), until: Instant::now() + Duration::from_secs(60), expires: 1, epoch, lightning: None };
         assert!(!stale.live(), "a session held by an in-flight reader cannot issue more requests after lock");
         let legacy: wallet::Spark = serde_json::from_str(r#"{"address":"spark1test","identity":"02"}"#).unwrap();
         assert!(!legacy.authenticated); assert!(session(&legacy,"mainnet").unwrap().is_none());
@@ -435,14 +494,14 @@ mod tests {
             Box::new(|_,body| { let q = Query::decode(body.as_slice()).unwrap(); assert!(!q.sender.is_empty()); assert_eq!(q.offset,1); (page(b"B",-1),0) }),
             Box::new(|_,body| { let q = Query::decode(body.as_slice()).unwrap(); assert!(!q.receiver.is_empty()); assert_eq!(q.offset,0); (page(b"AC",-1),0) }),
         ]);
-        let s = Session { operator: base, token: Zeroizing::new("reader".into()), until: Instant::now()+Duration::from_secs(30), expires:1, epoch:EPOCH.load(Ordering::SeqCst) };
+        let s = Session { operator: base, token: Zeroizing::new("reader".into()), until: Instant::now()+Duration::from_secs(30), expires:1, epoch:EPOCH.load(Ordering::SeqCst), lightning: None };
         let rows = spark::history_with(&identity().public().serialize(),"mainnet",Some(&s)).unwrap();
         assert_eq!(rows.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),vec!["A","B","C"]); worker.join().unwrap();
     }
     #[test]
     fn repeated_history_cursor_fails_instead_of_returning_partial_accounts() {
         let (base, worker) = mock(vec![Box::new(|_,_| (page(b"A",0),0))]);
-        let s = Session { operator: base, token: Zeroizing::new("reader".into()), until: Instant::now()+Duration::from_secs(30), expires:1, epoch:EPOCH.load(Ordering::SeqCst) };
+        let s = Session { operator: base, token: Zeroizing::new("reader".into()), until: Instant::now()+Duration::from_secs(30), expires:1, epoch:EPOCH.load(Ordering::SeqCst), lightning: None };
         assert!(spark::history_with(&identity().public().serialize(),"mainnet",Some(&s)).unwrap_err().contains("incomplete accounting")); worker.join().unwrap();
     }
     /// Read-only smoke test with a fresh random identity: establishes handshake

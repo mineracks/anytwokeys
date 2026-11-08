@@ -246,7 +246,14 @@
                   <div class="seed-grid"></div>
                   <div class="row seed-suggest" style="gap:var(--s2);flex-wrap:wrap;min-height:34px" aria-live="polite"></div>
                   <div class="seed-count" style="font-size:14px" aria-live="polite"></div></div>
-                <div class="row" style="gap:10px;align-items:center;flex-wrap:wrap"><button class="btn primary" type="button" id="vs-ln-go">Read the descriptions</button><span class="muted" id="vs-ln-note" style="font-size:13px" aria-live="polite"></span></div>
+                <div class="row" style="gap:10px;align-items:center;flex-wrap:wrap"><button class="btn primary" type="button" id="vs-ln-go">Read the descriptions once</button><span class="muted" id="vs-ln-note" style="font-size:13px" aria-live="polite"></span></div>
+                <div class="stack" id="vs-ln-card-form" style="gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid var(--line)">
+                  <div class="label">Or write the wallet’s key to a card, and read them with every sync</div>
+                  <div class="muted" style="font-size:13px"><b>What changes.</b> Today the card holds a <b>reader</b> key: it can read the balance and the history, and nothing else. A card holding the wallet’s <b>own</b> key reads those too, opens the Lightning service for the descriptions at every unlock, and <b>can sign for the wallet</b> — the same standing as a vault key in this app: nothing leaves the card, its PIN and a touch guard every use, and losing the card loses nothing while the words are kept. The words are not stored; the key is written once.</div>
+                  <div class="grid2"><div class="field"><label class="cap">A card with an empty signing slot</label><select id="vs-ln-cards"><option value="">plug in a set-up card</option></select></div>
+                  <div class="field"><label class="cap">Its admin PIN</label><input type="password" id="vs-ln-admin" autocomplete="off"></div></div>
+                  <div class="row" style="gap:10px;align-items:center;flex-wrap:wrap"><button class="btn" type="button" id="vs-ln-write">Write the wallet’s key to this card</button><span class="muted" id="vs-ln-write-note" style="font-size:13px" aria-live="polite"></span></div>
+                </div>
               </div>
             </details>
           </div>
@@ -567,6 +574,7 @@
                   </div></details>
                   <label class="spark-check"><input type="checkbox" id="spark-make-private"> Also make the wallet private (otherwise keep its existing privacy setting).</label>
                   <label class="spark-check" id="spark-replace-row" hidden><input type="checkbox" id="spark-replace-reader"> Replace the existing designated reader. Its access to this private wallet will stop.</label>
+                  <div class="muted"><b>Two levels of key.</b> The reader key registered here is a <b>second</b> key, known to Spark as allowed to look: it can read the balance and the history, and nothing else — not sign, not spend. Lightning descriptions (the text an invoice carried, "Mining reward for block …") live with the Lightning service, which answers only the wallet’s <b>own</b> key. Afterwards, in the vault’s settings, you can read them once with the words, or write the wallet’s own key to a <i>different</i> card: that card then reads the descriptions with every sync, and holds a key that can sign for the wallet — a vault-key level of trust, guarded by its PIN and a touch.</div>
                   <label>Reader PIN<input type="password" autocomplete="off" id="spark-enroll-pin"></label>
                   <div class="row"><button class="btn primary" id="spark-enroll">Register reader — PIN + touch</button><button class="btn" id="spark-cancel">Cancel enrolment</button></div>
                   <div class="muted" id="spark-enroll-note" aria-live="polite"></div>

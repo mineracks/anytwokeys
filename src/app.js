@@ -5131,11 +5131,35 @@ function renderLnCard() {
   if (card.hidden) return;
   const have = Object.keys(vault.spark.memos || {}).length, rows = Object.values(txFacts[vault.name]?.spark || {});
   const ln = rows.filter(t => t.kind === 0).length, missing = rows.filter(t => t.kind === 0 && !t.memo).length;
-  $('#vs-ln-text').textContent = have ? `${sats(have)} transfer${have === 1 ? '' : 's'} carr${have === 1 ? 'ies' : 'y'} the description its invoice was given${missing ? `; ${sats(missing)} Lightning receive${missing === 1 ? '' : 's'} on the list still ${missing === 1 ? 'has' : 'have'} none` : ''}.`
-    : ln ? `${sats(ln)} Lightning receive${ln === 1 ? '' : 's'} on the list; none carries its description yet.` : 'No Lightning receives on the list yet.';
+  const owner = vault.spark.owner_card ? `The wallet\u2019s own key is on card ${esc(vault.spark.owner_card)}: unlocking with that card reads the descriptions with every sync (two touches: Spark, then the Lightning service). ` : '';
+  $('#vs-ln-text').innerHTML = owner + esc(have ? `${sats(have)} transfer${have === 1 ? '' : 's'} carr${have === 1 ? 'ies' : 'y'} the description its invoice was given${missing ? `; ${sats(missing)} Lightning receive${missing === 1 ? '' : 's'} on the list still ${missing === 1 ? 'has' : 'have'} none` : ''}.`
+    : ln ? `${sats(ln)} Lightning receive${ln === 1 ? '' : 's'} on the list; none carries its description yet.` : 'No Lightning receives on the list yet.');
+  $('#vs-ln-words').querySelector('summary').textContent = vault.spark.owner_card ? 'Read them once with the words instead' : 'Read them from the Lightning service';
+  $('#vs-ln-card-form').hidden = !!vault.spark.owner_card;
   const root = $('#vs-ln-words'); if (root.open && !root.querySelector('.seed-grid input')) seedBuild(12, root);
 }
-$('#vs-ln-words').addEventListener('toggle', () => { const root = $('#vs-ln-words'); if (root.open) { if (!root.querySelector('.seed-grid input')) seedBuild(12, root); else seedRoot = root; } else seedClear(); });
+async function lnCards() {
+  let cs = []; try { cs = await invoke('cards_list'); } catch {}
+  const spares = cs.filter(c => !c.pubkey), sel = $('#vs-ln-cards'), was = sel.value;
+  sel.innerHTML = spares.length ? spares.map(c => `<option value="${esc(c.reader)}">${esc(modelName(c.form, c.nfc))} \u00b7 serial ${c.serial}</option>`).join('') : '<option value="">plug in a set-up card with an empty signing slot</option>';
+  if (was && spares.some(c => c.reader === was)) sel.value = was;
+  $('#vs-ln-write').disabled = !spares.length;
+}
+$('#vs-ln-write').onclick = async () => {
+  if (!vault || !vault.spark) return;
+  const root = $('#vs-ln-words'), words = [...root.querySelectorAll('.seed-grid input')].map(i => i.value.trim().toLowerCase()).filter(Boolean).join(' ');
+  const reader = $('#vs-ln-cards').value, admin = $('#vs-ln-admin').value;
+  if (!words) return toast('Type the wallet\u2019s seed words first'); if (!reader) return toast('Plug in a set-up card with an empty signing slot'); if (!admin) return toast('Enter the card\u2019s admin PIN');
+  const b = $('#vs-ln-write'), note = $('#vs-ln-write-note'), me = vault.name; b.disabled = true; note.textContent = 'Checking the words against the wallet, then writing the key to the card\u2026';
+  try {
+    const serial = await invoke('spark_owner_import', { name: me, reader, adminPin: admin, words }); seedClear(); $('#vs-ln-admin').value = '';
+    const st = await invoke('store_get'); store = st; const v = store.vaults.find(x => x.name === me); if (v && vault && vault.name === me) vault = v;
+    note.textContent = `Written. Card ${serial} now opens this wallet and its Lightning descriptions; unlock with it next time.`;
+    renderLnCard();
+  } catch (e) { note.textContent = ''; fail(e); }
+  finally { b.disabled = false; }
+};
+$('#vs-ln-words').addEventListener('toggle', () => { const root = $('#vs-ln-words'); if (root.open) { if (!root.querySelector('.seed-grid input')) seedBuild(12, root); else seedRoot = root; lnCards(); } else seedClear(); });
 $('#vs-ln-go').onclick = async () => {
   if (!vault || !vault.spark) return;
   const root = $('#vs-ln-words'), words = [...root.querySelectorAll('.seed-grid input')].map(i => i.value.trim().toLowerCase()).filter(Boolean).join(' ');
@@ -5601,11 +5625,12 @@ function sparkUnlockStage(step, card) {
   const sp = p.v.spark, form = (card && card.form) || p.form || 3, nano = [2, 4].includes(form & 0x0F), cardIn = isCard(form), press = isToken2(form) || isNitro(form);
   paintSteps('#spark-unlock-steps', step, form);
   const g = $('#spark-unlock-guide'), sig = step + ':' + (form & 0x0F); if (g._sig !== sig) { g._sig = sig; g.innerHTML = guideArt(step, form); }
-  const name = store.vaults.flatMap(v => v.keys).find(k => k.pubkey === sp.reader_pubkey)?.name || ((lockInfo && lockInfo.cards) || []).find(k => k.pubkey === sp.reader_pubkey)?.name || 'The reader key';
+  const asOwner = !!(card && p.asOwner), want = asOwner ? sp.identity : sp.reader_pubkey;
+  const name = asOwner ? 'The wallet\u2019s own key' : (store.vaults.flatMap(v => v.keys).find(k => k.pubkey === want)?.name || ((lockInfo && lockInfo.cards) || []).find(k => k.pubkey === want)?.name || 'The reader key');
   const keyBox = $('#spark-unlock-key');
   if (card) {
     keyBox.className = 'lock-key'; keyBox.style.gridTemplateColumns = 'auto minmax(0,1fr)';
-    keyBox.innerHTML = `${keyArt(form, !!card.nfc, 40)}<b>${esc(name)}<small>${esc(modelName(form, !!card.nfc))} ${esc(String(card.serial))} \u00b7 <span style="color:var(--signal)">\u2713 ${inWords(form)} \u2014 the registered reader</span></small></b>`;
+    keyBox.innerHTML = `${keyArt(form, !!card.nfc, 40)}<b>${esc(name)}<small>${esc(modelName(form, !!card.nfc))} ${esc(String(card.serial))} \u00b7 <span style="color:var(--signal)">\u2713 ${inWords(form)} \u2014 ${asOwner ? 'the wallet\u2019s own key: it reads the Lightning descriptions too' : 'the registered reader'}</span></small></b>`;
   } else {
     keyBox.className = 'lock-key off'; keyBox.style.gridTemplateColumns = 'auto minmax(0,1fr)';
     keyBox.innerHTML = `${keyArt(form, false, 40)}<b>${esc(name)}<small>${esc(modelName(form, false))} ${esc(String(sp.reader_card))} \u00b7 ${notInWords(form)}${p.other ? ` \u2014 the key that is (${esc(String(p.other))}) is not this wallet\u2019s reader` : ''}</small></b>`;
@@ -5615,17 +5640,19 @@ function sparkUnlockStage(step, card) {
   $('#spark-unlock-pin').disabled = step !== 'pin';
   $('#spark-unlock-go').disabled = step !== 'pin' || !$('#spark-unlock-pin').value;
   $('#spark-unlock-act').textContent = step === 'plug' ? putIn(form, name === 'The reader key' ? 'the registered key' : name) : step === 'pin' ? 'Enter its PIN' : p.onPad ? 'Enter the PIN on the reader' : cardIn ? 'The card is opening it' : `${press ? 'Press' : 'Touch'} the ${nano ? 'nano' : press ? 'button' : 'key'} now`;
-  $('#spark-unlock-text').textContent = step === 'plug' ? `The reader is ${modelName(form, false)} ${sp.reader_card}. It is looked for as soon as it is in.`
-    : step === 'pin' ? (cardIn ? 'Then press Open: the card signs on its own, there is nothing to touch.' : press ? 'Then press Open: the key will ask for a press of its button.' : 'Then press Open: the key will ask for a touch.') + (p.pinpad ? ' Or type it on the reader\u2019s own keypad.' : '')
+  $('#spark-unlock-text').textContent = step === 'plug' ? `The reader is ${modelName(form, false)} ${sp.reader_card}${sp.owner_card ? `, or the wallet\u2019s own key on card ${sp.owner_card}` : ''}. It is looked for as soon as it is in.`
+    : step === 'pin' ? (cardIn ? 'Then press Open: the card signs on its own, there is nothing to touch.' : press ? `Then press Open: the key will ask for ${asOwner ? 'two presses of its button, one for Spark and one for the Lightning service' : 'a press of its button'}.` : `Then press Open: the key will ask for ${asOwner ? 'two touches, one for Spark and one for the Lightning service' : 'a touch'}.`) + (p.pinpad ? ' Or type it on the reader\u2019s own keypad.' : '')
     : p.onPad ? PINPAD_NOTE + '.' : cardIn ? 'Its PIN alone opens it. Keep it in the reader.'
-    : `${nano ? 'It runs along the key\u2019s top edge. Touch it' : press ? 'Press it' : 'Touch it'} when its light flashes. Keep the key plugged in.`;
+    : `${nano ? 'It runs along the key\u2019s top edge. Touch it' : press ? 'Press it' : 'Touch it'} when its light flashes${asOwner ? ', twice: once for Spark, once for the Lightning service' : ''}. Keep the key plugged in.`;
 }
 async function sparkUnlockCards() {
   const p = sparkUnlockPending; if (!p) return;
   const sp = p.v.spark;
   let cs = []; try { cs = await invoke('cards_list'); } catch {}
   if (!sparkUnlockPending || sparkUnlockPending !== p || p.busy) return;
-  const mine = cs.find(c => c.pubkey === sp.reader_pubkey && String(c.serial) === sp.reader_card && (c.touch === 'FIXED' || isCard(c.form)));
+  const owner = sp.owner_card ? cs.find(c => c.pubkey === sp.identity && String(c.serial) === sp.owner_card && (c.touch === 'FIXED' || isCard(c.form))) : null;
+  const mine = owner || cs.find(c => c.pubkey === sp.reader_pubkey && String(c.serial) === sp.reader_card && (c.touch === 'FIXED' || isCard(c.form)));
+  p.asOwner = !!owner;
   p.other = !mine && cs.length ? cs[0].serial : null;
   if (mine) p.form = mine.form || p.form;
   p.pinpad = !!(mine && mine.pinpad);
@@ -5652,11 +5679,12 @@ async function sparkUnlockGo(onPad) {
   // a brushed key with Yubico OTP on types a code, not a PIN: nothing is sent, no try is used
   if (/^[cbdefghijklnrtuv]{32,}$/.test(pin)) { pin = ''; return toast('That was the key typing a one-time code, not a PIN. Nothing was sent to the card and no PIN try was used. Turn off Yubico OTP on this key to stop it happening.', 9000); }
   p.busy = true; $('#spark-unlock-note').textContent = '';
-  sparkUnlockStage('touch', { serial: p.v.spark.reader_card, form: p.form, nfc: false });
+  const serial = p.asOwner ? p.v.spark.owner_card : p.v.spark.reader_card;
+  sparkUnlockStage('touch', { serial, form: p.form, nfc: false });
   let opened = false;
   try { const request = invoke('spark_unlock', { name: p.name, reader, pin }); pin = ''; await request; opened = true; }
   catch (e) { $('#spark-unlock-note').textContent = String(e) + ' Check the key before trying again.'; }
-  finally { pin = ''; p.busy = false; p.onPad = false; if (opened) sparkUnlockClose(true); else { sparkUnlockStage(p.present ? 'pin' : 'plug', p.present ? { serial: p.v.spark.reader_card, form: p.form, nfc: false } : null); $('#spark-unlock-pin').focus(); } }
+  finally { pin = ''; p.busy = false; p.onPad = false; if (opened) sparkUnlockClose(true); else { sparkUnlockStage(p.present ? 'pin' : 'plug', p.present ? { serial, form: p.form, nfc: false } : null); $('#spark-unlock-pin').focus(); } }
 }
 $('#spark-unlock-form').onsubmit = (e) => { e.preventDefault(); sparkUnlockGo(false); };
 $('#spark-unlock-pinpad').onclick = () => sparkUnlockGo(true);
