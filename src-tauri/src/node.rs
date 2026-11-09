@@ -1068,12 +1068,16 @@ mod tests {
     fn a_real_lnd_file_through_the_returned_check() {
         let p = std::env::var("A2K_LEDGER_FILE").expect("A2K_LEDGER_FILE");
         let (_, _, mut ev, _) = ledger_from_file(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        // A2K_HELD_TXIDS: txid or txid:net pairs the vault's live reads hold that the file does not
         for t in std::env::var("A2K_HELD_TXIDS").unwrap_or_default().split(',').filter(|t| !t.is_empty()) {
-            ev.push(Event { id: t.to_string(), time: 1792000000, net: -1, fee: 0, layer: "chain".into(), txid: t.to_string(), hash: String::new(), kind: "withdrawal".into(), memo: String::new(), to: Vec::new(), height: 0, phantom: false, msat: 0 });
+            let (id, net) = t.split_once(':').map(|(a, b)| (a, b.parse::<i64>().unwrap_or(-1))).unwrap_or((t, -1));
+            ev.push(Event { id: id.to_string(), time: 1792000000, net, fee: 0, layer: "chain".into(), txid: id.to_string(), hash: String::new(), kind: "withdrawal".into(), memo: String::new(), to: Vec::new(), height: 0, phantom: false, msat: 0 });
         }
         let before = ev.iter().filter(|e| e.kind == "unreturned").count();
+        let sum_before: i64 = ev.iter().map(|e| e.net).sum();
         lnd_returned(&mut ev, &crate::chain::defaults(bitcoin::Network::Bitcoin), "mainnet");
         println!("unreturned before {before}, after {}", ev.iter().filter(|e| e.kind == "unreturned").count());
+        println!("ledger sum before {sum_before}, after {}", ev.iter().map(|e| e.net).sum::<i64>());
         for e in ev.iter().filter(|e| e.kind == "unreturned") { println!("  left {:>10} {}", e.net, e.memo.chars().take(120).collect::<String>()); }
     }
 
