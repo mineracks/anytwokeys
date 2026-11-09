@@ -165,12 +165,17 @@ pub fn view(store: &Value) -> Value {
 /// Put a merged view back into a store, keeping everything that does not travel exactly as this device had it.
 pub fn apply(store: &mut Value, merged: &Value) {
     let local_vaults: HashMap<String, Value> = store.get("vaults").and_then(Value::as_array).map(|a| a.iter().map(|v| (vault_id(v), v.clone())).collect()).unwrap_or_default();
+    let local_order: Vec<String> = store.get("vaults").and_then(Value::as_array).map(|a| a.iter().map(vault_id).collect()).unwrap_or_default();
+    let unordered = merged.get("_unordered").is_some();
     let Some(s) = store.as_object_mut() else { return };
     for k in SYNCED {
         match merged.get(*k) { Some(v) => { s.insert((*k).into(), v.clone()); } None => { s.remove(*k); } }
     }
+    s.remove("_unordered");
     if let Some(Value::Array(vs)) = s.get_mut("vaults") {
-        for v in vs { let id = vault_id(v); if let (Some(o), Some(mine)) = (v.as_object_mut(), local_vaults.get(&id)) { for f in VAULT_LOCAL { if let Some(x) = mine.get(*f) { o.insert((*f).into(), x.clone()); } } } }
+        for v in vs.iter_mut() { let id = vault_id(v); if let (Some(o), Some(mine)) = (v.as_object_mut(), local_vaults.get(&id)) { for f in VAULT_LOCAL { if let Some(x) = mine.get(*f) { o.insert((*f).into(), x.clone()); } } } }
+        // a host whose book carries no arrangement (written before the order travelled) must not undo this device's
+        if unordered { vs.sort_by_key(|v| local_order.iter().position(|i| *i == vault_id(v)).unwrap_or(usize::MAX)); }
     }
     if !s.contains_key("vaults") { s.insert("vaults".into(), Value::Array(vec![])); }
 }
@@ -239,16 +244,25 @@ pub const ROTATED: &str = "this profile\u{2019}s key was replaced on another dev
 fn objects(keys: &Keys, view: &Value) -> BTreeMap<String, Value> {
     let mut out = BTreeMap::new();
     let mut book = view.as_object().cloned().unwrap_or_default();
-    if let Some(Value::Array(vs)) = book.remove("vaults") { for v in vs { out.insert(keys.name_of("v", &vault_id(&v)), v); } }
-    book.insert("index".into(), Value::Array(out.keys().map(|k| Value::String(k.clone())).collect()));
+    // the index lists the vault objects IN THE PERSON'S ORDER: the order of the list is theirs (drag and drop), it
+    // travels with the book, and assemble() puts the vaults back in it — object names sort by a hash, not by anything
+    // a person chose, and a list rebuilt in that order lost the arrangement at every sync (9 Nov 2026)
+    let mut index = Vec::new();
+    if let Some(Value::Array(vs)) = book.remove("vaults") { for v in vs { let k = keys.name_of("v", &vault_id(&v)); index.push(Value::String(k.clone())); out.insert(k, v); } }
+    book.insert("index".into(), Value::Array(index));
     out.insert(BOOK.into(), Value::Object(book));
     out
 }
+/// An index in the objects' own sorted order carries no arrangement: books written before the order travelled
+/// (and, by chance, a person whose arrangement happens to be the hash order — nothing is lost by keeping theirs).
+fn index_is_ordered(index: &[String]) -> bool { let mut sorted = index.to_vec(); sorted.sort(); sorted != index }
 fn assemble(objs: &BTreeMap<String, Value>) -> Value {
     let mut out = objs.get(BOOK).and_then(Value::as_object).cloned().unwrap_or_default();
-    out.remove("index");
-    let vaults: Vec<Value> = objs.iter().filter(|(k, _)| k.starts_with("v/")).map(|(_, v)| v.clone()).collect();
-    out.insert("vaults".into(), Value::Array(vaults));
+    let index: Vec<String> = out.remove("index").and_then(|i| i.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())).unwrap_or_default();
+    let mut vaults: Vec<(&String, Value)> = objs.iter().filter(|(k, _)| k.starts_with("v/")).map(|(k, v)| (k, v.clone())).collect();
+    if index_is_ordered(&index) { vaults.sort_by_key(|(k, _)| index.iter().position(|i| i == *k).unwrap_or(usize::MAX)); }
+    else { out.insert("_unordered".into(), Value::Bool(true)); }   // apply() then keeps this device's arrangement
+    out.insert("vaults".into(), Value::Array(vaults.into_iter().map(|(_, v)| v).collect()));
     Value::Object(out)
 }
 
@@ -674,6 +688,28 @@ mod tests {
         let out = m(base, local.clone(), remote.clone());
         assert_eq!(out["vaults"][0]["next"], 9);
         assert_eq!(m(json!({}), remote, local)["vaults"][0]["next"], 9, "whichever side is asked");
+    }
+
+    #[test]
+    fn the_persons_vault_order_travels_in_the_book_and_an_old_book_does_not_undo_it() {
+        let keys = keys_from(&[7u8; 32], b"test");
+        let view = json!({ "vaults": [vault("b", "wsh(B)", json!({})), vault("a", "wsh(A)", json!({})), vault("c", "wsh(C)", json!({}))], "profile": {} });
+        let objs = objects(&keys, &view);
+        let back = assemble(&objs);
+        assert_eq!(back["vaults"].as_array().unwrap().iter().map(|v| v["name"].as_str().unwrap()).collect::<Vec<_>>(), vec!["b", "a", "c"], "the arrangement comes back as it went");
+        assert!(back.get("_unordered").is_none());
+        // a book from before: index in the objects' sorted order says nothing about arrangement
+        let mut old = objs.clone();
+        let mut book = old.get(BOOK).unwrap().as_object().unwrap().clone();
+        let mut idx: Vec<String> = old.keys().filter(|k| k.starts_with("v/")).cloned().collect(); idx.sort();
+        book.insert("index".into(), Value::Array(idx.into_iter().map(Value::String).collect()));
+        old.insert(BOOK.into(), Value::Object(book));
+        let merged = assemble(&old);
+        assert!(merged.get("_unordered").is_some());
+        let mut store = json!({ "vaults": [vault("c", "wsh(C)", json!({})), vault("b", "wsh(B)", json!({})), vault("a", "wsh(A)", json!({}))] });
+        apply(&mut store, &merged);
+        assert_eq!(store["vaults"].as_array().unwrap().iter().map(|v| v["name"].as_str().unwrap()).collect::<Vec<_>>(), vec!["c", "b", "a"], "this device's arrangement stands");
+        assert!(store.get("_unordered").is_none());
     }
 
     #[test]
