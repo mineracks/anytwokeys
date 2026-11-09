@@ -731,6 +731,14 @@ pub fn lnd_returned(events: &mut Vec<Event>, facts: &std::collections::HashMap<S
 /// unreturned with that said; spent by a transaction this ledger holds, counted there; spent by anyone else, gone.
 /// Whatever the records held beyond this node's output had moved to the peer over the channel's life — before the
 /// records begin, for a channel the recovery dropped — and is booked peer-side. Failures leave the row as it was.
+/// Rows a chain step adds go in place of any row of the same id from an earlier import, never beside it: a re-import
+/// once left the peer-side row of an abandoned channel twice, the older twin dated 1970, and the gap grew by the pair.
+pub fn replace_rows(events: &mut Vec<Event>, add: Vec<Event>) {
+    let ids: std::collections::HashSet<String> = add.iter().map(|e| e.id.clone()).collect();
+    events.retain(|e| !ids.contains(&e.id));
+    events.extend(add); events.sort_by_key(|e| (e.time, e.id.clone()));
+}
+
 pub fn lnd_abandoned(events: &mut Vec<Event>, facts: &std::collections::HashMap<String, CloseFacts>, servers: &crate::chain::Servers, network: &str) {
     use std::str::FromStr;
     use bitcoin::Txid;
@@ -795,7 +803,7 @@ pub fn lnd_abandoned(events: &mut Vec<Event>, facts: &std::collections::HashMap<
         }
     }
     log(format!("{open} still open on the chain, {ours} with this node's output found, {gone} taken by another, {unknown} not yet tellable, {} peer-side row(s) added", add.len()));
-    events.extend(add); events.sort_by_key(|e| (e.time, e.id.clone()));
+    replace_rows(events, add);
 }
 
 /// What the chain step needs to know about each closed channel beyond its rows: by closing txid, the capacity
@@ -1308,7 +1316,19 @@ mod tests {
     }
 
     #[test]
-    fn a_whole_reread_replaces_rows_and_keeps_what_the_node_forgot() {
+    fn a_chain_step_s_row_replaces_its_earlier_self_instead_of_doubling_it() {
+        let side = |t: u32, net: i64| Event { id: "abc:side".into(), time: t, net, fee: 0, layer: "channel".into(), txid: "abc".into(), hash: String::new(), kind: "peer-side".into(), memo: String::new(), to: Vec::new(), height: 972552, phantom: false, msat: net * 1000 };
+        let other = Event { id: "x".into(), time: 50, net: 7, fee: 0, layer: "chain".into(), txid: "x".into(), hash: String::new(), kind: "deposit".into(), memo: String::new(), to: Vec::new(), height: 0, phantom: false, msat: 0 };
+        let mut ev = vec![side(1, -98_073), other.clone()];          // the 1970-dated twin an earlier import left
+        replace_rows(&mut ev, vec![side(1_761_000_000, -98_073)]);
+        assert_eq!(ev.len(), 2);
+        assert_eq!(ev.iter().filter(|e| e.id == "abc:side").count(), 1);
+        assert_eq!(ev.iter().find(|e| e.id == "abc:side").unwrap().time, 1_761_000_000);
+        assert_eq!(ev.iter().map(msat_of).sum::<i64>(), -98_073_000 + 7_000);
+    }
+
+    #[test]
+fn a_whole_reread_replaces_rows_and_keeps_what_the_node_forgot() {
         let ev = |id: &str, net: i64| Event { id: id.into(), time: 10, net, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "received".into(), memo: String::new(), to: Vec::new(), height: 0, phantom: false, msat: 0 };
         let have = vec![ev("a", 100), ev("routed:0", 7), ev("b", 50)];
         // the node now reports a (changed) and the day's routing (whole, not an increment); b is gone from it
