@@ -430,8 +430,12 @@ let peekT = null;
 document.addEventListener('pointerdown', (e) => { if (!document.body.classList.contains('discreet') || !e.target.closest('.content, #vault-tabs, #title')) return; peekT = setTimeout(() => document.body.classList.add('peek'), 350); }, true);
 for (const ev of ['pointerup', 'pointercancel']) document.addEventListener(ev, () => { clearTimeout(peekT); document.body.classList.remove('peek'); }, true);
 // what a private profile copies does not sit on the clipboard for the rest of the day
+// ...and a copy that the webview refuses (it has, silently) goes through the system's own pasteboard tool instead;
+// a copy that fails both ways says so, rather than nothing
 { const wt = navigator.clipboard.writeText.bind(navigator.clipboard);
-  navigator.clipboard.writeText = (t) => wt(t).then((r) => { if (isPrivate()) setTimeout(async () => { try { if ((await navigator.clipboard.readText()) === t) await wt(''); } catch {} }, 60000); return r; }); }
+  const write = (t) => wt(t).catch(() => invoke('clipboard_write', { text: t }));
+  navigator.clipboard.writeText = (t) => write(t).then((r) => { if (isPrivate()) setTimeout(async () => { try { if ((await navigator.clipboard.readText()) === t) await write(''); } catch {} }, 60000); return r; })
+    .catch((e) => { toast('Could not copy: ' + e); throw e; }); }
 
 async function boot() {
   try { document.body.dataset.platform = await invoke('platform'); } catch {}   // the words on the lock and profile screens depend on it
