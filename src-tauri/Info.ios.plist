@@ -29,9 +29,14 @@
   <!-- Export compliance, answered once for every build: the app uses only standard, published algorithms
        (XChaCha20-Poly1305, AES, HKDF, secp256k1, TLS), which Apple classes as exempt. Piers gave this answer in
        App Store Connect for the first build on 2026-10-06. -->
-  <!-- The app ships its own XChaCha20-Poly1305/AES/ECDSA: non-exempt, standard algorithms. Once App Store Connect
-       issues the encryption documentation code (after the French declaration is accepted), add
-       ITSEncryptionExportComplianceCode here so builds inherit it. -->
+  <!-- The app ships its own XChaCha20-Poly1305/AES/ECDSA: non-exempt, standard algorithms. The French encryption
+       declaration (App Store Connect d494fe91, filed 2026-10-06) was APPROVED on 2026-11-10 and this is its code, so
+       every build inherits the answer. The key was absent from 8 Nov to 10 Nov while the code did not yet exist
+       (altool refused uploads that carried an empty code against the pending declaration). -->
+  <key>ITSAppUsesNonExemptEncryption</key>
+  <true/>
+  <key>ITSEncryptionExportComplianceCode</key>
+  <string>ec4195ef-81ec-473f-9fc8-e96033ca77b2</string>
   <key>UIFileSharingEnabled</key>
   <true/>
   <key>LSSupportsOpeningDocumentsInPlace</key>
