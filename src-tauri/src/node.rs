@@ -1161,6 +1161,7 @@ mod tests {
         println!("unreturned before {before}, after {}", ev.iter().filter(|e| e.kind == "unreturned").count());
         for e in ev.iter().filter(|e| e.memo.contains("own address") || e.memo.contains("by the chain")) { println!("  corrected {} {} fee {} {}", &e.id[..12], e.net, e.fee, e.memo.chars().take(100).collect::<String>()); }
         println!("ledger sum before {sum_before}, after {}", ev.iter().map(|e| e.net).sum::<i64>());
+        if let Ok(p) = std::env::var("A2K_DUMP") { let mut out = String::from("unix,id,layer,kind,sats,msat,fee,txid,memo\n"); for e in &ev { out.push_str(&format!("{},{},{},{},{},{},{},{},\"{}\"\n", e.time, e.id, e.layer, e.kind, e.net, e.msat, e.fee, e.txid, e.memo.replace('"', "'"))); } std::fs::write(p, out).unwrap(); }
         for e in ev.iter().filter(|e| e.kind == "unreturned") { println!("  left {:>10} {}", e.net, e.memo.chars().take(120).collect::<String>()); }
     }
 
