@@ -1635,7 +1635,7 @@ async function vaultReport() {
     const blocks = [{ kind: 'facts', rows: facts }];
     // the two charts from Home, over the vault's whole life
     if (L && L.timeline.length) {
-      const first = (L.timeline.find(p => p.scoped) || L.timeline[0]).t, to = Math.floor(Date.now() / 1000), from = Math.max(0, first - 3600);
+      const first = (L.timeline.find(p => p.scoped && p.t >= GENESIS_T) || L.timeline.find(p => p.t >= GENESIS_T) || L.timeline[0]).t, to = Math.floor(Date.now() / 1000), from = Math.max(0, first - 3600);
       const run = priced ? await pricesRange(ccy, first, to, [vault.name]) : { prices: {} };
       const S = sumSeries(L, from, to, run.prices || {}, now);
       const lbl = (t) => new Date(t * 1000).toLocaleDateString();
@@ -2418,6 +2418,7 @@ function lineChart(el, { title, sub, series, fmt, fmtAxis, from, to }) {
 
 window.addEventListener('resize', () => { clearTimeout(window.__sumResize); window.__sumResize = setTimeout(() => { if ($('#s-home').classList.contains('on')) renderHomeSummary(); if ($('#s-overview').classList.contains('on')) renderOverview(); }, 180); });
 // ---------- the summary card, for one vault or for all of them ----------
+const GENESIS_T = 1231006505;   // 2009-01-03: no price, and no coin, before it
 const SUM_RANGES = [['30', '30 days', 30], ['90', '90 days', 90], ['365', '1 year', 365], ['all', 'All', 0]];
 const sumPref = (k, d) => { try { return localStorage.getItem('a2k-sum-' + k) || d; } catch { return d; } };
 const sumSave = (k, v) => { try { localStorage.setItem('a2k-sum-' + k, v); } catch {} };
@@ -2498,7 +2499,7 @@ async function renderSummary(box, names, opts = {}) {
   const t3 = performance.now();
   const rangeKey = sumPref('range', 'all'), R = SUM_RANGES.find(r => r[0] === rangeKey) || SUM_RANGES[3];
   // the range opens at this scope's own first movement: a linked vault's older lots (a transfer's cost) are in the timeline too, and would stretch the axis back years
-  const to = Math.floor(Date.now() / 1000), first = L.timeline.length ? (L.timeline.find(p => p.scoped) || L.timeline[0]).t : to;
+  const to = Math.floor(Date.now() / 1000), first = L.timeline.length ? (L.timeline.find(p => p.scoped && p.t >= GENESIS_T) || L.timeline.find(p => p.t >= GENESIS_T) || L.timeline[0]).t : to;   // an undated row (t 0) must not open the axis in 1970
   const from = R[2] ? Math.min(to - R[2] * 86400, to - 3600) : Math.max(0, first - Math.max(3600, (to - first) * 0.03));
   const namesOf = (a) => inputs.filter(i => (i.asset || 'BTC') === a).map(i => i.name);
   const run = priced && L.timeline.length ? await pricesRange(ccy, Math.max(from, first), to, mixed ? namesOf('BTC') : names) : { every: 1, prices: {}, ok: true };

@@ -281,6 +281,9 @@ pub fn quote_at(prices_url: &str, unit: Unit, ccy: &str, t: Option<u32>) -> Opti
 
 /// The step between days for a span, so a chart never needs more than about a year of points: every day up to 365
 /// days, then every other day, and so on. The price service refuses a request of more than 400 points outright.
+/// The most days one `series` answer holds (the price service's own bound).
+pub const SERIES_MAX_POINTS: u32 = 400;
+
 pub fn series_every(from: &str, to: &str) -> u32 {
     let day = |d: &str| -> Option<i64> { let (y, m, dd) = (d.get(0..4)?.parse::<i64>().ok()?, d.get(5..7)?.parse::<i64>().ok()?, d.get(8..10)?.parse::<i64>().ok()?);
         // days from civil (Howard Hinnant), enough to count the days between two dates
@@ -288,7 +291,9 @@ pub fn series_every(from: &str, to: &str) -> u32 {
         let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + dd - 1; let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
         Some(era * 146097 + doe) };
     let span = match (day(from), day(to)) { (Some(a), Some(b)) if b > a => (b - a) as u32, _ => 0 };
-    (span / 365 + 1).clamp(1, 31)
+    // every Nth day for each year of span, and never more points than the service answers in one go (400, the last
+    // day always added): a ledger row dated 1970 once asked for 20,766 days every 31st and was refused
+    (span / 365 + 1).max(span.div_ceil(SERIES_MAX_POINTS - 2)).clamp(1, 31)
 }
 
 /// One run of daily closes from the price service's `series` question: ONE request where the chart used to make up
@@ -532,6 +537,14 @@ mod series_tests {
         assert!((q("2013-04-10") - 219.44982806052266).abs() < 1e-9 && (q("2013-04-11") - 151.2516716213126).abs() < 1e-9);
         assert_eq!(p[0].1.as_ref().unwrap().basis, "daily 2013-04-08");
     }
+    #[test]
+    fn the_step_never_asks_for_more_points_than_one_answer_holds() {
+        assert_eq!(series_every("2025-04-01", "2026-11-09"), 2);          // 587 days: every other day, 294 points
+        assert_eq!(series_every("2026-10-10", "2026-11-09"), 1);
+        assert_eq!(series_every("2009-01-03", "2026-11-09"), 18);          // 6,519 days: a step per year of span
+        assert_eq!(series_every("2009-01-03", "2042-01-01"), 31);          // the cap: 12,052 days / 31 = 389 points
+    }
+
     #[test]
     fn a_day_with_no_price_is_a_hole_never_a_zero() {
         let p = read_series(&fx("series-holes-2009.json"), Unit::Btc, "AUD");

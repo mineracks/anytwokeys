@@ -774,7 +774,7 @@ pub fn lnd_abandoned(events: &mut Vec<Event>, facts: &std::collections::HashMap<
         };
         let peer_msat = records - my_sats as i64 * 1000;
         if peer_msat != 0 {
-            add.push(Event { id: format!("{cid_s}:side"), time: e.time.max(1), net: -peer_msat / 1000, msat: -peer_msat, fee: 0, layer: "channel".into(), txid: cid_s.clone(), hash: String::new(), kind: if peer_msat > 0 { "peer-side" } else { "our-side" }.into(), memo: format!("channel {} closed on the chain at height {} by the peer (transaction {}…), after this node had abandoned it: this node's output was {} sats, its records say {} — the {} sats {} had moved {} over the channel's life without a payment this node has a record of (its records begin after the recovery that dropped this channel).", f.short, height, &cid_s[..12], my_sats, records / 1000, (peer_msat / 1000).abs(), if peer_msat > 0 { "more" } else { "less" }, if peer_msat > 0 { "to the peer" } else { "from the peer" }), to: Vec::new(), height, phantom: false });
+            add.push(Event { id: format!("{cid_s}:side"), time: if e.time > 0 { e.time } else { 0 }, net: -peer_msat / 1000, msat: -peer_msat, fee: 0, layer: "channel".into(), txid: cid_s.clone(), hash: String::new(), kind: if peer_msat > 0 { "peer-side" } else { "our-side" }.into(), memo: format!("channel {} closed on the chain at height {} by the peer (transaction {}…), after this node had abandoned it: this node's output was {} sats, its records say {} — the {} sats {} had moved {} over the channel's life without a payment this node has a record of (its records begin after the recovery that dropped this channel).", f.short, height, &cid_s[..12], my_sats, records / 1000, (peer_msat / 1000).abs(), if peer_msat > 0 { "more" } else { "less" }, if peer_msat > 0 { "to the peer" } else { "from the peer" }), to: Vec::new(), height, phantom: false });
         }
         e.txid = cid_s.clone(); e.height = height; e.net = -(my_sats as i64); e.msat = -(my_sats as i64) * 1000;
         match my_spend {
@@ -788,6 +788,8 @@ pub fn lnd_abandoned(events: &mut Vec<Event>, facts: &std::collections::HashMap<
                 let net_ = crate::wallet::network_of(network);
                 e.to = sp.map(|t| t.output.iter().map(|o| (bitcoin::Address::from_script(&o.script_pubkey, net_).map(|a| a.to_string()).unwrap_or_default(), o.value.to_sat())).filter(|(a, _)| !a.is_empty()).collect()).unwrap_or_default();
                 e.kind = "withdrawal".into(); e.layer = "chain".into(); e.txid = by.clone();
+                // dated at the sweep, not at the close: the money moved when the spender confirmed
+                if let Some(sh) = hs.iter().flatten().find(|x| x.txid.eq_ignore_ascii_case(&by)).map(|x| x.height.max(0) as u32).filter(|h| *h > 0) { e.height = sh; e.time = 0; }
                 e.memo = format!("channel {} closed on the chain by the peer at height {} (transaction {}…): this node's output of {} sats was spent by {}…, a transaction the node never saw — swept with its seed. Where it went is on this row: a vault of yours, if this app holds the address; otherwise whoever held this node's keys.", f.short, height, &cid_s[..12], my_sats, &by[..12]);
             }
         }

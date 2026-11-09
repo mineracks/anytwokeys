@@ -178,6 +178,8 @@ async fn prices_series(ccy: String, from: String, to: String, unit: Option<Strin
         if !(ccy.len() == 3 && ccy.chars().all(|c| c.is_ascii_uppercase())) { return Err("the currency is a three-letter code".into()); }
         let well_formed = |d: &str| d.len() == 10 && d.as_bytes()[4] == b'-' && d.as_bytes()[7] == b'-' && d.chars().filter(|c| c.is_ascii_digit()).count() == 8;
         if !(well_formed(&from) && well_formed(&to)) || from > to { return Err("a range is two days, YYYY-MM-DD, in order".into()); }
+        // no coin and no price before the genesis block: an undated row (1970) must not turn into a 20,000-day question
+        let from = if from.as_str() < "2009-01-03" { "2009-01-03".to_string() } else { from };
         let s = wallet::load()?;
         let prices = if s.settings.custom { s.settings.prices.clone() } else { activity::PRICES.to_string() };
         let every = activity::series_every(&from, &to);
