@@ -622,7 +622,10 @@ pub fn merge_events(have: &[Event], new: Vec<Event>) -> Vec<Event> {
 /// is KEPT. The ledger never shrinks: what a node once said about money that moved is evidence, and a node that has
 /// forgotten it is not a reason for this app to.
 pub fn keep_and_replace(have: &[Event], new: Vec<Event>) -> Vec<Event> {
-    let mut by_id: std::collections::BTreeMap<String, Event> = have.iter().map(|e| (e.id.clone(), e.clone())).collect();
+    // a day's routing comes whole (one row, routed:<day>): the day's earlier rows under any other id — one per
+    // forward, as older readings wrote them — are that same day read again, not more of it
+    let days: std::collections::HashSet<u32> = new.iter().filter(|e| e.kind == "routed" && e.id == format!("routed:{}", e.time / 86400)).map(|e| e.time / 86400).collect();
+    let mut by_id: std::collections::BTreeMap<String, Event> = have.iter().filter(|e| !(e.kind == "routed" && days.contains(&(e.time / 86400)) && e.id != format!("routed:{}", e.time / 86400))).map(|e| (e.id.clone(), e.clone())).collect();
     for e in new { by_id.insert(e.id.clone(), e); }
     let mut out: Vec<Event> = by_id.into_values().collect();
     out.sort_by_key(|e| (e.time, e.id.clone()));
@@ -717,12 +720,39 @@ pub fn lnd_own_change(events: &mut Vec<Event>, servers: &crate::chain::Servers, 
     use std::str::FromStr;
     use bitcoin::Txid;
     let net = crate::wallet::network_of(network);
-    let want: Vec<usize> = events.iter().enumerate().filter(|(_, e)| e.layer == "chain" && e.kind == "withdrawal" && !e.txid.is_empty() && !e.phantom && !e.to.is_empty()).map(|(i, _)| i).collect();
+    const MARK: &str = "sats of this went to the wallet's own address";
+    // a row whose destinations were filled from the chain lists its change among them, and its amount already leaves
+    // the change out: destinations + fee exceed what the row says left. Such a row is not a candidate — and one this
+    // step reduced before it knew that (9 Nov 2026) is put back to the node's own figure
+    let paid = |e: &Event| e.to.iter().map(|(_, v)| *v as i64).sum::<i64>() + e.fee as i64;
+    for e in events.iter_mut().filter(|e| e.layer == "chain" && e.kind == "withdrawal" && e.memo.contains(MARK)) {
+        if paid(e) > -e.net {
+            e.net = -paid(e); e.msat = e.net * 1000;
+            if let Some(at) = e.memo.find(MARK) { let head = e.memo[..at].trim_end_matches(|c: char| c.is_ascii_digit() || c == ' ').to_string(); e.memo = head; }
+        }
+    }
+    let want: Vec<usize> = events.iter().enumerate().filter(|(_, e)| e.layer == "chain" && e.kind == "withdrawal" && !e.txid.is_empty() && !e.phantom && !e.to.is_empty() && paid(e) <= -e.net).map(|(i, _)| i).collect();
     if want.is_empty() { return; }
     let log = |m: String| crate::watch::log(&format!("own change: {} withdrawal(s): {m}", want.len()));
     let ids: Vec<Txid> = want.iter().filter_map(|&i| Txid::from_str(&events[i].txid).ok()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
     let txs = match crate::chain::transactions_kept(servers, network, &ids, &|_| true) { Ok(t) => t, Err(e) => { log(format!("transactions not fetched: {e}")); return } };
     let by_id: std::collections::HashMap<Txid, &bitcoin::Transaction> = txs.iter().map(|t| (t.compute_txid(), t)).collect();
+    // the fee by the chain: inputs less outputs. A wallet that knew only some of a transaction's inputs books only
+    // part of the fee (the restored copy wrote 0 for the rescue, which paid 42,100); what left is outputs plus the
+    // whole fee. The parents of every input are fetched for their values; a fee the chain puts higher is taken
+    let parents: Vec<Txid> = txs.iter().flat_map(|t| t.input.iter().map(|i| i.previous_output.txid)).filter(|p| !by_id.contains_key(p)).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    let mut fees_fixed = 0usize;
+    if let Ok(par) = crate::chain::transactions_kept(servers, network, &parents, &|_| true) {
+        let prev: std::collections::HashMap<Txid, &bitcoin::Transaction> = par.iter().chain(txs.iter()).map(|t| (t.compute_txid(), t)).collect();
+        for &i in &want {
+            let Some(t) = Txid::from_str(&events[i].txid).ok().and_then(|id| by_id.get(&id)) else { continue };
+            let ins: Option<u64> = t.input.iter().map(|inp| prev.get(&inp.previous_output.txid).and_then(|p| p.output.get(inp.previous_output.vout as usize)).map(|o| o.value.to_sat())).sum();
+            let Some(ins) = ins else { continue };
+            let fee = ins.saturating_sub(t.output.iter().map(|o| o.value.to_sat()).sum::<u64>());
+            let e = &mut events[i];
+            if fee > e.fee { let more = (fee - e.fee) as i64; e.net -= more; e.msat = e.net * 1000; e.memo = format!("{}{}The fee was {} sats by the chain; the node's wallet booked {} (it knew only some of the inputs).", e.memo, if e.memo.is_empty() { "" } else { " " }, fee, e.fee); e.fee = fee; fees_fixed += 1; }
+        }
+    } else { log("parents of the inputs not fetched; fees left as booked".into()); }
     // every output a row lists as paid away: whose row, which outpoint, its address, how much
     let mut outs: Vec<(usize, bitcoin::OutPoint, String, u64, bitcoin::ScriptBuf)> = Vec::new();
     for &i in &want {
@@ -732,7 +762,7 @@ pub fn lnd_own_change(events: &mut Vec<Event>, servers: &crate::chain::Servers, 
             if events[i].to.iter().any(|(a, v)| *a == addr && *v == o.value.to_sat()) { outs.push((i, bitcoin::OutPoint { txid: t.compute_txid(), vout: vout as u32 }, addr, o.value.to_sat(), o.script_pubkey.clone())); }
         }
     }
-    if outs.is_empty() { return; }
+    if outs.is_empty() { log(format!("no destinations to check; {fees_fixed} fee(s) raised to the chain's")); return; }
     let spks: Vec<bitcoin::ScriptBuf> = outs.iter().map(|o| o.4.clone()).collect();
     let hists = match crate::chain::histories(servers, &spks) { Ok(h) => h, Err(e) => { log(format!("output histories not fetched: {e}")); return } };
     // the wallet's own transactions in this ledger: it signed every withdrawal and every channel open
@@ -748,9 +778,9 @@ pub fn lnd_own_change(events: &mut Vec<Event>, servers: &crate::chain::Servers, 
         e.net += *value as i64; e.msat = e.net * 1000; fixed += 1; sats_back += value;
         e.to.retain(|(a, _)| a != addr);
         let sp_id = sp.compute_txid().to_string();
-        e.memo = format!("{}{}{} sats of this went to the wallet's own address {}…, not away: transaction {}… in this ledger spent it as the wallet's. The copy of the node that wrote this row did not know the address (restored from a backup, it knows no address derived after it); the amount is corrected.", e.memo, if e.memo.is_empty() { "" } else { " " }, value, &addr[..12.min(addr.len())], &sp_id[..12]);
+        e.memo = format!("{}{}{} {MARK} {}…, not away: transaction {}… in this ledger spent it as the wallet's. The copy of the node that wrote this row did not know the address (restored from a backup, it knows no address derived after it); the amount is corrected.", e.memo, if e.memo.is_empty() { "" } else { " " }, value, &addr[..12.min(addr.len())], &sp_id[..12]);
     }
-    log(format!("{} outputs, {} spender(s) fetched, {} output(s) were the wallet's own change, {} sats", outs.len(), spenders.len(), fixed, sats_back));
+    log(format!("{} outputs, {} spender(s) fetched, {} output(s) were the wallet's own change, {} sats; {} fee(s) raised to the chain's", outs.len(), spenders.len(), fixed, sats_back, fees_fixed));
 }
 
 /// For Core Lightning, `listfunds` under "listfunds" gives the balances. Returns (kind, identity pubkey if the file
@@ -1129,9 +1159,18 @@ mod tests {
         lnd_returned(&mut ev, &crate::chain::defaults(bitcoin::Network::Bitcoin), "mainnet");
         lnd_own_change(&mut ev, &crate::chain::defaults(bitcoin::Network::Bitcoin), "mainnet");
         println!("unreturned before {before}, after {}", ev.iter().filter(|e| e.kind == "unreturned").count());
-        for e in ev.iter().filter(|e| e.memo.contains("own address")) { println!("  corrected {} {} {}", &e.id[..12], e.net, e.memo.chars().take(100).collect::<String>()); }
+        for e in ev.iter().filter(|e| e.memo.contains("own address") || e.memo.contains("by the chain")) { println!("  corrected {} {} fee {} {}", &e.id[..12], e.net, e.fee, e.memo.chars().take(100).collect::<String>()); }
         println!("ledger sum before {sum_before}, after {}", ev.iter().map(|e| e.net).sum::<i64>());
         for e in ev.iter().filter(|e| e.kind == "unreturned") { println!("  left {:>10} {}", e.net, e.memo.chars().take(120).collect::<String>()); }
+    }
+
+    #[test]
+    fn a_row_whose_destinations_came_from_the_chain_is_not_change_corrected_and_is_put_back_if_it_was() {
+        // the live node booked 5,000,852 leaving (5,000,000 away + 852 fee); the chain later listed both outputs, change
+        // included, as its destinations; an earlier pass took the change off — destinations + fee exceed the amount
+        let mut ev = vec![Event { id: "f69f".into(), time: 10, net: -4_987_920, fee: 852, layer: "chain".into(), txid: "f69f".into(), hash: String::new(), kind: "withdrawal".into(), memo: "external 12932 sats of this went to the wallet's own address bc1pjr98…, not away: transaction d40d… in this ledger spent it as the wallet's. The copy…".into(), to: vec![("bc1p-away".into(), 5_000_000)], height: 0, phantom: false, msat: 0 }];
+        lnd_own_change(&mut ev, &crate::chain::defaults(bitcoin::Network::Bitcoin), "mainnet");
+        assert_eq!((ev[0].net, ev[0].msat, ev[0].memo.as_str()), (-5_000_852, -5_000_852_000, "external"), "put back to the node's figure, the note removed");
     }
 
     #[test]
@@ -1161,6 +1200,11 @@ mod tests {
         assert_eq!(out.iter().find(|e| e.id == "a").unwrap().net, 120, "a row read again is replaced");
         assert_eq!(out.iter().find(|e| e.id == "routed:0").unwrap().net, 9, "a whole re-read replaces the day, it does not add to it");
         assert_eq!(out.iter().find(|e| e.id == "b").unwrap().net, 50);
+        // an older reading's per-forward rows for a day give way to that day's whole row
+        let r = |id: &str, t: u32, net: i64| Event { id: id.into(), time: t, net, fee: 0, layer: "lightning".into(), txid: String::new(), hash: String::new(), kind: "routed".into(), memo: String::new(), to: Vec::new(), height: 0, phantom: false, msat: 0 };
+        let have = vec![r("routed:864010:0", 864_010, 3), r("routed:864050:1", 864_050, 4), r("routed:950400:0", 950_400, 9)];
+        let out = keep_and_replace(&have, vec![r("routed:10", 864_050, 7)]);
+        assert_eq!(out.iter().map(|e| (e.id.as_str(), e.net)).collect::<Vec<_>>(), vec![("routed:10", 7), ("routed:950400:0", 9)], "day 10 is replaced whole; a day the new reading does not carry is kept");
     }
 
     #[test]

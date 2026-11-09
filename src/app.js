@@ -1631,7 +1631,7 @@ async function vaultReport() {
     const blocks = [{ kind: 'facts', rows: facts }];
     // the two charts from Home, over the vault's whole life
     if (L && L.timeline.length) {
-      const first = L.timeline[0].t, to = Math.floor(Date.now() / 1000), from = Math.max(0, first - 3600);
+      const first = (L.timeline.find(p => p.scoped) || L.timeline[0]).t, to = Math.floor(Date.now() / 1000), from = Math.max(0, first - 3600);
       const run = priced ? await pricesRange(ccy, first, to, [vault.name]) : { prices: {} };
       const S = sumSeries(L, from, to, run.prices || {}, now);
       const lbl = (t) => new Date(t * 1000).toLocaleDateString();
@@ -2208,7 +2208,7 @@ function buildLedger(inputs, method, kinds, scope) {
       if (kinds[e.txid] === 'stolen' || kinds[e.txid] === 'lost') { realised[e.txid].proceeds = 0; realised[e.txid].gain = cost !== null ? -cost : null; }
     }
     if (realised[e.txid]) for (const l of e.legs) if (l.net < 0) realised[l.id] = realised[e.txid];
-    timeline.push({ t: e.t, txid: e.txid, price: e.price, asset: assetOfEvent(e), before, sats: Object.entries(sats).filter(([n]) => inScope(n)).reduce((a, [,x]) => a + x, 0), units: unitsNow(), basis: basisNow(), internal: isInternal });
+    timeline.push({ t: e.t, txid: e.txid, price: e.price, asset: assetOfEvent(e), scoped: e.legs.some(l => inScope(l.vault)), before, sats: Object.entries(sats).filter(([n]) => inScope(n)).reduce((a, [,x]) => a + x, 0), units: unitsNow(), basis: basisNow(), internal: isInternal });
   }
   // each coin still held, with the lots its sats came from (meaningful under 'utxo', where coins keep their own history)
   return { coins: Object.fromEntries([...coins].map(([op, c]) => [op, c.lots])), queues, pools, timeline, internal, unpriced, realised, method, perVault: { sats, basis: method === 'average' ? Object.fromEntries(Object.entries(pools).map(([k, p]) => [k, p.basis])) : Object.fromEntries(Object.keys(sats).map(v => [v, (method === 'utxo' ? [...coins.values()].filter(c => c.vault === v).flatMap(c => c.lots) : (queues[v] || [])).reduce((a, l) => a + (l.cost || 0), 0)])) } };
@@ -2493,7 +2493,8 @@ async function renderSummary(box, names, opts = {}) {
   perf('overview ledger', t2, L.timeline.length);
   const t3 = performance.now();
   const rangeKey = sumPref('range', 'all'), R = SUM_RANGES.find(r => r[0] === rangeKey) || SUM_RANGES[3];
-  const to = Math.floor(Date.now() / 1000), first = L.timeline.length ? L.timeline[0].t : to;
+  // the range opens at this scope's own first movement: a linked vault's older lots (a transfer's cost) are in the timeline too, and would stretch the axis back years
+  const to = Math.floor(Date.now() / 1000), first = L.timeline.length ? (L.timeline.find(p => p.scoped) || L.timeline[0]).t : to;
   const from = R[2] ? Math.min(to - R[2] * 86400, to - 3600) : Math.max(0, first - Math.max(3600, (to - first) * 0.03));
   const namesOf = (a) => inputs.filter(i => (i.asset || 'BTC') === a).map(i => i.name);
   const run = priced && L.timeline.length ? await pricesRange(ccy, Math.max(from, first), to, mixed ? namesOf('BTC') : names) : { every: 1, prices: {}, ok: true };
