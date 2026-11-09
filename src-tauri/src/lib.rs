@@ -1967,7 +1967,7 @@ fn node_import_at(name: String, path: String) -> R<(Store, ImportReport)> {
         if let Some(h) = held.as_mut() { let off = gone.min(h.onchain); h.onchain -= off; h.pending = h.pending.saturating_sub(gone - off); } }
     let to_before = n.events.iter().filter(|e| !e.to.is_empty()).count();
     { let (servers, network) = (wallet::servers_for(&s_ro, &net_ro), net_ro.clone());
-      if kind == "lnd" { node::lnd_returned(&mut n.events, &servers, &network); node::lnd_own_change(&mut n.events, &servers, &network); }
+      if kind == "lnd" { let facts = node::lnd_close_facts(&text); node::lnd_returned(&mut n.events, &facts, &servers, &network); node::lnd_abandoned(&mut n.events, &facts, &servers, &network); node::lnd_own_change(&mut n.events, &servers, &network); }
       node_destinations(&mut n.events, &servers, &network);
       if !claims.is_null() { node::strip_own_destinations(&mut n.events, &node::cln_own_outputs(&claims, &servers, &network)); } }
     let to_filled = n.events.iter().filter(|e| !e.to.is_empty()).count() - to_before;
@@ -1977,6 +1977,16 @@ fn node_import_at(name: String, path: String) -> R<(Store, ImportReport)> {
         n.onchain = h.onchain; n.channels = h.channels; n.pending = h.pending; n.read_at = now();
         let at = n.events.iter().map(|e| e.time).max().unwrap_or(now() as u32);
         n.events = node::reconcile(std::mem::take(&mut n.events), h.total(), at, UNACCOUNTED);
+        // a gap under a sat for every row this ledger knows only to the sat is those rows' millisatoshi remainder,
+        // not a missing payment: payments the node read live before it carried millisatoshi, and closes, where a
+        // channel side's sub-sat part is dropped on the chain. Said on the row; the figure stays exact
+        let sat_only = n.events.iter().filter(|e| e.layer == "lightning" && e.msat == 0).count();
+        let closes = n.events.iter().filter(|e| e.layer == "channel" && e.kind == "close").count();
+        if let Some(u) = n.events.iter_mut().find(|e| e.kind == "unaccounted") {
+            if u.msat != 0 && (u.msat.abs() as usize) < 1000 * (sat_only + closes) {
+                u.memo = format!("Millisatoshi remainder, not a missing payment: {} msat, under a sat for each of the {} rows this ledger knows only to the sat ({sat_only} payments read live before millisatoshi were kept, {closes} channel closes, where a side's sub-sat part is dropped on the chain).", u.msat.abs(), sat_only + closes);
+            }
+        }
     }
     let gap = n.events.iter().rev().find(|e| e.kind == "unaccounted").map(|e| (e.net, e.time)).unwrap_or((0, 0));
     let report = ImportReport { read, new, total: n.events.len(), to_filled, held: held.map(|h| h.total()), gap: gap.0, gap_at: gap.1 };
