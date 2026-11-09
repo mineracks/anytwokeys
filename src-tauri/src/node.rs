@@ -671,27 +671,28 @@ pub fn lnd_returned(events: &mut Vec<Event>, servers: &crate::chain::Servers, ne
     use bitcoin::Txid;
     let want: Vec<usize> = events.iter().enumerate().filter(|(_, e)| e.kind == "unreturned" && !e.txid.is_empty()).map(|(i, _)| i).collect();
     if want.is_empty() { return; }
+    let log = |m: String| crate::watch::log(&format!("returned: {} unreturned row(s): {m}", want.len()));   // counts only: the log names no transaction and no amount
     let ids: Vec<Txid> = want.iter().filter_map(|&i| Txid::from_str(&events[i].txid).ok()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
-    let Ok(txs) = crate::chain::transactions_kept(servers, network, &ids, &|_| true) else { return };
+    let txs = match crate::chain::transactions_kept(servers, network, &ids, &|_| true) { Ok(t) => t, Err(e) => { log(format!("closing transactions not fetched: {e}")); return } };
     let by_id: std::collections::HashMap<Txid, &bitcoin::Transaction> = txs.iter().map(|t| (t.compute_txid(), t)).collect();
     // every output of every such closing transaction: whose row, which outpoint, how much
     let mut outs: Vec<(usize, bitcoin::OutPoint, u64)> = Vec::new();
     for &i in &want { if let Some(t) = Txid::from_str(&events[i].txid).ok().and_then(|id| by_id.get(&id)) { for (vout, o) in t.output.iter().enumerate() { outs.push((i, bitcoin::OutPoint { txid: t.compute_txid(), vout: vout as u32 }, o.value.to_sat())); } } }
     let spks: Vec<bitcoin::ScriptBuf> = outs.iter().filter_map(|(_, op, _)| by_id.get(&op.txid).and_then(|t| t.output.get(op.vout as usize)).map(|o| o.script_pubkey.clone())).collect();
-    if spks.len() != outs.len() { return; }
-    let Ok(hists) = crate::chain::histories(servers, &spks) else { return };
+    if spks.len() != outs.len() { log(format!("{} of {} closing transactions came back", by_id.len(), ids.len())); return; }
+    let hists = match crate::chain::histories(servers, &spks) { Ok(h) => h, Err(e) => { log(format!("output histories not fetched: {e}")); return } };
     let held: std::collections::HashSet<String> = events.iter().filter(|e| e.kind != "unreturned" && !e.txid.is_empty()).map(|e| e.txid.to_lowercase()).collect();
     // candidate spenders: transactions in those histories that this ledger holds (others are not ours to count)
     let cand: Vec<Txid> = hists.iter().flatten().filter(|h| held.contains(&h.txid.to_lowercase())).filter_map(|h| Txid::from_str(&h.txid).ok()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
-    if cand.is_empty() { return; }
-    let Ok(spenders) = crate::chain::transactions_kept(servers, network, &cand, &|_| true) else { return };
+    if cand.is_empty() { log(format!("{} outputs, no spender among the ledger's {} transactions", outs.len(), held.len())); return; }
+    let spenders = match crate::chain::transactions_kept(servers, network, &cand, &|_| true) { Ok(t) => t, Err(e) => { log(format!("spenders not fetched: {e}")); return } };
     let mut back: std::collections::HashMap<usize, (u64, Vec<String>)> = std::collections::HashMap::new();
     for (i, op, value) in &outs {
         if let Some(sp) = spenders.iter().find(|t| t.input.iter().any(|inp| inp.previous_output == *op)) {
             let e = back.entry(*i).or_default(); e.0 += value; let id = sp.compute_txid().to_string(); if !e.1.contains(&id) { e.1.push(id); }
         }
     }
-    let mut drop = Vec::new();
+    let mut drop = Vec::new(); let back_n = back.len();
     for (i, (sats, by)) in back {
         let e = &mut events[i];
         let left = (-e.net) - sats as i64;
@@ -700,6 +701,7 @@ pub fn lnd_returned(events: &mut Vec<Event>, servers: &crate::chain::Servers, ne
         e.net = -left; e.msat = -left * 1000;
         e.memo = format!("{} Of it, {} sats came back through {} — transaction(s) this ledger holds — and are counted there; {} sats did not.", e.memo, sats, by_words, left);
     }
+    log(format!("{} outputs, {} spender(s) in the ledger, {} row(s) reduced, {} dropped", outs.len(), spenders.len(), back_n.saturating_sub(drop.len()), drop.len()));
     drop.sort_unstable(); for i in drop.into_iter().rev() { events.remove(i); }
 }
 
@@ -1058,6 +1060,21 @@ mod tests {
         assert_eq!((close.kind.as_str(), close.net), ("close", -1_000_000), "the close takes our side out of the channel");
         assert!(ev.iter().all(|e| e.id != "cc:side"), "funding − fee = settled: nothing drifted, no settlement row");
         assert_eq!(ev.iter().map(|e| e.net).sum::<i64>(), 999_500, "the wallet ends with the sweep, once — before this it read 1,999,500");
+    }
+
+    /// A2K_LEDGER_FILE=<lnd file> A2K_HELD_TXIDS=<comma list of txids the ledger also holds>: runs the chain check
+    /// that cancels an unreturned close whose output one of those transactions spent. Needs the chain.
+    #[test] #[ignore]
+    fn a_real_lnd_file_through_the_returned_check() {
+        let p = std::env::var("A2K_LEDGER_FILE").expect("A2K_LEDGER_FILE");
+        let (_, _, mut ev, _) = ledger_from_file(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        for t in std::env::var("A2K_HELD_TXIDS").unwrap_or_default().split(',').filter(|t| !t.is_empty()) {
+            ev.push(Event { id: t.to_string(), time: 1792000000, net: -1, fee: 0, layer: "chain".into(), txid: t.to_string(), hash: String::new(), kind: "withdrawal".into(), memo: String::new(), to: Vec::new(), height: 0, phantom: false, msat: 0 });
+        }
+        let before = ev.iter().filter(|e| e.kind == "unreturned").count();
+        lnd_returned(&mut ev, &crate::chain::defaults(bitcoin::Network::Bitcoin), "mainnet");
+        println!("unreturned before {before}, after {}", ev.iter().filter(|e| e.kind == "unreturned").count());
+        for e in ev.iter().filter(|e| e.kind == "unreturned") { println!("  left {:>10} {}", e.net, e.memo.chars().take(120).collect::<String>()); }
     }
 
     #[test]
