@@ -1967,7 +1967,7 @@ fn node_import_at(name: String, path: String) -> R<(Store, ImportReport)> {
         if let Some(h) = held.as_mut() { let off = gone.min(h.onchain); h.onchain -= off; h.pending = h.pending.saturating_sub(gone - off); } }
     let to_before = n.events.iter().filter(|e| !e.to.is_empty()).count();
     { let (servers, network) = (wallet::servers_for(&s_ro, &net_ro), net_ro.clone());
-      if kind == "lnd" { node::lnd_returned(&mut n.events, &servers, &network); }
+      if kind == "lnd" { node::lnd_returned(&mut n.events, &servers, &network); node::lnd_own_change(&mut n.events, &servers, &network); }
       node_destinations(&mut n.events, &servers, &network);
       if !claims.is_null() { node::strip_own_destinations(&mut n.events, &node::cln_own_outputs(&claims, &servers, &network)); } }
     let to_filled = n.events.iter().filter(|e| !e.to.is_empty()).count() - to_before;

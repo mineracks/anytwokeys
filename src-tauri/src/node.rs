@@ -371,8 +371,9 @@ fn lnd_chain_row(t: &serde_json::Value, opens: &std::collections::HashSet<String
     // arriving), and a routing node's life has many such closes
     let (layer, kind, mut net) = if opens.contains(&txid) { ("channel", "open", -(fee as i64)) } else if let Some(settled) = closes.get(&txid) { ("channel", "close", amount.max(0) - settled) } else if amount >= 0 { ("chain", "deposit", amount) } else { ("chain", "withdrawal", amount) };
     let to = lnd_outs(t); let mut memo = s("label");
-    if kind == "withdrawal" { let paid: i64 = to.iter().map(|(_, v)| *v as i64).sum(); if paid > -amount {
-        net = -(paid + (-amount));
+    if kind == "withdrawal" { let paid: i64 = to.iter().map(|(_, v)| *v as i64).sum(); if paid + fee as i64 > -amount {
+        // what left is the outputs that are not ours plus the fee; the inputs the wallet did know are inside that, not on top of it
+        net = -(paid + fee as i64);
         memo = format!("{}{}the node's wallet booked only {} sats for this; {} sats of it came from outputs the wallet had not counted as its own (a channel's close being swept), so the amount is taken from the transaction's outputs", memo, if memo.is_empty() { "" } else { " — " }, -amount, paid);
     } }
     if net == 0 && fee == 0 && layer != "channel" { return None; }
@@ -703,6 +704,53 @@ pub fn lnd_returned(events: &mut Vec<Event>, servers: &crate::chain::Servers, ne
     }
     log(format!("{} outputs, {} spender(s) in the ledger, {} row(s) reduced, {} dropped", outs.len(), spenders.len(), back_n.saturating_sub(drop.len()), drop.len()));
     drop.sort_unstable(); for i in drop.into_iter().rev() { events.remove(i); }
+}
+
+/// The mirror of lnd_returned, for withdrawals. A copy restored from a backup does not know the addresses the live
+/// wallet derived after the backup, so it lists the live wallet's own change as money paid away — and when its file
+/// replaces the live reading of the same transaction, the change leaves once there and again in the transaction that
+/// later spent it. The chain is asked who spent each "paid away" output of every withdrawal: an output spent by a
+/// transaction this ledger holds as the wallet's own (a withdrawal or a channel open — the wallet signed it) was the
+/// wallet's, and comes off what the row says left; the address leaves the row's destinations so the correction is
+/// made once. Failures leave the rows as they were. Logs counts only.
+pub fn lnd_own_change(events: &mut Vec<Event>, servers: &crate::chain::Servers, network: &str) {
+    use std::str::FromStr;
+    use bitcoin::Txid;
+    let net = crate::wallet::network_of(network);
+    let want: Vec<usize> = events.iter().enumerate().filter(|(_, e)| e.layer == "chain" && e.kind == "withdrawal" && !e.txid.is_empty() && !e.phantom && !e.to.is_empty()).map(|(i, _)| i).collect();
+    if want.is_empty() { return; }
+    let log = |m: String| crate::watch::log(&format!("own change: {} withdrawal(s): {m}", want.len()));
+    let ids: Vec<Txid> = want.iter().filter_map(|&i| Txid::from_str(&events[i].txid).ok()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    let txs = match crate::chain::transactions_kept(servers, network, &ids, &|_| true) { Ok(t) => t, Err(e) => { log(format!("transactions not fetched: {e}")); return } };
+    let by_id: std::collections::HashMap<Txid, &bitcoin::Transaction> = txs.iter().map(|t| (t.compute_txid(), t)).collect();
+    // every output a row lists as paid away: whose row, which outpoint, its address, how much
+    let mut outs: Vec<(usize, bitcoin::OutPoint, String, u64, bitcoin::ScriptBuf)> = Vec::new();
+    for &i in &want {
+        let Some(t) = Txid::from_str(&events[i].txid).ok().and_then(|id| by_id.get(&id)) else { continue };
+        for (vout, o) in t.output.iter().enumerate() {
+            let addr = bitcoin::Address::from_script(&o.script_pubkey, net).map(|a| a.to_string()).unwrap_or_default();
+            if events[i].to.iter().any(|(a, v)| *a == addr && *v == o.value.to_sat()) { outs.push((i, bitcoin::OutPoint { txid: t.compute_txid(), vout: vout as u32 }, addr, o.value.to_sat(), o.script_pubkey.clone())); }
+        }
+    }
+    if outs.is_empty() { return; }
+    let spks: Vec<bitcoin::ScriptBuf> = outs.iter().map(|o| o.4.clone()).collect();
+    let hists = match crate::chain::histories(servers, &spks) { Ok(h) => h, Err(e) => { log(format!("output histories not fetched: {e}")); return } };
+    // the wallet's own transactions in this ledger: it signed every withdrawal and every channel open
+    let own: std::collections::HashSet<String> = events.iter().filter(|e| !e.txid.is_empty() && !e.phantom && (e.kind == "withdrawal" || e.kind == "open")).map(|e| e.txid.to_lowercase()).collect();
+    let cand: Vec<Txid> = hists.iter().flatten().filter(|h| own.contains(&h.txid.to_lowercase())).filter_map(|h| Txid::from_str(&h.txid).ok()).filter(|t| !ids.contains(t)).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    let spenders = if cand.is_empty() { Vec::new() } else { match crate::chain::transactions_kept(servers, network, &cand, &|_| true) { Ok(t) => t, Err(e) => { log(format!("spenders not fetched: {e}")); return } } };
+    // a transaction already fetched above can be the spender too (one withdrawal spending another's change)
+    let all: Vec<&bitcoin::Transaction> = txs.iter().chain(spenders.iter()).collect();
+    let mut fixed = 0usize; let mut sats_back = 0u64;
+    for (i, op, addr, value, _) in &outs {
+        let Some(sp) = all.iter().find(|t| own.contains(&t.compute_txid().to_string()) && t.compute_txid() != op.txid && t.input.iter().any(|inp| inp.previous_output == *op)) else { continue };
+        let e = &mut events[*i];
+        e.net += *value as i64; e.msat = e.net * 1000; fixed += 1; sats_back += value;
+        e.to.retain(|(a, _)| a != addr);
+        let sp_id = sp.compute_txid().to_string();
+        e.memo = format!("{}{}{} sats of this went to the wallet's own address {}…, not away: transaction {}… in this ledger spent it as the wallet's. The copy of the node that wrote this row did not know the address (restored from a backup, it knows no address derived after it); the amount is corrected.", e.memo, if e.memo.is_empty() { "" } else { " " }, value, &addr[..12.min(addr.len())], &sp_id[..12]);
+    }
+    log(format!("{} outputs, {} spender(s) fetched, {} output(s) were the wallet's own change, {} sats", outs.len(), spenders.len(), fixed, sats_back));
 }
 
 /// For Core Lightning, `listfunds` under "listfunds" gives the balances. Returns (kind, identity pubkey if the file
@@ -1079,7 +1127,9 @@ mod tests {
           for e in &ev { let x = by.entry((e.layer.clone(), e.kind.clone())).or_default(); x.0 += 1; x.1 += e.net; }
           println!("{} rows from the file:", ev.len()); for ((l, k), (c, n)) in by { println!("  {l:>10} {k:<12} {c:>5} rows {n:>14} sats"); } }
         lnd_returned(&mut ev, &crate::chain::defaults(bitcoin::Network::Bitcoin), "mainnet");
+        lnd_own_change(&mut ev, &crate::chain::defaults(bitcoin::Network::Bitcoin), "mainnet");
         println!("unreturned before {before}, after {}", ev.iter().filter(|e| e.kind == "unreturned").count());
+        for e in ev.iter().filter(|e| e.memo.contains("own address")) { println!("  corrected {} {} {}", &e.id[..12], e.net, e.memo.chars().take(100).collect::<String>()); }
         println!("ledger sum before {sum_before}, after {}", ev.iter().map(|e| e.net).sum::<i64>());
         for e in ev.iter().filter(|e| e.kind == "unreturned") { println!("  left {:>10} {}", e.net, e.memo.chars().take(120).collect::<String>()); }
     }
