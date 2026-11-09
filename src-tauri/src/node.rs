@@ -780,7 +780,16 @@ pub fn lnd_abandoned(events: &mut Vec<Event>, facts: &std::collections::HashMap<
         match my_spend {
             None => { ours += 1; e.memo = format!("channel {} closed on the chain by the peer at height {} (transaction {}…): this node's output of {} sats is STILL UNSPENT — recoverable with this node's seed (chantools sweepremoteclosed). Booked as not returned until it is swept; say below when it is.", f.short, height, &cid_s[..12], my_sats); }
             Some((by, _)) if held.contains(&by.to_lowercase()) => { ours += 1; e.net = 0; e.msat = 0; e.memo = format!("channel {} closed on the chain by the peer at height {} (transaction {}…): this node's output of {} sats came back through {}…, a transaction this ledger holds, and is counted there.", f.short, height, &cid_s[..12], my_sats, &by[..12]); }
-            Some((by, _)) => { gone += 1; e.memo = format!("channel {} closed on the chain by the peer at height {} (transaction {}…): this node's output of {} sats was spent by {}…, a transaction this ledger does not hold — taken by whoever held this node's keys.", f.short, height, &cid_s[..12], my_sats, &by[..12]); }
+            Some((by, _)) => {
+                // where it went is put on the row, so a sweep into a vault of the person's own is linked as a move;
+                // anything else is whoever held this node's keys
+                gone += 1;
+                let sp = sps.iter().find(|t| t.compute_txid().to_string() == by);
+                let net_ = crate::wallet::network_of(network);
+                e.to = sp.map(|t| t.output.iter().map(|o| (bitcoin::Address::from_script(&o.script_pubkey, net_).map(|a| a.to_string()).unwrap_or_default(), o.value.to_sat())).filter(|(a, _)| !a.is_empty()).collect()).unwrap_or_default();
+                e.kind = "withdrawal".into(); e.layer = "chain".into(); e.txid = by.clone();
+                e.memo = format!("channel {} closed on the chain by the peer at height {} (transaction {}…): this node's output of {} sats was spent by {}…, a transaction the node never saw — swept with its seed. Where it went is on this row: a vault of yours, if this app holds the address; otherwise whoever held this node's keys.", f.short, height, &cid_s[..12], my_sats, &by[..12]);
+            }
         }
     }
     log(format!("{open} still open on the chain, {ours} with this node's output found, {gone} taken by another, {unknown} not yet tellable, {} peer-side row(s) added", add.len()));
