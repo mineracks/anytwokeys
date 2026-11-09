@@ -5383,6 +5383,13 @@ $('#vs-node-retire').onclick = async () => {
   } catch (e) { $('#vs-node-note').textContent = String(e); }
 };
 
+$('#vs-node-csv').onclick = async () => {
+  if (!vault || !vault.node) return;
+  const b = $('#vs-node-csv'); b.disabled = true;
+  try { const n = await invoke('node_ledger_csv', { name: vault.name }); $('#vs-node-note').textContent = `Saved: ${sats(n)} rows, times in UTC, amounts in sats.`; }
+  catch (e) { if (String(e) !== 'cancelled') $('#vs-node-note').textContent = String(e); }
+  finally { b.disabled = false; }
+};
 $('#vs-node-import').onclick = async () => {
   if (!vault || !vault.node) return;
   const b = $('#vs-node-import'); b.disabled = true; $('#vs-node-retire').disabled = true; $('#vs-node-note').textContent = '';

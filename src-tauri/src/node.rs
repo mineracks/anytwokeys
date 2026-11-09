@@ -1075,6 +1075,9 @@ mod tests {
         }
         let before = ev.iter().filter(|e| e.kind == "unreturned").count();
         let sum_before: i64 = ev.iter().map(|e| e.net).sum();
+        { let mut by: std::collections::BTreeMap<(String, String), (usize, i64)> = Default::default();
+          for e in &ev { let x = by.entry((e.layer.clone(), e.kind.clone())).or_default(); x.0 += 1; x.1 += e.net; }
+          println!("{} rows from the file:", ev.len()); for ((l, k), (c, n)) in by { println!("  {l:>10} {k:<12} {c:>5} rows {n:>14} sats"); } }
         lnd_returned(&mut ev, &crate::chain::defaults(bitcoin::Network::Bitcoin), "mainnet");
         println!("unreturned before {before}, after {}", ev.iter().filter(|e| e.kind == "unreturned").count());
         println!("ledger sum before {sum_before}, after {}", ev.iter().map(|e| e.net).sum::<i64>());
