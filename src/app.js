@@ -155,7 +155,7 @@ function paintCrumbs(name) {
   if (APP_LEVEL.has(name)) trail.push(['Any Two Keys', null]);
   if (name === 'entity') trail.push(['Entities', 'entities']);
   if (name === 'place') trail.push(['Locations', 'places']);
-  const here = { home: '', send: 'Send', receive: 'Receive', backup: 'Backup', keys: recPage.kind === 'key' ? recPage.leaf : 'Keys', settings: 'App settings', places: 'Locations', entities: 'Entities', allkeys: 'Keys', entity: (entityOf(entPage) || {}).name || 'Entity', place: ((store.places || []).find(p => p.id === placePage) || {}).name || 'Location', own: ownState.kind === 'split' ? 'Split coin' : 'Combine coins', setup: 'New vault', restore: 'Restore', sign: 'Sign', messages: 'Messages', tx: name === 'tx' && vault && txView.txid ? txHeadline() : '', coins: recPage.kind === 'coin' ? recPage.leaf : '', addresses: recPage.kind === 'addr' ? recPage.leaf : '' }[name] || '';
+  const here = { home: '', send: 'Send', receive: 'Receive', backup: 'Backup', keys: recPage.kind === 'key' ? recPage.leaf : 'Keys', settings: 'App settings', places: 'Locations', entities: 'Entities', allkeys: 'Keys', entity: (entityOf(entPage) || {}).name || 'Entity', place: ((store.places || []).find(p => p.id === placePage) || {}).name || 'Location', own: ownState.kind === 'split' ? 'Split coin' : 'Combine coins', setup: 'New vault', restore: 'Restore', sign: 'Sign', messages: 'Messages', tx: name === 'tx' && vault && txView.txid ? txShort() : '', coins: recPage.kind === 'coin' ? recPage.leaf : '', addresses: recPage.kind === 'addr' ? recPage.leaf : '' }[name] || '';
   const el = $('#crumbs'); el.hidden = !trail.length;
   // separators only BETWEEN crumbs: a screen with no name of its own (Home, Activity) used to end in a dangling ›
   const html = trail.map(([t, go]) => (go ? `<a tabindex="0" role="link" data-crumb="${go}">${esc(t)}</a>` : `<span>${esc(t)}</span>`)).join('<span class="sep">›</span>') + (here ? `<span class="sep sep-here">›</span><span class="here">${esc(here)}</span>` : '');
@@ -566,15 +566,19 @@ const txList = {};
 const txOrder = () => (txList[vault.name] || []);
 function openTx(txid) { const h = txOrder().find(x => x.txid === txid); txView.txid = txid; txView.height = h ? h.height : 0; show('tx'); }
 function stepTx(by) { const l = txOrder(), i = l.findIndex(x => x.txid === txView.txid); if (i < 0 || !l[i + by]) return; clearTimeout(saveTxField.t); saveTxField('note'); openTx(l[i + by].txid); }
-const txHeadline = () => { const f = ((txFacts[vault.name] || {}).rows || {})[txView.txid], lab = labelOf('tx:' + txView.txid);
-  if (lab) return lab; if (!f || f.net === null) return txView.txid.slice(0, 10) + '…';
+// the transaction in a few words — date and amount — for the breadcrumb, which says WHERE you are; the title says
+// what you called it (the label), clamped by the stylesheet, the whole text on hover
+const txShort = () => { const f = ((txFacts[vault.name] || {}).rows || {})[txView.txid];
+  if (!f || f.net === null) return txView.txid.slice(0, 10) + '…';
   return (f.time ? new Date(f.time * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) + ' · ' : '') + (f.net > 0 ? '+' : f.net < 0 ? '−' : '') + sats(Math.abs(f.net)) + ' sats'; };
+const txHeadline = () => labelOf('tx:' + txView.txid) || txShort();
+const setTxTitle = () => { const t = $('#title'), h = txHeadline(); t.textContent = h; t.title = h.length > 60 ? h : ''; };
 async function renderTx() {
   if (!vault || !txView.txid) return show('home');
   const name = vault.name, txid = txView.txid, mine = ++txView.seq, key = 'tx:' + txid;
   recPoint('tx', key);
   const facts = txFacts[name] || {}, f = (facts.rows || {})[txid];
-  paintCrumbs('tx'); $('#title').textContent = txHeadline();
+  paintCrumbs('tx'); setTxTitle();
   { const l = txOrder(), i = l.findIndex(x => x.txid === txid); $('#tx-prev').disabled = i <= 0; $('#tx-next').disabled = i < 0 || i >= l.length - 1; $('#tx-pos').textContent = i >= 0 ? `${i + 1} of ${l.length}` : ''; }
   // what the activity list already knows is on screen at once; the decoded transaction fills the rest in
   const amt = $('#tx-amt'); amt.className = 'tx-amt' + (f && f.net > 0 ? ' in' : ''); amt.innerHTML = f && f.net !== null ? `${f.net > 0 ? '+' : f.net < 0 ? '−' : ''}${sats(Math.abs(f.net))} <small>sats</small>` : '…';
@@ -1066,7 +1070,7 @@ async function saveTxField(which) {
   try { store = await invoke(which === 'label' ? 'label_set' : 'note_set', which === 'label' ? { name, key, label: val } : { name, key, note: val }); vault = store.vaults.find(v => v.name === name) || vault;
     const sealed = name && vault && vault.seal && vault.seal.shares && vault.seal.shares.length;
     recSaid('Saved ' + new Date().toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) + (sealed ? ' · backed up' : ' · on this computer'), true, sealed ? 'Encrypted and backed up with this vault\'s labels; any two keys bring it back' : 'Kept on this computer only. Seal the keys to back it up.');
-    if (which === 'label') { if (recView.kind === 'tx') { paintCrumbs('tx'); $('#title').textContent = txHeadline(); } else renderRecHead(); } }
+    if (which === 'label') { if (recView.kind === 'tx') { paintCrumbs('tx'); setTxTitle(); } else renderRecHead(); } }
   catch (e) { recSaid(''); fail(e); }
 }
 $('#tx-label').addEventListener('blur', () => saveTxField('label'));
@@ -3015,11 +3019,11 @@ function sameDayOut(name, txid) {
   const f = txFacts[name]; if (!f) return [];
   const me = f.rows[txid]; if (!me || !me.time) return [];
   const day = (t) => new Date(t * 1000).toDateString();
-  // a node's channel rows (a close, the peer's side of one) are its own accounting, not a spend anyone could take:
-  // only a transaction the node's ledger also holds on the chain layer can be stolen
-  const ev = store.vaults.find(v => v.name === name)?.node?.events || [];
-  const chan = new Set(ev.filter(e => e.layer === 'channel').map(e => e.txid)), chain = new Set(ev.filter(e => e.layer === 'chain').map(e => e.txid));
-  return Object.values(f.rows).filter(r => r.txid !== txid && r.net < 0 && r.time && day(r.time) === day(me.time) && !transferText(f, r.txid) && !(chan.has(r.txid) && !chain.has(r.txid))).map(r => r.txid);
+  // a node's channel rows (a close, the peer's side of one) are its own accounting, not a spend anyone could take.
+  // A node's activity rows are keyed by the ledger row's id (two rows can share one transaction), so the layer is
+  // looked up by that id
+  const layerOf = Object.fromEntries((store.vaults.find(v => v.name === name)?.node?.events || []).map(e => [e.id, e.layer]));
+  return Object.values(f.rows).filter(r => r.txid !== txid && r.net < 0 && r.time && day(r.time) === day(me.time) && !transferText(f, r.txid) && layerOf[r.txid] !== 'channel').map(r => r.txid);
 }
 document.addEventListener('click', async (ev) => {
   const a = ev.target.closest('[data-stolen-too]'); if (!a || !vault) return;
