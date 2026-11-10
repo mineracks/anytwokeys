@@ -1562,6 +1562,20 @@ fn node_read(n: &node::Node, servers: &chain::Servers, network: &str) -> R<node:
             let (new, marks) = c.events_since(&n.marks)?;
             fresh.events = node::merge_events(&n.events, new); fresh.marks = marks;
             fresh.onchain = onchain; fresh.channels = channels; fresh.pending = pending; fresh.version = version; fresh.read_at = now();
+            // the chain over the node's word, the same three steps a file import runs (node_import_at): a close whose
+            // output came home through a transaction this ledger holds, a channel the node abandoned that is still
+            // on the chain, and the wallet's own change listed as paid away. A live node that was emptied by
+            // someone holding its keys is read with the same detail as a backup of one. Failures leave the rows as
+            // they were; the log names counts, never a transaction or an amount.
+            match (c.get("/v1/channels/closed"), c.get("/v1/transactions")) {
+                (Ok(closed), Ok(txns)) => {
+                    let facts = node::lnd_close_facts(&serde_json::json!({ "closedchannels": closed, "listchaintxns": txns }).to_string());
+                    node::lnd_returned(&mut fresh.events, &facts, servers, network);
+                    node::lnd_abandoned(&mut fresh.events, &facts, servers, network);
+                }
+                (a, b) => crate::watch::log(&format!("lnd chain steps skipped: {}", a.err().or(b.err()).unwrap_or_default())),
+            }
+            node::lnd_own_change(&mut fresh.events, servers, network);
             node_destinations(&mut fresh.events, servers, network);
             fresh.events = node::reconcile(fresh.events, node::Held { onchain, channels, pending }.total(), now() as u32, UNACCOUNTED);
         }

@@ -57,6 +57,12 @@ counts as already booked only by a deposit or withdrawal; a fee row naming the s
 it, not the chain's. A transaction the bookkeeper named that is on no server's chain is a **phantom**: kept, counted as
 zero, said so.
 
+An LND node read live goes through the same three chain steps as a file imported from a backup of one: a close whose
+output came home through a transaction the ledger holds, a channel the node abandoned that still sits on the chain,
+and the wallet's own change listed as paid away (`lnd_returned`, `lnd_abandoned`, `lnd_own_change`, run in `node_read`
+from the node's own `closedchannels` and `listchaintxns` answers). A node that is still answering but was emptied by
+someone holding its keys is read with the same detail as a restored copy of one.
+
 Bookkeeper fee rows are named by their transaction (`onchain_fee|txid|account`), never by the time of the read: a
 restored copy and the live node must give the same row the same id, and equal fee or close rows of one transaction
 collapse to one after every merge (`node::dedupe_fee_rows`, earliest kept, destinations taken from either).
