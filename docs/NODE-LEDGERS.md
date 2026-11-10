@@ -90,6 +90,10 @@ destruction of a CGT asset), claimed in the year the loss is discovered, with th
 transaction, the addresses the coins went to, the report made. The unaccounted row of a drained node takes the same
 picker, so a whole incident can be booked as one loss once the node is retired as empty.
 
+A whole incident can also be booked from one file: a BIP 329 labels file (Vault settings → *Import labels*) may carry
+`"disposal": "stolen"` (or sold, spent, gift, self, lost) on a `tx` line beside, or instead of, its label, and the export
+writes the field back out. Other BIP 329 readers ignore it.
+
 ## Retiring a node
 
 Vault settings → *The node* → **Retire this node — keep its ledger**, with a reason that is kept with the record. A retired

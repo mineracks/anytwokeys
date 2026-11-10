@@ -3853,7 +3853,10 @@ fn labels_export(name: String) -> R<String> {
     for k in keys {
         let (t, r) = k.split_once(':').unwrap_or(("", ""));
         let t = match t { "addr" => "addr", "tx" => "tx", "out" => "output", _ => continue };
-        lines.push(serde_json::json!({ "type": t, "ref": r, "label": v.labels[k] }).to_string());
+        let mut line = serde_json::json!({ "type": t, "ref": r, "label": v.labels[k] });
+        // what a spend was (sold, spent, gift, self, stolen, lost) travels with the label: a field BIP 329 readers ignore
+        if let Some(d) = v.more.get(k).and_then(|m| m.get("disposal")).and_then(|d| d.get("kind")).and_then(|x| x.as_str()) { line["disposal"] = d.into(); }
+        lines.push(line.to_string());
     }
     if lines.is_empty() { return Err("this vault has no labels yet".into()); }
     let path = files::FileDialog::new().set_title("Save labels (BIP 329)").set_file_name(format!("{}-labels.jsonl", v.name.replace(' ', "-"))).add_filter("BIP 329 labels", &["jsonl", "json"]).save_file().ok_or("cancelled")?;
@@ -3865,17 +3868,24 @@ fn labels_export(name: String) -> R<String> {
 async fn labels_import(name: String) -> R<usize> {
     let path = files::FileDialog::new().set_title("Open a labels file (BIP 329)").add_filter("BIP 329 labels", &["jsonl", "json", "txt"]).pick_file().ok_or("cancelled")?;
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let mut got: Vec<(String, String)> = Vec::new();
+    // each line: a label, a disposal (what a spend out was: sold, spent, gift, self, stolen, lost — on a tx), or both.
+    // A whole incident can be booked from one file: every sweep an attacker made, marked stolen in one import.
+    let mut got: Vec<(String, Option<String>, Option<String>)> = Vec::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         let j: serde_json::Value = match serde_json::from_str(line) { Ok(j) => j, Err(_) => continue };
-        let (t, r, lab) = (j["type"].as_str().unwrap_or(""), j["ref"].as_str().unwrap_or(""), j["label"].as_str().unwrap_or(""));
+        let (t, r, lab) = (j["type"].as_str().unwrap_or(""), j["ref"].as_str().unwrap_or(""), j["label"].as_str().unwrap_or("").trim());
         let key = match t { "addr" => format!("addr:{r}"), "tx" => format!("tx:{r}"), "output" => format!("out:{r}"), _ => continue };
-        if !r.is_empty() && !lab.trim().is_empty() { got.push((key, lab.trim().to_string())); }
+        let disp = j["disposal"].as_str().map(str::trim).filter(|d| t == "tx" && ["sold", "spent", "gift", "self", "stolen", "lost"].contains(d)).map(str::to_string);
+        if !r.is_empty() && (!lab.is_empty() || disp.is_some()) { got.push((key, Some(lab.to_string()).filter(|l| !l.is_empty()), disp)); }
     }
     let n = got.len();
     if n == 0 { return Err("no addr, tx or output labels in that file".into()); }
     let nm = name.clone();
-    wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) { let t = now(); for (k, l) in got { v.label_meta.insert(k.clone(), t); v.labels.insert(k, l); } })?;
+    wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) { let t = now(); for (k, l, d) in got {
+        v.label_meta.insert(k.clone(), t);
+        if let Some(l) = l { v.labels.insert(k.clone(), l); }
+        if let Some(d) = d { v.more.entry(k).or_default().insert("disposal".into(), serde_json::json!({ "kind": d, "t": t })); }
+    } })?;
     let _ = labels_sync(name).await;
     Ok(n)
 }
