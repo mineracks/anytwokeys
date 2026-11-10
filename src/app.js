@@ -3015,7 +3015,11 @@ function sameDayOut(name, txid) {
   const f = txFacts[name]; if (!f) return [];
   const me = f.rows[txid]; if (!me || !me.time) return [];
   const day = (t) => new Date(t * 1000).toDateString();
-  return Object.values(f.rows).filter(r => r.txid !== txid && r.net < 0 && r.time && day(r.time) === day(me.time) && !transferText(f, r.txid)).map(r => r.txid);
+  // a node's channel rows (a close, the peer's side of one) are its own accounting, not a spend anyone could take:
+  // only a transaction the node's ledger also holds on the chain layer can be stolen
+  const ev = store.vaults.find(v => v.name === name)?.node?.events || [];
+  const chan = new Set(ev.filter(e => e.layer === 'channel').map(e => e.txid)), chain = new Set(ev.filter(e => e.layer === 'chain').map(e => e.txid));
+  return Object.values(f.rows).filter(r => r.txid !== txid && r.net < 0 && r.time && day(r.time) === day(me.time) && !transferText(f, r.txid) && !(chan.has(r.txid) && !chain.has(r.txid))).map(r => r.txid);
 }
 document.addEventListener('click', async (ev) => {
   const a = ev.target.closest('[data-stolen-too]'); if (!a || !vault) return;
