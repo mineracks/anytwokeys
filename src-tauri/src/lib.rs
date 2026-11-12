@@ -9,6 +9,7 @@ mod sync;
 mod muun;
 mod liquid;
 mod activity;
+mod provenance;
 mod cycle;
 mod transfers;
 mod net;
@@ -993,7 +994,7 @@ fn vault_create(name: String, threshold: usize, keys: Vec<NewKey>, rotating: Opt
     let pubs: Vec<String> = keys.iter().map(|k| k.pubkey.to_lowercase()).collect();
     let descriptor = wallet::descriptor_for(threshold, &pubs)?;
     let network = wallet::network_of(&s.settings.network);
-    let mut v = Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name, network: s.settings.network.clone(), threshold,
+    let mut v = Vault { provenance_default: None, provenance_policy: None, watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name, network: s.settings.network.clone(), threshold,
         keys: keys.into_iter().map(|k| wallet::KeyRef { name: k.name, serial: k.serial, pubkey: k.pubkey.to_lowercase(), device: None }).collect(),
         descriptor, address: String::new(), created: now(),
         chain_code: if rotating.unwrap_or(true) { Some(fresh_chain_code()) } else { None }, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None, entity: None, exchange: None };
@@ -1043,7 +1044,7 @@ fn descriptor_parse(text: String) -> R<Parsed> {
     let (desc_text, cc) = wallet::split_recovery(&text);
     let (threshold, keys) = wallet::keys_of(&desc_text)?;
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
-    let tmp = Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name: String::new(), network: s.settings.network.clone(), threshold, keys: keys.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.clone(), device: None }).collect(),
+    let tmp = Vault { provenance_default: None, provenance_policy: None, watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name: String::new(), network: s.settings.network.clone(), threshold, keys: keys.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.clone(), device: None }).collect(),
         descriptor: descriptor.clone(), address: String::new(), created: 0, chain_code: cc.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None, entity: None, exchange: None };
     let address = wallet::address_at(&tmp, 0)?;
     Ok(Parsed { threshold, keys, descriptor: wallet::recovery_line(&tmp), address, rotating: cc.is_some(), ext: None, kind: "cards".into(), name: ur_name })
@@ -1100,7 +1101,7 @@ fn muun_restore(name: String, key1: String, key2: String, code: String, expect: 
     if let Some(v) = s.vaults.iter().find(|v| v.muun.as_ref().map(|o| o.user == m.user).unwrap_or(false)) {
         return Err(format!("this Muun wallet is already here, as '{}'", v.name));
     }
-    let mut v = Vault { watch: None, spark: None, muun: Some(m), liquid: None, statement: None, node: None, name, network: s.settings.network.clone(), threshold: 2,
+    let mut v = Vault { provenance_default: None, provenance_policy: None, watch: None, spark: None, muun: Some(m), liquid: None, statement: None, node: None, name, network: s.settings.network.clone(), threshold: 2,
         keys: Vec::new(), descriptor: String::new(), address: String::new(), created: now(), chain_code: None,
         next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(),
         notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0,
@@ -1145,7 +1146,7 @@ fn xpub_restore(name: String, text: String, names: Vec<String>) -> R<Vault> {
     if x.depth == 0 {
         return Err("that is a MASTER key, not an account key. Hardened levels cannot be derived from a public key, so this app could only watch m/0/i — almost certainly not where your wallet keeps its coins. Export the account key (what a wallet calls its watch-only or xpub export).".into());
     }
-    let mut v = Vault { watch: Some(wallet::Watch { key, kinds, said, sp: None }), spark: None, muun: None, liquid: None, statement: None, node: None, name,
+    let mut v = Vault { provenance_default: None, provenance_policy: None, watch: Some(wallet::Watch { key, kinds, said, sp: None }), spark: None, muun: None, liquid: None, statement: None, node: None, name,
         network: network.to_string(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address: String::new(),
         created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
         labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
@@ -1180,7 +1181,7 @@ async fn spark_restore(name: String, address: String) -> R<Vault> {
             return Err(if balance > 0 { "Spark will not list this wallet's transfers — its privacy setting is on. The balance can be read but the history cannot, so there is nothing here to account with.".into() }
                 else { "Spark shows nothing under this address: no balance and no transfers. That is what an EMPTY wallet looks like — and also exactly what a wallet with its privacy setting on looks like, since a private wallet answers with nothing rather than with a refusal. If you know this wallet holds sats, its privacy setting is on (Wallet of Satoshi's wallets are), and authenticated reader enrolment can grant access without turning privacy off.".into() });
         }
-        let mut v = Vault { watch: None, spark: Some(wallet::Spark { address: address.trim().to_string(), identity, reader_pubkey: String::new(), reader_card: String::new(), authenticated: false, memos: Default::default(), owner_card: String::new(), owner_slot: None }), muun: None, liquid: None, statement: None, node: None,
+        let mut v = Vault { provenance_default: None, provenance_policy: None, watch: None, spark: Some(wallet::Spark { address: address.trim().to_string(), identity, reader_pubkey: String::new(), reader_card: String::new(), authenticated: false, memos: Default::default(), owner_card: String::new(), owner_slot: None }), muun: None, liquid: None, statement: None, node: None,
             name, network, threshold: 1, keys: Vec::new(), descriptor: String::new(), address: address.trim().to_string(),
             created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
             labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
@@ -1378,7 +1379,7 @@ fn exchange_import(name: String, entity: Option<String>) -> R<(Vault, usize)> {
     }
     let n = ex.rows.len();
     let entity = entity.filter(|id| s.entities.iter().any(|e| &e.id == id));
-    let v = Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, exchange: Some(ex),
+    let v = Vault { provenance_default: None, provenance_policy: None, watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, exchange: Some(ex),
         name, network: "mainnet".into(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address: String::new(),
         created: t, chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
         labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
@@ -1496,7 +1497,7 @@ async fn node_add(name: String, kind: String, url: String, cred: String, pin: St
         let keep: zeroize::Zeroizing<String> = if kind == "lnd" { zeroize::Zeroizing::new(node::lnd_cred(&cred)?.macaroon_hex) } else { cred.clone() };
         node::keep_cred(&node::id_of(&n.url, &n.pubkey), &keep)?;
         let txs: std::collections::HashMap<String, i32> = n.events.iter().filter(|e| !e.txid.is_empty()).map(|e| (e.txid.clone(), 0)).collect();
-        let v = Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: Some(n),
+        let v = Vault { provenance_default: None, provenance_policy: None, watch: None, spark: None, muun: None, liquid: None, statement: None, node: Some(n),
             name: name.clone(), network: "mainnet".into(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address: String::new(),
             created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
             labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
@@ -1629,7 +1630,7 @@ fn statement_import(name: String, text: String) -> R<(Vault, usize)> {
         let out = v.clone(); wallet::save(&s)?; return Ok((out, n));
     }
     let n = st.rows.len();
-    let mut v = Vault { watch: None, spark: None, muun: None, liquid: None, statement: Some(st), node: None,
+    let mut v = Vault { provenance_default: None, provenance_policy: None, watch: None, spark: None, muun: None, liquid: None, statement: Some(st), node: None,
         name, network: "mainnet".into(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address: String::new(),
         created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
         labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
@@ -1642,7 +1643,7 @@ fn statement_import(name: String, text: String) -> R<(Vault, usize)> {
 
 fn new_spark_vault(name: String, spark: wallet::Spark, network: String) -> Vault {
     let address = spark.address.clone();
-    Vault { watch: None, spark: Some(spark), muun: None, liquid: None, statement: None, node: None,
+    Vault { provenance_default: None, provenance_policy: None, watch: None, spark: Some(spark), muun: None, liquid: None, statement: None, node: None,
         name, network, threshold: 1, keys: Vec::new(), descriptor: String::new(), address,
         created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
         labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
@@ -1731,7 +1732,7 @@ async fn liquid_restore(name: String, words: String) -> R<Vault> {
             let sib = l.for_asset(&asset);
             let mut vname = if sib.is_lbtc() { name.clone() } else { format!("{name} \u{b7} {}", sib.ticker()) };
             while s.vaults.iter().any(|v| v.name == vname) { vname.push('\u{2032}'); }
-            let v = Vault { watch: None, spark: None, muun: None, liquid: Some(sib), statement: None, node: None,
+            let v = Vault { provenance_default: None, provenance_policy: None, watch: None, spark: None, muun: None, liquid: Some(sib), statement: None, node: None,
                 name: vname, network: "mainnet".into(), threshold: 1, keys: Vec::new(), descriptor: String::new(), address: address.clone(),
                 created: now(), chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0,
                 labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(),
@@ -1770,7 +1771,7 @@ fn vault_restore(name: String, text: String, names: Vec<String>) -> R<Vault> {
     let (desc_text, cc) = wallet::split_recovery(&text);
     let (threshold, keys) = wallet::keys_of(&desc_text)?;
     let descriptor = wallet::descriptor_for(threshold, &keys)?;
-    let mut v = Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name, network: s.settings.network.clone(), threshold,
+    let mut v = Vault { provenance_default: None, provenance_policy: None, watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name, network: s.settings.network.clone(), threshold,
         keys: keys.iter().enumerate().map(|(i, k)| wallet::KeyRef { name: names.get(i).cloned().unwrap_or_else(|| format!("key {}", i + 1)), serial: 0, pubkey: k.clone(), device: None }).collect(),
         descriptor, address: String::new(), created: now(), chain_code: cc, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None, entity: None, exchange: None };
     v.address = wallet::address_at(&v, 0)?;
@@ -1852,7 +1853,7 @@ fn signers_vault(name: String, threshold: usize, keys: &[SignerIn], network: &st
 /// A vault of extended keys held by other signers. Each key is named for the person, and keeps its origin — the
 /// fingerprint and path a hardware signer matches on — as the "pubkey" shown for it; it is never a card's key.
 pub(crate) fn ext_vault(name: String, info: &wallet::ExtInfo, names: &[String]) -> Vault {
-    Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name, network: info.network.clone(), threshold: info.threshold,
+    Vault { provenance_default: None, provenance_policy: None, watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name, network: info.network.clone(), threshold: info.threshold,
         keys: info.keys.iter().enumerate().map(|(i, k)| wallet::KeyRef { name: names.get(i).cloned().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| if k.fixed { format!("key {} · a card", i + 1) } else { format!("key {} · {}", i + 1, k.fingerprint) }),
             // a fixed key is kept as the bare key, so a card plugged in is recognised as this vault's by the key it holds
             serial: 0, pubkey: if k.fixed { k.xpub.clone() } else { format!("[{}/{}]{}", k.fingerprint, k.path.trim_start_matches("m/").replace('\'', "h"), k.xpub) }, device: if k.fixed { Some("card".into()) } else { None } }).collect(),
@@ -2928,7 +2929,7 @@ struct Candidate { id: String, have: usize, locked: usize, need: usize, record: 
 
 fn seal_vault(rec: &seal::Record, name: String, shares: Vec<String>, sealed: Vec<String>) -> R<Vault> {
     let descriptor = wallet::descriptor_for(rec.threshold, &rec.pubkeys)?;
-    let mut v = Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name, network: rec.network.clone(), threshold: rec.threshold,
+    let mut v = Vault { provenance_default: None, provenance_policy: None, watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name, network: rec.network.clone(), threshold: rec.threshold,
         keys: rec.pubkeys.iter().zip(&rec.key_names).map(|(p, n)| wallet::KeyRef { name: n.clone(), serial: 0, pubkey: p.clone(), device: None }).collect(),
         descriptor, address: String::new(), created: now(), chain_code: rec.chain_code.clone(), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0,
         seal: wallet::Seal { shares, sealed }, ext: None, cost_method: None, entity: None, exchange: None };
@@ -3849,13 +3850,19 @@ fn labels_export(name: String) -> R<String> {
     let s = wallet::load()?;
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
     let mut lines: Vec<String> = Vec::new();
-    let mut keys: Vec<&String> = v.labels.keys().collect(); keys.sort();
+    // every record with a label, a disposal or a provenance mark: a mark without a label is still worth carrying
+    let mut keys: Vec<&String> = v.labels.keys().chain(v.more.iter().filter(|(_, m)| m.contains_key("disposal") || m.contains_key("provenance")).map(|(k, _)| k)).collect();
+    keys.sort(); keys.dedup();
     for k in keys {
         let (t, r) = k.split_once(':').unwrap_or(("", ""));
-        let t = match t { "addr" => "addr", "tx" => "tx", "out" => "output", _ => continue };
-        let mut line = serde_json::json!({ "type": t, "ref": r, "label": v.labels[k] });
+        let t = match t { "addr" => "addr", "tx" => "tx", "out" | "output" => "output", _ => continue };
+        let mut line = serde_json::json!({ "type": t, "ref": r });
+        if let Some(l) = v.labels.get(k) { line["label"] = l.clone().into(); }
         // what a spend was (sold, spent, gift, self, stolen, lost) travels with the label: a field BIP 329 readers ignore
         if let Some(d) = v.more.get(k).and_then(|m| m.get("disposal")).and_then(|d| d.get("kind")).and_then(|x| x.as_str()) { line["disposal"] = d.into(); }
+        // who can link this coin to its owner (provenance.rs): status, method, counterparty — the same way
+        if let Some(p) = v.more.get(k).and_then(provenance::mark_in) { line["provenance"] = serde_json::json!({ "status": p.status, "method": p.method, "counterparty": p.counterparty, "note": p.note }); }
+        if line.as_object().map(|o| o.len() <= 2).unwrap_or(true) { continue; }
         lines.push(line.to_string());
     }
     if lines.is_empty() { return Err("this vault has no labels yet".into()); }
@@ -3870,24 +3877,144 @@ async fn labels_import(name: String) -> R<usize> {
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     // each line: a label, a disposal (what a spend out was: sold, spent, gift, self, stolen, lost — on a tx), or both.
     // A whole incident can be booked from one file: every sweep an attacker made, marked stolen in one import.
-    let mut got: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+    let mut got: Vec<(String, Option<String>, Option<String>, Option<provenance::Mark>)> = Vec::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         let j: serde_json::Value = match serde_json::from_str(line) { Ok(j) => j, Err(_) => continue };
         let (t, r, lab) = (j["type"].as_str().unwrap_or(""), j["ref"].as_str().unwrap_or(""), j["label"].as_str().unwrap_or("").trim());
-        let key = match t { "addr" => format!("addr:{r}"), "tx" => format!("tx:{r}"), "output" => format!("out:{r}"), _ => continue };
+        // a coin's record is kept under "output:", the key the coin page writes
+        let key = match t { "addr" => format!("addr:{r}"), "tx" => format!("tx:{r}"), "output" => format!("output:{r}"), _ => continue };
         let disp = j["disposal"].as_str().map(str::trim).filter(|d| t == "tx" && ["sold", "spent", "gift", "self", "stolen", "lost"].contains(d)).map(str::to_string);
-        if !r.is_empty() && (!lab.is_empty() || disp.is_some()) { got.push((key, Some(lab.to_string()).filter(|l| !l.is_empty()), disp)); }
+        // provenance: an object {status, method, counterparty, note}, or just the status as a string
+        let prov = match &j["provenance"] {
+            serde_json::Value::String(st) => Some(provenance::Mark { status: st.trim().to_string(), ..Default::default() }),
+            serde_json::Value::Object(_) => serde_json::from_value::<provenance::Mark>(j["provenance"].clone()).ok(),
+            _ => None,
+        }.filter(|m| provenance::STATUSES.contains(&m.status.as_str()) && m.status != "unknown")
+         .map(|mut m| { if m.method.as_ref().map(|x| !provenance::METHODS.contains(&x.as_str())).unwrap_or(false) { m.method = None; } m.by = "you".into(); m });
+        if !r.is_empty() && (!lab.is_empty() || disp.is_some() || prov.is_some()) { got.push((key, Some(lab.to_string()).filter(|l| !l.is_empty()), disp, prov)); }
     }
     let n = got.len();
     if n == 0 { return Err("no addr, tx or output labels in that file".into()); }
     let nm = name.clone();
-    wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) { let t = now(); for (k, l, d) in got {
+    wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) { let t = now(); for (k, l, d, p) in got {
         v.label_meta.insert(k.clone(), t);
         if let Some(l) = l { v.labels.insert(k.clone(), l); }
-        if let Some(d) = d { v.more.entry(k).or_default().insert("disposal".into(), serde_json::json!({ "kind": d, "t": t })); }
+        if let Some(d) = d { v.more.entry(k.clone()).or_default().insert("disposal".into(), serde_json::json!({ "kind": d, "t": t })); }
+        if let Some(mut p) = p { p.t = t; v.more.entry(k).or_default().insert("provenance".into(), serde_json::to_value(p).unwrap_or_default()); }
     } })?;
     let _ = labels_sync(name).await;
     Ok(n)
+}
+
+// ---------- provenance: who can link a coin to its owner (provenance.rs) ----------
+#[derive(Serialize)]
+struct ProvAll { coins: std::collections::HashMap<String, provenance::Derived>, skipped: Vec<String> }
+/// A vault whose coins sit on the bitcoin chain, so the engine can read their lineage from the cached transactions.
+fn chain_vault(v: &Vault) -> bool { v.spark.is_none() && v.statement.is_none() && v.exchange.is_none() && v.node.is_none() && v.liquid.is_none() }
+/// Every coin the person's chain vaults ever made, with its provenance derived from their own records: the marks
+/// on coins, addresses and transactions, each vault's default, and the transactions an exchange's or custodian's
+/// statement also records (the transfer links). Read from the chain cache; a vault whose transactions cannot be read
+/// just now is listed in `skipped` and its coins are left out rather than guessed.
+#[tauri::command]
+async fn provenance_all() -> R<ProvAll> { block(provenance_all_inner).await }
+fn provenance_all_inner() -> R<ProvAll> {
+    use std::str::FromStr;
+    let s = wallet::load()?;
+    let view = transfers::view(&s);
+    let times = activity::cached_times();
+    let mut txs: std::collections::HashMap<String, provenance::Tx> = std::collections::HashMap::new();
+    let mut marks = provenance::Marks::default();
+    let mut skipped = Vec::new();
+    for v in &s.vaults {
+        // the person's marks live in every vault's records, chain or not: an exchange vault may hold the mark on an address
+        for (k, m) in &v.more {
+            let Some(mark) = provenance::mark_in(m) else { continue };
+            if let Some(op) = k.strip_prefix("output:").or_else(|| k.strip_prefix("out:")) { marks.coin.insert(op.to_string(), mark); }
+            else if let Some(a) = k.strip_prefix("addr:") { marks.addr.insert(a.to_string(), mark); }
+            else if let Some(t) = k.strip_prefix("tx:") { let e = marks.tx.entry(t.to_string()).or_insert_with(|| mark.clone()); if provenance::rank(&mark.status) > provenance::rank(&e.status) { *e = mark; } }
+        }
+        if let Some(def) = &v.provenance_default { if provenance::STATUSES.contains(&def.as_str()) && def != "unknown" { marks.vault.insert(v.name.clone(), provenance::Mark { status: def.clone(), by: "vault".into(), ..Default::default() }); } }
+        if !chain_vault(v) { continue; }
+        // a transaction an exchange's or a custodian's statement also lists (a link the person confirmed, or a certain one)
+        if let Some(links) = view.links.get(&v.name) {
+            for (txid, l) in links {
+                if l.forgotten || l.own { continue; }
+                let Some(peer) = s.vaults.iter().find(|p| p.name == l.peer) else { continue };
+                let mark = if let Some(ex) = &peer.exchange { provenance::Mark { status: "kyc".into(), method: Some("exchange".into()), counterparty: Some(ex.provider.clone()), by: "rule:statement".into(), ..Default::default() } }
+                    else if let Some(st) = &peer.statement { provenance::Mark { status: "known".into(), method: Some("transfer".into()), counterparty: Some(st.source.clone()), by: "rule:statement".into(), ..Default::default() } }
+                    else { continue };
+                marks.rule.insert(txid.clone(), mark);
+            }
+        }
+        let Some(seen) = s.seen.get(&v.name) else { continue };
+        if seen.txs.is_empty() { continue; }
+        let history: Vec<(String, i32)> = seen.txs.iter().map(|(t, h)| (t.clone(), *h)).collect();
+        let Ok(ids) = history.iter().map(|(t, _)| bitcoin::Txid::from_str(t)).collect::<Result<Vec<_>, _>>() else { skipped.push(v.name.clone()); continue };
+        let confirmed: std::collections::HashSet<bitcoin::Txid> = ids.iter().zip(&history).filter(|(_, (_, h))| *h > 0).map(|(i, _)| *i).collect();
+        let servers = wallet::servers_for(&s, &v.network);
+        let got = match chain::transactions_kept(&servers, &v.network, &ids, &|i| confirmed.contains(i)) { Ok(t) => t, Err(e) => { watch::log(&format!("provenance: {} skipped: {e}", v.name)); skipped.push(v.name.clone()); continue } };
+        let Ok(table) = wallet::ours_table(v) else { skipped.push(v.name.clone()); continue };
+        let net = wallet::network_of(&v.network);
+        let by_id: std::collections::HashMap<bitcoin::Txid, &bitcoin::Transaction> = got.iter().map(|t| (t.compute_txid(), t)).collect();
+        for ((txid, height), tx) in history.iter().zip(&got) {
+            let e = txs.entry(txid.clone()).or_insert_with(|| provenance::Tx {
+                id: txid.clone(), time: 0,
+                ins: tx.input.iter().map(|i| provenance::In { op: i.previous_output.to_string(), sats: 0, vault: None }).collect(),
+                outs: tx.output.iter().enumerate().map(|(n, o)| provenance::Out { op: format!("{txid}:{n}"), sats: o.value.to_sat(), vault: None, addr: bitcoin::Address::from_script(&o.script_pubkey, net).ok().map(|a| a.to_string()) }).collect(),
+            });
+            if *height > 0 { if let Some(t) = times.get(&format!("{}:{height}", v.network)) { e.time = *t; } }
+            for (k, i) in tx.input.iter().enumerate() {
+                if let Some(o) = by_id.get(&i.previous_output.txid).and_then(|p| p.output.get(i.previous_output.vout as usize)) {
+                    if table(&o.script_pubkey).is_some() { if let Some(x) = e.ins.get_mut(k) { x.vault = Some(v.name.clone()); x.sats = o.value.to_sat(); } }
+                }
+            }
+            for (n, o) in tx.output.iter().enumerate() { if table(&o.script_pubkey).is_some() { if let Some(x) = e.outs.get_mut(n) { x.vault = Some(v.name.clone()); } } }
+        }
+    }
+    let list: Vec<provenance::Tx> = txs.into_values().collect();
+    Ok(ProvAll { coins: provenance::derive(&list, &marks), skipped })
+}
+
+#[derive(Deserialize)]
+struct MarkIn { status: String, #[serde(default)] method: Option<String>, #[serde(default)] counterparty: Option<String>, #[serde(default)] note: Option<String> }
+/// Set, or clear (`mark` None, or status "unknown"), the provenance of one record: a coin (`output:<txid:vout>`),
+/// an address (`addr:<address>`, the vault's own or someone else's) or a transaction (`tx:<txid>`). It rides in the
+/// same synced record as the label.
+#[tauri::command]
+async fn provenance_set(name: String, key: String, mark: Option<MarkIn>) -> R<Store> {
+    if !(key.starts_with("output:") || key.starts_with("out:") || key.starts_with("addr:") || key.starts_with("tx:")) { return Err("a provenance mark goes on a coin, an address or a transaction".into()); }
+    let mark = mark.filter(|m| m.status != "unknown");
+    if let Some(m) = &mark {
+        if !provenance::STATUSES.contains(&m.status.as_str()) { return Err(format!("{:?} is not a status this app knows", m.status)); }
+        if let Some(x) = &m.method { if !provenance::METHODS.contains(&x.as_str()) { return Err(format!("{x:?} is not a method this app knows")); } }
+        if m.counterparty.as_ref().map(|c| c.chars().count() > 80).unwrap_or(false) { return Err("a counterparty's name holds up to 80 characters".into()); }
+        if m.note.as_ref().map(|c| c.chars().count() > 400).unwrap_or(false) { return Err("the note holds up to 400 characters".into()); }
+    }
+    let nm = name.clone();
+    wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) {
+        v.label_meta.insert(key.clone(), now());   // the mark rides in the synced record, newest wins (labels.rs)
+        match &mark {
+            Some(m) => { let full = provenance::Mark { status: m.status.clone(), method: m.method.clone().filter(|x| !x.is_empty()), counterparty: m.counterparty.clone().map(|c| c.trim().to_string()).filter(|c| !c.is_empty()), note: m.note.clone().map(|c| c.trim().to_string()).filter(|c| !c.is_empty()), t: now(), by: "you".into() };
+                v.more.entry(key.clone()).or_default().insert("provenance".into(), serde_json::to_value(full).unwrap_or_default()); }
+            None => { if let Some(r) = v.more.get_mut(&key) { r.remove("provenance"); } }
+        }
+    })?;
+    let _ = labels_sync(name).await;
+    Ok(wallet::load()?)
+}
+
+/// A vault's default status for coins nothing else classifies, and its policy when a build would mix statuses.
+#[tauri::command]
+fn vault_provenance(name: String, default: Option<String>, policy: Option<String>) -> R<Store> {
+    let default = default.filter(|d| !d.is_empty() && d != "unknown");
+    if let Some(d) = &default { if !provenance::STATUSES.contains(&d.as_str()) { return Err(format!("{d:?} is not a status this app knows")); } }
+    let policy = policy.filter(|p| !p.is_empty());
+    if let Some(p) = &policy { if !provenance::POLICIES.contains(&p.as_str()) { return Err(format!("{p:?} is not a policy this app knows")); } }
+    let mut s = wallet::load()?;
+    let v = s.vaults.iter_mut().find(|v| v.name == name).ok_or("no such vault")?;
+    v.provenance_default = default; v.provenance_policy = policy;
+    wallet::save(&s)?;
+    Ok(s)
 }
 
 // ---------- BSMS (BIP 129) ----------
@@ -4144,7 +4271,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![search_all, profiles_list, profile_open, profile_close, profile_create, profile_update, profile_delete, profile_picture_pick, guard_displays, guard_sharing, guard_override, vault_move_start, move_land, persona_generate, persona_defaults, transfer_answer, transfer_links, device_key_read, device_key_file, vault_create_signers, net_offline, drill_every, cost_method_set, vault_cost_method, vault_ext_rewrite, cards_other, prices_series, perf_log, cycle_curve, cycle_now, cycle_marks, location_status, location_preview, location_now, place_search, ctx_set, tx_map, tx_pdf, lock_status, lock_start, lock_open_mac, lock_open_card, lock_now, lock_add_card, lock_remove_card, lock_settings, open_url, vault_activity, tx_detail, node_status, device_locale, contact_save, contact_delete, contact_used, vault_receive_address, vault_key_seen, key_form_seen, vault_pdf, vault_shares_pdf, record_pdf, address_flow, report_pdf, notify_test, spend_ceremony, spend_qr, spend_pdf, spend_import, seal_status, seal_write, seal_read, seal_unlock, seal_adopt, seal_preview, seal_restore, label_set, note_set, attach_paths, attach_pick, attach_bytes, attach_remove, attach_open, attach_have, attach_thumb, attach_fetch, icon_fetch, labels_sync, labels_export, labels_import, bsms_export, bsms_import, vault_addresses, message_sign_key, message_stage, message_finish, message_verify,
             cards_list, card_generate, attach_view, profiles_refresh, sync_face_refresh, sync_status, sync_enable, sync_rotate, sync_remove_card, sync_now, sync_tick, sync_disable, sync_find, sync_adopt, card_survey, card_tap, nk_firmware, nk_firmware_update, secret_preview, card_init_key_from, card_import, card_init_resume_check, key_setup_restart, card_reset, card_pin_change_pad, platform, ui_note, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, node_retire, node_import_pick, node_import, node_ledger_csv, clipboard_write, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, liquid_restore, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_forget, spark_memos, spark_owner_import, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, vault_last, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard,
-            engraver_find, engraver_jog, engraver_run, engraver_cancel, vault_shares_plates, share_rewrap
+            engraver_find, engraver_jog, engraver_run, engraver_cancel, vault_shares_plates, share_rewrap,
+            provenance_all, provenance_set, vault_provenance
         ])
         .build(tauri::generate_context!())
         .expect("error while running Any Two Keys")
@@ -4588,7 +4716,7 @@ mod shares_tests {
         let mut ext = ext_vault("x".into(), &info, &[]); ext.address = wallet::address_at(&ext, 0).unwrap();
         let cards = ["03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2", "032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe", "038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47"];
         let d = wallet::descriptor_for(2, &cards.iter().map(|c| c.to_string()).collect::<Vec<_>>()).unwrap();
-        let card = Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name: "c".into(), network: "mainnet".into(), threshold: 2, keys: cards.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.to_string(), device: None }).collect(),
+        let card = Vault { provenance_default: None, provenance_policy: None, watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name: "c".into(), network: "mainnet".into(), threshold: 2, keys: cards.iter().map(|k| wallet::KeyRef { name: String::new(), serial: 0, pubkey: k.to_string(), device: None }).collect(),
             descriptor: d, address: String::new(), created: 0, chain_code: Some("ab".repeat(32)), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None, entity: None, exchange: None };
         let dir = std::env::temp_dir().join(format!("a2k-shares-{}", std::process::id())); let _ = std::fs::remove_dir_all(&dir);
         unsafe { std::env::set_var("A2K_DATA_DIR", &dir); }

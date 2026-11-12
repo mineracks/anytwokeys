@@ -942,3 +942,13 @@ dd .mkt-n{display:block}
 
 /* a Spark row's Lightning description, under its label */
 table.act td .memo{display:block;font-size:12px;line-height:1.3;max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* provenance: who can link a coin to its owner */
+.ptag{display:inline-block;font-family:var(--display);font-size:11px;font-weight:600;padding:1px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted);white-space:nowrap;vertical-align:middle}
+.ptag.kyc{border-color:var(--gold);color:var(--gold)} .ptag.known{color:var(--ink);border-color:var(--ink)} .ptag.private{color:var(--signal);border-color:var(--signal)} .ptag.unknown{border-style:dashed}
+.ptag.linked{border-style:dotted}
+.provpick{margin-top:6px} .provpick .pick.tight .opt{min-height:0}
+.provlist{display:flex;flex-direction:column;gap:3px;margin:0 0 6px;font-size:13px}
+.provtrail{font-size:12.5px;color:var(--muted);margin-top:4px;display:flex;flex-direction:column;gap:2px;max-width:70ch}
+.provwarn{font-size:13.5px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);display:flex;flex-direction:column;gap:6px;margin-top:8px} .provwarn.warn{border-color:var(--gold)}
+.provsum{display:flex;flex-direction:column;gap:8px;margin:4px 0 10px} .provsum-body{display:flex;gap:18px;align-items:center;flex-wrap:wrap} .provsum-t{flex:1 1 320px;margin:0}

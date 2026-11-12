@@ -156,6 +156,7 @@
         <div style="display:flex;flex-direction:column;gap:18px">
           <div class="field"><div class="label">Your vault address</div><div class="mono" id="addr-text" style="padding:11px 14px;border:1px solid var(--line);border-radius:6px;background:var(--panel);-webkit-user-select:text;user-select:text"></div></div>
           <div class="card" style="flex-direction:row;gap:12px;align-items:flex-start"><svg width="18" height="18" style="color:var(--gold);flex:0 0 18px;margin-top:2px"><use href="#i-warn"/></svg><div style="font-size:14px" id="addr-note"></div></div>
+          <div class="field" id="recv-prov" hidden></div>
           <div class="muted" style="font-size:13px">Deposits show on Home after one confirmation, usually within 10 to 30 minutes.</div>
         </div>
       </div>
@@ -187,7 +188,7 @@
           <div class="row" style="gap:10px;align-items:center"><input id="coin-find" placeholder="Find a label or an address" autocomplete="off" spellcheck="false" style="max-width:260px" aria-label="Find a coin"><span class="muted" style="font-size:13px" id="coin-count"></span></div>
         </div>
         <div id="coin-ctl"></div>
-        <table class="tbl" id="coin-table" style="margin-top:12px"><thead><tr><th style="width:34px"><input type="checkbox" id="coin-tick-all" aria-label="Tick every coin listed" style="width:auto;min-height:0;margin:0"></th><th>Label</th><th class="r">Amount</th><th>Coin</th><th>Address</th><th class="r">Status</th></tr></thead><tbody id="coin-rows"><tr><td class="muted" colspan="6">syncing…</td></tr></tbody></table>
+        <table class="tbl" id="coin-table" style="margin-top:12px"><thead><tr><th style="width:34px"><input type="checkbox" id="coin-tick-all" aria-label="Tick every coin listed" style="width:auto;min-height:0;margin:0"></th><th>Label</th><th>Who knows</th><th class="r">Amount</th><th>Coin</th><th>Address</th><th class="r">Status</th></tr></thead><tbody id="coin-rows"><tr><td class="muted" colspan="7">syncing…</td></tr></tbody></table>
         <div class="row" style="justify-content:space-between;align-items:flex-start;margin-top:10px;gap:14px"><div class="row" style="gap:12px;flex:0 0 auto"><button class="linkish" type="button" id="coin-sel-all">Select all</button><button class="linkish" type="button" id="coin-sel-none">Clear</button></div><div class="muted" style="font-size:13px">A coin is one unspent output — one arrival that has not been spent on. Click one to keep a note, a photo or a file with it. Tick coins to send them, combine them into one, or split one into several.</div></div>
         <div class="pickbar" id="coin-bar" hidden><div class="pb-what"><b id="coin-bar-sum"></b><span class="muted" id="coin-bar-sub" style="font-size:13px"></span></div><div class="pb-act"><button class="btn" type="button" id="coin-send">Send these</button><button class="btn" type="button" id="coin-combine">Combine coins</button><span class="pb-one"><button class="btn" type="button" id="coin-split">Split coin</button><small class="muted" id="coin-split-why"></small></span></div></div>
       </div>
@@ -224,6 +225,10 @@
           <div class="card"><div class="label">How what leaves is costed</div>
             <div class="field"><label class="cap" for="vs-method">Cost method</label><select id="vs-method" style="max-width:420px"><option value="">The app's own</option><option value="utxo">The coins actually spent</option><option value="fifo">First in, first out</option><option value="average">Average cost (for reference)</option></select></div>
             <div class="muted" style="font-size:13px" id="vs-method-note"></div></div>
+          <div class="card" id="vs-prov-card"><div class="label">Who can link this vault’s coins to you</div>
+            <div class="field"><label class="cap" for="vs-prov">Coins nothing else classifies are</label><select id="vs-prov" style="max-width:420px"><option value="">Unclassified, until you say</option><option value="kyc">KYC — bought where your identity is held</option><option value="known">Known — a person or a service knows they are yours</option><option value="private">Private — nothing links them to you</option></select></div>
+            <div class="field"><div class="cap">When a build would mix statuses</div><div class="seg" role="radiogroup" aria-label="Policy" id="vs-prov-policy"><button type="button" role="radio" data-policy="warn">Warn</button><button type="button" role="radio" data-policy="refuse">Refuse</button><button type="button" role="radio" data-policy="none">Say nothing</button></div></div>
+            <div class="muted" style="font-size:13px" id="vs-prov-note"></div></div>
           <div class="card" id="vs-node-card" hidden><div class="label">The node</div>
             <dl class="tx-dl" id="vs-node-facts"></dl>
             <div class="muted" style="font-size:13px" id="vs-node-text"></div>

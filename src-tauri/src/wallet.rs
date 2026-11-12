@@ -71,6 +71,11 @@ pub struct Vault {
     #[serde(default)] pub entity: Option<String>,
     /// an exchange account, read from the statements the exchange gives (exchange.rs); nothing here can be spent
     #[serde(default)] pub exchange: Option<crate::exchange::Exchange>,
+    /// provenance (provenance.rs): the status a coin of this vault carries when nothing else classifies it —
+    /// "kyc" | "known" | "private"; None = unclassified until the person says
+    #[serde(default)] pub provenance_default: Option<String>,
+    /// what Send, Combine and Split do when a build would mix statuses: "none" | "warn" | "refuse"; None = warn
+    #[serde(default)] pub provenance_policy: Option<String>,
 }
 
 /// The recovery record split across the cards (seal.rs). Shares are made once so cards sealed on different days agree.
@@ -1432,7 +1437,7 @@ mod tests {
     fn vault(cc: Option<&str>) -> Vault {
         let keys = ["03375055e53d2e4acd7245ef554e054fffe4bae7385adbb019afdd924337b2e6f2", "032c2bc9f764a1265f0fd69c0bcb90b4429007f975858fc8b4df65cd0211ffb8fe", "038410f240613b33fe73d968f331ca82eb1fbd018c6189f89f8c5f9b9fb26f6a47"];
         let descriptor = descriptor_for(2, &keys.iter().map(|k| k.to_string()).collect::<Vec<_>>()).unwrap();
-        Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name: "t".into(), network: "signet".into(), threshold: 2, keys: keys.iter().enumerate().map(|(i, k)| KeyRef { name: format!("k{i}"), serial: 0, pubkey: k.to_string() , device: None }).collect(),
+        Vault { provenance_default: None, provenance_policy: None, watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name: "t".into(), network: "signet".into(), threshold: 2, keys: keys.iter().enumerate().map(|(i, k)| KeyRef { name: format!("k{i}"), serial: 0, pubkey: k.to_string() , device: None }).collect(),
             descriptor, address: String::new(), created: 0, chain_code: cc.map(|c| c.to_string()), next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(), files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: None, cost_method: None, entity: None, exchange: None }
     }
     #[test]
@@ -1502,7 +1507,7 @@ mod ext_tests {
     use super::*;
     fn vault_of(desc: &str) -> Vault {
         let info = ext_parse(desc).unwrap().unwrap();
-        Vault { watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name: "ext".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
+        Vault { provenance_default: None, provenance_policy: None, watch: None, spark: None, muun: None, liquid: None, statement: None, node: None, name: "ext".into(), network: info.network.clone(), threshold: info.threshold, keys: vec![], descriptor: info.descriptor.clone(), address: String::new(), created: 0,
             chain_code: None, next: 0, scan_max: 0, next_change: 0, scan_max_change: 0, labels: Default::default(), label_meta: Default::default(), notes: Default::default(),
             files: Default::default(), more: Default::default(), labels_synced: 0, seal: Default::default(), ext: Some(info.descriptor), cost_method: None, entity: None, exchange: None }
     }
