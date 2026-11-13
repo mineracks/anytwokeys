@@ -18,6 +18,9 @@ exchanges and custodians you imported. No chain-analysis service is asked, and n
   arrived, who. A mark on the coin comes before its address's, which comes before its transaction's.
 - **A transaction's sheet → Who can link it** marks the transaction: on a deposit, every coin it brought in; on a
   payment, the coins it spent (paid to an exchange, they are KYC from then on).
+- Under a mark on a coin or a transaction, one tap — *Use this for every coin at bc1q… — 4 there now, and every one
+  still to come* — copies it onto the address, so an address that is paid again and again is answered once. On a
+  payment the same line offers the address paid to.
 - **Vault settings → Who can link this vault's coins to you**: a default for coins nothing else classifies, and a
   policy for when a build would mix statuses — *Warn* (the default), *Refuse* (a private-only vault), *Say nothing*.
 - A transaction one of your exchange vaults also records (a transfer link) is KYC with that exchange as counterparty
@@ -48,7 +51,11 @@ the coin, so the trail is not optional.
   a destination you marked and the sibling coins still in the vault that paying it would link, and the vault's policy.
   *Refuse* stops the build. A split says the status does not change.
 - **Home, All vaults, each entity**: *Who can link these coins to you* — a donut and a table of coins, sats, worth
-  and share by status, for the unspent coins of the vaults in view.
+  and share by status, for the unspent coins of the vaults in view. A vault that is not coins on the chain is one
+  bucket, listed under the table with its reason: an exchange balance is KYC (the exchange holds your identity), a
+  custodian's statement and a Spark wallet are Known (the custodian, or the Spark service provider, sees every
+  payment), a Lightning node is Known (its public key is a public identity), a Liquid wallet is unclassified until
+  you say. The vault's default in Vault settings comes before each of these rules.
 
 ## In the labels file
 

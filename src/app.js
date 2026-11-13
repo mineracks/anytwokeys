@@ -1959,7 +1959,7 @@ function recPageOpen(kind, id) {
     : [['Address', `<span class="mono" style="word-break:break-all;-webkit-user-select:text;user-select:text">${esc(id)}</span>`], ['Chain', `${row.chain === 'change' ? 'change \u2014 the app sends what is left over here' : 'receive \u2014 one to hand out'}${vault._rotating ? ' \u00b7 ' + fmtIndex(row.index) : ''}`],
        ['Holding', held ? `${sats(held)} sats in ${sats(H.length)} coin${H.length === 1 ? '' : 's'} \u2014 listed below` : ((vault._history || []).some(x => x.index === row.index) ? 'nothing now \u2014 it has been used and spent from' : 'nothing yet \u2014 this address has never been used')]];
   provReady(() => { if (recPage.kind === kind && recPage.id === id) recPageOpen(kind, id); });
-  if (kind === 'coin') { const dd = provOf(id); chain.push(['Who can link it', `${provTag(dd)}${dd && dd.method ? `<small class="muted"> \u00b7 ${esc(provMethodWord(dd.method))}</small>` : ''}${dd && dd.counterparty ? `<small class="muted"> \u00b7 ${esc(dd.counterparty)}</small>` : ''}${dd && dd.cluster_size > 1 ? `<small class="muted"> \u00b7 one of ${sats(dd.cluster_size)} coins the chain shows controlled together</small>` : ''}${provTrail(dd)}${provPick('output:' + id, { who: 'Who was on the other side', note: 'What you say on the coin itself comes before its address\u2019s mark and its transaction\u2019s.' })}`]); }
+  if (kind === 'coin') { const dd = provOf(id); chain.push(['Who can link it', `${provTag(dd)}${provAfter(dd)}${dd && dd.cluster_size > 1 ? `<small class="muted">one of ${sats(dd.cluster_size)} coins the chain shows controlled together</small>` : ''}${provTrail(dd)}${provPick('output:' + id, { addrs: [coinAddr(coin)].filter(Boolean), who: 'Who was on the other side', note: 'What you say on the coin itself comes before its address\u2019s mark and its transaction\u2019s.' })}`]); }
   else chain.push(['Who can link it', provPick('addr:' + id, { who: 'Who you gave this address to', note: 'Every coin that arrives here takes this, unless the coin itself is marked.' })]);
   const txs = kind === 'addr' ? [...new Set((vault._history || []).filter(x => x.index === row.index).map(x => x.txid))] : [];
   if (txs.length) chain.push(['Transactions', txs.map(t => `<a href="#" class="mono" data-go-tx="${t}">${t.slice(0, 10)}\u2026</a>`).join(', ')]);
@@ -3055,6 +3055,8 @@ function provTag(d, extra) {
   const st = d ? d.status : 'unknown', linked = d && d.linked;
   return `<span class="ptag ${st}${linked ? ' linked' : ''}" title="${esc((d ? d.trail : ['not yet classified']).join('\n'))}">${PROV_WORD[st]}${linked ? ' · linked' : ''}${extra || ''}</span>`;
 }
+/// the method and counterparty after a chip, on the same line
+const provAfter = (d) => `${d && d.method ? `<span class="muted"> \u00b7 ${esc(provMethodWord(d.method))}</span>` : ''}${d && d.counterparty ? `<span class="muted"> \u00b7 ${esc(d.counterparty)}</span>` : ''}`;
 /// the trail, as small lines
 const provTrail = (d) => d && d.trail && d.trail.length ? `<div class="provtrail">${d.trail.map(l => `<div>${esc(l)}</div>`).join('')}</div>` : '';
 /// what the person said about a record, as stored (not the derived view)
@@ -3064,8 +3066,17 @@ function provPick(key, words) {
   const m = provMark(key) || {}, st = m.status || '';
   return `<div class="provpick" data-prov-of="${esc(key)}">
     <div class="pick tight">${PROV_STATUSES.filter(([k]) => k !== 'unknown').map(([k, n, why]) => `<div class="opt${k === st ? ' on' : ''}" data-status="${k}" title="${esc(why)}">${n}</div>`).join('')}${st ? '<div class="opt" data-status="unknown" title="Forget what was said here">Clear</div>' : ''}</div>
-    ${st ? `<div class="row" style="gap:8px;margin-top:6px;flex-wrap:wrap"><select data-prov-method style="max-width:240px">${PROV_METHODS.map(([k, n]) => `<option value="${k}"${(m.method || '') === k ? ' selected' : ''}>${n}</option>`).join('')}</select><input data-prov-cp maxlength="80" placeholder="${esc((words && words.who) || 'Who was on the other side')}" value="${esc(m.counterparty || '')}" style="max-width:260px"></div>` : ''}
+    ${st ? `<div class="prow"><select data-prov-method>${PROV_METHODS.map(([k, n]) => `<option value="${k}"${(m.method || '') === k ? ' selected' : ''}>${n}</option>`).join('')}</select><input data-prov-cp maxlength="80" placeholder="${esc((words && words.who) || 'Who was on the other side')}" value="${esc(m.counterparty || '')}"></div>` : ''}
+    ${st && words && words.addrs && words.addrs.length ? words.addrs.map(a => provAddrLine(key, m, a, words.paid)).join('') : ''}
     ${words && words.note ? `<small class="muted" style="display:block;margin-top:6px">${esc(words.note)}</small>` : ''}</div>`;
+}
+/// The line under a coin's or a transaction's mark offering it to the address: every coin that arrived there, and every one still to come, takes it.
+function provAddrLine(key, m, addr, paid) {
+  const have = provAddrMark(addr), n = (vault._coins || []).filter(c => coinAddr(c) === addr).length;
+  const where = `${paid ? 'paid to' : 'at'} ${shortAddr(addr)}`;
+  if (have && have.status === m.status && (have.method || null) === (m.method || null) && (have.counterparty || null) === (m.counterparty || null))
+    return `<small class="muted" style="display:block;margin-top:6px">Every coin ${where} takes this too.</small>`;
+  return `<div style="margin-top:6px"><a href="#" data-prov-addr="${esc(addr)}" data-prov-from="${esc(key)}">Use this for every coin ${where}${!paid && n > 1 ? ` \u2014 ${sats(n)} there now` : ''}, and every one still to come \u203a</a></div>`;
 }
 async function provSave(key, patch) {
   if (!vault) return;
@@ -3078,6 +3089,8 @@ async function provSave(key, patch) {
   } catch (e) { fail(e); }
 }
 document.addEventListener('click', async (e) => {
+  const a = e.target.closest('a[data-prov-addr]');
+  if (a) { e.preventDefault(); const m = provMark(a.dataset.provFrom); if (!m || !m.status) return; await provSave('addr:' + a.dataset.provAddr, { status: m.status, method: m.method || null, counterparty: m.counterparty || null }); provRepaint(); toast('Said on the address \u2014 every coin there takes it unless the coin itself is marked'); return; }
   const o = e.target.closest('.provpick .opt'); if (!o) return;
   const box = o.closest('[data-prov-of]'); if (!box) return;
   e.preventDefault();
@@ -3138,9 +3151,24 @@ function provWarn(ops, to) {
 }
 /// Holding by provenance across the vaults named: the unspent coins the engine knows, by status.
 function provRollup(names) {
-  const by = {}, count = {}; let total = 0, n = 0;
+  const by = {}, count = {}, balances = {}, off = []; let total = 0, n = 0;
   for (const d of Object.values(prov.coins)) { if (d.spent || !names.includes(d.vault)) continue; by[d.status] = (by[d.status] || 0) + d.sats; count[d.status] = (count[d.status] || 0) + 1; total += d.sats; n++; }
-  return { by, count, total, n };
+  for (const name of names) { const v = store.vaults.find(x => x.name === name); if (!v || provChainVault(v)) continue;
+    const L = vaultLedger(name), held = L && L.timeline.length ? L.timeline[L.timeline.length - 1].sats : 0; if (!held) continue;
+    const r = provRule(v); by[r.status] = (by[r.status] || 0) + held; balances[r.status] = (balances[r.status] || 0) + 1; total += held; n++; off.push({ name, sats: held, ...r }); }
+  return { by, count, balances, off, total, n };
+}
+const provChainVault = (v) => !(v.spark || v.liquid || v.statement || v.exchange || v.node);
+/// A balance that is not coins on the chain is one bucket: who holds it, or sees it, says who can link it. The vault's
+/// own default comes first; otherwise the rule for its kind.
+function provRule(v) {
+  const d = v.provenance_default, own = d ? `${PROV_WORD[d]}: this vault\u2019s default, set in Vault settings` : '';
+  if (v.exchange) return { status: d || 'kyc', method: 'exchange', counterparty: v.exchange.provider || 'the exchange', by: d ? 'vault' : 'rule:exchange', trail: [own || `KYC: ${v.exchange.provider || 'the exchange'} holds your identity against this balance`] };
+  if (v.statement) return { status: d || 'known', method: 'transfer', counterparty: v.statement.source || 'the custodian', by: d ? 'vault' : 'rule:statement', trail: [own || `Known: ${v.statement.source || 'the custodian'} keeps this balance for you and knows it is yours`] };
+  if (v.spark) return { status: d || 'known', method: 'channel', counterparty: 'the Spark service provider', by: d ? 'vault' : 'rule:spark', trail: [own || 'Known: the Spark service provider sees every payment in and out of this wallet, and your name if you gave the app one'] };
+  if (v.node) return { status: d || 'known', method: 'channel', counterparty: v.node.alias || 'your node', by: d ? 'vault' : 'rule:node', trail: [own || 'Known: a node\u2019s public key is a public identity, and its channels are on the chain'] };
+  if (v.liquid) return { status: d || 'unknown', method: null, counterparty: null, by: d ? 'vault' : '', trail: [own || 'Unclassified: a peg-in links L-BTC to the bitcoin it came from, a swap provider sees both sides \u2014 say which in Vault settings'] };
+  return { status: d || 'unknown', method: null, counterparty: null, by: d ? 'vault' : '', trail: [own || 'not yet classified'] };
 }
 /// The donut and its table: what share of the holding each status is, in sats and in money.
 function provDonut(host, names, ccy, now) {
@@ -3156,17 +3184,18 @@ function provDonut(host, names, ccy, now) {
     return `<path d="${d}" fill="none" stroke="${col[k]}" stroke-width="${w}"><title>${PROV_WORD[k]} · ${sats(R.by[k])} sats</title></path>`; });
   host.innerHTML = `<div class="label">Who can link these coins to you</div><div class="provsum-body"><svg viewBox="0 0 100 100" width="100" height="100" role="img" aria-label="Holding by provenance">${arcs.join('')}</svg>
     <table class="tbl provsum-t"><thead><tr><th>Status</th><th class="r">Coins</th><th class="r">Sats</th>${ccy && now ? '<th class="r">Worth now</th>' : ''}<th class="r">Share</th></tr></thead><tbody>
-    ${order.map(k => `<tr><td><span class="ptag ${k}">${PROV_WORD[k]}</span></td><td class="r">${sats(R.count[k])}</td><td class="r">${sats(R.by[k])}</td>${ccy && now ? `<td class="r">${money(R.by[k] / 1e8 * now.price, ccy)}</td>` : ''}<td class="r">${(R.by[k] / R.total * 100).toFixed(1)}%</td></tr>`).join('')}</tbody></table></div>
+    ${order.map(k => `<tr><td><span class="ptag ${k}">${PROV_WORD[k]}</span></td><td class="r">${[R.count[k] ? sats(R.count[k]) : '', R.balances[k] ? `${R.balances[k]} balance${R.balances[k] === 1 ? '' : 's'}` : ''].filter(Boolean).join(' + ')}</td><td class="r">${sats(R.by[k])}</td>${ccy && now ? `<td class="r">${money(R.by[k] / 1e8 * now.price, ccy)}</td>` : ''}<td class="r">${(R.by[k] / R.total * 100).toFixed(1)}%</td></tr>`).join('')}</tbody></table></div>
+    ${R.off.length ? `<div class="provlist" style="margin-top:8px">${R.off.map(o => `<div><span class="ptag ${o.status}" title="${esc(o.trail.join('\n'))}">${PROV_WORD[o.status]}</span> ${esc(o.name)} <span class="muted">\u00b7 ${sats(o.sats)} sats \u00b7 ${esc(o.trail[0])}</span></div>`).join('')}</div>` : ''}
     <div class="muted" style="font-size:12.5px">${R.by.unknown ? 'Unclassified coins are the ones nothing in your records says anything about yet: mark them on Coins, or give the vault a default in Vault settings. ' : ''}From your own records — marks on coins, addresses and transactions, and the statements you imported — never from a chain-analysis service.${prov.skipped.length ? ` ${prov.skipped.map(esc).join(', ')} could not be read just now and ${prov.skipped.length === 1 ? 'is' : 'are'} left out.` : ''}</div>`;
 }
 /// The transaction sheet's row: each of this vault's coins in it with its status, and the mark on the transaction.
 function provTxRow(d, spend) {
   const ready = provReady(renderTx);
   const ours = d.outputs.filter(o => o.ours !== null).map(o => `${d.txid}:${o.n}`), ins = d.inputs.filter(i => i.ours !== null).map(i => i.outpoint);
-  const list = (ops, head) => ops.length ? `<div class="provlist">${head ? `<small class="muted">${head}</small>` : ''}${ops.map(op => { const dd = provOf(op); return `<div>${provTag(dd)} <span class="mono" style="font-size:12px">${esc(op.slice(0, 8))}…:${esc(op.split(':')[1])}</span>${dd && dd.method ? `<small class="muted"> · ${esc(provMethodWord(dd.method))}</small>` : ''}${dd && dd.counterparty ? `<small class="muted"> · ${esc(dd.counterparty)}</small>` : ''}</div>`; }).join('')}</div>` : '';
+  const list = (ops, head) => ops.length ? `<div class="provlist">${head ? `<small class="muted">${head}</small>` : ''}${ops.map(op => { const dd = provOf(op); return `<div>${provTag(dd)} <span class="mono" style="font-size:12px">${esc(op.slice(0, 8))}…:${esc(op.split(':')[1])}</span>${provAfter(dd)}</div>`; }).join('')}</div>` : '';
   return `${!ready ? '<div class="muted" style="font-size:12.5px">working it out…</div>' : ''}${spend ? list(ins, 'the coins spent') : ''}${list(ours, spend ? 'what came back' : '')}${provPick('tx:' + d.txid, spend
-    ? { who: 'Who was paid — an exchange, a person, a service', note: 'A mark on the payment marks the coins it spent: paid to an exchange, they are KYC from here on, and so is whatever the chain shows was controlled with them.' }
-    : { who: 'Who paid you', note: 'Marks every coin this transaction brought in. A mark on the coin itself, or on its address, comes first.' })}`;
+    ? { addrs: [...new Set(d.outputs.filter(o => o.ours === null && !o.peer && o.address).map(o => o.address))], paid: true, who: 'Who was paid — an exchange, a person, a service', note: 'A mark on the payment marks the coins it spent: paid to an exchange, they are KYC from here on, and so is whatever the chain shows was controlled with them.' }
+    : { addrs: [...new Set(d.outputs.filter(o => o.ours !== null && o.address).map(o => o.address))], who: 'Who paid you', note: 'Marks every coin this transaction brought in. A mark on the coin itself, or on its address, comes first.' })}`;
 }
 function disposalPick(name, txid) {
   const L = vaultLedger(name), kind = (L && L.realised[txid] && L.realised[txid].kind) || '';
@@ -5370,9 +5399,10 @@ function paintBackupKeys() {
 /// The vault's default provenance and its policy when a build would mix statuses.
 function paintProvSettings() {
   const sel = $('#vs-prov'); if (!sel || !vault) return;
-  const chain = !(vault.spark || vault.liquid || vault.statement || vault.exchange || vault.node);
-  $('#vs-prov-card').hidden = !chain; if (!chain) return;
+  const chain = provChainVault(vault);
+  $('#vs-prov-card').hidden = false; $('#vs-prov-policy').closest('.field').hidden = !chain;
   sel.value = vault.provenance_default || '';
+  if (!chain) { const r = provRule({ ...vault, provenance_default: null }); $('#vs-prov-note').textContent = `Left blank, this balance counts as ${PROV_WORD[r.status]} \u2014 ${r.trail[0].replace(/^[^:]*: /, '')}. Say otherwise here if ${vault.exchange ? 'the exchange never asked who you are' : 'you know better'}.`; return; }
   const pol = vault.provenance_policy || 'warn';
   $$('#vs-prov-policy button').forEach(b => b.setAttribute('aria-checked', b.dataset.policy === pol ? 'true' : 'false'));
   $('#vs-prov-note').textContent = (vault.provenance_default ? `Coins nothing else classifies count as ${PROV_WORD[vault.provenance_default]}. ` : 'Coins nothing else classifies stay unclassified until you mark them. ')
