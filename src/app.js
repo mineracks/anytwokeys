@@ -2559,7 +2559,7 @@ async function renderSummary(box, names, opts = {}) {
     k.appendChild(tile('Realised', inR.length ? (rg >= 0 ? '▲ +' : '▼ −') + money(Math.abs(rg), ccy) : 'nothing yet', inR.length ? `${inR.length} disposal${inR.length === 1 ? '' : 's'} in this range${known.length < inR.length ? ` \u00b7 ${inR.length - known.length} of unknown cost` : ''}` : 'nothing has left in this range', inR.length ? (rg >= 0 ? 'up' : 'down') : ''));
   }
   box.appendChild(k);
-  { const pbox = document.createElement('div'); pbox.hidden = true; box.appendChild(pbox); const fill = () => { if (pbox.isConnected) provDonut(pbox, names, ccy, now); }; pbox._refill = fill; if (provReady(fill)) fill(); }
+  { const pbox = document.createElement('div'); pbox.hidden = true; box.appendChild(pbox); const fill = () => { if (pbox.isConnected) provDonut(pbox, names, ccy, now, mixed ? (nowState.units || {}).BTC || 0 : nowState.sats); }; pbox._refill = fill; if (provReady(fill)) fill(); }
   const c1 = document.createElement('div'); c1.className = 'chart'; box.appendChild(c1);
   lineChart(c1, { title: `Balance, in ${mixed ? 'sats' : unitName(names)}`, sub: mixed ? `It changes only when something arrives or leaves. ${assets.filter(a => a !== 'BTC').map(a => unitName(namesOf(a).slice(0, 1))).join(' and ')} ${assets.length > 2 ? 'are' : 'is'} counted in worth and cost, not in this line.` : 'It changes only when something arrives or leaves.', from, to,
     series: [{ name: 'Balance', color: 'var(--series-value)', pts: S.bal, step: true, area: true }],
@@ -3151,12 +3151,13 @@ function provWarn(ops, to) {
 }
 /// Holding by provenance across the vaults named: the unspent coins the engine knows, by status.
 function provRollup(names) {
-  const by = {}, count = {}, balances = {}, off = []; let total = 0, n = 0;
+  const by = {}, count = {}, balances = {}, off = [], other = []; let total = 0, n = 0;
   for (const d of Object.values(prov.coins)) { if (d.spent || !names.includes(d.vault)) continue; by[d.status] = (by[d.status] || 0) + d.sats; count[d.status] = (count[d.status] || 0) + 1; total += d.sats; n++; }
   for (const name of names) { const v = store.vaults.find(x => x.name === name); if (!v || provChainVault(v)) continue;
-    const L = vaultLedger(name), held = L && L.timeline.length ? L.timeline[L.timeline.length - 1].sats : 0; if (!held) continue;
+    const L = vaultLedger(name), held = L && L.timeline.length ? L.timeline[L.timeline.length - 1].sats : 0; if (!(held > 0)) continue;
+    if (!inSats(v)) { other.push({ name, text: unitAmount(v, held) }); continue; }   // not bitcoin: it cannot sit in a table of sats
     const r = provRule(v); by[r.status] = (by[r.status] || 0) + held; balances[r.status] = (balances[r.status] || 0) + 1; total += held; n++; off.push({ name, sats: held, ...r }); }
-  return { by, count, balances, off, total, n };
+  return { by, count, balances, off, other, total, n };
 }
 const provChainVault = (v) => !(v.spark || v.liquid || v.statement || v.exchange || v.node);
 /// A balance that is not coins on the chain is one bucket: who holds it, or sees it, says who can link it. The vault's
@@ -3171,9 +3172,11 @@ function provRule(v) {
   return { status: d || 'unknown', method: null, counterparty: null, by: d ? 'vault' : '', trail: [own || 'not yet classified'] };
 }
 /// The donut and its table: what share of the holding each status is, in sats and in money.
-function provDonut(host, names, ccy, now) {
+function provDonut(host, names, ccy, now, holding) {
   host.innerHTML = ''; host.className = 'provsum';
   const R = provRollup(names); if (!R.n) { host.hidden = true; return; }
+  // the holding above this table is the truth; a gap between the two is a row to read, never a silent difference
+  const gap = holding === undefined || holding === null ? 0 : Math.round(holding) - R.total;
   host.hidden = false;
   const order = ['kyc', 'known', 'private', 'unknown'].filter(k => R.by[k]);
   const col = { kyc: 'var(--gold)', known: 'var(--ink)', private: 'var(--signal)', unknown: 'var(--muted)' };
@@ -3184,7 +3187,9 @@ function provDonut(host, names, ccy, now) {
     return `<path d="${d}" fill="none" stroke="${col[k]}" stroke-width="${w}"><title>${PROV_WORD[k]} · ${sats(R.by[k])} sats</title></path>`; });
   host.innerHTML = `<div class="label">Who can link these coins to you</div><div class="provsum-body"><svg viewBox="0 0 100 100" width="100" height="100" role="img" aria-label="Holding by provenance">${arcs.join('')}</svg>
     <table class="tbl provsum-t"><thead><tr><th>Status</th><th class="r">Coins</th><th class="r">Sats</th>${ccy && now ? '<th class="r">Worth now</th>' : ''}<th class="r">Share</th></tr></thead><tbody>
-    ${order.map(k => `<tr><td><span class="ptag ${k}">${PROV_WORD[k]}</span></td><td class="r">${[R.count[k] ? sats(R.count[k]) : '', R.balances[k] ? `${R.balances[k]} balance${R.balances[k] === 1 ? '' : 's'}` : ''].filter(Boolean).join(' + ')}</td><td class="r">${sats(R.by[k])}</td>${ccy && now ? `<td class="r">${money(R.by[k] / 1e8 * now.price, ccy)}</td>` : ''}<td class="r">${(R.by[k] / R.total * 100).toFixed(1)}%</td></tr>`).join('')}</tbody></table></div>
+    ${order.map(k => `<tr><td><span class="ptag ${k}">${PROV_WORD[k]}</span></td><td class="r">${[R.count[k] ? sats(R.count[k]) : '', R.balances[k] ? `${R.balances[k]} balance${R.balances[k] === 1 ? '' : 's'}` : ''].filter(Boolean).join(' + ')}</td><td class="r">${sats(R.by[k])}</td>${ccy && now ? `<td class="r">${money(R.by[k] / 1e8 * now.price, ccy)}</td>` : ''}<td class="r">${(R.by[k] / R.total * 100).toFixed(1)}%</td></tr>`).join('')}${gap > 0 ? `<tr><td><span class="muted">Not in this view</span></td><td class="r"></td><td class="r">${sats(gap)}</td>${ccy && now ? `<td class="r">${money(gap / 1e8 * now.price, ccy)}</td>` : ''}<td class="r"></td></tr>` : ''}</tbody></table></div>
+    ${gap > 0 ? `<div class="muted" style="font-size:12.5px">${sats(gap)} sats of the holding are in no bucket: coins the chain cache has not described yet, a vault that could not be read, or a balance this view does not count.</div>` : gap < 0 ? `<div class="muted" style="font-size:12.5px">This view counts ${sats(-gap)} sats more than the holding above \u2014 a coin seen by two vaults is counted once there and may be counted twice here.</div>` : ''}
+    ${R.other.length ? `<div class="muted" style="font-size:12.5px">Not bitcoin, so not in the table: ${R.other.map(o => `${esc(o.text)} in ${esc(o.name)}`).join(' \u00b7 ')}.</div>` : ''}
     ${R.off.length ? `<div class="provlist" style="margin-top:8px">${R.off.map(o => `<div><span class="ptag ${o.status}" title="${esc(o.trail.join('\n'))}">${PROV_WORD[o.status]}</span> ${esc(o.name)} <span class="muted">\u00b7 ${sats(o.sats)} sats \u00b7 ${esc(o.trail[0])}</span></div>`).join('')}</div>` : ''}
     <div class="muted" style="font-size:12.5px">${R.by.unknown ? 'Unclassified coins are the ones nothing in your records says anything about yet: mark them on Coins, or give the vault a default in Vault settings. ' : ''}From your own records — marks on coins, addresses and transactions, and the statements you imported — never from a chain-analysis service.${prov.skipped.length ? ` ${prov.skipped.map(esc).join(', ')} could not be read just now and ${prov.skipped.length === 1 ? 'is' : 'are'} left out.` : ''}</div>`;
 }
