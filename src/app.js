@@ -3079,6 +3079,11 @@ function provAddrLine(key, m, addr, paid) {
   return `<div style="margin-top:6px"><a href="#" data-prov-addr="${esc(addr)}" data-prov-from="${esc(key)}">Use this for every coin ${where}${!paid && n > 1 ? ` \u2014 ${sats(n)} there now` : ''}, and every one still to come \u203a</a></div>`;
 }
 async function provSave(key, patch) {
+  const run = (prov.q || Promise.resolve()).then(() => provSaveNow(key, patch));
+  prov.q = run.catch(() => {});
+  return run;
+}
+async function provSaveNow(key, patch) {
   if (!vault) return;
   const m = provMark(key) || {};
   const next = { status: patch.status !== undefined ? patch.status : (m.status || 'unknown'), method: patch.method !== undefined ? patch.method : (m.method || null), counterparty: patch.counterparty !== undefined ? patch.counterparty : (m.counterparty || null), note: m.note || null };
@@ -3090,7 +3095,12 @@ async function provSave(key, patch) {
 }
 document.addEventListener('click', async (e) => {
   const a = e.target.closest('a[data-prov-addr]');
-  if (a) { e.preventDefault(); const m = provMark(a.dataset.provFrom); if (!m || !m.status) return; await provSave('addr:' + a.dataset.provAddr, { status: m.status, method: m.method || null, counterparty: m.counterparty || null }); provRepaint(); toast('Said on the address \u2014 every coin there takes it unless the coin itself is marked'); return; }
+  if (a) { e.preventDefault(); const from = a.dataset.provFrom, m = { ...(provMark(from) || {}) };
+    // what is in the boxes now, not what had been saved when the line was drawn: typing a name and tapping the line is one gesture
+    const box = $$('.provpick[data-prov-of]').find(b => b.dataset.provOf === from);
+    if (box) { const sel = box.querySelector('select[data-prov-method]'), cp = box.querySelector('input[data-prov-cp]'); if (sel && sel.value) m.method = sel.value; if (cp) m.counterparty = cp.value.trim() || null; }
+    if (!m.status) return;
+    await provSave('addr:' + a.dataset.provAddr, { status: m.status, method: m.method || null, counterparty: m.counterparty || null }); provRepaint(); toast('Said on the address \u2014 every coin there takes it unless the coin itself is marked'); return; }
   const o = e.target.closest('.provpick .opt'); if (!o) return;
   const box = o.closest('[data-prov-of]'); if (!box) return;
   e.preventDefault();
