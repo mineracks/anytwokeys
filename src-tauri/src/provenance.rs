@@ -101,7 +101,14 @@ pub struct Derived {
     pub cluster_size: u32,
     /// the coin has been spent (it is the input of a later transaction)
     pub spent: bool,
+    /// when it was spent (block time of that transaction; 0 = unspent or not yet in a block), so a screen can draw
+    /// holdings by status over time
+    pub spent_at: u32,
+    /// the owner froze it (BIP 329 `spendable: false`): kept out of Send, Combine and Split until thawed
+    pub frozen: bool,
     pub time: u32,
+    /// the address it sits at, when the script has one — so a screen can group coins by address without the vault loaded
+    #[serde(skip_serializing_if = "Option::is_none")] pub addr: Option<String>,
 }
 
 fn short(op: &str) -> String {
@@ -169,7 +176,7 @@ pub fn derive(txs: &[Tx], marks: &Marks) -> HashMap<String, Derived> {
         // 2. each of the owner's outputs: its own mark, its address's, its transaction's, a statement's, its lineage, its vault's
         for o in tx.outs.iter().filter(|o| o.vault.is_some()) {
             let vault = o.vault.clone().unwrap_or_default();
-            let mut e = Derived { vault: vault.clone(), sats: o.sats, status: "unknown".into(), own: "unknown".into(), time: tx.time, ..Default::default() };
+            let mut e = Derived { vault: vault.clone(), sats: o.sats, status: "unknown".into(), own: "unknown".into(), time: tx.time, addr: o.addr.clone(), ..Default::default() };
             if let Some(m) = marks.coin.get(&o.op) { apply(&mut e, m, "set by you on this coin".into()); }
             else if let Some(m) = o.addr.as_ref().and_then(|a| marks.addr.get(a)) { apply(&mut e, m, format!("from its address: you marked {}{}", short_addr(o.addr.as_deref().unwrap_or("")), m.counterparty.as_ref().map(|c| format!(" as {c}’s")).unwrap_or_default())); }
             else if !spends && marks.tx.contains_key(&tx.id) { let m = &marks.tx[&tx.id]; apply(&mut e, m, "you marked this transaction".into()); }
@@ -198,7 +205,7 @@ pub fn derive(txs: &[Tx], marks: &Marks) -> HashMap<String, Derived> {
             else { e.trail.push("not yet classified".into()); }
             d.insert(o.op.clone(), e);
         }
-        for i in &ours_in { if let Some(e) = d.get_mut(&i.op) { e.spent = true; } }
+        for i in &ours_in { if let Some(e) = d.get_mut(&i.op) { e.spent = true; e.spent_at = tx.time; } }
     }
     // 3. clusters: coins spent together; and when every input was the owner's, the outputs with them
     let ops: Vec<String> = { let mut v: Vec<String> = d.keys().cloned().collect(); v.sort(); v };
@@ -255,6 +262,7 @@ mod tests {
         marks.rule.insert("dep".into(), Mark { status: "kyc".into(), method: Some("exchange".into()), counterparty: Some("Bitaroo".into()), by: "rule:statement".into(), ..Default::default() });
         let d = derive(&txs, &marks);
         let a = &d["dep:0"]; assert_eq!((a.status.as_str(), a.method.as_deref(), a.counterparty.as_deref(), a.spent, a.linked), ("kyc", Some("exchange"), Some("Bitaroo"), true, false));
+        assert_eq!((a.time, a.spent_at), (1_700_000_000, 1_700_100_000), "a coin knows when it came and when it went");
         assert!(a.trail[0].contains("Bitaroo’s statement"), "{:?}", a.trail);
         let c = &d["pay:1"]; assert_eq!((c.status.as_str(), c.method.as_deref(), c.by.as_str(), c.spent), ("kyc", Some("exchange"), "inherited", false));
         assert!(c.trail[0].starts_with("change: inherits"), "{:?}", c.trail);

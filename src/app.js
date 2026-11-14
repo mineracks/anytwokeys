@@ -1466,23 +1466,24 @@ function renderCoins2() {
   listControls($('#coin-ctl'), 'coin', [
     { key: 'sort', label: 'Sort', def: 'big', options: [['big', 'Largest'], ['small', 'Smallest'], ['new', 'Newest'], ['old', 'Oldest']] },
     { key: 'group', label: 'Group', def: 'none', options: [['none', 'None'], ['addr', 'Address'], ['status', 'Status'], ['prov', 'Who knows']] },
-    { key: 'prov', label: 'Who knows', def: 'all', options: [['all', 'All'], ['kyc', 'KYC'], ['known', 'Known'], ['private', 'Private'], ['unknown', 'Unclassified']] }], renderCoins2);
+    { key: 'prov', label: 'Who knows', def: 'all', options: [['all', 'All'], ['kyc', 'KYC'], ['known', 'Known'], ['private', 'Private'], ['unknown', 'Unclassified'], ['frozen', 'Frozen']] }], renderCoins2);
   const sort = listPref('coin', 'sort', 'big'), group = listPref('coin', 'group', 'none'), pf = listPref('coin', 'prov', 'all');
   provReady(renderCoins2);
   const hk = (c) => c.height > 0 ? c.height : 9e9;   // unconfirmed is the newest there is
   const all = (vault._coins || []).slice().sort({ big: (a, b) => b.value - a.value, small: (a, b) => a.value - b.value, new: (a, b) => hk(b) - hk(a) || b.value - a.value, old: (a, b) => hk(a) - hk(b) || b.value - a.value }[sort]);
   const q = ($('#coin-find').value || '').trim().toLowerCase();
-  const hits = all.filter(c => (pf === 'all' || provStatus(c.txid + ':' + c.vout) === pf) && (!q || (coinKey(c) + ' ' + coinAddr(c) + ' ' + labelOf(coinKey(c)) + ' ' + ((vault.notes || {})[coinKey(c)] || '')).toLowerCase().includes(q)));
+  const hits = all.filter(c => (pf === 'all' || (pf === 'frozen' ? provFrozen(c.txid + ':' + c.vout) : provStatus(c.txid + ':' + c.vout) === pf)) && (!q || (coinKey(c) + ' ' + coinAddr(c) + ' ' + labelOf(coinKey(c)) + ' ' + ((vault.notes || {})[coinKey(c)] || '')).toLowerCase().includes(q)));
   const gkey = group === 'addr' ? (c) => { const a = coinAddr(c); return a ? (labelOf('addr:' + a) ? labelOf('addr:' + a) + ' \u00b7 ' + shortAddr(a) : shortAddr(a)) : 'Address unknown'; } : group === 'prov' ? (c) => PROV_WORD[provStatus(c.txid + ':' + c.vout)] : group === 'status' ? (c) => c.height > 0 ? 'Confirmed' : 'Unconfirmed' : null;
   if (gkey) hits.sort((a, b) => gkey(a).localeCompare(gkey(b)) || all.indexOf(a) - all.indexOf(b));
   const tb = $('#coin-rows'); tb.innerHTML = '';
-  if (!hits.length) tb.innerHTML = `<tr><td class="muted" colspan="7">${all.length ? (pf !== 'all' ? `no ${PROV_WORD[pf].toLowerCase()} coins here` : 'nothing here matches that') : 'no coins yet: nothing has arrived, or nothing is left unspent'}</td></tr>`;
+  if (!hits.length) tb.innerHTML = `<tr><td class="muted" colspan="7">${all.length ? (pf !== 'all' ? `no ${pf === 'frozen' ? 'frozen' : PROV_WORD[pf].toLowerCase()} coins here` : 'nothing here matches that') : 'no coins yet: nothing has arrived, or nothing is left unspent'}</td></tr>`;
   let lastG = null;
   for (const c of hits) {
     if (gkey) { const g = gkey(c); if (g !== lastG) { const mine = hits.filter(x => gkey(x) === g); tb.appendChild(groupRow(g, mine.length, mine.reduce((a, x) => a + x.value, 0), true, 7)); lastG = g; } }
     const k = coinKey(c), addr = coinAddr(c), tip = vault._height || 0, deep = c.height > 0 && tip ? tip - c.height + 1 : 0, op = c.txid + ':' + c.vout;
     const tr = document.createElement('tr'); tr.className = 'rowpick' + (coinSel.has(op) ? ' picked' : ''); tr.dataset.coin = k; tr.dataset.op = op;
-    tr.innerHTML = `<td class="tick"><input type="checkbox" data-sel="${op}" ${coinSel.has(op) ? 'checked' : ''} aria-label="Tick this coin"></td><td>${lblHtml(k)}</td><td>${provTag(provOf(op))}</td><td class="r" style="font-variant-numeric:tabular-nums">${sats(c.value)} sats${(() => { const f = txFacts[vault.name]; return f && f.now && f.ccy ? `<small class="muted" style="display:block;font-size:11.5px">${worth(c.value, f.now, f.ccy)} now</small>` : ''; })()}</td><td><span class="mono">${c.txid.slice(0, 8)}…:${c.vout}</span>${vault._rotating && c.index !== undefined ? ' <span class="muted">· ' + fmtIndex(c.index) + '</span>' : ''}</td><td class="mono" title="${esc(addr)}">${addr ? esc(addr.slice(0, 18)) + '…' : '—'}</td><td class="r ${c.height > 0 ? 'ok' : 'muted'}">${c.height > 0 ? (deep ? sats(deep) + ' deep' : 'confirmed') : 'unconfirmed'}</td>`;
+    const fz = provFrozen(op);
+    tr.innerHTML = `<td class="tick"><input type="checkbox" data-sel="${op}" ${coinSel.has(op) ? 'checked' : ''}${fz ? ' disabled title="Frozen: thaw it on its page to spend it"' : ''} aria-label="Tick this coin"></td><td>${lblHtml(k)}</td><td>${provTag(provOf(op))}${fz ? ' ' + provFrozenTag(op) : ''}</td><td class="r" style="font-variant-numeric:tabular-nums">${sats(c.value)} sats${(() => { const f = txFacts[vault.name]; return f && f.now && f.ccy ? `<small class="muted" style="display:block;font-size:11.5px">${worth(c.value, f.now, f.ccy)} now</small>` : ''; })()}</td><td><span class="mono">${c.txid.slice(0, 8)}…:${c.vout}</span>${vault._rotating && c.index !== undefined ? ' <span class="muted">· ' + fmtIndex(c.index) + '</span>' : ''}</td><td class="mono" title="${esc(addr)}">${addr ? esc(addr.slice(0, 18)) + '…' : '—'}</td><td class="r ${c.height > 0 ? 'ok' : 'muted'}">${c.height > 0 ? (deep ? sats(deep) + ' deep' : 'confirmed') : 'unconfirmed'}</td>`;
     tr.addEventListener('click', (e) => { if (e.target.closest('.lbl, input')) return; openCoin(c); });
     tb.appendChild(tr);
   }
@@ -1961,6 +1962,14 @@ function recPageOpen(kind, id) {
   provReady(() => { if (recPage.kind === kind && recPage.id === id) recPageOpen(kind, id); });
   if (kind === 'coin') { const dd = provOf(id); chain.push(['Who can link it', `${provTag(dd)}${provAfter(dd)}${dd && dd.cluster_size > 1 ? `<small class="muted">one of ${sats(dd.cluster_size)} coins the chain shows controlled together</small>` : ''}${provTrail(dd)}${provPick('output:' + id, { addrs: [coinAddr(coin)].filter(Boolean), who: 'Who was on the other side', note: 'What you say on the coin itself comes before its address\u2019s mark and its transaction\u2019s.' })}`]); }
   else chain.push(['Who can link it', provPick('addr:' + id, { who: 'Who you gave this address to', note: 'Every coin that arrives here takes this, unless the coin itself is marked.' })]);
+  if (kind === 'coin') {
+    const fz = ((vault.more || {})['output:' + id] || {}), frozen = fz.spendable === false, fi = fz.frozen || {}, dd = provOf(id);
+    // small, unexplained and unasked-for: the shape of a dust attack. Frozen, it never joins a spend and so never links the rest
+    const dust = !frozen && coin.value <= 1000 && (!dd || dd.status === 'unknown');
+    chain.push(['Spendable', frozen
+      ? `<span class="ptag frozen">Frozen</span> <span class="muted">since ${fi.t ? esc(new Date(fi.t * 1000).toLocaleDateString()) : '—'}${fi.by && fi.by !== 'you' ? ` · by the ${esc(fi.by)}` : ''}${fi.why ? ` · ${esc(fi.why)}` : ''}. Left out of Send, Combine and Split; still counted in the holding.</span><div style="margin-top:6px"><button class="btn small" type="button" id="coin-thaw">Thaw it</button></div>`
+      : `Yes.${dust ? ' <b>Small and unexplained</b> — an unasked-for receipt this size can be a dust attack: spent with your other coins, it links them to whoever sent it.' : ''}<div class="row" style="margin-top:6px;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn small" type="button" id="coin-freeze">${dust ? 'Freeze it as dust' : 'Freeze this coin'}</button><input id="coin-freeze-why" maxlength="200" placeholder="why (optional)" style="flex:1 1 180px;max-width:320px"></div><small class="muted" style="display:block;margin-top:4px">Frozen, it is left out of every build here and marked <span class="mono">spendable: false</span> in the labels file, so other wallets leave it alone too.</small>`]);
+  }
   const txs = kind === 'addr' ? [...new Set((vault._history || []).filter(x => x.index === row.index).map(x => x.txid))] : [];
   if (txs.length) chain.push(['Transactions', txs.map(t => `<a href="#" class="mono" data-go-tx="${t}">${t.slice(0, 10)}\u2026</a>`).join(', ')]);
   box.innerHTML = `<div class="txnav"><button class="btn small" type="button" data-rec-step="-1"${i > 0 ? '' : ' disabled'}>${words[0]}</button><span class="muted">${i >= 0 ? `${i + 1} of ${l.length}` : ''}</span><button class="btn small" type="button" data-rec-step="1"${i >= 0 && i < l.length - 1 ? '' : ' disabled'}>${words[1]}</button></div>
@@ -1971,7 +1980,14 @@ function recPageOpen(kind, id) {
     ${kind === 'addr' ? `<div class="muted" style="font-size:13px">${(vault._history || []).some(x => x.index === row.index) ? 'An address that has been used is public: whoever you gave it to can see everything it has ever held.' : 'Labelling an address before you hand it out is the point: when a deposit arrives you already know who it was from.'}</div>` : ''}
     <div id="rec-slot"></div>`;
   $$('[data-rec-step]', box).forEach(b => b.onclick = () => recPageStep(+b.dataset.recStep));
-  if (kind === 'coin') $('#coin-spend').onclick = () => { coinPick.clear(); coinPick.add(id); show('send'); setTimeout(() => { const d = $('#coins-adv'); if (d) d.open = true; renderCoins(); coinSum(); }, 60); };
+  if (kind === 'coin') {
+    const frozen = provFrozen(id);
+    $('#coin-spend').disabled = frozen; if (frozen) $('#coin-spend').title = 'Frozen: thaw it first';
+    $('#coin-spend').onclick = () => { if (provFrozen(id)) return toast('This coin is frozen. Thaw it first.'); coinPick.clear(); coinPick.add(id); show('send'); setTimeout(() => { const d = $('#coins-adv'); if (d) d.open = true; renderCoins(); coinSum(); }, 60); };
+    const fr = $('#coin-freeze'), th = $('#coin-thaw');
+    if (fr) fr.onclick = () => coinFreeze(id, true, ($('#coin-freeze-why') || {}).value || null);
+    if (th) th.onclick = () => coinFreeze(id, false, null);
+  }
   else { $('#addr-show').onclick = () => { drawAddress(row); show('receive'); }; $('#addr-copy').onclick = () => navigator.clipboard.writeText(id).then(() => toast('Address copied')); }
   recPoint(kind, kind === 'coin' ? 'output:' + id : 'addr:' + id, $('#rec-slot'));
   paintCrumbs(kind === 'coin' ? 'coins' : 'addresses');
@@ -3050,6 +3066,28 @@ const provDrop = () => { prov.at = 0; };
 const provOf = (op) => prov.coins[op] || null;
 const provStatus = (op) => (provOf(op) || {}).status || 'unknown';
 const provMethodWord = (m) => (PROV_METHODS.find(([k]) => k === m) || [])[1] || m;
+/// frozen (BIP 329 spendable: false) — from the vault's own record first, so the page is right before the engine has run
+const provFrozen = (op) => { const r = vault && vault.more && vault.more['output:' + op]; if (r && 'spendable' in r) return r.spendable === false; const d = provOf(op); return !!(d && d.frozen); };
+const provFrozenTag = (op) => `<span class="ptag frozen" title="Frozen: left out of Send, Combine and Split until thawed on its page">Frozen</span>`;
+async function coinFreeze(op, frozen, why) {
+  if (!vault) return;
+  try { store = await invoke('coin_freeze', { name: vault.name, op, frozen, why }); vault = store.vaults.find(v => v.name === vault.name) || vault; coinSel.delete(op); coinPick.delete(op); provDrop(); provRepaint(); toast(frozen ? 'Frozen. It stays in the holding and out of every build.' : 'Thawed. It can be spent again.'); } catch (e) { fail(e); }
+}
+/// The counterparty register: the exchanges and custodians the app already tracks, and every name given with a mark.
+function provCounterparties() {
+  const s = new Set();
+  for (const v of store.vaults) { if (v.exchange && v.exchange.provider) s.add(v.exchange.provider); if (v.statement && v.statement.source) s.add(v.statement.source); for (const r of Object.values(v.more || {})) if (r.provenance && r.provenance.counterparty) s.add(r.provenance.counterparty); }
+  return [...s].filter(Boolean).sort((a, b) => a.localeCompare(b));
+}
+/// a <datalist> of the register, kept on the body, for every counterparty box
+function provCpList() { let dl = $('#prov-cps'); if (!dl) { dl = document.createElement('datalist'); dl.id = 'prov-cps'; document.body.appendChild(dl); } dl.innerHTML = provCounterparties().map(c => `<option value="${esc(c)}">`).join(''); return 'prov-cps'; }
+/// what the register knows about a name: an exchange the app tracks is KYC by exchange; otherwise the mark most often given with it
+function provCpMark(cp) {
+  if (store.vaults.some(v => v.exchange && v.exchange.provider === cp)) return { status: 'kyc', method: 'exchange' };
+  const seen = {}; for (const v of store.vaults) for (const r of Object.values(v.more || {})) { const p = r.provenance; if (p && p.counterparty === cp) { const k = p.status + '|' + (p.method || ''); seen[k] = (seen[k] || 0) + 1; } }
+  const top = Object.entries(seen).sort((a, b) => b[1] - a[1])[0]; if (!top) return { status: 'known', method: null };
+  const [st, m] = top[0].split('|'); return { status: st, method: m || null };
+}
 /// a status word as a chip, with the trail as its tooltip
 function provTag(d, extra) {
   const st = d ? d.status : 'unknown', linked = d && d.linked;
@@ -3066,7 +3104,7 @@ function provPick(key, words) {
   const m = provMark(key) || {}, st = m.status || '';
   return `<div class="provpick" data-prov-of="${esc(key)}">
     <div class="pick tight">${PROV_STATUSES.filter(([k]) => k !== 'unknown').map(([k, n, why]) => `<div class="opt${k === st ? ' on' : ''}" data-status="${k}" title="${esc(why)}">${n}</div>`).join('')}${st ? '<div class="opt" data-status="unknown" title="Forget what was said here">Clear</div>' : ''}</div>
-    ${st ? `<div class="prow"><select data-prov-method>${PROV_METHODS.map(([k, n]) => `<option value="${k}"${(m.method || '') === k ? ' selected' : ''}>${n}</option>`).join('')}</select><input data-prov-cp maxlength="80" placeholder="${esc((words && words.who) || 'Who was on the other side')}" value="${esc(m.counterparty || '')}"></div>` : ''}
+    ${st ? `<div class="prow"><select data-prov-method>${PROV_METHODS.map(([k, n]) => `<option value="${k}"${(m.method || '') === k ? ' selected' : ''}>${n}</option>`).join('')}</select><input data-prov-cp list="${provCpList()}" maxlength="80" placeholder="${esc((words && words.who) || 'Who was on the other side')}" value="${esc(m.counterparty || '')}"></div>` : ''}
     ${st && words && words.addrs && words.addrs.length ? words.addrs.map(a => provAddrLine(key, m, a, words.paid)).join('') : ''}
     ${words && words.note ? `<small class="muted" style="display:block;margin-top:6px">${esc(words.note)}</small>` : ''}</div>`;
 }
@@ -3111,7 +3149,10 @@ document.addEventListener('change', async (e) => {
   const sel = e.target.closest('.provpick select[data-prov-method]'), cp = e.target.closest('.provpick input[data-prov-cp]');
   if (!sel && !cp) return;
   const box = e.target.closest('[data-prov-of]'); if (!box) return;
-  await provSave(box.dataset.provOf, sel ? { method: sel.value || null } : { counterparty: cp.value.trim() || null });
+  let patch = sel ? { method: sel.value || null } : { counterparty: cp.value.trim() || null };
+  // a name the register knows as an exchange, with no method yet: the method follows
+  if (cp && patch.counterparty) { const ms = box.querySelector('select[data-prov-method]'); if (ms && !ms.value && store.vaults.some(v => v.exchange && v.exchange.provider === patch.counterparty)) patch.method = 'exchange'; }
+  await provSave(box.dataset.provOf, patch);
   provRepaint();
 });
 /// repaint whatever is showing provenance now
@@ -3154,11 +3195,53 @@ function provWarn(ops, to) {
     lines.push(`<b>The destination is marked ${PROV_WORD[dest.status]}${dest.counterparty ? ` (${esc(dest.counterparty)})` : ''}.</b> Paying it attaches your identity to ${M.by.private + M.by.unknown === ops.length ? 'these coins' : 'the private coins here'} and their history${sib.size ? `, and to the ${sib.size} other coin${sib.size === 1 ? '' : 's'} still in this vault that the chain shows controlled together` : ''}.`);
   }
   if (M.by.unknown && !M.mixes) lines.push(`${M.by.unknown} of these coin${M.by.unknown === 1 ? ' has' : 's have'} no provenance yet — mark ${M.by.unknown === 1 ? 'it' : 'them'} on Coins.`);
+  // combining: how many separate holders an observer sees now, and that it becomes one
+  if (to === null && ops.length > 1) {
+    const cl = new Map(); for (const op of ops) { const d = provOf(op); if (d) cl.set(d.cluster, d.cluster_size); }
+    if (cl.size > 1) { const joined = [...cl.values()].reduce((a, b) => a + b, 0); lines.push(`<b>The chain shows these coins as ${cl.size} separate holders now.</b> Spent together they become one: the histories of ${sats(joined)} coins joined, those still in your vaults included.`); }
+  }
   const block = M.mixes && policy === 'refuse';
   if (block) lines.push(`<b>This vault refuses to mix.</b> Change the coins, or the policy in Vault settings.`);
   if (!lines.length) return { html: '', block: false, mix: M };
   return { html: `<div class="provwarn${M.mixes || dest ? ' warn' : ''}">${lines.map(l => `<div>${l}</div>`).join('')}</div>`, block, mix: M };
 }
+/// The coins of one status (or set of statuses) that would cover this spend, largest first — the same arithmetic as the
+/// coin plans: a coin costs about one input of fee, and the preview that follows gives the exact figure.
+function provOnlyPick(statuses, f) {
+  const coins = ((vault && vault._coins) || []).filter(c => { const op = c.txid + ':' + c.vout; return statuses.includes(provStatus(op)) && !provFrozen(op); }).sort((a, b) => b.value - a.value);
+  const inVb = (sendPrev && sendPrev.choice.chosen.length ? (sendPrev.choice.vsize - 95) / sendPrev.choice.chosen.length : 0) || 110, rate = f.rate || 1;
+  const pick = []; let have = 0;
+  for (const c of coins) { if (have >= f.amount + Math.ceil(rate * (11 + inVb * pick.length + 90))) break; pick.push(c.txid + ':' + c.vout); have += c.value; }
+  return have >= f.amount + Math.ceil(rate * (11 + inVb * pick.length + 90)) ? pick : null;
+}
+const PROV_ONLY = [['private', ['private'], 'only private coins'], ['kyc', ['kyc'], 'only KYC coins'], ['linked', ['kyc', 'known'], 'only coins already linked to you']];
+/// One tap to the unmixed spend: the links, with the fee difference filled in by provOnlyFees once the previews return.
+function provOnlyLinks(ch, f) {
+  const links = [];
+  for (const [k, sts, words] of PROV_ONLY) {
+    if (k === 'kyc' && provOnlyPick(['kyc'], f) === null && provOnlyPick(['kyc', 'known'], f) !== null) continue;   // the wider set says it
+    if (k === 'linked' && provOnlyPick(['kyc'], f) !== null) continue;
+    const pick = provOnlyPick(sts, f); if (!pick) continue;
+    if (pick.length === ch.chosen.length && pick.every(op => ch.chosen.includes(op))) continue;
+    links.push(`<div><a href="#" data-prov-only="${k}">Use ${words}</a> <span class="muted" data-prov-only-fee="${k}">\u00b7 working out the fee\u2026</span></div>`);
+  }
+  return links.length ? `<div class="provonly">${links.join('')}</div>` : '';
+}
+async function provOnlyFees(box, ch, f) {
+  const els = [...box.querySelectorAll('[data-prov-only-fee]')]; if (!els.length) return;
+  const me = sendSeq;
+  for (const el of els) {
+    const k = el.dataset.provOnlyFee, sts = (PROV_ONLY.find(x => x[0] === k) || [])[1] || [], pick = provOnlyPick(sts, f); if (!pick) { el.textContent = ''; continue; }
+    try { const p = await invoke('spend_preview', { name: vault.name, to: f.to, amount: f.amount, rate: f.rate, sendAll: false, coins: pick }); if (me !== sendSeq) return;
+      const d = p.choice.fee - ch.fee; el.textContent = `\u00b7 ${pick.length} coin${pick.length === 1 ? '' : 's'}, fee ${d === 0 ? 'the same' : (d > 0 ? '+' : '\u2212') + sats(Math.abs(d)) + ' sats'}`; }
+    catch (e) { el.textContent = `\u00b7 ${String(e).slice(0, 80)}`; }
+  }
+}
+document.addEventListener('click', (e) => {
+  const a = e.target.closest('a[data-prov-only]'); if (!a || !vault) return; e.preventDefault();
+  const f = sendFields(), sts = (PROV_ONLY.find(x => x[0] === a.dataset.provOnly) || [])[1] || [], pick = provOnlyPick(sts, f); if (!pick) return toast('Those coins no longer cover the amount');
+  coinPick.clear(); for (const op of pick) coinPick.add(op); const d = $('#coins-adv'); if (d) d.open = true; renderCoins(); coinSum(); sendPreview(); toast(`${pick.length} coin${pick.length === 1 ? '' : 's'} ticked \u2014 nothing new is linked`);
+});
 /// Holding by provenance across the vaults named: the unspent coins the engine knows, by status.
 function provRollup(names) {
   const by = {}, count = {}, balances = {}, off = [], other = []; let total = 0, n = 0;
@@ -3197,11 +3280,98 @@ function provDonut(host, names, ccy, now, holding) {
     return `<path d="${d}" fill="none" stroke="${col[k]}" stroke-width="${w}"><title>${PROV_WORD[k]} · ${sats(R.by[k])} sats</title></path>`; });
   host.innerHTML = `<div class="label">Who can link these coins to you</div><div class="provsum-body"><svg viewBox="0 0 100 100" width="100" height="100" role="img" aria-label="Holding by provenance">${arcs.join('')}</svg>
     <table class="tbl provsum-t"><thead><tr><th>Status</th><th class="r">Coins</th><th class="r">Sats</th>${ccy && now ? '<th class="r">Worth now</th>' : ''}<th class="r">Share</th></tr></thead><tbody>
-    ${order.map(k => `<tr><td><span class="ptag ${k}">${PROV_WORD[k]}</span></td><td class="r">${[R.count[k] ? sats(R.count[k]) : '', R.balances[k] ? `${R.balances[k]} balance${R.balances[k] === 1 ? '' : 's'}` : ''].filter(Boolean).join(' + ')}</td><td class="r">${sats(R.by[k])}</td>${ccy && now ? `<td class="r">${money(R.by[k] / 1e8 * now.price, ccy)}</td>` : ''}<td class="r">${(R.by[k] / R.total * 100).toFixed(1)}%</td></tr>`).join('')}${gap > 0 ? `<tr><td><span class="muted">Not in this view</span></td><td class="r"></td><td class="r">${sats(gap)}</td>${ccy && now ? `<td class="r">${money(gap / 1e8 * now.price, ccy)}</td>` : ''}<td class="r"></td></tr>` : ''}</tbody></table></div>
+    ${order.map(k => `<tr><td><span class="ptag ${k}">${PROV_WORD[k]}</span>${k === 'unknown' ? ' <a href="#" data-prov-bulk style="font-size:12.5px">Sort them ›</a>' : ''}</td><td class="r">${[R.count[k] ? sats(R.count[k]) : '', R.balances[k] ? `${R.balances[k]} balance${R.balances[k] === 1 ? '' : 's'}` : ''].filter(Boolean).join(' + ')}</td><td class="r">${sats(R.by[k])}</td>${ccy && now ? `<td class="r">${money(R.by[k] / 1e8 * now.price, ccy)}</td>` : ''}<td class="r">${(R.by[k] / R.total * 100).toFixed(1)}%</td></tr>`).join('')}${gap > 0 ? `<tr><td><span class="muted">Not in this view</span></td><td class="r"></td><td class="r">${sats(gap)}</td>${ccy && now ? `<td class="r">${money(gap / 1e8 * now.price, ccy)}</td>` : ''}<td class="r"></td></tr>` : ''}</tbody></table></div>
     ${gap > 0 ? `<div class="muted" style="font-size:12.5px">${sats(gap)} sats of the holding are in no bucket: coins the chain cache has not described yet, a vault that could not be read, or a balance this view does not count.</div>` : gap < 0 ? `<div class="muted" style="font-size:12.5px">This view counts ${sats(-gap)} sats more than the holding above \u2014 a coin seen by two vaults is counted once there and may be counted twice here.</div>` : ''}
     ${R.other.length ? `<div class="muted" style="font-size:12.5px">Not bitcoin, so not in the table: ${R.other.map(o => `${esc(o.text)} in ${esc(o.name)}`).join(' \u00b7 ')}.</div>` : ''}
     ${R.off.length ? `<div class="provlist" style="margin-top:8px">${R.off.map(o => `<div><span class="ptag ${o.status}" title="${esc(o.trail.join('\n'))}">${PROV_WORD[o.status]}</span> ${esc(o.name)} <span class="muted">\u00b7 ${sats(o.sats)} sats \u00b7 ${esc(o.trail[0])}</span></div>`).join('')}</div>` : ''}
-    <div class="muted" style="font-size:12.5px">${R.by.unknown ? 'Unclassified coins are the ones nothing in your records says anything about yet: mark them on Coins, or give the vault a default in Vault settings. ' : ''}From your own records — marks on coins, addresses and transactions, and the statements you imported — never from a chain-analysis service.${prov.skipped.length ? ` ${prov.skipped.map(esc).join(', ')} could not be read just now and ${prov.skipped.length === 1 ? 'is' : 'are'} left out.` : ''}</div>`;
+    <div class="muted" style="font-size:12.5px">${R.by.unknown ? 'Unclassified coins are the ones nothing in your records says anything about yet: sort them above, mark them on Coins, or give the vault a default in Vault settings. ' : ''}From your own records — marks on coins, addresses and transactions, and the statements you imported — never from a chain-analysis service.${prov.skipped.length ? ` ${prov.skipped.map(esc).join(', ')} could not be read just now and ${prov.skipped.length === 1 ? 'is' : 'are'} left out.` : ''}</div>
+    ${R.count && Object.keys(R.count).length ? '<div><button class="linkish" type="button" data-prov-time>Show it over time</button></div><div class="chart" data-prov-chart hidden></div>' : ''}`;
+  host.querySelector('[data-prov-bulk]') && (host.querySelector('[data-prov-bulk]').onclick = (e) => { e.preventDefault(); provBulk(host, names); });
+  const tb = host.querySelector('[data-prov-time]'); if (tb) tb.onclick = () => { const el = host.querySelector('[data-prov-chart]'); el.hidden = !el.hidden; tb.textContent = el.hidden ? 'Show it over time' : 'Hide the chart'; if (!el.hidden) provTimeChart(el, names); };
+}
+/// Sats held by status, over time: each coin counted from the day it came to the day it left, by what the records say
+/// about it NOW — knowledge of who can link a coin applies to its whole life, not from the day it was written down.
+function provSeries(names) {
+  const now = Math.floor(Date.now() / 1000), ev = [];
+  for (const d of Object.values(prov.coins)) { if (!names.includes(d.vault)) continue; const t0 = d.time || now; ev.push([t0, d.status, d.sats]); if (d.spent) ev.push([Math.max(t0, d.spent_at || now), d.status, -d.sats]); }
+  if (!ev.length) return null;
+  ev.sort((a, b) => a[0] - b[0]);
+  const by = { kyc: 0, known: 0, private: 0, unknown: 0 }, pts = { kyc: [], known: [], private: [], unknown: [] }, from = ev[0][0] - 1;
+  for (const k in pts) pts[k].push([from, 0]);
+  for (const [t, st, v] of ev) { by[st] += v; for (const k in pts) pts[k].push([t, by[k]]); }
+  for (const k in pts) pts[k].push([Math.max(now, from + 3600), by[k]]);
+  return { from, to: Math.max(now, from + 3600), pts, by };
+}
+function provTimeChart(el, names) {
+  const S = provSeries(names); if (!S) { el.innerHTML = '<div class="sum-empty">Nothing on the chain to draw.</div>'; return; }
+  const col = { kyc: 'var(--gold)', known: 'var(--ink)', private: 'var(--signal)', unknown: 'var(--muted)' };
+  const order = ['kyc', 'known', 'private', 'unknown'].filter(k => S.pts[k].some(p => p[1] > 0));
+  lineChart(el, { title: 'Who can link your coins, over time', sub: 'Sats held by status: each coin counted from the day it came to the day it left, by what your records say about it now. Balances off the chain are not drawn.', from: S.from, to: S.to,
+    series: order.map(k => ({ name: PROV_WORD[k], color: col[k], pts: S.pts[k], step: true })), fmt: (v) => sats(Math.round(v)) + ' sats', fmtAxis: (v) => csats(v) });
+}
+/// ---------- bulk classification: the unclassified coins of these vaults, sorted in one go ----------
+function provUnknowns(names) { return Object.entries(prov.coins).filter(([, d]) => !d.spent && d.status === 'unknown' && names.includes(d.vault)).map(([op, d]) => ({ op, ...d })); }
+const vaultLabel = (name, key) => ((((store.vaults.find(v => v.name === name) || {}).labels) || {})[key]) || '';
+/// What a coin's label, or its address's, already says: a name the register knows, or a word that names a method.
+function provSuggest(c) {
+  const text = [vaultLabel(c.vault, 'output:' + c.op), c.addr ? vaultLabel(c.vault, 'addr:' + c.addr) : ''].filter(Boolean).join(' · ');
+  if (!text) return null;
+  const low = text.toLowerCase();
+  for (const cp of provCounterparties()) if (low.includes(cp.toLowerCase())) { const m = provCpMark(cp); return { status: m.status, method: m.method, counterparty: cp, why: text }; }
+  const words = [['salary', 'earned'], ['wages', 'earned'], ['invoice', 'earned'], ['earned', 'earned'], ['paid for', 'earned'], ['gift', 'gift'], ['inherit', 'inheritance'], ['mined', 'mined'], ['mining', 'mined'], ['coinjoin', 'coinjoin'], ['whirlpool', 'coinjoin'], ['joinmarket', 'coinjoin'], [' atm', 'atm'], ['p2p', 'p2p'], ['bisq', 'p2p'], ['robosats', 'p2p'], ['hodl hodl', 'p2p'], ['hodlhodl', 'p2p'], ['swap', 'swap'], ['boltz', 'swap'], ['channel', 'channel'], ['exchange', 'exchange']];
+  for (const [w, m] of words) if ((' ' + low).includes(w)) return { status: PROV_IMPLIES[m], method: m, counterparty: null, why: text };
+  return null;
+}
+function provBulk(host, names) {
+  let box = host.querySelector('.provbulk'); if (!box) { box = document.createElement('div'); box.className = 'provbulk'; host.appendChild(box); }
+  const U = provUnknowns(names);
+  if (!U.length) { box.innerHTML = '<div class="muted" style="font-size:13px">Every coin here is classified.</div>'; return; }
+  const groups = new Map(), rest = [];
+  for (const c of U) { const g = provSuggest(c); if (!g) { rest.push(c); continue; } const k = `${g.status}|${g.method || ''}|${g.counterparty || ''}`; if (!groups.has(k)) groups.set(k, { ...g, coins: [] }); groups.get(k).coins.push(c); }
+  const byAddr = {}; for (const c of rest) if (c.addr) (byAddr[c.addr] = byAddr[c.addr] || []).push(c);
+  const multi = Object.entries(byAddr).filter(([, cs]) => cs.length > 1).sort((a, b) => b[1].length - a[1].length);
+  const G = [...groups.values()];
+  const many = names.length > 1;
+  box.innerHTML = `<div class="label" style="margin-top:10px">Sorting ${sats(U.length)} unclassified coin${U.length === 1 ? '' : 's'} · ${sats(U.reduce((a, c) => a + c.sats, 0))} sats</div>
+    ${G.length ? `<div class="provgrp"><b>From what you called them</b><div class="muted" style="font-size:12.5px">A label on the coin or its address names someone the register knows, or says how it arrived.</div>${G.map((g, i) => `<div class="provsug"><div>${sats(g.coins.length)} coin${g.coins.length === 1 ? '' : 's'} · ${sats(g.coins.reduce((a, c) => a + c.sats, 0))} sats — “${esc(g.coins[0].why)}”${g.coins.length > 1 ? ' and the like' : ''} → <span class="ptag ${g.status}">${PROV_WORD[g.status]}</span>${g.method ? `<span class="muted"> · ${esc(provMethodWord(g.method))}</span>` : ''}${g.counterparty ? `<span class="muted"> · ${esc(g.counterparty)}</span>` : ''}</div><button class="btn small" type="button" data-bulk-sug="${i}">Mark ${g.coins.length === 1 ? 'it' : 'them'}</button></div>`).join('')}</div>` : ''}
+    ${multi.length ? `<div class="provgrp"><b>Several at one address</b><div class="muted" style="font-size:12.5px">Said on the address, every coin there and every one still to come takes it.</div>${multi.map(([a, cs]) => `<div class="provsug"><div>${sats(cs.length)} coins · ${sats(cs.reduce((x, c) => x + c.sats, 0))} sats at <span class="mono">${esc(shortAddr(a))}</span>${vaultLabel(cs[0].vault, 'addr:' + a) ? ` · ${esc(vaultLabel(cs[0].vault, 'addr:' + a))}` : ''}${many ? ` <span class="muted">· ${esc(cs[0].vault)}</span>` : ''}</div>${vault && vault.name === cs[0].vault ? `<a href="#" data-go-addr="${esc(a)}">Open the address ›</a>` : ''}</div>`).join('')}</div>` : ''}
+    <div class="provgrp"><b>${G.length || multi.length ? 'The rest, in one go' : 'In one go'}</b> <span class="muted" style="font-size:12.5px">— ${sats(rest.length)} coin${rest.length === 1 ? '' : 's'}; untick any to leave out</span>
+      <div class="provrest">${rest.slice(0, 400).map(c => `<label><input type="checkbox" data-bulk-op="${esc(c.op)}" data-bulk-vault="${esc(c.vault)}" data-bulk-addr="${esc(c.addr || '')}" checked> <span class="mono">${esc(c.op.slice(0, 8))}…:${esc(c.op.split(':')[1])}</span><span class="r">${sats(c.sats)} sats</span><span class="muted">${many ? esc(c.vault) + ' · ' : ''}${c.time ? esc(new Date(c.time * 1000).toLocaleDateString()) : 'unconfirmed'}${vaultLabel(c.vault, 'output:' + c.op) ? ' · ' + esc(vaultLabel(c.vault, 'output:' + c.op)) : ''}</span></label>`).join('')}${rest.length > 400 ? `<div class="muted">and ${sats(rest.length - 400)} more — mark these first</div>` : ''}</div>
+      ${rest.length ? `<div class="provpick" data-bulk-form><div class="pick tight">${PROV_STATUSES.filter(([k]) => k !== 'unknown').map(([k, n, why]) => `<div class="opt" data-bstatus="${k}" title="${esc(why)}">${n}</div>`).join('')}</div>
+        <div class="prow"><select data-bulk-method>${PROV_METHODS.map(([k, n]) => `<option value="${k}">${n}</option>`).join('')}</select><input data-bulk-cp list="${provCpList()}" maxlength="80" placeholder="Who was on the other side"></div>
+        <label class="muted" style="display:block;margin-top:6px;font-size:13px"><input type="checkbox" data-bulk-on-addr> Say it on each coin’s address too, so coins still to come there take it</label>
+        <div class="row" style="margin-top:8px;gap:10px;align-items:center;flex-wrap:wrap"><button class="btn primary small" type="button" data-bulk-apply disabled>Mark the ticked coins</button>${!many ? `<span class="muted" style="font-size:13px">or give ${esc(names[0])} a default in Vault settings</span>` : ''}</div></div>` : ''}
+    </div>`;
+  const form = box.querySelector('[data-bulk-form]');
+  const ready = () => { if (!form) return; const st = form.querySelector('.opt.on'), m = form.querySelector('[data-bulk-method]').value, n = [...box.querySelectorAll('[data-bulk-op]:checked')].length; form.querySelector('[data-bulk-apply]').disabled = !n || !(st || m); };
+  if (form) {
+    form.querySelectorAll('.opt[data-bstatus]').forEach(o => o.onclick = (e) => { e.preventDefault(); e.stopPropagation(); const on = o.classList.contains('on'); form.querySelectorAll('.opt').forEach(x => x.classList.remove('on')); if (!on) o.classList.add('on'); ready(); });
+    form.querySelector('[data-bulk-method]').onchange = ready;
+    form.querySelector('[data-bulk-cp]').onchange = () => { const cp = form.querySelector('[data-bulk-cp]').value.trim(), ms = form.querySelector('[data-bulk-method]'); if (cp && !ms.value && store.vaults.some(v => v.exchange && v.exchange.provider === cp)) ms.value = 'exchange'; ready(); };
+    box.querySelectorAll('[data-bulk-op]').forEach(i => i.onchange = ready);
+    form.querySelector('[data-bulk-apply]').onclick = () => {
+      const st = form.querySelector('.opt.on'), method = form.querySelector('[data-bulk-method]').value || null, counterparty = form.querySelector('[data-bulk-cp]').value.trim() || null;
+      const status = st ? st.dataset.bstatus : (PROV_IMPLIES[method] || null); if (!status) return toast('Pick a status, or a way it arrived');
+      const mark = { status, method, counterparty }, onAddr = form.querySelector('[data-bulk-on-addr]').checked, items = [], addrs = new Set();
+      for (const i of box.querySelectorAll('[data-bulk-op]:checked')) { items.push({ vault: i.dataset.bulkVault, key: 'output:' + i.dataset.bulkOp, mark }); if (onAddr && i.dataset.bulkAddr) { const k = i.dataset.bulkVault + '|' + i.dataset.bulkAddr; if (!addrs.has(k)) { addrs.add(k); items.push({ vault: i.dataset.bulkVault, key: 'addr:' + i.dataset.bulkAddr, mark }); } } }
+      provBulkApply(host, names, items, `${sats(items.length - addrs.size)} coin${items.length - addrs.size === 1 ? '' : 's'} marked ${PROV_WORD[status]}${addrs.size ? `, and ${sats(addrs.size)} address${addrs.size === 1 ? '' : 'es'}` : ''}`);
+    };
+    ready();
+  }
+  box.querySelectorAll('[data-bulk-sug]').forEach(b => b.onclick = () => { const g = G[+b.dataset.bulkSug]; const mark = { status: g.status, method: g.method || null, counterparty: g.counterparty || null }; provBulkApply(host, names, g.coins.map(c => ({ vault: c.vault, key: 'output:' + c.op, mark })), `${sats(g.coins.length)} coin${g.coins.length === 1 ? '' : 's'} marked ${PROV_WORD[g.status]}${g.counterparty ? ' · ' + g.counterparty : ''}`); });
+  box.scrollIntoView({ block: 'nearest' });
+}
+async function provBulkApply(host, names, items, said) {
+  if (!items.length) return;
+  try {
+    store = await invoke('provenance_set_many', { items });
+    if (vault) vault = store.vaults.find(v => v.name === vault.name) || vault;
+    provDrop(); toast(said);
+    // the donut redraws itself from the new view; the sorting panel comes back for whatever is left
+    const again = () => { const f = host._refill; if (f) f(); if (provUnknowns(names).length) provBulk(host, names); };
+    if (provReady(again)) again();
+    provRepaint();
+  } catch (e) { fail(e); }
 }
 /// The transaction sheet's row: each of this vault's coins in it with its status, and the mark on the transaction.
 function provTxRow(d, spend) {
@@ -3309,9 +3479,11 @@ function paintReview() {
       <div class="muted" style="font-size:13px;margin-top:6px" id="disposal-note"></div></div>`;
     out += '</div>';
   }
-  { const W = provWarn(ch.chosen, ours ? null : f.to); paintReview.block = W.block; out += provReady(paintReview) ? W.html : '<div class="muted" style="font-size:12.5px">Checking who can link these coins\u2026</div>'; }
+  { const W = provWarn(ch.chosen, ours ? null : f.to); paintReview.block = W.block; out += provReady(paintReview) ? W.html : '<div class="muted" style="font-size:12.5px">Checking who can link these coins\u2026</div>';
+    if (W.mix && W.mix.mixes && !f.all && !built) out += provOnlyLinks(ch, f); }
   out += `<div class="muted" style="border-top:1px solid var(--line);padding-top:10px;font-size:13px">${built ? `Next: sign with ${vault.keys.length === 1 ? 'the key' : 'any ' + vault.threshold + ' of your ' + vault.keys.length + ' keys'}. Nothing is sent until you confirm after the last signature.` : 'Nothing is built yet: this is what it would do.'}</div></div>`;
   box.innerHTML = out;
+  provOnlyFees(box, ch, f);
   const note = $('#disposal-note');
   if (note) note.textContent = DISPOSAL_NOTES[disposalKind] ? DISPOSAL_NOTES[disposalKind]
     : disposalKind ? 'A disposal. The gain above is realised when this confirms; the reason is kept with the transaction.'
@@ -3706,8 +3878,9 @@ function renderCoins() {
   if (!coins.length) { list.innerHTML = '<div class="muted" style="font-size:13px">the vault holds no coins</div>'; $('#coin-sum').textContent = ''; return; }
   const h = vault._height || 0;
   const L = vaultLedger(vault.name), f = txFacts[vault.name] || {}, price = f.now && f.ccy ? f.now.price : null;
-  list.innerHTML = coins.slice().sort((a, b) => b.value - a.value).map(c => { const op = c.txid + ':' + c.vout; const conf = c.height ? h - c.height + 1 : 0;
-    return `<label class="coin"><input type="checkbox" data-op="${op}" ${coinPick.has(op) ? 'checked' : ''}><span class="mono">${c.txid.slice(0, 10)}…${c.txid.slice(-4)}:${c.vout}${vault._rotating ? ' <span class="muted">· ' + fmtIndex(c.index) + '</span>' : ''}</span>${lblHtml('out:' + op)}<span style="font-variant-numeric:tabular-nums">${sats(c.value)} sats</span><span class="muted">${conf ? conf + ' conf' : 'unconfirmed'}</span>${coinTax(L, c, price, f.ccy)}</label>`; }).join('');
+  provReady(renderCoins);
+  list.innerHTML = coins.slice().sort((a, b) => b.value - a.value).map(c => { const op = c.txid + ':' + c.vout; const conf = c.height ? h - c.height + 1 : 0; const fz = provFrozen(op); if (fz) coinPick.delete(op);
+    return `<label class="coin${fz ? ' frozen' : ''}"><input type="checkbox" data-op="${op}" ${coinPick.has(op) ? 'checked' : ''}${fz ? ' disabled title="Frozen: thaw it on its page to spend it"' : ''}>${fz ? provFrozenTag(op) : ''}<span class="mono">${c.txid.slice(0, 10)}…${c.txid.slice(-4)}:${c.vout}${vault._rotating ? ' <span class="muted">· ' + fmtIndex(c.index) + '</span>' : ''}</span>${lblHtml('out:' + op)}<span style="font-variant-numeric:tabular-nums">${sats(c.value)} sats</span><span class="muted">${conf ? conf + ' conf' : 'unconfirmed'}</span>${coinTax(L, c, price, f.ccy)}</label>`; }).join('');
   // Under first-in-first-out or average cost the pick does not decide the cost, so the screen must not imply it does
   const note = $('#coin-method');
   if (note) note.textContent = !L ? '' : L.method === 'utxo'

@@ -2333,6 +2333,19 @@ async fn servers_test(electrum: String, explorer: String) -> R<String> {
 
 /// What a vault of extended keys cannot do yet, said before anything card-shaped is attempted rather than failing
 /// deep inside the card arithmetic with a message about public keys.
+/// The coins the owner froze (BIP 329 `spendable: false`, kept under the coin's record as `spendable`): a dust
+/// attack's unsolicited receipt, a coin under dispute, one they simply never want spent by accident.
+fn frozen_ops(v: &Vault) -> std::collections::HashSet<String> {
+    v.more.iter().filter(|(_, m)| m.get("spendable").and_then(|x| x.as_bool()) == Some(false)).filter_map(|(k, _)| k.strip_prefix("output:").map(str::to_string)).collect()
+}
+/// The coins a build may use: the frozen ones are left out, and a frozen coin named by hand is refused with its reason.
+fn thawed(v: &Vault, coins: &[wallet::CoinAt], pick: Option<&[String]>) -> R<Vec<wallet::CoinAt>> {
+    let frozen = frozen_ops(v);
+    if frozen.is_empty() { return Ok(coins.to_vec()); }
+    if let Some(p) = pick { if let Some(op) = p.iter().find(|op| frozen.contains(*op)) { return Err(format!("{}…:{} is frozen. Thaw it on its coin page first, or leave it out.", &op[..op.len().min(8)], op.split(':').nth(1).unwrap_or(""))); } }
+    Ok(coins.iter().filter(|c| !frozen.contains(&format!("{}:{}", c.txid, c.vout))).cloned().collect())
+}
+
 /// A watched wallet is watched: no screen, and no command, may act as though it could sign.
 fn watch_only(v: &Vault) -> R<()> {
     if v.node.is_some() { return Err(format!("‘{}’ is a node watched with a read-only credential. Nothing here can spend it; use the node itself.", v.name)); }
@@ -2357,7 +2370,8 @@ async fn spend_build(name: String, to: String, amount: u64, rate: f64, send_all:
         let sc = wallet::scan(&v, &servers, s.settings.gap)?;
         let change_index = if wallet::rotates(&v) { wallet::CHANGE | sc.next_change } else { 0 };
         let pick = coins.filter(|c| !c.is_empty());
-        let b = wallet::build(&v, &sc.coins, change_index, &to, amount, rate, send_all, pick.as_deref())?;
+        let usable = thawed(&v, &sc.coins, pick.as_deref())?;
+        let b = wallet::build(&v, &usable, change_index, &to, amount, rate, send_all, pick.as_deref())?;
         let b = legacy_prev_txs(&v, &servers, b)?;
         let (n, sm, nc, smc, psbt) = (sc.next, sc.scan_max.max(sc.next), sc.next_change, sc.scan_max_change.max(sc.next_change), b.psbt.clone());
         wallet::update(|s| { if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == v.name) { vm.next = n; vm.scan_max = sm; vm.next_change = nc; vm.scan_max_change = smc; } s.last_psbt = Some(psbt); s.last_message = None; })?;
@@ -2374,7 +2388,8 @@ async fn spend_preview_own(name: String, coins: Vec<String>, count: u32, amounts
         watch_only(&v)?;
         let servers = wallet::servers_for(&s, &v.network);
         let sc = wallet::scan(&v, &servers, s.settings.gap)?;
-        wallet::plan_own(&v, &sc.coins, sc.next, &coins, count, amounts.as_deref(), rate)
+        let usable = thawed(&v, &sc.coins, Some(&coins))?;
+        wallet::plan_own(&v, &usable, sc.next, &coins, count, amounts.as_deref(), rate)
     }).await
 }
 /// The same, built: the PSBT is kept as the spend in progress, and Sign takes it from there like any other.
@@ -2386,8 +2401,9 @@ async fn spend_build_own(name: String, coins: Vec<String>, count: u32, amounts: 
         watch_only(&v)?;
         let servers = wallet::servers_for(&s, &v.network);
         let sc = wallet::scan(&v, &servers, s.settings.gap)?;
-        let plan = wallet::plan_own(&v, &sc.coins, sc.next, &coins, count, amounts.as_deref(), rate)?;
-        let b = wallet::build_own(&v, &sc.coins, &plan)?;
+        let usable = thawed(&v, &sc.coins, Some(&coins))?;
+        let plan = wallet::plan_own(&v, &usable, sc.next, &coins, count, amounts.as_deref(), rate)?;
+        let b = wallet::build_own(&v, &usable, &plan)?;
         let b = legacy_prev_txs(&v, &servers, b)?;
         let (n, sm, nc, smc, psbt) = (sc.next, sc.scan_max.max(sc.next), sc.next_change, sc.scan_max_change.max(sc.next_change), b.psbt.clone());
         wallet::update(|s| { if let Some(vm) = s.vaults.iter_mut().find(|x| x.name == v.name) { vm.next = n; vm.scan_max = sm; vm.next_change = nc; vm.scan_max_change = smc; } s.last_psbt = Some(psbt); s.last_message = None; })?;
@@ -2424,7 +2440,9 @@ async fn spend_preview(name: String, to: String, amount: u64, rate: f64, send_al
         let servers = wallet::servers_for(&s, &v.network);
         let sc = wallet::scan(&v, &servers, s.settings.gap)?;
         let change_index = if wallet::rotates(&v) { wallet::CHANGE | sc.next_change } else { 0 };
-        let choice = wallet::select(&v, &sc.coins, change_index, &to, amount, rate, send_all, coins.filter(|c| !c.is_empty()).as_deref())?;
+        let pick = coins.filter(|c| !c.is_empty());
+        let usable = thawed(&v, &sc.coins, pick.as_deref())?;
+        let choice = wallet::select(&v, &usable, change_index, &to, amount, rate, send_all, pick.as_deref())?;
         Ok(Preview { choice, to_ours: owner_of(&s, &v, &to), coins: sc.coins })
     }).await
 }
@@ -3851,7 +3869,7 @@ fn labels_export(name: String) -> R<String> {
     let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?;
     let mut lines: Vec<String> = Vec::new();
     // every record with a label, a disposal or a provenance mark: a mark without a label is still worth carrying
-    let mut keys: Vec<&String> = v.labels.keys().chain(v.more.iter().filter(|(_, m)| m.contains_key("disposal") || m.contains_key("provenance")).map(|(k, _)| k)).collect();
+    let mut keys: Vec<&String> = v.labels.keys().chain(v.more.iter().filter(|(_, m)| m.contains_key("disposal") || m.contains_key("provenance") || m.contains_key("spendable")).map(|(k, _)| k)).collect();
     keys.sort(); keys.dedup();
     for k in keys {
         let (t, r) = k.split_once(':').unwrap_or(("", ""));
@@ -3862,6 +3880,8 @@ fn labels_export(name: String) -> R<String> {
         if let Some(d) = v.more.get(k).and_then(|m| m.get("disposal")).and_then(|d| d.get("kind")).and_then(|x| x.as_str()) { line["disposal"] = d.into(); }
         // who can link this coin to its owner (provenance.rs): status, method, counterparty — the same way
         if let Some(p) = v.more.get(k).and_then(provenance::mark_in) { line["provenance"] = serde_json::json!({ "status": p.status, "method": p.method, "counterparty": p.counterparty, "note": p.note }); }
+        // a frozen coin: BIP 329's own field, so Sparrow and the others keep it out of their coin selection too
+        if t == "output" && v.more.get(k).and_then(|m| m.get("spendable")).and_then(|x| x.as_bool()) == Some(false) { line["spendable"] = false.into(); }
         if line.as_object().map(|o| o.len() <= 2).unwrap_or(true) { continue; }
         lines.push(line.to_string());
     }
@@ -3877,7 +3897,7 @@ async fn labels_import(name: String) -> R<usize> {
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     // each line: a label, a disposal (what a spend out was: sold, spent, gift, self, stolen, lost — on a tx), or both.
     // A whole incident can be booked from one file: every sweep an attacker made, marked stolen in one import.
-    let mut got: Vec<(String, Option<String>, Option<String>, Option<provenance::Mark>)> = Vec::new();
+    let mut got: Vec<(String, Option<String>, Option<String>, Option<provenance::Mark>, Option<bool>)> = Vec::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         let j: serde_json::Value = match serde_json::from_str(line) { Ok(j) => j, Err(_) => continue };
         let (t, r, lab) = (j["type"].as_str().unwrap_or(""), j["ref"].as_str().unwrap_or(""), j["label"].as_str().unwrap_or("").trim());
@@ -3891,16 +3911,20 @@ async fn labels_import(name: String) -> R<usize> {
             _ => None,
         }.filter(|m| provenance::STATUSES.contains(&m.status.as_str()) && m.status != "unknown")
          .map(|mut m| { if m.method.as_ref().map(|x| !provenance::METHODS.contains(&x.as_str())).unwrap_or(false) { m.method = None; } m.by = "you".into(); m });
-        if !r.is_empty() && (!lab.is_empty() || disp.is_some() || prov.is_some()) { got.push((key, Some(lab.to_string()).filter(|l| !l.is_empty()), disp, prov)); }
+        // BIP 329 `spendable`: false freezes the coin here too; an explicit true thaws it
+        let spendable = if t == "output" { j["spendable"].as_bool() } else { None };
+        if !r.is_empty() && (!lab.is_empty() || disp.is_some() || prov.is_some() || spendable.is_some()) { got.push((key, Some(lab.to_string()).filter(|l| !l.is_empty()), disp, prov, spendable)); }
     }
     let n = got.len();
     if n == 0 { return Err("no addr, tx or output labels in that file".into()); }
     let nm = name.clone();
-    wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) { let t = now(); for (k, l, d, p) in got {
+    wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) { let t = now(); for (k, l, d, p, sp) in got {
         v.label_meta.insert(k.clone(), t);
         if let Some(l) = l { v.labels.insert(k.clone(), l); }
         if let Some(d) = d { v.more.entry(k.clone()).or_default().insert("disposal".into(), serde_json::json!({ "kind": d, "t": t })); }
-        if let Some(mut p) = p { p.t = t; v.more.entry(k).or_default().insert("provenance".into(), serde_json::to_value(p).unwrap_or_default()); }
+        if let Some(mut p) = p { p.t = t; v.more.entry(k.clone()).or_default().insert("provenance".into(), serde_json::to_value(p).unwrap_or_default()); }
+        match sp { Some(false) => { let r = v.more.entry(k).or_default(); r.insert("spendable".into(), false.into()); r.insert("frozen".into(), serde_json::json!({ "t": t, "by": "labels file" })); }
+                   Some(true) => { if let Some(r) = v.more.get_mut(&k) { r.remove("spendable"); r.remove("frozen"); } } None => {} }
     } })?;
     let _ = labels_sync(name).await;
     Ok(n)
@@ -3972,7 +3996,9 @@ fn provenance_all_inner() -> R<ProvAll> {
         }
     }
     let list: Vec<provenance::Tx> = txs.into_values().collect();
-    Ok(ProvAll { coins: provenance::derive(&list, &marks), skipped })
+    let mut coins = provenance::derive(&list, &marks);
+    for v in &s.vaults { for op in frozen_ops(v) { if let Some(d) = coins.get_mut(&op) { d.frozen = true; } } }
+    Ok(ProvAll { coins, skipped })
 }
 
 #[derive(Deserialize)]
@@ -4015,6 +4041,56 @@ fn vault_provenance(name: String, default: Option<String>, policy: Option<String
     v.provenance_default = default; v.provenance_policy = policy;
     wallet::save(&s)?;
     Ok(s)
+}
+
+#[derive(Deserialize)]
+struct ProvItem { vault: String, key: String, #[serde(default)] mark: Option<MarkIn> }
+/// Many marks in one write: bulk classification sorts dozens of unclassified coins, across vaults, in one gesture.
+/// Each item is checked as provenance_set checks one; the whole batch is refused if any item is wrong.
+#[tauri::command]
+async fn provenance_set_many(items: Vec<ProvItem>) -> R<Store> {
+    if items.is_empty() { return Err("nothing to mark".into()); }
+    if items.len() > 5000 { return Err("that is more than one batch can take (5000)".into()); }
+    for it in &items {
+        if !(it.key.starts_with("output:") || it.key.starts_with("out:") || it.key.starts_with("addr:") || it.key.starts_with("tx:")) { return Err(format!("{}: a provenance mark goes on a coin, an address or a transaction", it.key)); }
+        if let Some(m) = &it.mark {
+            if m.status != "unknown" && !provenance::STATUSES.contains(&m.status.as_str()) { return Err(format!("{:?} is not a status this app knows", m.status)); }
+            if let Some(x) = &m.method { if !x.is_empty() && !provenance::METHODS.contains(&x.as_str()) { return Err(format!("{x:?} is not a method this app knows")); } }
+            if m.counterparty.as_ref().map(|c| c.chars().count() > 80).unwrap_or(false) { return Err("a counterparty's name holds up to 80 characters".into()); }
+        }
+    }
+    let mut vaults: Vec<String> = items.iter().map(|i| i.vault.clone()).collect(); vaults.sort(); vaults.dedup();
+    wallet::update(|s| {
+        let t = now();
+        for it in &items {
+            let Some(v) = s.vaults.iter_mut().find(|v| v.name == it.vault) else { continue };
+            v.label_meta.insert(it.key.clone(), t);
+            match it.mark.as_ref().filter(|m| m.status != "unknown") {
+                Some(m) => { let full = provenance::Mark { status: m.status.clone(), method: m.method.clone().filter(|x| !x.is_empty()), counterparty: m.counterparty.clone().map(|c| c.trim().to_string()).filter(|c| !c.is_empty()), note: m.note.clone().map(|c| c.trim().to_string()).filter(|c| !c.is_empty()), t, by: "you".into() };
+                    v.more.entry(it.key.clone()).or_default().insert("provenance".into(), serde_json::to_value(full).unwrap_or_default()); }
+                None => { if let Some(r) = v.more.get_mut(&it.key) { r.remove("provenance"); } }
+            }
+        }
+    })?;
+    for name in vaults { let _ = labels_sync(name).await; }
+    Ok(wallet::load()?)
+}
+
+/// Freeze a coin (BIP 329 `spendable: false`) or thaw it. A frozen coin stays in the holding and in every view, and
+/// is left out of Send, Combine and Split until thawed; naming it by hand is refused with the reason.
+#[tauri::command]
+async fn coin_freeze(name: String, op: String, frozen: bool, why: Option<String>) -> R<Store> {
+    if op.split_once(':').map(|(t, n)| t.len() != 64 || n.parse::<u32>().is_err()).unwrap_or(true) { return Err("a coin is named txid:vout".into()); }
+    if why.as_ref().map(|c| c.chars().count() > 200).unwrap_or(false) { return Err("the reason holds up to 200 characters".into()); }
+    let key = format!("output:{op}");
+    let nm = name.clone();
+    wallet::update(|s| if let Some(v) = s.vaults.iter_mut().find(|v| v.name == nm) {
+        v.label_meta.insert(key.clone(), now());
+        if frozen { let r = v.more.entry(key.clone()).or_default(); r.insert("spendable".into(), false.into()); r.insert("frozen".into(), serde_json::json!({ "t": now(), "by": "you", "why": why.clone().map(|w| w.trim().to_string()).filter(|w| !w.is_empty()) })); }
+        else if let Some(r) = v.more.get_mut(&key) { r.remove("spendable"); r.remove("frozen"); }
+    })?;
+    let _ = labels_sync(name).await;
+    Ok(wallet::load()?)
 }
 
 // ---------- BSMS (BIP 129) ----------
@@ -4272,7 +4348,7 @@ pub fn run() {
             cards_list, card_generate, attach_view, profiles_refresh, sync_face_refresh, sync_status, sync_enable, sync_rotate, sync_remove_card, sync_now, sync_tick, sync_disable, sync_find, sync_adopt, card_survey, card_tap, nk_firmware, nk_firmware_update, secret_preview, card_init_key_from, card_import, card_init_resume_check, key_setup_restart, card_reset, card_pin_change_pad, platform, ui_note, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, node_retire, node_import_pick, node_import, node_ledger_csv, clipboard_write, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, liquid_restore, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_forget, spark_memos, spark_owner_import, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, vault_last, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard,
             engraver_find, engraver_jog, engraver_run, engraver_cancel, vault_shares_plates, share_rewrap,
-            provenance_all, provenance_set, vault_provenance
+            provenance_all, provenance_set, provenance_set_many, vault_provenance, coin_freeze
         ])
         .build(tauri::generate_context!())
         .expect("error while running Any Two Keys")
