@@ -15,7 +15,7 @@ use sha2::Digest;
 pub const BASE: &str = "https://bitcoin.mineracks.com/records/";
 /// ed25519 public keys (32 bytes, hex) a manifest may be signed with: the fleet's public-records key. Two during a
 /// rotation (applications/public-records/README.md "Rotating the key"). Empty = this build cannot accept a snapshot.
-const PUBKEYS: &[&str] = &[];
+const PUBKEYS: &[&str] = &["20c12b21b53ae6b15b4c3df63759b2ef19d9af1ee1c5a2dfffec863ff83aec5d"];
 const DAY: u64 = 86_400;
 /// what a record says, for the screens — the kind words the builder emits
 pub const KINDS: &[&str] = &["sanctioned", "ransomware", "scam", "hack", "exchange", "service", "gambling", "market", "mixer", "coinjoin", "miner"];
