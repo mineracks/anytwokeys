@@ -107,6 +107,8 @@ Rust: `records.rs` — `refresh`, `status`, `lookup`, `attach` (runs at the end 
 `records_status`, `records_refresh`, `records_lookup`. The builder and the service: `applications/public-records/` in
 the infrastructure repo. Pinned keys: `PUBKEYS` in `records.rs`; a rotation pins two for one release.
 
+
+The service is also a Tor hidden service (the onion is named on bitcoin.mineracks.com/records/ and sent as an `Onion-Location` header), and on the server only a verified snapshot is ever published: a root timer checks the manifest signature against the pinned public key and every file hash before anything moves into the served directory. The app itself has no Tor client; the onion is for Tor Browser and for wallets behind a Tor proxy.
 ## In the labels file
 
 BIP 329 export carries `"provenance": {"status", "method", "counterparty", "note"}` on `output`, `addr` and `tx`
