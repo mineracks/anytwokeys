@@ -18,7 +18,7 @@ pub const BASE: &str = "https://bitcoin.mineracks.com/records/";
 const PUBKEYS: &[&str] = &["20c12b21b53ae6b15b4c3df63759b2ef19d9af1ee1c5a2dfffec863ff83aec5d"];
 const DAY: u64 = 86_400;
 /// what a record says, for the screens — the kind words the builder emits
-pub const KINDS: &[&str] = &["sanctioned", "ransomware", "scam", "hack", "exchange", "service", "gambling", "market", "mixer", "coinjoin", "miner"];
+pub const KINDS: &[&str] = &["sanctioned", "seized", "ransomware", "scam", "hack", "exchange", "service", "gambling", "market", "mixer", "coinjoin", "miner"];
 
 /// One record against an address: the kind of thing a source says it is, the source's own label, the source, and the
 /// day it was listed (empty when the source gives none).

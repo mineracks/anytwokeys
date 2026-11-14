@@ -77,9 +77,13 @@ the coin, so the trail is not optional.
 
 ## Public records
 
-Records anyone can download — sanctions lists (OFAC), ransomware payment addresses (Ransomwhe.re), exchange, service,
-market, mixer, coinjoin-coordinator and mining-payout wallets (GraphSense TagPacks) — gathered by the fleet into one
-**signed snapshot** at `bitcoin.mineracks.com/records/` (half a million records, 5 MB gzipped), fetched **whole** once a
+Records anyone can download — the US (OFAC), UK, EU and Australian sanctions lists; addresses a court filing says are
+in a government's custody (kind `seized`, "in a government's custody" — a record about custody, never an accusation);
+ransomware payment addresses (Ransomwhe.re); exchange wallets the exchange has signed for (OKX proof of reserves) and
+exchange, service, market, mixer, coinjoin-coordinator and mining-payout wallets (GraphSense TagPacks, mempool.space's
+pool list) — gathered by the fleet into one **signed snapshot** at `bitcoin.mineracks.com/records/` (half a million
+records, 5 MB gzipped, rebuilt every six hours, every publish kept with its signature and a per-source diff), fetched
+**whole** once a
 day and matched **on this device**. The one request names no address, no hash, no count; nothing about a coin is ever
 sent anywhere. The manifest's ed25519 signature is checked against a key pinned in the app, and the file's SHA-256
 against the manifest — on download, and again whenever the cached copy is read back. The setting is in App settings

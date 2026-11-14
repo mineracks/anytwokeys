@@ -2989,7 +2989,7 @@ $('#send-to').addEventListener('input', () => { paintTo.own = null; paintTo(); }
 async function recordsNote(who, a) {
   let rs = []; try { [rs] = await invoke('records_lookup', { addrs: [a] }); } catch { return; }
   if (!rs || !rs.length || $('#send-to').value.trim() !== a || !who.contains(who.querySelector('span, button'))) return;
-  const d = document.createElement('div'); d.className = 'recnote' + (rs.some(r => r.kind === 'sanctioned') ? ' hard' : '');
+  const d = document.createElement('div'); d.className = 'recnote' + (rs.some(r => r.kind === 'sanctioned' || r.kind === 'seized') ? ' hard' : '');
   d.innerHTML = `<b>This address is in public records.</b>${recList(rs.map(r => ({ ...r, at: '', addr: a, n: 1 })))}`;
   who.appendChild(d);
 }
@@ -3071,7 +3071,7 @@ const PROV_STATUSES = [['kyc', 'KYC', 'a regulated party holds your identity aga
 const PROV_METHODS = [['', 'How it arrived…'], ['exchange', 'Bought on an exchange'], ['atm', 'Bitcoin ATM'], ['p2p', 'Peer to peer'], ['mined', 'Mined'], ['earned', 'Earned'], ['gift', 'Gift'], ['inheritance', 'Inheritance'], ['coinjoin', 'Coinjoin'], ['channel', 'Lightning channel'], ['swap', 'Swap'], ['transfer', 'From another of your vaults']];
 const PROV_WORD = Object.fromEntries(PROV_STATUSES.map(([k, n]) => [k, n]));
 // public records (records.rs): what a source says an address is, and where it stood against the coin
-const REC_WORD = { sanctioned: 'on a sanctions list', ransomware: 'ransomware payment address', scam: 'scam address', hack: 'hack proceeds', exchange: 'exchange wallet', service: 'service wallet', gambling: 'gambling service', market: 'darknet market', mixer: 'mixing service', coinjoin: 'coinjoin coordinator', miner: 'mining payout' };
+const REC_WORD = { sanctioned: 'on a sanctions list', seized: 'in a government\u2019s custody', ransomware: 'ransomware payment address', scam: 'scam address', hack: 'hack proceeds', exchange: 'exchange wallet', service: 'service wallet', gambling: 'gambling service', market: 'darknet market', mixer: 'mixing service', coinjoin: 'coinjoin coordinator', miner: 'mining payout' };
 const REC_AT = { from: 'came from', with: 'arrived alongside', to: 'went to' };
 const recLine = (h) => `<div><span class="ptag rec ${esc(h.kind)}">${REC_WORD[h.kind] || esc(h.kind)}</span> <b>${esc(h.label)}</b>${h.at ? ` <span class="muted">· ${REC_AT[h.at]} ${h.n > 1 ? `${sats(h.n)} such addresses` : `<span class="mono" style="font-size:11.5px">${esc(shortAddr(h.addr || ''))}</span>`}</span>` : ''}<small class="muted">${esc(h.source)}${h.listed ? ` · listed ${esc(h.listed)}` : ''}</small></div>`;
 const recList = (hits) => `<div class="reclist">${hits.map(recLine).join('')}</div><small class="muted">A record says a source listed an address on a date. It is not a verdict, and it does not move the status above. Matched on this device against a signed snapshot; no address was sent anywhere.</small>`;
