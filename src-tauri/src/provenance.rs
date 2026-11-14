@@ -57,7 +57,8 @@ pub fn mark_in(more: &serde_json::Map<String, serde_json::Value>) -> Option<Mark
 
 /// One input of a transaction: its outpoint, and — when it is one of the owner's coins — its sats and its vault.
 #[derive(Debug, Clone, Default)]
-pub struct In { pub op: String, pub sats: u64, pub vault: Option<String> }
+pub struct In { pub op: String, pub sats: u64, pub vault: Option<String>, /// the address the spent output sat at, when its transaction is known (records.rs looks it up)
+    pub addr: Option<String> }
 /// One output: outpoint, sats, the owner's vault it paid (None = someone else's), and its address when it has one.
 #[derive(Debug, Clone, Default)]
 pub struct Out { pub op: String, pub sats: u64, pub vault: Option<String>, pub addr: Option<String> }
@@ -109,6 +110,9 @@ pub struct Derived {
     pub time: u32,
     /// the address it sits at, when the script has one — so a screen can group coins by address without the vault loaded
     #[serde(skip_serializing_if = "Option::is_none")] pub addr: Option<String>,
+    /// public records against the addresses its transactions touched (records.rs): a source listed one on a date —
+    /// shown as that, never as a verdict; the status above never moves because of a record
+    #[serde(skip_serializing_if = "Vec::is_empty")] pub records: Vec<crate::records::Hit>,
 }
 
 fn short(op: &str) -> String {
@@ -246,8 +250,8 @@ mod tests {
     use super::*;
     fn m(status: &str) -> Mark { Mark { status: status.into(), by: "you".into(), ..Default::default() } }
     fn mc(status: &str, method: &str, cp: &str) -> Mark { Mark { status: status.into(), method: Some(method.into()), counterparty: Some(cp.into()), by: "you".into(), ..Default::default() } }
-    fn ours(op: &str, sats: u64, vault: &str) -> In { In { op: op.into(), sats, vault: Some(vault.into()) } }
-    fn theirs(op: &str) -> In { In { op: op.into(), sats: 0, vault: None } }
+    fn ours(op: &str, sats: u64, vault: &str) -> In { In { op: op.into(), sats, vault: Some(vault.into()), addr: None } }
+    fn theirs(op: &str) -> In { In { op: op.into(), sats: 0, vault: None, addr: None } }
     fn out(txid: &str, n: u32, sats: u64, vault: Option<&str>, addr: &str) -> Out { Out { op: format!("{txid}:{n}"), sats, vault: vault.map(str::to_string), addr: Some(addr.into()) } }
     fn tx(id: &str, time: u32, ins: Vec<In>, outs: Vec<Out>) -> Tx { Tx { id: id.into(), time, ins, outs } }
 

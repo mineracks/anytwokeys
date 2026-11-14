@@ -10,6 +10,7 @@ mod muun;
 mod liquid;
 mod activity;
 mod provenance;
+mod records;
 mod cycle;
 mod transfers;
 mod net;
@@ -2027,7 +2028,7 @@ fn node_import_at(name: String, path: String) -> R<(Store, ImportReport)> {
 }
 
 #[tauri::command]
-fn settings_set(app: tauri::AppHandle, network: String, custom: bool, electrum: String, explorer: String, gap: Option<u32>, fiat: Option<String>, prices: Option<String>, vss: Option<String>, tiles: Option<String>, geocode: Option<String>, location: Option<bool>, location_exact: Option<bool>, sp_oracle: Option<String>) -> R<Store> {
+fn settings_set(app: tauri::AppHandle, network: String, custom: bool, electrum: String, explorer: String, gap: Option<u32>, fiat: Option<String>, prices: Option<String>, vss: Option<String>, tiles: Option<String>, geocode: Option<String>, location: Option<bool>, location_exact: Option<bool>, sp_oracle: Option<String>, public_records: Option<bool>) -> R<Store> {
     let mut s = wallet::load()?;
     if network != "mainnet" && network != "signet" { return Err("network must be mainnet or signet".into()); }
     let gap = gap.unwrap_or(s.settings.gap);
@@ -2043,7 +2044,7 @@ fn settings_set(app: tauri::AppHandle, network: String, custom: bool, electrum: 
     if !(sp_oracle.is_empty() || sp_oracle.starts_with("https://")) { return Err("the silent payments oracle is an https address, or empty to switch silent payments off".into()); }
     let tiles = tiles.map(|v| v.trim().to_string()).unwrap_or_else(|| s.settings.tiles.clone());
     if !(tiles.is_empty() || tiles.starts_with("https://")) { return Err("the map host is an https address of a .pmtiles file, or empty for no maps".into()); }
-    s.settings = wallet::Settings { network, custom, electrum: electrum.trim().to_string(), explorer: explorer.trim().to_string(), gap, fiat, prices, vss, sp_oracle, location, location_exact, tiles, geocode: geocode.map(|v| v.trim().trim_end_matches('/').to_string()).filter(|v| v.is_empty() || v.starts_with("https://")).unwrap_or_else(|| s.settings.geocode.clone()), offline: s.settings.offline, drill_days: s.settings.drill_days, cost_method: s.settings.cost_method.clone() };
+    s.settings = wallet::Settings { network, custom, electrum: electrum.trim().to_string(), explorer: explorer.trim().to_string(), gap, fiat, prices, vss, sp_oracle, location, location_exact, tiles, public_records: public_records.unwrap_or(s.settings.public_records), geocode: geocode.map(|v| v.trim().trim_end_matches('/').to_string()).filter(|v| v.is_empty() || v.starts_with("https://")).unwrap_or_else(|| s.settings.geocode.clone()), offline: s.settings.offline, drill_days: s.settings.drill_days, cost_method: s.settings.cost_method.clone() };
     wallet::save(&s)?;
     location_follow(&app, location);
     Ok(s)
@@ -3980,26 +3981,52 @@ fn provenance_all_inner() -> R<ProvAll> {
         let Ok(table) = wallet::ours_table(v) else { skipped.push(v.name.clone()); continue };
         let net = wallet::network_of(&v.network);
         let by_id: std::collections::HashMap<bitcoin::Txid, &bitcoin::Transaction> = got.iter().map(|t| (t.compute_txid(), t)).collect();
+        // the transactions that paid this vault's deposits, when a public-records snapshot is here to match their addresses
+        // against: fetched once, kept (a parent of a confirmed transaction is confirmed), skipped if the server cannot say
+        let mut parents: std::collections::HashMap<bitcoin::Txid, bool> = std::collections::HashMap::new();
         for ((txid, height), tx) in history.iter().zip(&got) {
             let e = txs.entry(txid.clone()).or_insert_with(|| provenance::Tx {
                 id: txid.clone(), time: 0,
-                ins: tx.input.iter().map(|i| provenance::In { op: i.previous_output.to_string(), sats: 0, vault: None }).collect(),
+                ins: tx.input.iter().map(|i| provenance::In { op: i.previous_output.to_string(), sats: 0, vault: None, addr: None }).collect(),
                 outs: tx.output.iter().enumerate().map(|(n, o)| provenance::Out { op: format!("{txid}:{n}"), sats: o.value.to_sat(), vault: None, addr: bitcoin::Address::from_script(&o.script_pubkey, net).ok().map(|a| a.to_string()) }).collect(),
             });
             if *height > 0 { if let Some(t) = times.get(&format!("{}:{height}", v.network)) { e.time = *t; } }
             for (k, i) in tx.input.iter().enumerate() {
                 if let Some(o) = by_id.get(&i.previous_output.txid).and_then(|p| p.output.get(i.previous_output.vout as usize)) {
-                    if table(&o.script_pubkey).is_some() { if let Some(x) = e.ins.get_mut(k) { x.vault = Some(v.name.clone()); x.sats = o.value.to_sat(); } }
-                }
+                    if let Some(x) = e.ins.get_mut(k) { x.sats = o.value.to_sat(); x.addr = bitcoin::Address::from_script(&o.script_pubkey, net).ok().map(|a| a.to_string()); if table(&o.script_pubkey).is_some() { x.vault = Some(v.name.clone()); } }
+                } else { parents.entry(i.previous_output.txid).or_insert(*height > 0); }
             }
             for (n, o) in tx.output.iter().enumerate() { if table(&o.script_pubkey).is_some() { if let Some(x) = e.outs.get_mut(n) { x.vault = Some(v.name.clone()); } } }
+        }
+        if !parents.is_empty() && records::snapshot().is_some() {
+            let ids: Vec<bitcoin::Txid> = parents.keys().copied().collect();
+            match chain::transactions_kept(&servers, &v.network, &ids, &|i| parents.get(i).copied().unwrap_or(false)) {
+                Ok(ps) => {
+                    let pb: std::collections::HashMap<bitcoin::Txid, &bitcoin::Transaction> = ps.iter().map(|t| (t.compute_txid(), t)).collect();
+                    for (txid, _) in &history { let Some(e) = txs.get_mut(txid) else { continue }; for x in e.ins.iter_mut().filter(|x| x.addr.is_none()) {
+                        let Some((pt, pn)) = x.op.split_once(':') else { continue };
+                        let (Ok(pt), Ok(pn)) = (bitcoin::Txid::from_str(pt), pn.parse::<usize>()) else { continue };
+                        if let Some(o) = pb.get(&pt).and_then(|p| p.output.get(pn)) { x.sats = o.value.to_sat(); x.addr = bitcoin::Address::from_script(&o.script_pubkey, net).ok().map(|a| a.to_string()); }
+                    } }
+                }
+                Err(e) => watch::log(&format!("provenance: {}: the senders' transactions could not be read ({e}); public records on deposits skipped", v.name)),
+            }
         }
     }
     let list: Vec<provenance::Tx> = txs.into_values().collect();
     let mut coins = provenance::derive(&list, &marks);
     for v in &s.vaults { for op in frozen_ops(v) { if let Some(d) = coins.get_mut(&op) { d.frozen = true; } } }
+    records::attach(&list, &mut coins);
     Ok(ProvAll { coins, skipped })
 }
+
+/// Public records (records.rs): the snapshot's state, a refresh, and the records against addresses on a screen.
+#[tauri::command]
+async fn records_status() -> R<records::Status> { block(|| Ok(records::status())).await }
+#[tauri::command]
+async fn records_refresh(force: bool) -> R<records::Status> { block(move || records::refresh(force)).await }
+#[tauri::command]
+async fn records_lookup(addrs: Vec<String>) -> R<Vec<Vec<records::Rec>>> { block(move || Ok(addrs.iter().map(|a| records::lookup(a)).collect())).await }
 
 #[derive(Deserialize)]
 struct MarkIn { status: String, #[serde(default)] method: Option<String>, #[serde(default)] counterparty: Option<String>, #[serde(default)] note: Option<String> }
@@ -4348,7 +4375,7 @@ pub fn run() {
             cards_list, card_generate, attach_view, profiles_refresh, sync_face_refresh, sync_status, sync_enable, sync_rotate, sync_remove_card, sync_now, sync_tick, sync_disable, sync_find, sync_adopt, card_survey, card_tap, nk_firmware, nk_firmware_update, secret_preview, card_init_key_from, card_import, card_init_resume_check, key_setup_restart, card_reset, card_pin_change_pad, platform, ui_note, card_pin_judge, card_init_pins, card_init_check, card_init_harden, card_init_key, card_init_prove, key_setup_skip, store_get, vault_create, descriptor_parse, vault_restore, vault_recovery, vault_rename, vault_order, vault_forget, sp_watch, sp_rescan, sp_forget, sp_cancel, sp_address, vault_address_kind, statement_pick, statement_preview, statement_import, node_check, node_add, node_retire, node_import_pick, node_import, node_ledger_csv, clipboard_write, key_card_open, place_save, place_delete, key_place_set, spend_preview_own, spend_build_own, entity_save, entity_delete, vault_entity_set, icon_set, icon_pick, exchange_pick_preview, exchange_import, exchange_pick_raw, exchange_map_preview, spend_preview, disposal_set, muun_restore, muun_check, liquid_restore, spark_restore, spark_restore_words, spark_discover, spark_discovery_cancel, spark_enroll, spark_unlock, spark_forget, spark_memos, spark_owner_import, spark_reader_generate, spark_session_status, seed_wordlist, seed_check, xpub_restore,
             settings_set, vault_sync, vault_last, fees_get, servers_test, spend_build, spend_sign, spend_status, spend_broadcast, spend_export, spend_discard,
             engraver_find, engraver_jog, engraver_run, engraver_cancel, vault_shares_plates, share_rewrap,
-            provenance_all, provenance_set, provenance_set_many, vault_provenance, coin_freeze
+            provenance_all, provenance_set, provenance_set_many, vault_provenance, coin_freeze, records_status, records_refresh, records_lookup
         ])
         .build(tauri::generate_context!())
         .expect("error while running Any Two Keys")

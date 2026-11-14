@@ -111,6 +111,9 @@ pub struct Settings {
     #[serde(default = "default_geocode")] pub geocode: String,
     /// work offline: no request leaves the app until this is turned off again
     #[serde(default)] pub offline: bool,
+    /// keep the public-records snapshot (records.rs) from bitcoin.mineracks.com/records/ — one request a day that names
+    /// no address; coins are matched on this device. Off = never fetched, nothing matched.
+    #[serde(default = "default_public_records")] pub public_records: bool,
     /// how often a vault should be proved recoverable from its cards, in days; 0 = never ask
     #[serde(default = "default_drill")] pub drill_days: u32,
     /// how a disposal's cost is found: "utxo" (the coins actually spent, as the chain records them), "fifo", "average"
@@ -123,6 +126,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self { serde_json::from_str(r#"{"network":"","custom":false,"electrum":"","explorer":""}"#).expect("the empty settings parse") }
 }
+pub fn default_public_records() -> bool { true }
 pub fn default_geocode() -> String { "https://geocode.mineracks.com".into() }
 pub fn default_tiles() -> String { "https://tiles.mineracks.com/planet.pmtiles".into() }
 pub fn default_vss() -> String { crate::labels::DEFAULT_VSS.into() }

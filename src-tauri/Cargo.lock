@@ -96,6 +96,7 @@ dependencies = [
  "ciborium",
  "core-foundation",
  "dirs 6.0.0",
+ "ed25519-dalek",
  "electrum-client",
  "elements",
  "flate2",

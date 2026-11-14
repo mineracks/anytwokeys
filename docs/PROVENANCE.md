@@ -75,6 +75,38 @@ the coin, so the trail is not optional.
   table draws sats held by status across the whole history: each coin counted from the day it came to the day it
   left, by what your records say about it now — knowledge of who can link a coin applies to its whole life.
 
+## Public records
+
+Records anyone can download — sanctions lists (OFAC), ransomware payment addresses (Ransomwhe.re), exchange, service,
+market, mixer, coinjoin-coordinator and mining-payout wallets (GraphSense TagPacks) — gathered by the fleet into one
+**signed snapshot** at `bitcoin.mineracks.com/records/` (half a million records, 5 MB gzipped), fetched **whole** once a
+day and matched **on this device**. The one request names no address, no hash, no count; nothing about a coin is ever
+sent anywhere. The manifest's ed25519 signature is checked against a key pinned in the app, and the file's SHA-256
+against the manifest — on download, and again whenever the cached copy is read back. The setting is in App settings
+(*Match coins against public records*, on by default; Offline stops it like everything else).
+
+A record is a record: *a source listed this address on this date*. It is shown as that — the kind of thing the source
+says it is, the source's own label, the source, the date — never as a verdict or a score, and **it never moves the
+status**: who can link a coin to you is still what you said, what the chain shows, and the rules; a record is one more
+thing you can see while deciding.
+
+Where a coin's transactions touched a recorded address, the coin page says so under *Public records*, with where the
+address stood: *came from* (an input of the transaction that paid the coin — the senders' transactions are read once
+for this and kept), *arrived alongside* (another output of it, the sender's change or a fellow recipient), *went to*
+(an output of the transaction that spent it). The same record on many addresses of one transaction — an exchange's
+batch withdrawal — is one line with a count. The transaction sheet looks the foreign addresses on screen up in one
+call. On Send, a destination that is in public records is said under the To field before the money moves; a
+sanctions record is in the warning colour. The provenance panel under the donut carries the snapshot line (its date,
+records, sources) and the way to a fresh one; a stale snapshot is refreshed once a session on its own.
+
+In bulk classification, a coin whose paying transaction came *from* an exchange's wallet is suggested as **KYC ·
+exchange · that exchange**, and one that came through a coinjoin coordinator as *coinjoin* — a suggestion in the
+"From what you called them" group, for you to confirm, never applied by itself.
+
+Rust: `records.rs` — `refresh`, `status`, `lookup`, `attach` (runs at the end of `provenance_all`), commands
+`records_status`, `records_refresh`, `records_lookup`. The builder and the service: `applications/public-records/` in
+the infrastructure repo. Pinned keys: `PUBKEYS` in `records.rs`; a rotation pins two for one release.
+
 ## In the labels file
 
 BIP 329 export carries `"provenance": {"status", "method", "counterparty", "note"}` on `output`, `addr` and `tx`
@@ -87,6 +119,6 @@ BIP 329 readers ignore the field.
 Rust: `provenance.rs` (the engine, `derive`, with its tests on a hand-built graph); commands `provenance_all`
 (the graph from every chain vault's cached transactions, the marks from every vault's records, the statement rule from
 the transfer links), `provenance_set`, `provenance_set_many` (the bulk flow's one write), `vault_provenance`,
-`coin_freeze`. The derived view carries `spent_at`, `frozen` and `addr` so the screens can draw time and group by
-address without the vault loaded. The design: `roadmap/anytwokeys/PROVENANCE-SPEC.md` in the
+`coin_freeze`, and `records_*` (above). The derived view carries `spent_at`, `frozen`, `addr` and `records` so the screens can
+draw time, group by address and show public records without the vault loaded. The design: `roadmap/anytwokeys/PROVENANCE-SPEC.md` in the
 infrastructure repo.

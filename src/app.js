@@ -638,6 +638,14 @@ async function renderTx() {
   }
   let d; try { d = await invoke('tx_detail', { name, txid, height: txView.height }); } catch (e) { if (mine === txView.seq) { $('#tx-dl').innerHTML = `<dt>Details</dt><dd class="warn">${esc(e)}</dd>`; $('#tx-proof').textContent = ''; } return; }
   if (mine !== txView.seq || !vault || vault.name !== name) return;   // the person has moved on; this answer is for another screen
+  // public records against the other side's addresses (records.rs): one lookup, on this device
+  const recAddrs = [...new Set([...d.inputs.filter(i => i.ours === null && i.address).map(i => i.address), ...d.outputs.filter(o => o.ours === null && o.address).map(o => o.address)])];
+  let recHits = [];
+  if (recAddrs.length) {
+    const spendTx = d.inputs.some(i => i.ours !== null);
+    try { const rr = await invoke('records_lookup', { addrs: recAddrs }); recHits = recFold(rr.flatMap((rs, k) => rs.map(r => ({ ...r, addr: recAddrs[k], at: d.inputs.some(i => i.address === recAddrs[k]) ? 'from' : spendTx ? 'to' : 'with' })))); } catch {}
+    if (mine !== txView.seq || !vault || vault.name !== name) return;
+  }
   const conf = d.height > 0 ? Math.max(1, d.tip - d.height + 1) : 0, st = $('#tx-status');
   st.className = 'state ' + (conf ? 'ok' : 'here'); st.querySelector('span').textContent = conf ? `confirmed · ${sats(conf)} block${conf === 1 ? '' : 's'} deep` : 'in the mempool';
   if (!f) { amt.className = 'tx-amt' + (d.net > 0 ? ' in' : ''); amt.innerHTML = `${d.net > 0 ? '+' : d.net < 0 ? '−' : ''}${sats(Math.abs(d.net))} <small>sats</small>`; }
@@ -678,6 +686,7 @@ async function renderTx() {
       if (nm === undefined) cycleNow().then(renderTx);
       rows.push(['Market context', cycleTable({ title: 'When received', sub: t ? cycleDay(t) : 'not in a block yet', mark: cm }, { title: 'Now', sub: cycleStale(nm) ? `as of ${cycleDay(nm.t)}` : '', mark: nm })]); }
   }
+  if (recHits.length) rows.push(['Public records', recList(recHits)]);
   $('#tx-dl').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
   $('#tx-proof').textContent = d.proof === 'proved' ? `the node proved it is in block ${sats(d.height)}` : d.proof === 'unconfirmed' ? 'not in a block yet' : d.proof;
   $('#tx-proof').classList.toggle('warn', d.proof !== 'proved' && d.proof !== 'unconfirmed');
@@ -1961,6 +1970,7 @@ function recPageOpen(kind, id) {
        ['Holding', held ? `${sats(held)} sats in ${sats(H.length)} coin${H.length === 1 ? '' : 's'} \u2014 listed below` : ((vault._history || []).some(x => x.index === row.index) ? 'nothing now \u2014 it has been used and spent from' : 'nothing yet \u2014 this address has never been used')]];
   provReady(() => { if (recPage.kind === kind && recPage.id === id) recPageOpen(kind, id); });
   if (kind === 'coin') { const dd = provOf(id); chain.push(['Who can link it', `${provTag(dd)}${provAfter(dd)}${dd && dd.cluster_size > 1 ? `<small class="muted">one of ${sats(dd.cluster_size)} coins the chain shows controlled together</small>` : ''}${provTrail(dd)}${provPick('output:' + id, { addrs: [coinAddr(coin)].filter(Boolean), who: 'Who was on the other side', note: 'What you say on the coin itself comes before its address\u2019s mark and its transaction\u2019s.' })}`]); }
+  if (kind === 'coin') { const dd = provOf(id); if (dd && dd.records && dd.records.length) chain.push(['Public records', recList(dd.records)]); }
   else chain.push(['Who can link it', provPick('addr:' + id, { who: 'Who you gave this address to', note: 'Every coin that arrives here takes this, unless the coin itself is marked.' })]);
   if (kind === 'coin') {
     const fz = ((vault.more || {})['output:' + id] || {}), frozen = fz.spendable === false, fi = fz.frozen || {}, dd = provOf(id);
@@ -2966,6 +2976,7 @@ function paintTo() {
   else if (/^(bc1|tb1|[13mn2])[a-zA-Z0-9]{20,}$/.test(a)) who.innerHTML = `<button type="button" class="linkish" id="save-addr">Save this address…</button>`;
   else return;
   who.hidden = false;
+  recordsNote(who, a);
   if ($('#save-addr')) $('#save-addr').onclick = () => {
     who.innerHTML = `<div class="savebar"><input id="save-addr-name" placeholder="A name for it, e.g. exchange deposit" maxlength="60"><button type="button" class="btn small primary" id="save-addr-go">Save</button><button type="button" class="linkish" id="save-addr-no">Cancel</button></div>`;
     const go = async () => { try { store = await invoke('contact_save', { name: $('#save-addr-name').value, address: a, network: vault.network }); toast('Saved to the address book'); paintTo(); } catch (e) { fail(e); } };
@@ -2974,6 +2985,14 @@ function paintTo() {
   };
 }
 $('#send-to').addEventListener('input', () => { paintTo.own = null; paintTo(); });
+// a destination that is in public records — a sanctions list above all — said before the money moves
+async function recordsNote(who, a) {
+  let rs = []; try { [rs] = await invoke('records_lookup', { addrs: [a] }); } catch { return; }
+  if (!rs || !rs.length || $('#send-to').value.trim() !== a || !who.contains(who.querySelector('span, button'))) return;
+  const d = document.createElement('div'); d.className = 'recnote' + (rs.some(r => r.kind === 'sanctioned') ? ' hard' : '');
+  d.innerHTML = `<b>This address is in public records.</b>${recList(rs.map(r => ({ ...r, at: '', addr: a, n: 1 })))}`;
+  who.appendChild(d);
+}
 $('#paste-to').onclick = async () => {
   try { const t = (await navigator.clipboard.readText()).trim(); if (!t) return toast('Clipboard is empty'); fillDestination(t); }
   catch { toast('Could not read the clipboard'); }
@@ -3051,6 +3070,14 @@ const DISPOSAL_NOTES = { self: 'Not a disposal: no gain is realised and the cost
 const PROV_STATUSES = [['kyc', 'KYC', 'a regulated party holds your identity against it'], ['known', 'Known', 'a person or a service knows it is yours, with no regulated record'], ['private', 'Private', 'nothing in your records links it to you'], ['unknown', 'Unclassified', 'not said yet']];
 const PROV_METHODS = [['', 'How it arrived…'], ['exchange', 'Bought on an exchange'], ['atm', 'Bitcoin ATM'], ['p2p', 'Peer to peer'], ['mined', 'Mined'], ['earned', 'Earned'], ['gift', 'Gift'], ['inheritance', 'Inheritance'], ['coinjoin', 'Coinjoin'], ['channel', 'Lightning channel'], ['swap', 'Swap'], ['transfer', 'From another of your vaults']];
 const PROV_WORD = Object.fromEntries(PROV_STATUSES.map(([k, n]) => [k, n]));
+// public records (records.rs): what a source says an address is, and where it stood against the coin
+const REC_WORD = { sanctioned: 'on a sanctions list', ransomware: 'ransomware payment address', scam: 'scam address', hack: 'hack proceeds', exchange: 'exchange wallet', service: 'service wallet', gambling: 'gambling service', market: 'darknet market', mixer: 'mixing service', coinjoin: 'coinjoin coordinator', miner: 'mining payout' };
+const REC_AT = { from: 'came from', with: 'arrived alongside', to: 'went to' };
+const recLine = (h) => `<div><span class="ptag rec ${esc(h.kind)}">${REC_WORD[h.kind] || esc(h.kind)}</span> <b>${esc(h.label)}</b>${h.at ? ` <span class="muted">· ${REC_AT[h.at]} ${h.n > 1 ? `${sats(h.n)} such addresses` : `<span class="mono" style="font-size:11.5px">${esc(shortAddr(h.addr || ''))}</span>`}</span>` : ''}<small class="muted">${esc(h.source)}${h.listed ? ` · listed ${esc(h.listed)}` : ''}</small></div>`;
+const recList = (hits) => `<div class="reclist">${hits.map(recLine).join('')}</div><small class="muted">A record says a source listed an address on a date. It is not a verdict, and it does not move the status above. Matched on this device against a signed snapshot; no address was sent anywhere.</small>`;
+// the same record on several addresses of one transaction, folded to one line with a count
+function recFold(hits) { const out = []; for (const h of hits) { const e = out.find(x => x.at === h.at && x.kind === h.kind && x.label === h.label && x.source === h.source); if (e) e.n += 1; else out.push({ ...h, n: 1 }); } return out; }
+
 const PROV_RANK = { kyc: 3, known: 2, private: 1, unknown: 0 };
 const PROV_IMPLIES = { exchange: 'kyc', atm: 'kyc', earned: 'known', gift: 'known', inheritance: 'known', swap: 'known', channel: 'known', mined: 'private', p2p: 'private', coinjoin: 'private' };
 const prov = { coins: {}, skipped: [], at: 0, loading: null, waiting: new Set() };
@@ -3063,6 +3090,21 @@ function provReady(repaint) {
   return false;
 }
 const provDrop = () => { prov.at = 0; };
+// the Public records line under the donut: what snapshot is here, and the way to a fresh one. Once a session, a stale
+// snapshot is refreshed on its own (the request names no address) and the coins re-derived against it.
+async function provRecStatus(host) {
+  const el = host.querySelector('[data-rec-status]'); if (!el) return;
+  let st; try { st = await invoke('records_status'); } catch (e) { el.textContent = ''; return; }
+  const day = st.built ? new Date(st.built).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+  const words = !st.on ? 'Public records: off (App settings).'
+    : st.loaded ? `Public records: snapshot of ${esc(day)} · ${sats(st.rows)} records from ${sats(st.sources)} sources, matched on this device.`
+    : st.keys === 0 ? 'Public records: this build cannot accept a snapshot yet (no signing key pinned).'
+    : 'Public records: no snapshot on this computer yet.';
+  el.innerHTML = `${words}${st.on && st.keys ? ` <button class="linkish" type="button" data-rec-refresh>${st.loaded ? 'Check for a newer one' : 'Download it (5 MB from bitcoin.mineracks.com; the request names no address)'}</button>` : ''}${st.error ? `<div class="warn" style="font-size:12.5px">${esc(st.error)}</div>` : ''}`;
+  const go = async (force) => { const b = el.querySelector('[data-rec-refresh]'); if (b) { b.disabled = true; b.textContent = 'Checking…'; } try { const r = await invoke('records_refresh', { force }); if (r.error) toast(r.error); else if (r.loaded) toast(`Public records: ${sats(r.rows)} records, snapshot of ${new Date(r.built).toLocaleDateString()}`); } catch (e) { fail(e); } provDrop(); if (host._refill) host._refill(); else provRecStatus(host); };
+  const b = el.querySelector('[data-rec-refresh]'); if (b) b.onclick = () => go(true);
+  if (st.on && st.keys && st.stale && !st.error && !provRecStatus.tried) { provRecStatus.tried = true; go(false); }
+}
 const provOf = (op) => prov.coins[op] || null;
 const provStatus = (op) => (provOf(op) || {}).status || 'unknown';
 const provMethodWord = (m) => (PROV_METHODS.find(([k]) => k === m) || [])[1] || m;
@@ -3285,8 +3327,9 @@ function provDonut(host, names, ccy, now, holding) {
     ${R.other.length ? `<div class="muted" style="font-size:12.5px">Not bitcoin, so not in the table: ${R.other.map(o => `${esc(o.text)} in ${esc(o.name)}`).join(' \u00b7 ')}.</div>` : ''}
     ${R.off.length ? `<div class="provlist" style="margin-top:8px">${R.off.map(o => `<div><span class="ptag ${o.status}" title="${esc(o.trail.join('\n'))}">${PROV_WORD[o.status]}</span> ${esc(o.name)} <span class="muted">\u00b7 ${sats(o.sats)} sats \u00b7 ${esc(o.trail[0])}</span></div>`).join('')}</div>` : ''}
     <div class="muted" style="font-size:12.5px">${R.by.unknown ? 'Unclassified coins are the ones nothing in your records says anything about yet: sort them above, mark them on Coins, or give the vault a default in Vault settings. ' : ''}From your own records — marks on coins, addresses and transactions, and the statements you imported — never from a chain-analysis service.${prov.skipped.length ? ` ${prov.skipped.map(esc).join(', ')} could not be read just now and ${prov.skipped.length === 1 ? 'is' : 'are'} left out.` : ''}</div>
-    ${R.count && Object.keys(R.count).length ? '<div><button class="linkish" type="button" data-prov-time>Show it over time</button></div><div class="chart" data-prov-chart hidden></div>' : ''}`;
+    ${R.count && Object.keys(R.count).length ? '<div><button class="linkish" type="button" data-prov-time>Show it over time</button></div><div class="chart" data-prov-chart hidden></div>' : ''}<div class="recstatus muted" data-rec-status></div>`;
   host.querySelector('[data-prov-bulk]') && (host.querySelector('[data-prov-bulk]').onclick = (e) => { e.preventDefault(); provBulk(host, names); });
+  provRecStatus(host);
   const tb = host.querySelector('[data-prov-time]'); if (tb) tb.onclick = () => { const el = host.querySelector('[data-prov-chart]'); el.hidden = !el.hidden; tb.textContent = el.hidden ? 'Show it over time' : 'Hide the chart'; if (!el.hidden) provTimeChart(el, names); };
 }
 /// Sats held by status, over time: each coin counted from the day it came to the day it left, by what the records say
@@ -3315,12 +3358,20 @@ const vaultLabel = (name, key) => ((((store.vaults.find(v => v.name === name) ||
 /// What a coin's label, or its address's, already says: a name the register knows, or a word that names a method.
 function provSuggest(c) {
   const text = [vaultLabel(c.vault, 'output:' + c.op), c.addr ? vaultLabel(c.vault, 'addr:' + c.addr) : ''].filter(Boolean).join(' · ');
-  if (!text) return null;
+  if (!text) return provSuggestRec(c);
   const low = text.toLowerCase();
   for (const cp of provCounterparties()) if (low.includes(cp.toLowerCase())) { const m = provCpMark(cp); return { status: m.status, method: m.method, counterparty: cp, why: text }; }
   const words = [['salary', 'earned'], ['wages', 'earned'], ['invoice', 'earned'], ['earned', 'earned'], ['paid for', 'earned'], ['gift', 'gift'], ['inherit', 'inheritance'], ['mined', 'mined'], ['mining', 'mined'], ['coinjoin', 'coinjoin'], ['whirlpool', 'coinjoin'], ['joinmarket', 'coinjoin'], [' atm', 'atm'], ['p2p', 'p2p'], ['bisq', 'p2p'], ['robosats', 'p2p'], ['hodl hodl', 'p2p'], ['hodlhodl', 'p2p'], ['swap', 'swap'], ['boltz', 'swap'], ['channel', 'channel'], ['exchange', 'exchange']];
   for (const [w, m] of words) if ((' ' + low).includes(w)) return { status: PROV_IMPLIES[m], method: m, counterparty: null, why: text };
-  return null;
+  return provSuggestRec(c);
+}
+/// A public record on the transaction that paid the coin: it came from an exchange's wallet, or through a coinjoin
+/// coordinator. A suggestion for the person to confirm — the record itself never sets a status.
+function provSuggestRec(c) {
+  const h = (c.records || []).find(h => h.at === 'from' && (h.kind === 'exchange' || h.kind === 'coinjoin'));
+  if (!h) return null;
+  return h.kind === 'exchange' ? { status: 'kyc', method: 'exchange', counterparty: h.label, why: `public record: came from a ${h.label} wallet (${h.source})` }
+    : { status: PROV_IMPLIES.coinjoin, method: 'coinjoin', counterparty: null, why: `public record: came through ${h.label} (${h.source})` };
 }
 function provBulk(host, names) {
   let box = host.querySelector('.provbulk'); if (!box) { box = document.createElement('div'); box.className = 'provbulk'; host.appendChild(box); }
@@ -5916,6 +5967,7 @@ function renderSettings() {
   $('#def-electrum').textContent = def[0]; $('#def-explorer').textContent = def[1];
   $('#own-servers').classList.toggle('on', !store.settings.custom);
   $('#offline-switch').classList.toggle('on', !!store.settings.offline);
+  $('#records-switch').classList.toggle('on', store.settings.public_records !== false); recSettingsState();
   $('#c-electrum').value = store.settings.electrum || ''; $('#c-explorer').value = store.settings.explorer || '';
   $('#custom-card').style.opacity = store.settings.custom ? 1 : .6;
   $('#gap-in').value = store.settings.gap || 20;
@@ -6039,6 +6091,11 @@ $('#net-menu').onclick = (e) => e.stopPropagation();
 $('#net-recheck').onclick = () => { netMenu(false); paintNode('checking', 'Checking…', ''); checkNode(); };
 $('#net-toggle').onclick = () => { netMenu(false); setOffline(!store.settings.offline); };
 $('#offline-switch').onclick = () => setOffline(!store.settings.offline);
+$('#records-switch').onclick = async () => { try { store = await invoke('settings_set', { network: netName(), custom: store.settings.custom, electrum: store.settings.electrum, explorer: store.settings.explorer, public_records: store.settings.public_records === false }); provDrop(); renderSettings(); } catch (e) { fail(e); } };
+async function recSettingsState() {
+  const el = $('#records-state'); if (!el) return;
+  try { const st = await invoke('records_status'); el.textContent = !st.on ? 'Off: nothing is fetched and no coin is matched.' : st.loaded ? `Snapshot of ${new Date(st.built).toLocaleDateString()} on this computer · ${sats(st.rows)} records from ${sats(st.sources)} sources${st.error ? ` · last check: ${st.error}` : ''}` : st.keys === 0 ? 'This build pins no signing key yet, so no snapshot can be accepted.' : 'No snapshot on this computer yet; it is fetched when a provenance view opens.'; } catch { el.textContent = ''; }
+}
 document.addEventListener('click', () => { if (!$('#net-menu').hidden) netMenu(false); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#net-menu').hidden) netMenu(false); });
 setInterval(() => { if (!document.hidden) checkNode(); }, 30000);
