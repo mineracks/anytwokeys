@@ -79,7 +79,8 @@ the coin, so the trail is not optional.
 
 Records anyone can download — the US (OFAC), UK, EU and Australian sanctions lists; addresses a court filing says are
 in a government's custody (kind `seized`, "in a government's custody" — a record about custody, never an accusation);
-ransomware payment addresses (Ransomwhe.re); exchange wallets the exchange has signed for (OKX proof of reserves) and
+ransomware payment addresses (Ransomwhe.re); addresses the public has reported for extortion or theft (kind `reported`,
+"reported by the public · unverified" — surfaced because exchanges\' screening vendors read the same feeds, never a verdict); exchange wallets the exchange has signed for (OKX proof of reserves) and
 exchange, service, market, mixer, coinjoin-coordinator and mining-payout wallets (GraphSense TagPacks, mempool.space's
 pool list) — gathered by the fleet into one **signed snapshot** at `bitcoin.mineracks.com/records/` (half a million
 records, 5 MB gzipped, rebuilt every six hours, every publish kept with its signature and a per-source diff), fetched
