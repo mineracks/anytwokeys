@@ -163,7 +163,7 @@ pub fn derive(txs: &[Tx], marks: &Marks) -> HashMap<String, Derived> {
         // 1. a destination mark lands on the coins spent: paid to an exchange, says the person or its statement
         if spends {
             let dest: Option<(Mark, String)> = if let Some(m) = marks.tx.get(&tx.id) { Some((m.clone(), "you marked this transaction".into())) }
-                else if let Some(m) = marks.rule.get(&tx.id) { Some((m.clone(), format!("{}’s statement lists this transaction", m.counterparty.clone().unwrap_or_else(|| "the custodian".into())))) }
+                else if let Some(m) = marks.rule.get(&tx.id) { Some((m.clone(), rule_why(m))) }
                 else { tx.outs.iter().filter(|o| o.vault.is_none()).find_map(|o| o.addr.as_ref().and_then(|a| marks.addr.get(a).map(|m| (m.clone(), format!("paid to {}, an address you marked{}", short_addr(a), m.counterparty.as_ref().map(|c| format!(" as {c}’s")).unwrap_or_default()))))) };
             if let Some((m, why)) = dest {
                 for i in &ours_in {
@@ -184,7 +184,7 @@ pub fn derive(txs: &[Tx], marks: &Marks) -> HashMap<String, Derived> {
             if let Some(m) = marks.coin.get(&o.op) { apply(&mut e, m, "set by you on this coin".into()); }
             else if let Some(m) = o.addr.as_ref().and_then(|a| marks.addr.get(a)) { apply(&mut e, m, format!("from its address: you marked {}{}", short_addr(o.addr.as_deref().unwrap_or("")), m.counterparty.as_ref().map(|c| format!(" as {c}’s")).unwrap_or_default())); }
             else if !spends && marks.tx.contains_key(&tx.id) { let m = &marks.tx[&tx.id]; apply(&mut e, m, "you marked this transaction".into()); }
-            else if !spends && marks.rule.contains_key(&tx.id) { let m = &marks.rule[&tx.id]; apply(&mut e, m, format!("{}’s statement lists this transaction", m.counterparty.clone().unwrap_or_else(|| "the custodian".into()))); }
+            else if !spends && marks.rule.contains_key(&tx.id) { let m = &marks.rule[&tx.id]; apply(&mut e, m, rule_why(m)); }
             else if spends {
                 let from: Vec<&Derived> = ours_in.iter().filter_map(|i| d.get(&i.op)).collect();
                 let top = from.iter().max_by_key(|x| rank(&x.status)).copied();
@@ -243,6 +243,106 @@ pub fn derive(txs: &[Tx], marks: &Marks) -> HashMap<String, Derived> {
         }
     }
     d
+}
+
+/// Why a rule mark applies, in words: the rule's own sentence when it brought one (`note` on a `rule:` mark), else
+/// the statement wording every rule used to share.
+fn rule_why(m: &Mark) -> String {
+    match (&m.note, m.by.starts_with("rule:")) {
+        (Some(n), true) if !n.is_empty() => n.clone(),
+        _ => format!("{}’s statement lists this transaction", m.counterparty.clone().unwrap_or_else(|| "the custodian".into())),
+    }
+}
+
+/// A vault that is not coins on the bitcoin chain, as the bucket engine needs it: what kind of thing holds the
+/// balance, the person's default for the vault, who the counterparty is, and the places where its money touched the
+/// chain — a node's funding (deposits and channel opens, by txid), a Liquid wallet's peg-ins (by the bitcoin outpoint
+/// claimed) and swaps (by time). Everything else the engine knows comes from `derive`.
+#[derive(Debug, Clone, Default)]
+pub struct OffVault {
+    pub name: String,
+    /// "exchange" · "statement" · "spark" · "node" · "liquid"
+    pub kind: String,
+    pub default: Option<String>,
+    pub counterparty: Option<String>,
+    /// a node's chain deposits and channel opens: (txid, time)
+    pub funded_by: Vec<(String, u32)>,
+    /// a Liquid wallet's peg-ins: (bitcoin outpoint claimed, time)
+    pub pegins: Vec<(String, u32)>,
+    /// a Liquid wallet's swaps: time of each
+    pub swaps: Vec<u32>,
+}
+
+/// Who can link a balance that is not coins on the chain: one bucket per vault, with its trail. Worst wins here too.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct Bucket {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")] pub method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub counterparty: Option<String>,
+    /// "vault" · "rule:<kind>" · "" (nothing said)
+    pub by: String,
+    pub trail: Vec<String>,
+}
+
+/// The rules for balances off the chain, each said in the trail:
+/// - an exchange balance is KYC (the exchange holds the owner's identity); a custodian's statement and a Spark wallet
+///   are known (the custodian, or the service provider, sees every payment);
+/// - a Lightning node is at least known (its public key is a public identity, its channels are on the chain), and
+///   it inherits the worst status of the coins that FUNDED it: a channel opened, or the node's wallet paid, from a
+///   KYC coin of one of the owner's vaults ties the node to that identity;
+/// - a Liquid wallet: a peg-in links the L-BTC to the bitcoin it came from, so it inherits that coin's status; a swap
+///   provider sees both sides, so a wallet that swapped is at least known; otherwise it is unclassified until said.
+/// The vault's own default, set in Vault settings, comes before the rule for its kind — and a funding or a peg-in of
+/// a WORSE status still moves it, with the trail saying so, because the chain shows the link whatever was set.
+pub fn off_chain(vaults: &[OffVault], txs: &[Tx], coins: &HashMap<String, Derived>) -> HashMap<String, Bucket> {
+    let by_id: HashMap<&str, &Tx> = txs.iter().map(|t| (t.id.as_str(), t)).collect();
+    let mut out = HashMap::new();
+    for v in vaults {
+        let own = v.default.as_ref().filter(|d| STATUSES.contains(&d.as_str()) && *d != "unknown");
+        let mut b = match (own, v.kind.as_str()) {
+            (Some(d), _) => Bucket { status: d.clone(), by: "vault".into(), trail: vec![format!("{}: this vault’s default, set in Vault settings", word(d))], ..Default::default() },
+            (None, "exchange") => Bucket { status: "kyc".into(), method: Some("exchange".into()), counterparty: v.counterparty.clone(), by: "rule:exchange".into(), trail: vec![format!("KYC: {} holds your identity against this balance", v.counterparty.as_deref().unwrap_or("the exchange"))] },
+            (None, "statement") => Bucket { status: "known".into(), method: Some("transfer".into()), counterparty: v.counterparty.clone(), by: "rule:statement".into(), trail: vec![format!("Known: {} keeps this balance for you and knows it is yours", v.counterparty.as_deref().unwrap_or("the custodian"))] },
+            (None, "spark") => Bucket { status: "known".into(), method: Some("channel".into()), counterparty: Some("the Spark service provider".into()), by: "rule:spark".into(), trail: vec!["Known: the Spark service provider sees every payment in and out of this wallet, and your name if you gave the app one".into()] },
+            (None, "node") => Bucket { status: "known".into(), method: Some("channel".into()), counterparty: v.counterparty.clone(), by: "rule:node".into(), trail: vec!["Known: a node’s public key is a public identity, and its channels are on the chain".into()] },
+            (None, "liquid") => Bucket { status: "unknown".into(), by: String::new(), trail: vec!["Unclassified: nothing in your records says who can link this wallet to you yet".into()], ..Default::default() },
+            (None, _) => Bucket { status: "unknown".into(), trail: vec!["not yet classified".into()], ..Default::default() },
+        };
+        if v.kind == "exchange" || v.kind == "statement" || v.kind == "spark" { out.insert(v.name.clone(), b); continue; }
+        // the chain's word: what funded the node, what was pegged in — the worst of them wins over whatever was said
+        let mut links: Vec<(u8, String, u32, String)> = Vec::new();   // (rank, status, time, why)
+        for (txid, time) in &v.funded_by {
+            let Some(t) = by_id.get(txid.as_str()) else { continue };
+            for i in t.ins.iter().filter(|i| i.vault.is_some()) {
+                let Some(c) = coins.get(&i.op) else { continue };
+                if rank(&c.status) >= 2 { links.push((rank(&c.status), c.status.clone(), *time, format!("funded on {} from {} of {}, which is {} ({})", day(*time), short(&i.op), i.vault.as_deref().unwrap_or(""), word(&c.status), c.trail.first().cloned().unwrap_or_default()))); }
+            }
+        }
+        for (op, time) in &v.pegins {
+            match coins.get(op) {
+                Some(c) if rank(&c.status) >= 2 => links.push((rank(&c.status), c.status.clone(), *time, format!("pegged in on {} from {} of {}, which is {} ({})", day(*time), short(op), c.vault, word(&c.status), c.trail.first().cloned().unwrap_or_default()))),
+                Some(c) if rank(&c.status) == 1 => b.trail.push(format!("pegged in on {} from {} of {}, a private coin: the peg-in itself links no one to you", day(*time), short(op), c.vault)),
+                _ => {}
+            }
+        }
+        if v.kind == "liquid" && !v.swaps.is_empty() {
+            let first = v.swaps.iter().copied().min().unwrap_or(0);
+            links.push((2, "known".into(), first, format!("swapped on {}: a swap provider sees both sides of a trade{}", day(first), if v.swaps.len() > 1 { format!(" ({} swaps)", v.swaps.len()) } else { String::new() })));
+            if b.method.is_none() { b.method = Some("swap".into()); b.counterparty = Some("the swap provider".into()); }
+        }
+        links.sort_by(|a, c| c.0.cmp(&a.0).then(a.2.cmp(&c.2)));
+        if let Some((r, status, _, why)) = links.first() {
+            if *r > rank(&b.status) {
+                let was = b.status.clone();
+                b.status = status.clone();
+                b.trail.push(format!("{} since the chain shows it: {}{}", word(status), why, if rank(&was) > 0 { format!(" (was {})", word(&was)) } else { String::new() }));
+                if b.by.is_empty() { b.by = format!("rule:{}", v.kind); }
+            } else if *r == rank(&b.status) && v.kind == "liquid" && b.by.is_empty() { b.by = "rule:liquid".into(); b.trail.push(why.clone()); }
+            else if *r == rank(&b.status) { b.trail.push(format!("and the chain agrees: {why}")); }
+        }
+        out.insert(v.name.clone(), b);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -365,5 +465,44 @@ mod tests {
         assert_eq!(day(1_709_424_000), "3 Mar 2024");   // 2024-03-03 00:00 UTC
         assert_eq!(day(0), "not yet in a block");
         assert_eq!(day(1_700_000_000), "14 Nov 2023");
+    }
+
+    #[test]
+    fn a_node_funded_from_a_kyc_coin_is_kyc_and_a_liquid_wallet_follows_its_peg_in_and_its_swaps() {
+        // a KYC coin (by mark) pays the node's wallet in "fund"; a private coin is pegged in to Liquid in "peg"
+        let txs = vec![
+            tx("k", 100, vec![theirs("x:0")], vec![out("k", 0, 100_000, Some("Cold"), "aK")]),
+            tx("p", 110, vec![theirs("y:0")], vec![out("p", 0, 50_000, Some("Cold"), "aP")]),
+            tx("fund", 200, vec![ours("k:0", 100_000, "Cold")], vec![out("fund", 0, 99_000, None, "nodeWallet")]),
+        ];
+        let mut marks = Marks::default();
+        marks.coin.insert("k:0".into(), mc("kyc", "exchange", "Kraken")); marks.coin.insert("p:0".into(), m("private"));
+        let coins = derive(&txs, &marks);
+        let vaults = vec![
+            OffVault { name: "Node".into(), kind: "node".into(), counterparty: Some("umbrel".into()), funded_by: vec![("fund".into(), 200)], ..Default::default() },
+            OffVault { name: "LBTC".into(), kind: "liquid".into(), pegins: vec![("p:0".into(), 300)], ..Default::default() },
+            OffVault { name: "USDt".into(), kind: "liquid".into(), swaps: vec![400, 500], ..Default::default() },
+            OffVault { name: "Ex".into(), kind: "exchange".into(), counterparty: Some("Bitaroo".into()), ..Default::default() },
+            OffVault { name: "Said".into(), kind: "node".into(), default: Some("private".into()), funded_by: vec![("fund".into(), 200)], ..Default::default() },
+        ];
+        let b = off_chain(&vaults, &txs, &coins);
+        let n = &b["Node"]; assert_eq!((n.status.as_str(), n.by.as_str()), ("kyc", "rule:node"));
+        assert!(n.trail[0].starts_with("Known: a node") && n.trail[1].contains("funded on") && n.trail[1].contains("which is KYC"), "{:?}", n.trail);
+        let l = &b["LBTC"]; assert_eq!(l.status, "unknown", "a private peg-in links no one");
+        assert!(l.trail.iter().any(|x| x.contains("a private coin")), "{:?}", l.trail);
+        let u = &b["USDt"]; assert_eq!((u.status.as_str(), u.method.as_deref(), u.by.as_str()), ("known", Some("swap"), "rule:liquid"));
+        assert!(u.trail.last().unwrap().contains("2 swaps"), "{:?}", u.trail);
+        assert_eq!(b["Ex"].status, "kyc");
+        let s = &b["Said"]; assert_eq!(s.status, "kyc", "the chain's word beats a default that says less");
+        assert!(s.trail[1].contains("(was private)"), "{:?}", s.trail);
+    }
+
+    #[test]
+    fn a_rule_mark_with_its_own_sentence_is_said_in_those_words() {
+        let txs = vec![tx("w", 100, vec![theirs("node:0")], vec![out("w", 0, 10_000, Some("Cold"), "a0")])];
+        let mut marks = Marks::default();
+        marks.rule.insert("w".into(), Mark { status: "known".into(), method: Some("channel".into()), counterparty: Some("umbrel".into()), note: Some("withdrawn from your node umbrel on 1 Jan 2026".into()), by: "rule:node".into(), ..Default::default() });
+        let d = derive(&txs, &marks);
+        assert_eq!((d["w:0"].status.as_str(), d["w:0"].trail[0].as_str()), ("known", "withdrawn from your node umbrel on 1 Jan 2026"));
     }
 }

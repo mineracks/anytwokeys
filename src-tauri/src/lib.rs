@@ -3233,7 +3233,7 @@ async fn report_pdf(title: String, subtitle: String, blocks: Vec<BlockIn>, file:
         use export::Block;
         let out: Vec<Block> = blocks.into_iter().map(|b| match b {
             BlockIn::Facts { rows } => Block::Facts(rows), BlockIn::Heading { text } => Block::Heading(text), BlockIn::Para { text } => Block::Para(text),
-            BlockIn::Chart { chart: c } => Block::Chart { title: c.title, series: c.series.into_iter().map(|s| (s.name, if s.color == "cost" { export::COST_RGB } else { export::VALUE_RGB }, s.pts, s.step)).collect(),
+            BlockIn::Chart { chart: c } => Block::Chart { title: c.title, series: c.series.into_iter().map(|s| (s.name, series_rgb(&s.color), s.pts, s.step)).collect(),
                 lo: c.lo, hi: c.hi, lo_label: c.lo_label, hi_label: c.hi_label, from_label: c.from_label, to_label: c.to_label },
         }).collect();
         export::doc(&title, &subtitle, &out)
@@ -3256,6 +3256,12 @@ async fn address_flow(name: String, index: u32, history: Vec<(String, i32)>) -> 
 
 #[derive(Deserialize)]
 struct SeriesIn { name: String, color: String, pts: Vec<(f64, f64)>, #[serde(default)] step: bool }
+/// A series colour as the screen names it: "cost", "value", or "#rrggbb" (the provenance status colours).
+fn series_rgb(c: &str) -> [f32; 3] {
+    if c == "cost" { return export::COST_RGB; }
+    if let Some(h) = c.strip_prefix('#') { if h.len() == 6 { if let Ok(n) = u32::from_str_radix(h, 16) { return [((n >> 16) & 255) as f32 / 255.0, ((n >> 8) & 255) as f32 / 255.0, (n & 255) as f32 / 255.0]; } } }
+    export::VALUE_RGB
+}
 #[derive(Deserialize)]
 struct ChartIn { title: String, series: Vec<SeriesIn>, lo: f64, hi: f64, lo_label: String, hi_label: String, from_label: String, to_label: String }
 
@@ -3271,7 +3277,7 @@ async fn record_pdf(name: String, key: String, title: String, subtitle: String, 
         let v = s.vaults.iter().find(|v| v.name == name).ok_or("no such vault")?.clone();
         let mut blocks = vec![Block::Facts(facts)];
         for c in charts {
-            let series = c.series.into_iter().map(|s| (s.name, if s.color == "cost" { export::COST_RGB } else { export::VALUE_RGB }, s.pts, s.step)).collect();
+            let series = c.series.into_iter().map(|s| (s.name, series_rgb(&s.color), s.pts, s.step)).collect();
             blocks.push(Block::Chart { title: c.title, series, lo: c.lo, hi: c.hi, lo_label: c.lo_label, hi_label: c.hi_label, from_label: c.from_label, to_label: c.to_label });
         }
         for (h, kv) in sections { if !kv.is_empty() { blocks.push(Block::Heading(h)); blocks.push(Block::Facts(kv)); } }
@@ -3894,8 +3900,36 @@ fn labels_export(name: String) -> R<String> {
 
 #[tauri::command]
 async fn labels_import(name: String) -> R<usize> {
-    let path = files::FileDialog::new().set_title("Open a labels file (BIP 329)").add_filter("BIP 329 labels", &["jsonl", "json", "txt"]).pick_file().ok_or("cancelled")?;
+    let path = files::FileDialog::new().set_title("Open a labels file (BIP 329, Sparrow, Electrum or Wasabi)").add_filter("Labels", &["jsonl", "json", "txt"]).pick_file().ok_or("cancelled")?;
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    // Three shapes are read. BIP 329 (Sparrow, and this app's own export): one JSON object per line. Electrum's
+    // labels export: one JSON object keyed by txid or address. Wasabi's wallet file: `HdPubKeys[]`, each a public
+    // key with its path and label — the address is derived here (BIP 84 or 86 by the path), so the labels land on
+    // the addresses this vault knows. The other two are turned into BIP 329 lines first and read the same way.
+    let text = match serde_json::from_str::<serde_json::Value>(text.trim()) {
+        Ok(serde_json::Value::Object(o)) if text.trim().starts_with('{') && !o.contains_key("type") => {
+            let net = wallet::load()?.vaults.iter().find(|v| v.name == name).map(|v| wallet::network_of(&v.network)).ok_or("no such vault")?;
+            let mut lines = Vec::new();
+            if let Some(keys) = o.get("HdPubKeys").and_then(|k| k.as_array()) {
+                let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+                for k in keys {
+                    let (Some(pk), Some(path), Some(label)) = (k["PubKey"].as_str(), k["FullKeyPath"].as_str(), k["Label"].as_str().map(str::trim).filter(|l| !l.is_empty())) else { continue };
+                    let Ok(raw) = hex::decode(pk) else { continue };
+                    let Ok(cpk) = bitcoin::CompressedPublicKey::from_slice(&raw) else { continue };
+                    let addr = if path.contains("/86'") || path.contains("/86h") { bitcoin::Address::p2tr(&secp, cpk.0.x_only_public_key().0, None, net) } else { bitcoin::Address::p2wpkh(&cpk, net) };
+                    lines.push(serde_json::json!({ "type": "addr", "ref": addr.to_string(), "label": label }).to_string());
+                }
+            } else {
+                for (k, v) in &o {
+                    let Some(label) = v.as_str().map(str::trim).filter(|l| !l.is_empty()) else { continue };
+                    let kind = if k.len() == 64 && k.chars().all(|c| c.is_ascii_hexdigit()) { "tx" } else if k.parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>().is_ok() { "addr" } else { continue };
+                    lines.push(serde_json::json!({ "type": kind, "ref": k, "label": label }).to_string());
+                }
+            }
+            lines.join("\n")
+        }
+        _ => text,
+    };
     // each line: a label, a disposal (what a spend out was: sold, spent, gift, self, stolen, lost — on a tx), or both.
     // A whole incident can be booked from one file: every sweep an attacker made, marked stolen in one import.
     let mut got: Vec<(String, Option<String>, Option<String>, Option<provenance::Mark>, Option<bool>)> = Vec::new();
@@ -3933,7 +3967,7 @@ async fn labels_import(name: String) -> R<usize> {
 
 // ---------- provenance: who can link a coin to its owner (provenance.rs) ----------
 #[derive(Serialize)]
-struct ProvAll { coins: std::collections::HashMap<String, provenance::Derived>, skipped: Vec<String> }
+struct ProvAll { coins: std::collections::HashMap<String, provenance::Derived>, skipped: Vec<String>, buckets: std::collections::HashMap<String, provenance::Bucket> }
 /// A vault whose coins sit on the bitcoin chain, so the engine can read their lineage from the cached transactions.
 fn chain_vault(v: &Vault) -> bool { v.spark.is_none() && v.statement.is_none() && v.exchange.is_none() && v.node.is_none() && v.liquid.is_none() }
 /// Every coin the person's chain vaults ever made, with its provenance derived from their own records: the marks
@@ -4014,10 +4048,43 @@ fn provenance_all_inner() -> R<ProvAll> {
         }
     }
     let list: Vec<provenance::Tx> = txs.into_values().collect();
+    // the balances that are not coins on the chain — an exchange, a custodian's statement, a Spark wallet, a Lightning
+    // node, a Liquid wallet — and the places where each touched the chain, for the bucket rules
+    let offs: Vec<provenance::OffVault> = s.vaults.iter().filter(|v| !chain_vault(v)).map(|v| {
+        let mut o = provenance::OffVault { name: v.name.clone(), default: v.provenance_default.clone(), ..Default::default() };
+        if let Some(ex) = &v.exchange { o.kind = "exchange".into(); o.counterparty = Some(ex.provider.clone()); }
+        else if let Some(st) = &v.statement { o.kind = "statement".into(); o.counterparty = Some(st.source.clone()); }
+        else if v.spark.is_some() { o.kind = "spark".into(); }
+        else if let Some(n) = &v.node {
+            o.kind = "node".into(); o.counterparty = Some(if n.alias.is_empty() { v.name.clone() } else { n.alias.clone() });
+            o.funded_by = n.events.iter().filter(|e| !e.txid.is_empty() && (e.kind == "deposit" || e.kind == "open")).map(|e| (e.txid.clone(), e.time)).collect();
+        }
+        else if let Some(l) = &v.liquid {
+            o.kind = "liquid".into();
+            o.pegins = l.txs.values().flat_map(|t| t.pegin.iter().map(move |op| (op.clone(), t.time))).collect();
+            o.swaps = liquid::rows(l).iter().filter(|r| r.kind == "swap").map(|r| r.time).collect();
+        }
+        o
+    }).collect();
     let mut coins = provenance::derive(&list, &marks);
+    let buckets = provenance::off_chain(&offs, &list, &coins);
+    // a node's withdrawal or channel close that paid one of the chain vaults: those coins came from the node, so they
+    // carry the node's bucket — said in the trail in the node's words. A second pass when any such rule was added.
+    let mut again = false;
+    for v in s.vaults.iter().filter(|v| v.node.is_some()) {
+        let (Some(n), Some(b)) = (&v.node, buckets.get(&v.name)) else { continue };
+        let alias = if n.alias.is_empty() { v.name.clone() } else { n.alias.clone() };
+        for e in n.events.iter().filter(|e| !e.txid.is_empty() && (e.kind == "withdrawal" || e.kind == "close")) {
+            if marks.rule.contains_key(&e.txid) || !list.iter().any(|t| t.id == e.txid && t.outs.iter().any(|x| x.vault.is_some())) { continue }
+            marks.rule.insert(e.txid.clone(), provenance::Mark { status: b.status.clone(), method: Some("channel".into()), counterparty: Some(alias.clone()), by: "rule:node".into(),
+                note: Some(format!("{} from your node {alias}, whose sats are {}{}", if e.kind == "close" { "a channel closed" } else { "withdrawn" }, provenance::word(&b.status), if b.status == "known" { " (a node’s public key is a public identity)" } else { "" })), ..Default::default() });
+            again = true;
+        }
+    }
+    if again { coins = provenance::derive(&list, &marks); }
     for v in &s.vaults { for op in frozen_ops(v) { if let Some(d) = coins.get_mut(&op) { d.frozen = true; } } }
     records::attach(&list, &mut coins);
-    Ok(ProvAll { coins, skipped })
+    Ok(ProvAll { coins, skipped, buckets })
 }
 
 /// Public records (records.rs): the snapshot's state, a refresh, and the records against addresses on a screen.

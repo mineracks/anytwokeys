@@ -70,10 +70,26 @@ the coin, so the trail is not optional.
   and share by status, for the unspent coins of the vaults in view. A vault that is not coins on the chain is one
   bucket, listed under the table with its reason: an exchange balance is KYC (the exchange holds your identity), a
   custodian's statement and a Spark wallet are Known (the custodian, or the Spark service provider, sees every
-  payment), a Lightning node is Known (its public key is a public identity), a Liquid wallet is unclassified until
-  you say. The vault's default in Vault settings comes before each of these rules. *Show it over time* under the
-  table draws sats held by status across the whole history: each coin counted from the day it came to the day it
-  left, by what your records say about it now — knowledge of who can link a coin applies to its whole life.
+  payment), a Lightning node is at least Known (its public key is a public identity, its channels are on the chain),
+  a Liquid wallet is unclassified until something says otherwise. The vault's default in Vault settings comes before
+  each of these rules — but the chain's word beats a default that says less, with the trail saying so:
+  - a **node** inherits the worst status of the coins that funded it (a deposit to its wallet or a channel opened
+    from a KYC coin of one of your vaults ties the node to that identity: *KYC since the chain shows it: funded on 3
+    Mar 2026 from abcd…:0 of Cold, which is KYC (…)*), and a withdrawal or a channel close from the node onto one of
+    your chain vaults gives those coins the node's status (*withdrawn from your node umbrel, whose sats are KYC*);
+  - a **Liquid** wallet follows its peg-ins — a peg-in claims a bitcoin outpoint, so the L-BTC inherits that coin's
+    status (a private peg-in is said but moves nothing: the peg-in itself links no one) — and a wallet that has
+    swapped is at least Known, because a swap provider sees both sides of the trade.
+  *Show it over time* under the table draws sats held by status across the whole history: each coin counted from the
+  day it came to the day it left, by what your records say about it now — knowledge of who can link a coin applies
+  to its whole life.
+- **Two reports** (Home for this vault, an entity's page for its vaults, the entities page for all), saved as PDF:
+  *Provenance report* — the holding by status in sats, money and share, each off-chain balance with its reasons,
+  the mix per vault, the chart over time, and a page on the method and its limits; *Source of funds* — every coin
+  held, oldest first, with the day it came, the amount and its worth that day, who can link it and the whole trail,
+  how it arrived and from whom, public records if any, labels, and the names of the papers attached to the coin or
+  its transaction, then the off-chain balances — what a bank or an exchange asks for, written from your own records
+  so each line can be checked. Neither sends an address anywhere; neither carries a score.
 
 ## Public records
 
@@ -123,9 +139,18 @@ written too. Import reads it back (an object, or just
 the status as a string), and files a coin's record under `output:<txid:vout>`, the key the coin page reads. Other
 BIP 329 readers ignore the field.
 
-Rust: `provenance.rs` (the engine, `derive`, with its tests on a hand-built graph); commands `provenance_all`
+Import also reads two other shapes and turns them into the same lines: **Electrum's** labels export (one JSON object
+keyed by txid or address) and a **Wasabi** wallet file (`HdPubKeys[]`: the address is derived here from each public
+key and its path, BIP 84 or 86, on the vault's network). After any import, the Activity card says how many still
+unclassified coins now carry a label that says who paid or how — an exchange's name (Kraken, Swyftx, CoinSpot …),
+*salary*, *gift*, *coinjoin*, *wasabi* — with *Sort them ›* opening the bulk flow on Home, where each is a suggestion
+to confirm, never a mark made for you.
+
+Rust: `provenance.rs` (the engine, `derive`, and `off_chain` — the bucket rules for the vaults that are not coins on
+the chain — with their tests on a hand-built graph); commands `provenance_all`
 (the graph from every chain vault's cached transactions, the marks from every vault's records, the statement rule from
-the transfer links), `provenance_set`, `provenance_set_many` (the bulk flow's one write), `vault_provenance`,
+the transfer links, the node rule from a node's withdrawals and closes — a second derive when one applies — and the
+buckets; Liquid transactions keep the bitcoin outpoints they pegged in, `liquid::Tx::pegin`), `provenance_set`, `provenance_set_many` (the bulk flow's one write), `vault_provenance`,
 `coin_freeze`, and `records_*` (above). The derived view carries `spent_at`, `frozen`, `addr` and `records` so the screens can
 draw time, group by address and show public records without the vault loaded. The design: `roadmap/anytwokeys/PROVENANCE-SPEC.md` in the
 infrastructure repo.

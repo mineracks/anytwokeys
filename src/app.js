@@ -1874,6 +1874,100 @@ async function lossReport(sc) {
   const path = await invoke('report_pdf', { title: `${sc.title} — stolen and lost`, subtitle: `${sats(rows.length)} row${rows.length === 1 ? '' : 's'} · ${amountsText(unitsOfRows(rows.map(x => [x.vault, x.r.sats])))} · printed ${new Date().toLocaleDateString()}`, blocks, file: `${sc.title}-stolen-and-lost` });
   toast('Saved ' + path, 6000);
 }
+/// The holdings-by-provenance report: what share of the holding each status is, the balances off the chain with
+/// their reasons, each vault's mix, and the picture over time — from the person's own records, with the method and
+/// its limits said. For an adviser, an accountant, an exchange's compliance desk, or the owner's own file.
+const PROV_RGB = { kyc: '#B08420', known: '#1E1B17', private: '#1F7A4D', unknown: '#6B6259' };
+const PROV_STATUS_WORDS = { kyc: 'KYC: a regulated party (an exchange, a broker, a custodian) holds the owner’s identity against these coins', known: 'Known: a person or a service knows these coins are the owner’s, with no regulated record of it', private: 'Private: nothing in the owner’s records links these coins to them', unknown: 'Unclassified: the records say nothing about these coins yet' };
+async function provHoldingsReport(sc) {
+  if (!provReady()) await new Promise(r => provReady(r));
+  const ccy = fiatCcy(), dateOf = (t) => new Date(t * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' });
+  const names = sc.names.filter(n => store.vaults.some(v => v.name === n)), R = provRollup(names);
+  if (!R.n) { toast(`Nothing in ${sc.title} is on the chain or in a balance this view can read.`, 6000); return; }
+  const now = names.map(n => txFacts[n] && txFacts[n].now).find(Boolean) || null, worth = (s) => now && ccy ? ` · ${money(s / 1e8 * now.price, ccy)}` : '';
+  const order = ['kyc', 'known', 'private', 'unknown'].filter(k => R.by[k]);
+  const blocks = [{ kind: 'facts', rows: [
+    ['For', scopeWords(sc)],
+    ['Prepared', dateOf(Math.floor(Date.now() / 1000))],
+    ['Holding', `${sats(R.total)} sats${worth(R.total)} — ${sats(Object.values(R.count).reduce((a, b) => a + b, 0))} coins on the chain${R.off.length ? ` and ${sats(R.off.length)} balance${R.off.length === 1 ? '' : 's'} off it` : ''}`],
+    ...order.map(k => [PROV_WORD[k], `${sats(R.by[k])} sats${worth(R.by[k])} · ${(R.by[k] / R.total * 100).toFixed(1)}%${R.count[k] ? ` · ${sats(R.count[k])} coin${R.count[k] === 1 ? '' : 's'}` : ''}${R.balances[k] ? ` · ${R.balances[k]} balance${R.balances[k] === 1 ? '' : 's'}` : ''}`]),
+  ] }];
+  blocks.push({ kind: 'para', text: 'Provenance here means who can link each coin to its owner: not where it has been, but who could say it is theirs. ' + order.map(k => PROV_STATUS_WORDS[k]).join('. ') + '. A coin takes the worst status of what it was built from, and coins spent together take the worst among them, because the chain shows them as one owner’s. Every figure comes from the owner’s own records — marks on coins, addresses and transactions, statements imported from exchanges and custodians, and the chain itself — never from a chain-analysis service, and no address was sent anywhere to produce it.' });
+  if (R.other.length) blocks.push({ kind: 'para', text: `Not bitcoin, so not in the figures above: ${R.other.map(o => `${o.text} in ${o.name}`).join('; ')}.` });
+  if (R.off.length) {
+    blocks.push({ kind: 'heading', text: 'Balances that are not coins on the chain' });
+    blocks.push({ kind: 'facts', rows: R.off.map(o => [o.name, `${PROV_WORD[o.status]} · ${sats(o.sats)} sats${worth(o.sats)}\n${(o.trail || []).join('\n')}`]) });
+  }
+  if (names.length > 1) {
+    blocks.push({ kind: 'heading', text: 'By vault' });
+    blocks.push({ kind: 'facts', rows: names.map(n => { const r = provRollup([n]); if (!r.n) return null; return [n, ['kyc', 'known', 'private', 'unknown'].filter(k => r.by[k]).map(k => `${PROV_WORD[k]} ${sats(r.by[k])} sats (${(r.by[k] / r.total * 100).toFixed(0)}%)`).join(' · ')]; }).filter(Boolean) });
+  }
+  const S = provSeries(names);
+  if (S) {
+    const lbl = (t) => new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+    const hi = Math.max(1, ...Object.values(S.pts).flat().map(p => p[1])) * 1.05;
+    const drawn = ['kyc', 'known', 'private', 'unknown'].filter(k => S.pts[k].some(p => p[1] > 0));
+    blocks.push({ kind: 'heading', text: 'Over time' });
+    blocks.push({ kind: 'chart', chart: { title: 'Sats held by status, each coin from the day it came to the day it left', lo: 0, hi, lo_label: '0', hi_label: `${sats(Math.round(hi))} sats`, from_label: lbl(S.from), to_label: lbl(S.to), series: drawn.map(k => ({ name: PROV_WORD[k], color: PROV_RGB[k], pts: S.pts[k], step: true })) } });
+    blocks.push({ kind: 'para', text: 'Each coin is drawn by what the records say about it now, for the whole time it was held. Balances off the chain are not drawn.' });
+  }
+  const unk = provUnknowns(names).length;
+  blocks.push({ kind: 'heading', text: 'Method and limits' });
+  blocks.push({ kind: 'para', text: `A coin is KYC when the owner marked it so, when it came from an exchange account the owner holds, or when it was built from such a coin. Known covers coins a counterparty can tie to the owner — a payer, a custodian, a Lightning node’s public identity, a swap provider that saw both sides of a trade. Private is a positive statement by the owner that nothing links the coin to them; the app never infers it. Unclassified is the honest default.${unk ? ` ${sats(unk)} coin${unk === 1 ? '' : 's'} here ${unk === 1 ? 'is' : 'are'} still unclassified.` : ''} Public records (sanctions lists, seizures, exchange and service wallets) are matched on the owner’s device against a signed snapshot and shown with their source and date; a record never sets a status. This document describes the owner’s records on the date prepared; it is not a verdict on the coins, and it is not a report from a chain-analysis service.${prov.skipped.length ? ` ${prov.skipped.join(', ')} could not be read and ${prov.skipped.length === 1 ? 'is' : 'are'} left out.` : ''}` });
+  const path = await invoke('report_pdf', { title: `${sc.title} — holdings by provenance`, subtitle: `${sats(R.total)} sats${worth(R.total)} · ${order.map(k => `${PROV_WORD[k]} ${(R.by[k] / R.total * 100).toFixed(0)}%`).join(' · ')} · printed ${new Date().toLocaleDateString()}`, blocks, file: `${sc.title}-provenance` });
+  toast('Saved ' + path, 6000);
+}
+/// The source-of-funds report: every coin held, oldest first — when it came, how much, who can link it and why, how
+/// it arrived and from whom, what it was worth on the day, and the papers kept with it. What a bank, an exchange or a
+/// conveyancer asks for when the owner moves a sum; written from the owner’s own records so they can be checked.
+async function sourceOfFundsReport(sc) {
+  if (!provReady()) await new Promise(r => provReady(r));
+  const ccy = fiatCcy(), dateOf = (t) => t ? new Date(t * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' }) : 'not in a block';
+  const names = sc.names.filter(n => store.vaults.some(v => v.name === n));
+  const coins = Object.entries(prov.coins).filter(([, d]) => !d.spent && names.includes(d.vault)).map(([op, d]) => ({ op, ...d })).sort((a, b) => (a.time || 9e9) - (b.time || 9e9) || a.op.localeCompare(b.op));
+  const R = provRollup(names);
+  if (!coins.length && !R.off.length) { toast(`Nothing is held in ${sc.title} right now.`, 6000); return; }
+  const quoteOf = (c) => { const f = txFacts[c.vault], txid = c.op.split(':')[0], row = f && f.rows && f.rows[txid]; return row && row.quote ? row.quote : null; };
+  const total = coins.reduce((a, c) => a + c.sats, 0);
+  let worthThen = 0, quoted = 0; for (const c of coins) { const q = quoteOf(c); if (q) { worthThen += c.sats / 1e8 * q.price; quoted++; } }
+  const now = names.map(n => txFacts[n] && txFacts[n].now).find(Boolean) || null;
+  const byMethod = {}, byCp = {};
+  for (const c of coins) { const m = c.method ? provMethodWord(c.method) : 'not said'; byMethod[m] = (byMethod[m] || 0) + c.sats; if (c.counterparty) byCp[c.counterparty] = (byCp[c.counterparty] || 0) + c.sats; }
+  const blocks = [{ kind: 'facts', rows: [
+    ['For', scopeWords(sc)],
+    ['Prepared', dateOf(Math.floor(Date.now() / 1000))],
+    ['Held', `${sats(total)} sats in ${sats(coins.length)} coin${coins.length === 1 ? '' : 's'}${now && ccy ? ` · ${money(total / 1e8 * now.price, ccy)} now` : ''}${R.off.length ? ` · and ${sats(R.off.reduce((a, o) => a + o.sats, 0))} sats in ${sats(R.off.length)} balance${R.off.length === 1 ? '' : 's'} off the chain` : ''}`],
+    ccy && quoted ? ['Worth when received', `${money(worthThen, ccy)}${quoted < coins.length ? ` for ${sats(quoted)} of the ${sats(coins.length)} coins; the rest have no price on their day` : ''}`] : null,
+    ['Who can link it', ['kyc', 'known', 'private', 'unknown'].filter(k => R.by[k]).map(k => `${PROV_WORD[k]} ${sats(R.by[k])} sats (${(R.by[k] / R.total * 100).toFixed(0)}%)`).join(' · ')],
+    ['How it arrived', Object.entries(byMethod).sort((a, b) => b[1] - a[1]).map(([m, s]) => `${m} ${sats(s)} sats`).join(' · ')],
+    Object.keys(byCp).length ? ['From whom', Object.entries(byCp).sort((a, b) => b[1] - a[1]).map(([m, s]) => `${m} ${sats(s)} sats`).join(' · ')] : null,
+  ].filter(Boolean) }];
+  blocks.push({ kind: 'para', text: `Each coin below is an unspent output on the Bitcoin chain held by ${sc.title} on the date prepared; its transaction id and amount can be checked by anyone with a block explorer. The status, the way it arrived and the counterparty are the owner’s own records — marks made on the coin, its address or its transaction, statements imported from exchanges and custodians, and the vault’s settings — with the reason for each stated. The worth in ${ccy || 'fiat'} is the market price on the day the coin was received. Papers attached to a coin or its transaction are listed by name; they travel with the owner’s encrypted backup, not with this document.` });
+  if (coins.length) blocks.push({ kind: 'heading', text: `The coins, oldest first` });
+  for (const c of coins) {
+    const v = store.vaults.find(x => x.name === c.vault), txid = c.op.split(':')[0], q = quoteOf(c);
+    const files = [...(((v && v.files) || {})['output:' + c.op] || []), ...(((v && v.files) || {})['tx:' + txid] || [])].map(f => f.name).filter(Boolean);
+    const lab = [vaultLabel(c.vault, 'output:' + c.op), c.addr ? vaultLabel(c.vault, 'addr:' + c.addr) : '', vaultLabel(c.vault, 'tx:' + txid)].filter(Boolean).join(' · ');
+    blocks.push({ kind: 'facts', rows: [
+      ['Received', `${dateOf(c.time)}${names.length > 1 ? ` — ${c.vault}` : ''}`],
+      ['Amount', `${sats(c.sats)} sats${q && ccy ? ` · ${money(c.sats / 1e8 * q.price, ccy)} that day at ${perUnit([c.vault], q, ccy)}` : ''}${now && ccy ? ` · ${money(c.sats / 1e8 * now.price, ccy)} now` : ''}`],
+      ['Who can link it', `${PROV_WORD[c.status]}${c.method ? ` · ${provMethodWord(c.method)}` : ''}${c.counterparty ? ` · ${c.counterparty}` : ''}${c.frozen ? ' · frozen' : ''}`],
+      ['Why', (c.trail && c.trail.length ? c.trail : ['nothing in the records says anything about this coin yet']).join('\n')],
+      ['Coin', c.op],
+      c.records && c.records.length ? ['Public records', recFold(c.records).map(h => `${REC_WORD[h.kind] || h.kind}: ${h.label} — ${REC_AT[h.at] || ''} ${h.n > 1 ? `${sats(h.n)} such addresses` : (h.addr || '')} (${h.source}${h.listed ? `, listed ${h.listed}` : ''})`).join('\n')] : null,
+      lab ? ['Label', lab] : null,
+      files.length ? ['Papers', files.join('\n')] : null,
+    ].filter(Boolean) });
+  }
+  if (R.off.length) {
+    blocks.push({ kind: 'heading', text: 'Balances that are not coins on the chain' });
+    blocks.push({ kind: 'facts', rows: R.off.map(o => [o.name, `${PROV_WORD[o.status]} · ${sats(o.sats)} sats${now && ccy ? ` · ${money(o.sats / 1e8 * now.price, ccy)} now` : ''}${o.counterparty ? ` · ${o.counterparty}` : ''}\n${(o.trail || []).join('\n')}`]) });
+  }
+  blocks.push({ kind: 'heading', text: 'What this document is' });
+  blocks.push({ kind: 'para', text: `A statement of the owner’s records on the date prepared, produced on their own device: no address was sent to any service to make it, and no chain-analysis score appears in it. Where a public record is shown it carries its source and its date and is not a verdict. Where a coin is marked KYC the regulated party named can confirm the purchase from its own records; where a coin is Known the counterparty named can; where it is Private the owner is the only witness, and the trail says why they say so.${prov.skipped.length ? ` ${prov.skipped.join(', ')} could not be read and ${prov.skipped.length === 1 ? 'is' : 'are'} left out.` : ''}` });
+  const path = await invoke('report_pdf', { title: `${sc.title} — source of funds`, subtitle: `${sats(coins.length)} coin${coins.length === 1 ? '' : 's'} · ${sats(total)} sats${ccy && quoted ? ` · ${money(worthThen, ccy)} when received` : ''} · printed ${new Date().toLocaleDateString()}`, blocks, file: `${sc.title}-source-of-funds` });
+  toast('Saved ' + path, 6000);
+}
 /// The report buttons, wherever they sit: Home (this vault), an entity's page (its vaults), the entities page (all).
 /// Loading the scope's vaults first; the CGT button then shows the years to pick from under itself.
 function scopeFromButton(b) {
@@ -1895,6 +1989,8 @@ async function withScope(b, run) {
 }
 document.addEventListener('click', async (e) => {
   const loss = e.target.closest('[data-loss-report]'); if (loss) { withScope(loss, lossReport); return; }
+  const pr = e.target.closest('[data-prov-report]'); if (pr) { withScope(pr, provHoldingsReport); return; }
+  const sf = e.target.closest('[data-funds-report]'); if (sf) { withScope(sf, sourceOfFundsReport); return; }
   const cgt = e.target.closest('[data-cgt-report]');
   if (cgt) {
     withScope(cgt, async (sc) => {
@@ -2628,7 +2724,7 @@ async function renderSummary(box, names, opts = {}) {
   perf('overview draw', t5, 0); perf('overview total', t0, names.length);
 }
 function renderHomeSummary() {
-  { const b = $('#s-home [data-loss-report]'); if (b) b.hidden = !(vault && txFacts[vault.name] && lossRows(scopeOfVault(vault)).length); } $('#home-summary').hidden = !!(vault && !hasPrice(vault)); $$('#s-home [data-vault-report], #s-home [data-cgt-report]').forEach(b => { b.hidden = !!(vault && !hasPrice(vault)); }); if (vault && hasPrice(vault) && $('#s-home').classList.contains('on')) renderSummary($('#home-summary'), [vault.name]); }
+  { const b = $('#s-home [data-loss-report]'); if (b) b.hidden = !(vault && txFacts[vault.name] && lossRows(scopeOfVault(vault)).length); } $('#home-summary').hidden = !!(vault && !hasPrice(vault)); $$('#s-home [data-vault-report], #s-home [data-cgt-report], #s-home [data-prov-report], #s-home [data-funds-report]').forEach(b => { b.hidden = !!(vault && !hasPrice(vault)); }); if (vault && hasPrice(vault) && $('#s-home').classList.contains('on')) renderSummary($('#home-summary'), [vault.name]); }
 
 // ---------- all vaults: the same view, of everything that has a price ----------
 // why a vault's history could not be read just now, in the words the person needs
@@ -3080,12 +3176,12 @@ function recFold(hits) { const out = []; for (const h of hits) { const e = out.f
 
 const PROV_RANK = { kyc: 3, known: 2, private: 1, unknown: 0 };
 const PROV_IMPLIES = { exchange: 'kyc', atm: 'kyc', earned: 'known', gift: 'known', inheritance: 'known', swap: 'known', channel: 'known', mined: 'private', p2p: 'private', coinjoin: 'private' };
-const prov = { coins: {}, skipped: [], at: 0, loading: null, waiting: new Set() };
+const prov = { coins: {}, skipped: [], buckets: {}, at: 0, loading: null, waiting: new Set() };
 /// The derived view, when it is here; otherwise start loading it and call `repaint` once it has arrived.
 function provReady(repaint) {
   if (prov.at) return true;
   if (repaint) prov.waiting.add(repaint);
-  if (!prov.loading) prov.loading = invoke('provenance_all').then(r => { prov.coins = r.coins || {}; prov.skipped = r.skipped || []; prov.err = ''; }, e => { prov.coins = {}; prov.skipped = []; prov.err = String(e); })
+  if (!prov.loading) prov.loading = invoke('provenance_all').then(r => { prov.coins = r.coins || {}; prov.skipped = r.skipped || []; prov.buckets = r.buckets || {}; prov.err = ''; }, e => { prov.coins = {}; prov.skipped = []; prov.buckets = {}; prov.err = String(e); })
     .finally(() => { prov.at = Date.now(); prov.loading = null; const w = [...prov.waiting]; prov.waiting.clear(); for (const f of w) { try { f(); } catch {} } });
   return false;
 }
@@ -3298,6 +3394,8 @@ const provChainVault = (v) => !(v.spark || v.liquid || v.statement || v.exchange
 /// A balance that is not coins on the chain is one bucket: who holds it, or sees it, says who can link it. The vault's
 /// own default comes first; otherwise the rule for its kind.
 function provRule(v) {
+  // the engine's bucket when it has run: it also reads the chain — what funded a node, what was pegged in, a swap
+  const b = prov.buckets && prov.buckets[v.name]; if (b) return { status: b.status, method: b.method || null, counterparty: b.counterparty || null, by: b.by, trail: b.trail };
   const d = v.provenance_default, own = d ? `${PROV_WORD[d]}: this vault\u2019s default, set in Vault settings` : '';
   if (v.exchange) return { status: d || 'kyc', method: 'exchange', counterparty: v.exchange.provider || 'the exchange', by: d ? 'vault' : 'rule:exchange', trail: [own || `KYC: ${v.exchange.provider || 'the exchange'} holds your identity against this balance`] };
   if (v.statement) return { status: d || 'known', method: 'transfer', counterparty: v.statement.source || 'the custodian', by: d ? 'vault' : 'rule:statement', trail: [own || `Known: ${v.statement.source || 'the custodian'} keeps this balance for you and knows it is yours`] };
@@ -3356,12 +3454,15 @@ function provTimeChart(el, names) {
 function provUnknowns(names) { return Object.entries(prov.coins).filter(([, d]) => !d.spent && d.status === 'unknown' && names.includes(d.vault)).map(([op, d]) => ({ op, ...d })); }
 const vaultLabel = (name, key) => ((((store.vaults.find(v => v.name === name) || {}).labels) || {})[key]) || '';
 /// What a coin's label, or its address's, already says: a name the register knows, or a word that names a method.
+// exchanges a label is likely to name; a match suggests KYC by exchange with that name (the person confirms)
+const PROV_EXCHANGES = ['Kraken', 'Coinbase', 'Binance', 'Swyftx', 'CoinSpot', 'Bitaroo', 'Amber', 'Independent Reserve', 'BTC Markets', 'CoinJar', 'Gemini', 'Bitstamp', 'Bitfinex', 'OKX', 'Bybit', 'KuCoin', 'River', 'Strike', 'Cash App', 'Robinhood', 'Bull Bitcoin', 'Relai', 'Pocket Bitcoin', 'Bitcoin Reserve'];
 function provSuggest(c) {
   const text = [vaultLabel(c.vault, 'output:' + c.op), c.addr ? vaultLabel(c.vault, 'addr:' + c.addr) : ''].filter(Boolean).join(' · ');
   if (!text) return provSuggestRec(c);
   const low = text.toLowerCase();
   for (const cp of provCounterparties()) if (low.includes(cp.toLowerCase())) { const m = provCpMark(cp); return { status: m.status, method: m.method, counterparty: cp, why: text }; }
-  const words = [['salary', 'earned'], ['wages', 'earned'], ['invoice', 'earned'], ['earned', 'earned'], ['paid for', 'earned'], ['gift', 'gift'], ['inherit', 'inheritance'], ['mined', 'mined'], ['mining', 'mined'], ['coinjoin', 'coinjoin'], ['whirlpool', 'coinjoin'], ['joinmarket', 'coinjoin'], [' atm', 'atm'], ['p2p', 'p2p'], ['bisq', 'p2p'], ['robosats', 'p2p'], ['hodl hodl', 'p2p'], ['hodlhodl', 'p2p'], ['swap', 'swap'], ['boltz', 'swap'], ['channel', 'channel'], ['exchange', 'exchange']];
+  for (const ex of PROV_EXCHANGES) if (low.includes(ex.toLowerCase())) return { status: 'kyc', method: 'exchange', counterparty: ex, why: text };
+  const words = [['wasabi', 'coinjoin'], ['samourai', 'coinjoin'], ['salary', 'earned'], ['wages', 'earned'], ['invoice', 'earned'], ['earned', 'earned'], ['paid for', 'earned'], ['gift', 'gift'], ['inherit', 'inheritance'], ['mined', 'mined'], ['mining', 'mined'], ['coinjoin', 'coinjoin'], ['whirlpool', 'coinjoin'], ['joinmarket', 'coinjoin'], [' atm', 'atm'], ['p2p', 'p2p'], ['bisq', 'p2p'], ['robosats', 'p2p'], ['hodl hodl', 'p2p'], ['hodlhodl', 'p2p'], ['swap', 'swap'], ['boltz', 'swap'], ['channel', 'channel'], ['exchange', 'exchange']];
   for (const [w, m] of words) if ((' ' + low).includes(w)) return { status: PROV_IMPLIES[m], method: m, counterparty: null, why: text };
   return provSuggestRec(c);
 }
@@ -4137,7 +4238,19 @@ async function labelsSync() {
 function renderActivityLabels() { $$('#activity .lbl, #act-all .lbl, #coin-rows .lbl, #addr-recv .lbl, #addr-chg .lbl').forEach(box => { const key = box.dataset.lkey; const t = box.querySelector('.text'); if (t && t.textContent !== labelOf(key)) t.textContent = labelOf(key); }); }
 $('#labels-sync').onclick = () => { $('#labels-out').textContent = 'syncing labels…'; labelsSync(); };
 $('#labels-export').onclick = async () => { try { $('#labels-out').textContent = 'Saved ' + await invoke('labels_export', { name: vault.name }); } catch (e) { if (!/cancelled/.test(String(e))) $('#labels-out').textContent = String(e); } };
-$('#labels-import').onclick = async () => { try { const n = await invoke('labels_import', { name: vault.name }); labelsSync(); store = await invoke('store_get'); vault = store.vaults.find(x => x.name === vault.name) || vault; $('#labels-out').textContent = `${n} label${n === 1 ? '' : 's'} imported into ${vault.name}.`; } catch (e) { if (!/cancelled/.test(String(e))) $('#labels-out').textContent = String(e); } };
+$('#labels-import').onclick = async () => { try { const n = await invoke('labels_import', { name: vault.name }); labelsSync(); store = await invoke('store_get'); vault = store.vaults.find(x => x.name === vault.name) || vault; $('#labels-out').textContent = `${n} label${n === 1 ? '' : 's'} imported into ${vault.name}.`; provDrop(); provAfterImport(vault.name, n); } catch (e) { if (!/cancelled/.test(String(e))) $('#labels-out').textContent = String(e); } };
+/// After a labels import: the labels that say who paid or how (an exchange's name, "salary", "coinjoin"…) are
+/// suggestions for the coins still unclassified — said here, with the way to sort them in one go on Home.
+function provAfterImport(name, n) {
+  const say = () => {
+    if (!vault || vault.name !== name) return;
+    const U = provUnknowns([name]), S = U.filter(c => { const g = provSuggest(c); return g && !/^public record/.test(g.why); });
+    const out = $('#labels-out'); if (!out) return;
+    out.innerHTML = `${sats(n)} label${n === 1 ? '' : 's'} imported into ${esc(name)}.${S.length ? ` ${sats(S.length)} unclassified coin${S.length === 1 ? ' has' : 's have'} labels that say who paid or how — <a href="#" data-prov-sort>Sort ${S.length === 1 ? 'it' : 'them'} ›</a>` : U.length ? ` ${sats(U.length)} coin${U.length === 1 ? ' is' : 's are'} still unclassified; nothing in the labels says who paid.` : ''}`;
+    const a = out.querySelector('[data-prov-sort]'); if (a) a.onclick = (e) => { e.preventDefault(); show('home'); const host = $('#s-home .provsum'); if (host) { provBulk(host, [name]); host.scrollIntoView({ block: 'start', behavior: 'smooth' }); } };
+  };
+  if (provReady(say)) say();
+}
 $('#bsms-export').onclick = async () => { try { toast('Saved ' + await invoke('bsms_export', { name: vault.name }), 6000); } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
 $('#bsms-open').onclick = async () => { try { const r = await invoke('bsms_import'); $('#desc-in').value = r.descriptor; readDescriptor(r.descriptor); if (r.first_address) toast('BSMS read. First address in the file: ' + r.first_address.slice(0, 12) + '…', 6000); } catch (e) { if (!/cancelled/.test(String(e))) fail(e); } };
 
@@ -4730,7 +4843,7 @@ function renderEntity() {
       ${(() => { const un = store.vaults.filter(v => !v.entity || !entityOf(v.entity)); return `<details class="adv" id="ent-unowned" style="margin-top:8px"${vs.length ? '' : ' open'}><summary>Vaults with no owner yet · ${sats(un.length)}</summary><div class="tp-list" style="margin-top:8px">${un.length ? un.map(v => `<div class="tp"><div class="tp-what"><div class="tp-head"><b>${esc(v.name)}</b> <span class="muted">· ${esc(kindOfVault(v))}${v.network !== 'mainnet' ? ' · ' + esc(v.network) : ''}</span></div></div><div class="tp-act"><button type="button" class="btn small" data-claim="${esc(v.name)}">Its owner</button></div></div>`).join('') : '<div class="muted" style="font-size:13px">Every vault has an owner.</div>'}</div></details>`; })()}
       ${keys.size ? `<div class="label" style="margin-top:6px">Its keys</div><div class="muted" style="font-size:13px">${[...keys.values()].map(k => `<b>${esc(k.name)}</b>${placeOf(k.pubkey) ? ' at ' + esc(placeOf(k.pubkey).name) : ''}`).join(' · ')} — <button type="button" class="linkish" data-go="allkeys">every key</button></div>` : ''}
       <div class="label" style="margin-top:6px">Its reports</div>
-      <div class="row" style="gap:8px;flex-wrap:wrap"><button class="btn small" type="button" data-cgt-report data-scope="entity" data-id="${esc(e.id)}" title="Every disposal across this entity's vaults in a financial year, with the treatment for a ${esc(kindWord(e.kind).toLowerCase())}">CGT report</button><button class="btn small" type="button" data-loss-report data-scope="entity" data-id="${esc(e.id)}" title="Every row marked stolen or lost across this entity's vaults">Stolen and lost report</button></div>
+      <div class="row" style="gap:8px;flex-wrap:wrap"><button class="btn small" type="button" data-cgt-report data-scope="entity" data-id="${esc(e.id)}" title="Every disposal across this entity's vaults in a financial year, with the treatment for a ${esc(kindWord(e.kind).toLowerCase())}">CGT report</button><button class="btn small" type="button" data-loss-report data-scope="entity" data-id="${esc(e.id)}" title="Every row marked stolen or lost across this entity's vaults">Stolen and lost report</button><button class="btn small" type="button" data-prov-report data-scope="entity" data-id="${esc(e.id)}" title="Who can link this entity's coins to it: the share of the holding that is KYC, known, private or unclassified, each balance's reason, and the picture over time">Provenance report</button><button class="btn small" type="button" data-funds-report data-scope="entity" data-id="${esc(e.id)}" title="Every coin this entity holds, oldest first: when it came, who can link it and why, how it arrived, what it was worth that day, and the papers kept with it">Source of funds</button></div>
       <div class="row" style="gap:8px;margin-top:6px"><button class="btn small" type="button" id="ent-edit">Edit</button><button class="btn small" type="button" id="ent-del">Forget this entity</button></div>
     </div></div><div id="ent-form"></div>`;
   paintIcons(card);

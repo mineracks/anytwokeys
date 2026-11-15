@@ -106,6 +106,11 @@ pub struct Tx {
     /// how many inputs and outputs the transaction has in all: more than ours alone says it was shared (a swap)
     #[serde(default)] pub ins_all: u32,
     #[serde(default)] pub outs_all: u32,
+    /// peg-ins: the bitcoin outpoints ("txid:vout") this transaction claimed from the main chain — a peg-in links the
+    /// L-BTC to the bitcoin it came from, so provenance can follow it (provenance.rs). `pegin_read` says this build
+    /// looked, so a transaction cached by an older build is read again once.
+    #[serde(default)] pub pegin: Vec<String>,
+    #[serde(default)] pub pegin_read: bool,
 }
 
 /// The SLIP-77 master blinding key from a BIP 39 seed, exactly as libwally and Green derive it: the SLIP-21
@@ -225,7 +230,7 @@ pub fn sync(l: &mut Liquid, gap: u32) -> Result<(), String> {
     }
     // 2. the raw transactions: those never read, those read while unconfirmed, and those read by a build that did
     // not keep their inputs (before 8 Nov 2026, evening)
-    let want: Vec<(String, i32)> = listed.iter().filter(|(id, h)| l.txs.get(*id).map(|t| (t.height == 0 && **h > 0) || (t.ins.is_empty() && t.ins_all > 0)).unwrap_or(true)).map(|(id, h)| (id.clone(), *h)).collect();
+    let want: Vec<(String, i32)> = listed.iter().filter(|(id, h)| l.txs.get(*id).map(|t| (t.height == 0 && **h > 0) || (t.ins.is_empty() && t.ins_all > 0) || !t.pegin_read).unwrap_or(true)).map(|(id, h)| (id.clone(), *h)).collect();
     let secp = zkp::Secp256k1::new();
     let mut times: HashMap<u32, u32> = HashMap::new();
     for (id, height) in want {
@@ -239,7 +244,8 @@ pub fn sync(l: &mut Liquid, gap: u32) -> Result<(), String> {
                 let h: elements::BlockHeader = deserialize(&hdr).map_err(|e| format!("block {height}: {e}"))?;
                 times.insert(height, h.time); h.time } }
         } else { 0 };
-        let mut t = Tx { id: id.clone(), height, time, fee: 0, paid_fee: false, moves: Default::default(), outs: Vec::new(), ins: tx.input.iter().map(|i| (i.previous_output.txid.to_string(), i.previous_output.vout)).collect(), ins_all: tx.input.len() as u32, outs_all: tx.output.len() as u32 };
+        let mut t = Tx { id: id.clone(), height, time, fee: 0, paid_fee: false, moves: Default::default(), outs: Vec::new(), ins: tx.input.iter().map(|i| (i.previous_output.txid.to_string(), i.previous_output.vout)).collect(), ins_all: tx.input.len() as u32, outs_all: tx.output.len() as u32,
+            pegin: tx.input.iter().filter(|i| i.is_pegin()).filter_map(|i| i.pegin_prevout()).map(|o| format!("{}:{}", o.txid, o.vout)).collect(), pegin_read: true };
         for (vout, o) in tx.output.iter().enumerate() {
             if o.is_fee() { if let elements::confidential::Value::Explicit(v) = o.value { t.fee += v; } continue; }
             if !ours.contains_key(o.script_pubkey.as_bytes()) { continue; }
