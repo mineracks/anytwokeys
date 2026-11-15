@@ -127,7 +127,7 @@ mod imp {
         let mut i = 0;
         while i + 6 <= tlv.len() {
             let (tag, len) = (tlv[i], tlv[i + 1] as usize);
-            if tag == feature && len == 4 { return Some(u32::from_be_bytes([tlv[i + 2], tlv[i + 3], tlv[i + 4], tlv[i + 5]])); }
+            if tag == feature && len == 4 { return Some(u32::from_be_bytes([tlv[i + 2], tlv[i + 3], tlv[i + 4], tlv[i + 5]]) as ffi::DWORD); }
             i += 2 + len;
         }
         None
