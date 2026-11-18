@@ -203,9 +203,88 @@ mod imp {
     pub fn readers() -> Result<Vec<String>, CardError> {
         let ctx = match Context::establish(Scope::User) { Ok(c) => c, Err(pcsc::Error::NoService) => return Ok(vec![]), Err(e) => return Err(CardError::Link(e.to_string())) };
         let mut buf = vec![0u8; 2048];
-        let names = match ctx.list_readers(&mut buf) { Ok(n) => n, Err(pcsc::Error::NoReadersAvailable) | Err(pcsc::Error::NoService) => return Ok(vec![]), Err(e) => return Err(CardError::Link(e.to_string())) };
-        Ok(names.map(|n| n.to_string_lossy().into_owned()).collect())
+        let names: Vec<String> = match ctx.list_readers(&mut buf) {
+            Ok(n) => n.map(|n| n.to_string_lossy().into_owned()).collect(),
+            Err(pcsc::Error::NoReadersAvailable) | Err(pcsc::Error::NoService) => vec![],
+            Err(e) => return Err(CardError::Link(e.to_string())),
+        };
+        replug::heal(&names);
+        Ok(names)
     }
+
+    /// A reader the operating system has on USB but the smart-card service does not list, healed by plugging it in
+    /// again in software.
+    ///
+    /// Measured 2026-11-18 on macOS 27.0.1 with a REINER SCT cyberJack RFID komfort on a Pro Display XDR's hub:
+    /// REINER's driver (3.99.5 SP16, libusb 1.0.26 inside) ABORTS its host process (`com.apple.ifdbundle`) when the
+    /// reader comes back after an unplug — `libusb_init` asserts `list_empty(&darwin_cached_devices)` because the
+    /// unplug left the device referenced in libusb's cache. macOS starts that host again only on a USB plug event, so
+    /// a reader on a display's or dock's hub, which drops and returns whenever the hub sleeps, stays missing until
+    /// someone pulls the cable. A USB re-enumerate is that plug event in software: nusb's `reset` is
+    /// `USBDeviceReEnumerate` on macOS, and after it the host came back and the reader was listed within six seconds,
+    /// its card answering. REINER's current download is still SP16, so this is ours to carry.
+    ///
+    /// Two rules keep it safe. The mismatch must hold for six seconds first, because a reader just plugged in is on
+    /// USB a moment before its driver host has listed it, and re-enumerating a LIVE host is the very unplug that
+    /// crashes it. And at most one re-enumerate a minute, so a reader that is truly broken is not reset in a loop.
+    /// Only readers we know by vendor:product are touched; a YubiKey or a Nitrokey is never reset.
+    #[cfg(target_os = "macos")]
+    mod replug {
+        use std::sync::Mutex;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        /// USB vendor:product → the start of the PC/SC name its driver gives it.
+        const KNOWN: &[((u16, u16), &str)] = &[((0x0C4B, 0x0501), "REINER SCT cyberJack")];
+        static GATE: Mutex<Gate> = Mutex::new(Gate { first_seen: 0, last_reset: 0 });
+        pub fn heal(names: &[String]) {
+            let Ok(devs) = nusb::list_devices() else { return };
+            let missing: Vec<_> = devs
+                .filter_map(|d| KNOWN.iter().find(|(id, _)| *id == (d.vendor_id(), d.product_id())).map(|(_, p)| (d, *p)))
+                .filter(|(_, prefix)| !names.iter().any(|n| n.starts_with(prefix)))
+                .collect();
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            if !GATE.lock().map(|mut g| g.due(now, !missing.is_empty())).unwrap_or(false) { return }
+            for (d, prefix) in missing {
+                match d.open().and_then(|dev| dev.reset()) {
+                    Ok(()) => eprintln!("{prefix}: on USB but not a reader; re-enumerated it so its driver host starts again"),
+                    Err(e) => eprintln!("{prefix}: on USB but not a reader, and the re-enumerate failed: {e}"),
+                }
+            }
+        }
+        /// When a mismatch has lasted long enough, and the last reset is far enough behind.
+        pub struct Gate { first_seen: u64, last_reset: u64 }
+        impl Gate {
+            pub const HOLD: u64 = 6;
+            pub const SPACING: u64 = 60;
+            pub fn due(&mut self, now: u64, missing: bool) -> bool {
+                if !missing { self.first_seen = 0; return false }
+                if self.first_seen == 0 { self.first_seen = now; return false }
+                if now.saturating_sub(self.first_seen) < Self::HOLD || now.saturating_sub(self.last_reset) < Self::SPACING { return false }
+                self.first_seen = 0;
+                self.last_reset = now;
+                true
+            }
+        }
+        #[cfg(test)]
+        mod tests {
+            use super::Gate;
+            #[test]
+            fn a_reader_missing_for_six_seconds_is_reset_once_and_then_not_again_for_a_minute() {
+                let mut g = Gate { first_seen: 0, last_reset: 0 };
+                assert!(!g.due(1000, true), "first sight only starts the clock");
+                assert!(!g.due(1002, true), "a reader just plugged in is on USB before it is listed");
+                assert!(g.due(1006, true), "six seconds on, the host is really gone");
+                assert!(!g.due(1008, true), "and the clock starts over");
+                assert!(!g.due(1014, true), "six seconds later it is still inside the minute's spacing");
+                assert!(g.due(1070, true), "a minute after the reset it may try again");
+                assert!(!g.due(1200, false), "a listed reader clears the clock");
+                assert!(!g.due(1300, true));
+                assert!(!g.due(1303, true), "three seconds is not six, even long after the last reset");
+                assert!(g.due(1306, true));
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    mod replug { pub fn heal(_: &[String]) {} }
 
     pub fn open(reader: &str) -> Result<Opened, CardError> {
         let cname = std::ffi::CString::new(reader).map_err(|_| CardError::Parse)?;

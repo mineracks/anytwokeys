@@ -94,7 +94,7 @@ dependencies = [
  "cbc",
  "chacha20poly1305",
  "ciborium",
- "core-foundation",
+ "core-foundation 0.10.1",
  "dirs 6.0.0",
  "ed25519-dalek",
  "electrum-client",
@@ -108,6 +108,7 @@ dependencies = [
  "miniscript",
  "num-bigint",
  "num-traits",
+ "nusb",
  "objc2",
  "objc2-core-location",
  "objc2-foundation",
@@ -1033,6 +1034,16 @@ dependencies = [
 
 [[package]]
 name = "core-foundation"
+version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91e195e091a93c46f7102ec7818a2aa394e1e1771c3ab4825963fa03e45afb8f"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
+]
+
+[[package]]
+name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6"
@@ -1054,7 +1065,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "064badf302c3194842cf2c5d61f56cc88e54a759313879cdf03abdd27d0c3b97"
 dependencies = [
  "bitflags 2.13.2",
- "core-foundation",
+ "core-foundation 0.10.1",
  "core-graphics-types",
  "foreign-types",
  "libc",
@@ -1067,7 +1078,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d44a101f213f6c4cdc1853d4b78aef6db6bdfa3468798cc1d9912f4735013eb"
 dependencies = [
  "bitflags 2.13.2",
- "core-foundation",
+ "core-foundation 0.10.1",
  "libc",
 ]
 
@@ -3391,6 +3402,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "nusb"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f861541f15de120eae5982923d073bfc0c1a65466561988c82d6e197734c19e"
+dependencies = [
+ "atomic-waker",
+ "core-foundation 0.9.4",
+ "core-foundation-sys",
+ "futures-core",
+ "io-kit-sys",
+ "libc",
+ "log",
+ "once_cell",
+ "rustix 0.38.44",
+ "slab",
+ "windows-sys 0.48.0",
+]
+
+[[package]]
 name = "objc2"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5013,7 +5043,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d"
 dependencies = [
  "bitflags 2.13.2",
- "core-foundation",
+ "core-foundation 0.10.1",
  "core-foundation-sys",
  "libc",
  "security-framework-sys",
@@ -5228,7 +5258,7 @@ checksum = "6ba5f8f29aa20853c4e3e85a33ec580eb66be1f057142e77a333834a318bacf2"
 dependencies = [
  "bitflags 2.13.2",
  "cfg-if",
- "core-foundation",
+ "core-foundation 0.10.1",
  "core-foundation-sys",
  "io-kit-sys",
  "mach2",
@@ -5578,7 +5608,7 @@ version = "0.35.3"
 dependencies = [
  "bitflags 2.13.2",
  "block2",
- "core-foundation",
+ "core-foundation 0.10.1",
  "core-graphics",
  "crossbeam-channel",
  "dbus",
